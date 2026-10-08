@@ -1,0 +1,169 @@
+# store-io &mdash; Roadmap
+
+> Path from scaffold to a certified 1.0. Hard parts are front-loaded; each phase has hard exit criteria, and every exit gate needs the maintainer's approval.
+>
+> **Anti-deferral rule:** no listed task moves to a later phase unless this file records the move and the reason.
+
+---
+
+## v0.1.0 &mdash; Scaffold (DONE)
+
+- [x] Repository, crate name reserved, dual license, REPS, directives, CI (Linux, macOS, Windows on stable and MSRV), audit and deny.
+- [x] No public API: the surface is designed in phase 1 and lands from phase 2.
+
+---
+
+## Phase 0 &mdash; Research (IN PROGRESS)
+
+Catalogue every file-management and I/O method on every target platform, source or measure its real cost and guarantee, then choose the best mechanism for every (platform x device class x operation) cell.
+
+Research tracks, one note each:
+
+| Track | Scope |
+|---|---|
+| R1 | Linux interfaces: pread/pwrite families and every `RWF_*` flag, O_DIRECT/O_DSYNC, fsync/fdatasync/sync_file_range/syncfs, io_uring setup flags, registered buffers and files, linked SQEs, MSG_RING, `uring_cmd`, io-wq, every fallocate mode, statx, FIEMAP, discard and zero-out, copy and clone, openat2, O_TMPFILE, renameat2, OFD locks, cachestat |
+| R2 | Windows interfaces: CreateFile flags, overlapped I/O and IOCP, IoRing versions and per-op support, FlushFileBuffers and every NtFlushBuffersFileEx mode, file-information classes, sparse/zero/trim FSCTLs, ReFS block clone, storage IOCTLs, LockFileEx |
+| R3 | macOS interfaces: F_FULLFSYNC, F_BARRIERFSYNC, F_NOCACHE, F_PREALLOCATE, F_PUNCHHOLE, clonefile, renamex_np, APFS semantics |
+| R4 | Device features: NVMe VWC, FUA, Flush scope, atomic-write fields, LBA formats, Write Zeroes, Deallocate, FDP, ZNS, SMART; SATA/SAS; power-loss protection and drives that lie; cloud block volumes; persistent memory and CXL |
+| R5 | Submission engines: thread pools, libaio, io_uring per kernel tier, NVMe passthrough, SPDK, IOCP, IoRing, macOS; QD1 latency, IOPS per core, CPU per I/O, privilege, availability |
+| R6 | Durability semantics per filesystem and stacked layer, fsync error semantics, directory and rename durability, virtualisation |
+| R7 | Buffer management: alignment, registration limits, huge pages, NUMA, owned-buffer completion models, DMA safety under cancellation, sensitive buffers |
+| R8 | Space management: preallocation, pre-zeroing, write-zeroes, recycling, hole punching, discard, thin provisioning, ENOSPC behaviour |
+| R9 | Small-object commits and copy-on-write: rename protocols, A/B headers, double-write, RWF_ATOMIC, reflink |
+| R10 | Crash-consistency research and tools: ALICE, CrashMonkey/B3, Chipmunk, LazyFS, dm-log-writes, dm-flakey/error/dust, power-cut rigs |
+| R11 | Deterministic simulation: FoundationDB, TigerBeetle VOPR, madsim, shuttle, loom; modelling device caches and crash states |
+| R12 | Existing Rust crates: io-uring, rustix, libc, nix, windows-sys, compio, tokio-uring, glommio, monoio, memmap2, fs4, fsys |
+| R13 | Prior art: PostgreSQL, SQLite, RocksDB, InnoDB, SQL Server, Seastar, TigerBeetle, LeanStore, DuckDB, ClickHouse, Kafka, etcd/bbolt |
+
+Then a critic pass over every track, and a synthesis with seven matrices: durability primitive, submission engine, provisioning and space, small-object commit, device feature, crash-testing tool, crate.
+
+Exit criteria:
+- [ ] Every number labelled.
+- [ ] Every requirement mapped to a chosen mechanism per platform and device class, with the rejected alternatives and the labelled fallback for each cell.
+- [ ] Critic findings resolved.
+- [ ] Baseline measurement plan written, and run where hardware exists: a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
+
+---
+
+## Phase 1 &mdash; Architecture
+
+`PLANNING`, `FILEMAP` (every file, every field), public API sketch, on-disk header formats with versioning, error model, crate layout, instrumentation stage list, harness design.
+
+Exit criteria:
+- [ ] Scenario review passes: every scenario has an owning file.
+- [ ] Requirement traceability table (requirement, file, test).
+- [ ] **No library code before this gate.**
+
+---
+
+## Phase 2 &mdash; Core, simulator, conformance skeleton
+
+Core types, errors and traits; the deterministic simulated backend with the full fault and crash model; the conformance crate skeleton; the harness skeleton with per-stage metrics.
+
+Exit criteria:
+- [ ] Compile-fail suite green (no integer, sequence number or forged ticket or receipt type-checks).
+- [ ] Same seed, same trace.
+- [ ] Every fault class detected.
+- [ ] Mutation gate on the reference model.
+- [ ] loom and Miri clean.
+
+---
+
+## Phase 3 &mdash; Probe, Linux synchronous tier, provisioning, slots, directory operations
+
+Probe with evidence and classes; the synchronous Linux backend (`pwritev2`, O_DIRECT, fdatasync); provisioning, recycle and release; A/B slots; atomic replace; ownership locks.
+
+Exit criteria:
+- [ ] Conformance green on ext4 and XFS (loop device and NVMe).
+- [ ] dm-log-writes, LazyFS and dm-error runs.
+- [ ] Golden probe reports.
+- [ ] Synchronous tier within its performance gate.
+- [ ] Power-cut rig commissioned, at least 500 cycles per device class.
+
+---
+
+## Phase 4 &mdash; Linux io_uring
+
+Ring per thread, registered buffers, direct descriptors, FUA versus flush selection, io-wq tuning.
+
+Exit criteria:
+- [ ] All performance gates met on a power-safe reference box and a consumer box.
+- [ ] Zero io-wq punts for writes to ready regions.
+- [ ] 60 s idle: zero syscalls.
+- [ ] At least 500 power cuts per device.
+
+---
+
+## Phase 5 &mdash; Windows
+
+IOCP backend; IoRing evaluation; bounded flush pool; rename and directory protocol.
+
+Exit criteria:
+- [ ] Conformance on NTFS.
+- [ ] Barrier within 3% of the raw primitive.
+- [ ] No timer quantum on any path (ETW).
+- [ ] At least 500 power cuts.
+
+---
+
+## Phase 6 &mdash; macOS and the single-file container
+
+F_FULLFSYNC backend; portable container format; unprivileged mode.
+
+Exit criteria:
+- [ ] Conformance on APFS, NTFS and ext4.
+- [ ] Container byte-identical across operating systems.
+- [ ] Zero idle wakeups.
+
+---
+
+## Phase 7 &mdash; Multi-device, NUMA, QoS
+
+Mirror writes, dependent writes, multi-device barriers, flush-sharing certification, I/O classes, auto-tuned background budget, clone and unshare, many-file mode, streaming copy, prefetch.
+
+Exit criteria:
+- [ ] At least 90% of summed per-device fio on 4 devices.
+- [ ] Commit-class p99 at most 2x idle p99 under background load.
+- [ ] Flush-sharing conformance per filesystem and kernel.
+
+---
+
+## Phase 8 &mdash; Raw namespace and NVMe passthrough
+
+`uring_cmd`, IOPOLL with a second ring, privilege reporting.
+
+Exit criteria:
+- [ ] Same conformance suite.
+- [ ] Passthrough performance published.
+
+---
+
+## Phase 9 &mdash; Certification and 1.0
+
+At least 3,000 power cuts per (model, firmware) on reference devices; fuzz campaigns; documentation; SemVer and MSRV policy; supply-chain checks.
+
+Exit criteria:
+- [ ] Every MUST requirement green.
+- [ ] Rig logs published with the release.
+
+---
+
+## Performance gates (per device class)
+
+Every gate is relative to fio on the same box, kernel, filesystem and flags. Every result names the device, durability class, filesystem, OS and kernel, and fsync status.
+
+| Metric | Power-safe device | Flush-required device |
+|---|---|---|
+| QD1 4 KiB durable write | p50 within fio + 2 us, p99 within fio + 5 us | within fio with the same primitive + 2 us (Linux) or + 3% (Windows, macOS) |
+| Barrier, one writer | completion tracking, 0 syscalls, at most 1 us over completion | raw primitive + 2 us p50 / + 5 us p99 (Linux); + 3% (Windows, macOS); never a timer quantum |
+| QD1 durable writes/s | at least 90% of fio | at least 90% of fio write+fdatasync |
+| 4 KiB durable random write, QD 32+ | at least 90% of fio per device | syncs/s reported at QD 1, 4 and 16 against fio |
+| Per-core submit efficiency | at least 90% of `t/io_uring` IOPS per core on null_blk | same |
+| Sequential write, 128 KiB+ | at least 90% of fio | same |
+| Scan | at least 85% of fio sequential read | same |
+| Hot path | 0 allocations after init, no lock or futex in submit/reap, no timed waits | same |
+| Idle, 60 s | 0 syscalls, 0 I/Os, 0 timer wakeups | same |
+| QoS | commit-class p99 at most 2x idle p99 under background load | same |
+| Observer | compiled out when off; at most 20 ns/op and 5% IOPS when on | same |
+| Multi-device | at least 90% of summed per-device fio, up to 4 devices | same |
+| Against fsys | at least 20% faster per comparable operation, or proven at the device floor | same |

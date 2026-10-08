@@ -1,0 +1,91 @@
+# =============================================================================
+#  R E P S   ·   store-io
+# =============================================================================
+[package]
+name    = "store-io"
+version = "0.1.0"
+
+# Minimum Supported Rust Version (MSRV). Provisional for the scaffold; the
+# Phase 0 crate survey (io-uring, rustix, windows-sys) confirms or raises it,
+# and any change is recorded in dev/ROADMAP.md before it lands.
+rust-version = "1.85"
+edition = "2024"
+
+# License
+license = "Apache-2.0 OR MIT"
+
+# Readme
+readme = "README.md"
+
+# Description (crates.io card limit is 140 characters)
+description = "Durable storage I/O for Rust databases: evidence-based durability classes, unforgeable receipts, direct I/O, io_uring and IOCP."
+
+# Keywords (5 max)
+keywords = ["storage", "durability", "direct-io", "io-uring", "database"]
+
+# Categories
+categories = ["filesystem", "database-implementations", "hardware-support", "os"]
+
+# Links
+homepage      = "https://github.com/jamesgober/store-io"
+repository    = "https://github.com/jamesgober/store-io"
+documentation = "https://docs.rs/store-io"
+
+# Authors
+authors = ["James Gober <me@jamesgober.com>"]
+
+# Only the library sources and the documents a crate consumer needs are
+# packaged. Development notes, CI and benchmarks stay in the repository.
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lib]
+name = "store_io"
+path = "src/lib.rs"
+
+
+# WORKSPACE
+# #################################
+# The facade crate is the workspace root. Backend, simulator, conformance and
+# harness crates join as members under crates/ once the architecture is
+# approved (dev/ROADMAP.md, phase 1).
+[workspace]
+members = []
+resolver = "3"
+
+
+# FEATURE FLAGS
+# #################################
+[features]
+default = []
+
+
+# DEPENDENCIES
+# #################################
+# None. Every dependency is justified in this file before it is added.
+[dependencies]
+
+
+# PROFILES
+# #################################
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true

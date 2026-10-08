@@ -1,0 +1,7 @@
+# Pins the development toolchain so every contributor and CI runner builds
+# against the same compiler. The MSRV (1.85) is enforced separately by the CI
+# matrix, which overrides this channel per-job via the RUSTUP_TOOLCHAIN env var.
+[toolchain]
+channel    = "stable"
+components = ["clippy", "rustfmt"]
+profile    = "minimal"

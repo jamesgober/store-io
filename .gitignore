@@ -1,0 +1,21 @@
+# Development (dev/ is committed; .dev/ and .claude/ stay local)
+/.dev
+/.claude
+
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# Benchmark and harness output
+/bench-results/
+*.profraw
+
+# Editor & OS junk
+/.vscode
+/.idea
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Secrets
+.env

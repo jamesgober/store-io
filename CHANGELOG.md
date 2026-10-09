@@ -133,6 +133,9 @@
   usable release (v0.3) covers Windows and the Linux synchronous tier, with
   io_uring, macOS, multi-device and passthrough after it and certification at
   1.0.
+- `dev/ROADMAP.md`: Linux CI conformance runs on loop-mounted ext4 and XFS
+  images with barriers on; the probe found that GitHub's Ubuntu runners mount
+  their root filesystem `nobarrier`, which store-io classes as unsafe.
 
 ### Fixed
 

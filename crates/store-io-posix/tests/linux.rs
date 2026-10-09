@@ -230,9 +230,9 @@ fn test_misaligned_direct_write_is_judged_by_the_kernel_not_rejected() {
     p.allocate(&file, 1 << 16).unwrap();
     let ev = p.probe(&dir, &file).unwrap();
     // A misaligned write is not refused by `submit`: the kernel decides, and
-    // its answer arrives in the completion. With direct I/O in effect that
-    // answer is EINVAL; with data journaling ext4 turns direct I/O into
-    // buffered I/O and accepts it, which the probe must have reported.
+    // its answer arrives in the completion. Kernels before 6.17 or so refuse
+    // it (EINVAL); newer ext4 serves it through the page cache instead. Either
+    // way it is never silently treated as direct I/O.
     let mut b = pool.take(4096).unwrap();
     assert!(b.set_len(100));
     q.submit(
@@ -246,11 +246,17 @@ fn test_misaligned_direct_write_is_judged_by_the_kernel_not_rejected() {
     )
     .unwrap();
     let done = drain(&mut q);
-    let result = done[0].1.map_err(|e| e.code);
-    if ev.fs.data_journal {
-        assert_eq!(result, Ok(100), "{:?} {:?}", ev.kernel, ev.fs);
-    } else {
-        assert_eq!(result, Err(libc::EINVAL), "{:?} {:?}", ev.kernel, ev.fs);
+    match done[0].1.map_err(|e| e.code) {
+        Err(libc::EINVAL) => {}
+        Ok(100) => {
+            // Accepted: the bytes must be in the page cache, where cachestat
+            // can see them.
+            let cached = p.range_state(&file, 0, 4096).unwrap().cached_pages;
+            if ev.kernel.is_some_and(|k| k >= (6, 5, 0)) {
+                assert!(cached.is_some_and(|n| n > 0), "{cached:?}");
+            }
+        }
+        other => panic!("{other:?} {:?} {:?}", ev.kernel, ev.fs),
     }
     assert!(done[0].2.is_some());
 }

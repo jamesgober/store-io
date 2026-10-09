@@ -80,6 +80,7 @@ The first release a database can build on. Probe with evidence and classes; Wind
 
 Exit criteria:
 - [ ] Conformance green on NTFS (dev box) and ext4 (Linux CI), plus XFS where the runner allows.
+  GitHub's Ubuntu runners mount their ext4 root `nobarrier` (found by the probe, 2026-10-09), which store-io classes as Unsafe; Linux CI conformance therefore runs on a loop-mounted ext4 (and XFS) image with barriers on, never on the runner's root filesystem.
 - [ ] dm-log-writes and dm-error runs in Linux CI.
 - [ ] Barrier within 3% of the raw primitive on the dev box; no timer quantum on any path.
 - [ ] Lone-writer, concurrent-writer and caller-batch gates on the dev box; at least 20% better than fsys per comparable operation or proven at the device floor.

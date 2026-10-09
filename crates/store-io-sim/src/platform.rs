@@ -4,6 +4,11 @@
 //! submitted, so a write that is still in a queue at a crash never reached the
 //! device. With `reorder` enabled, [`Queue::reap`] completes a seeded random
 //! subset of in-flight operations in a seeded random order.
+//!
+//! Data files behave as direct I/O: a read or write whose offset or length is
+//! not a multiple of the logical block, or whose buffer is not 4096-aligned,
+//! completes with `EINVAL` and never reaches the device, as `O_DIRECT` and
+//! `FILE_FLAG_NO_BUFFERING` do.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,7 +21,7 @@ use store_io_platform::{
     RangeState, RawResult, Rejected, ReleaseHow,
 };
 
-use crate::world::{DeviceKind, EBADF, FileId, SimConfig, World};
+use crate::world::{DeviceKind, EBADF, EINVAL, FileId, SimConfig, World};
 
 /// Shared handle to a simulated world.
 #[derive(Clone, Debug)]
@@ -240,6 +245,16 @@ impl Queue for SimQueue {
     }
 }
 
+/// Buffer address alignment the simulated device requires
+/// (`dio_mem_align` in the evidence).
+const MEM_ALIGN: usize = 4096;
+
+/// Whether a data transfer meets the direct-I/O alignment rules.
+fn aligned(w: &World, offset: u64, buf: &IoBuf) -> bool {
+    let lb = u64::from(w.config().logical_block.max(1));
+    offset % lb == 0 && buf.len() as u64 % lb == 0 && buf.as_ptr() as usize % MEM_ALIGN == 0
+}
+
 /// Applies an operation's effect at completion time.
 fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
     match p {
@@ -252,6 +267,8 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
+            } else if !aligned(w, offset, &buf) {
+                Err(EINVAL)
             } else {
                 w.complete_write(file, offset, buf.as_slice(), dsync)
             };
@@ -269,6 +286,8 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
+            } else if !aligned(w, offset, &buf) {
+                Err(EINVAL)
             } else {
                 w.complete_read(file, offset, buf.as_mut_slice())
             };

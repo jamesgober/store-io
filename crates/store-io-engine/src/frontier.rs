@@ -125,6 +125,34 @@ impl AppendFrontier {
         }
     }
 
+    /// Reserves like [`Self::reserve`], but while too many appends are in
+    /// flight ahead of the new one it waits for the completed prefix to
+    /// advance instead of failing. A completion always wakes it (there is an
+    /// in-flight reservation whenever the ring is full), and `give_up` (the
+    /// domain was poisoned, which also wakes waiters) ends the wait.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::reserve`]; [`NotWrittenCause::TooManyInFlight`] only when
+    /// `give_up` returned true.
+    pub fn reserve_wait(
+        &self,
+        len: u64,
+        give_up: impl Fn() -> bool,
+    ) -> Result<Reservation, NotWrittenCause> {
+        loop {
+            match self.reserve(len) {
+                Err(NotWrittenCause::TooManyInFlight) => {
+                    let p = self.prefix.load(Ordering::SeqCst);
+                    if !self.wait_completed(p + 1, &give_up) {
+                        return Err(NotWrittenCause::TooManyInFlight);
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+
     /// Records that the write of `r` completed, and advances the completed
     /// prefix as far as contiguous completions allow.
     ///
@@ -390,6 +418,56 @@ mod tests {
         std::thread::yield_now();
         fr.complete(a);
         assert_eq!(waiter.join().ok(), Some(true));
+    }
+
+    #[test]
+    fn test_reserve_wait_blocks_until_the_ring_drains() {
+        let fr = Arc::new(AppendFrontier::new(0, 1 << 30, 12, 4));
+        let held: Vec<_> = (0..4)
+            .map(|_| fr.reserve(4096).unwrap_or_else(|e| panic!("{e:?}")))
+            .collect();
+        assert_eq!(fr.reserve(4096), Err(NotWrittenCause::TooManyInFlight));
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let waiter = {
+            let fr = Arc::clone(&fr);
+            let started = Arc::clone(&started);
+            std::thread::spawn(move || {
+                let _leader = started.wait();
+                fr.reserve_wait(4096, || false)
+            })
+        };
+        let _leader = started.wait();
+        // The waiter cannot proceed while the ring is full; completing the
+        // oldest reservation frees it.
+        for r in held {
+            fr.complete(r);
+        }
+        let got = waiter.join().ok().and_then(Result::ok);
+        assert_eq!(got.map(|r| r.start), Some(4 * 4096));
+    }
+
+    #[test]
+    fn test_reserve_wait_gives_up_when_told() {
+        let fr = Arc::new(AppendFrontier::new(0, 1 << 30, 12, 4));
+        for _ in 0..4 {
+            assert!(fr.reserve(4096).is_ok());
+        }
+        let give_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter = {
+            let fr = Arc::clone(&fr);
+            let give_up = Arc::clone(&give_up);
+            std::thread::spawn(move || {
+                fr.reserve_wait(4096, || give_up.load(std::sync::atomic::Ordering::SeqCst))
+            })
+        };
+        give_up.store(true, std::sync::atomic::Ordering::SeqCst);
+        fr.wake_all();
+        // A waiter that registered after the wake still sees `give_up` on
+        // its first check.
+        assert_eq!(
+            waiter.join().ok(),
+            Some(Err(NotWrittenCause::TooManyInFlight))
+        );
     }
 }
 

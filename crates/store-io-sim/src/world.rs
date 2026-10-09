@@ -251,6 +251,13 @@ impl World {
         self.flushes_completed
     }
 
+    /// Writes completed so far, successful or not. Arm
+    /// `fail_write = Some(writes() + k)` to fail the k-th next one.
+    #[must_use]
+    pub fn writes(&self) -> u64 {
+        self.writes_completed
+    }
+
     /// Writes in the volatile cache.
     #[must_use]
     pub fn cached_writes(&self) -> usize {

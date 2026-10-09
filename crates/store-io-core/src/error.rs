@@ -57,6 +57,7 @@ impl std::error::Error for OsError {}
 
 /// The operation that failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Op {
     /// A data write.
     Write,
@@ -138,6 +139,7 @@ impl fmt::Display for ErrorContext {
 
 /// Why an operation was rejected before reaching the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NotWrittenCause {
     /// The offset or length is not aligned to the region's block size.
     Misaligned,
@@ -172,6 +174,8 @@ pub enum NotWrittenCause {
     /// The append region was reopened and its append position is not known
     /// yet: call `resume_at` with the end of your valid data first.
     NotPositioned,
+    /// Two writes in one batch overlap.
+    Overlap,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -193,6 +197,7 @@ impl fmt::Display for NotWrittenCause {
             Self::QueueFull => "device queue is full",
             Self::Interrupted => "interrupted before any I/O was issued",
             Self::NotPositioned => "append position unknown after reopen; call resume_at first",
+            Self::Overlap => "two writes in one batch overlap",
         })
     }
 }
@@ -208,6 +213,7 @@ pub struct FirstCause {
 
 /// Corruption store-io detected in its own metadata or on media.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CorruptionKind {
     /// The device reported an unreadable range.
     MediaError,
@@ -223,6 +229,7 @@ pub enum CorruptionKind {
 
 /// A capability the platform, filesystem or device does not offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Capability {
     /// A newer on-disk format or incompatible feature flags.
     FormatVersion,

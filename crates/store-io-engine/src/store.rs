@@ -192,7 +192,13 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) read_only: bool,
     pub(crate) owner_generation: u64,
     pub(crate) opts: StoreOptions,
+    /// Unique per open store in this process: tickets and receipts of one
+    /// open never vouch for another's writes.
+    pub(crate) epoch: u64,
 }
+
+/// Source of [`Inner::epoch`].
+static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// A store: one container file on one device.
 pub struct Store<P: Platform> {
@@ -654,6 +660,7 @@ where
                 read_only,
                 owner_generation,
                 opts,
+                epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             }),
         }
     }

@@ -9,15 +9,18 @@
 //! - [`Store`]: one container: create, open, read-only open, provisioning,
 //!   the device report, poisoning.
 //! - [`AppendRegion`], [`PageRegion`], [`Slot`]: the data surfaces.
+//! - [`AppendBatch`], [`PageBatch`]: many writes, one barrier.
 //! - [`receipt`]: positions, write tickets and durability receipts, which
 //!   only this crate can create.
 
 #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod batch;
 pub mod domain;
 mod exec;
 pub mod frontier;
+mod io;
 mod layout;
 pub mod receipt;
 mod region;
@@ -25,6 +28,7 @@ mod slots;
 mod store;
 mod sync;
 
+pub use batch::{AppendBatch, PageBatch};
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
 pub use store::{CONTAINER, Store, StoreOptions, StoreReport};

@@ -106,6 +106,25 @@
   (direct-I/O and atomic-write limits), the file system and its mount
   options, the block stack from sysfs (device-mapper, MD, loop, virtual
   disks, hypervisor detection) and, where permitted, NVMe identify data.
+- `store-io-engine`: the batch layer. `AppendBatch` packs records back to
+  back into pooled aligned buffers as they are added (one copy, or none with
+  `append_with`, which lends a zeroed slice to encode in place) and commits
+  with one reservation, the fewest device writes kept in flight together, and
+  one barrier: 100 records of 64 bytes are one write and one flush.
+  `PageBatch` checks writes as they are added, refuses overlaps, and submits
+  them together before one barrier. Both report exact positions.
+- `store-io-engine`: appends and page writes of any length; data larger
+  than the largest pooled buffer is written in pieces kept in flight together,
+  reusing at most eight buffers.
+- `store-io-engine`: appends wait for the append ring to drain instead of
+  failing with `TooManyInFlight` (`AppendFrontier::reserve_wait`, woken by
+  completions, never by a timer).
+- `store-io-engine`: a reservation guard poisons the device domain if an
+  append's reserved range is abandoned unwritten, including by a panic.
+- `store-io-sim`: `World::writes()` for arming write faults; data transfers
+  must meet direct-I/O alignment (offset and length in logical blocks, buffer
+  4096-aligned) or complete with `EINVAL`, as on real devices.
+- `store-io-core`: `NotWrittenCause::Overlap`.
 - `store-io-core`: `NotWrittenCause::NotPositioned`.
 - `store-io-core`: `OsError` implements `std::error::Error`, so raw
   platform results work with `?` in callers returning boxed errors.
@@ -122,6 +141,13 @@
 
 ### Changed
 
+- `store-io-engine`: receipts are exact. A ticket records the first device
+  flush that can cover its write and a receipt the flush its barrier waited
+  for; `DurableReceipt::covers` holds exactly when the write completed before
+  that flush (or, for append regions, lies in the durable prefix). Tickets and
+  receipts from different opens of a store never match.
+- `store-io-core`: `Op`, `NotWrittenCause`, `CorruptionKind` and `Capability`
+  are `#[non_exhaustive]`.
 - `dev/ROADMAP.md`: research phase progress. Thirteen research tracks, a
   critic pass and the synthesis are complete; requirement amendments await
   approval; measurements on bare-metal Linux, a power-loss-protected NVMe and
@@ -139,6 +165,9 @@
 
 ### Fixed
 
+- `store-io-engine`: an append or page write larger than the largest pooled
+  buffer failed with `PoolExhausted`; a page read did not check the
+  position's volume.
 - Lints that only fire on some toolchains and platforms: the free-list
   sequence comparison is a `match` (clippy 1.85), Linux `madvise` calls
   carry their safety comments in dedicated helpers, and the simulator's

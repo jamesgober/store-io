@@ -3,207 +3,26 @@
 //! Every handle is cheap to clone and safe to share between threads. Calls
 //! block until their I/O is done.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
-use store_io_core::align::align_up;
-use store_io_core::error::{Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op};
+use store_io_core::error::{CorruptionKind, Error, FirstCause, Named, NotWrittenCause, Op};
 use store_io_format::meta::{REGION_META_LEN, RegionKind, RegionMeta, RegionState as Lifecycle};
 use store_io_format::slot::HEADER_LEN;
-use store_io_platform::{IoBuf, IoOp, Platform};
+use store_io_platform::Platform;
 
-use crate::exec::{Lane, run};
+use crate::batch::{AppendBatch, PageBatch};
+use crate::exec::Pumped;
+use crate::io::{ctx, ctx_range, not_written};
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::slots::{PairAt, plan_next, read_pair};
-use crate::store::{LiveRegion, Store, durable_slot, flush_data};
+use crate::store::{LiveRegion, Store, durable_slot};
 
-fn ctx(r: &LiveRegion) -> ErrorContext {
-    ErrorContext {
-        region: Some(r.id),
-        range: None,
-    }
-}
-
-fn ctx_range(r: &LiveRegion, start: u64, end: u64) -> ErrorContext {
-    ErrorContext {
-        region: Some(r.id),
-        range: Some(store_io_core::error::ByteRange { start, end }),
-    }
-}
-
-/// Shared write path: copy into an aligned buffer, check, write, classify.
+/// Region lookups and provisioning.
 impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
-    fn ready(&self) -> Result<(), Error> {
-        if self.inner.read_only {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::ReadOnly,
-                ctx: ErrorContext::default(),
-            });
-        }
-        if let Some(first) = self.inner.domain.poisoned() {
-            return Err(Error::Poisoned { first });
-        }
-        Ok(())
-    }
-
-    fn buffer(&self, data: &[u8], aligned: u64, c: ErrorContext) -> Result<IoBuf, Error> {
-        let len = usize::try_from(aligned).map_err(|_| Error::NotWritten {
-            cause: NotWrittenCause::TooLarge,
-            ctx: c,
-        })?;
-        let mut buf = self.inner.pool.take(len).map_err(|_| Error::NotWritten {
-            cause: NotWrittenCause::PoolExhausted,
-            ctx: c,
-        })?;
-        let dst = buf.as_mut_slice();
-        dst[..data.len()].copy_from_slice(data);
-        dst[data.len()..].fill(0);
-        Ok(buf)
-    }
-
-    /// Writes one buffer at an absolute container offset; any failure after
-    /// submission poisons the domain.
-    fn write_at(
-        &self,
-        lane: &mut Lane<P::Queue>,
-        offset: u64,
-        buf: IoBuf,
-        c: ErrorContext,
-    ) -> Result<(), Error> {
-        let want = buf.len();
-        let dsync = self.inner.policy.dsync;
-        let done = run(
-            lane,
-            IoOp::Write {
-                file: &self.inner.file,
-                offset,
-                buf,
-                dsync,
-            },
-        )
-        .map_err(|(_b, raw)| {
-            // Refused before the device: media untouched. Callers that have
-            // already reserved append space poison separately.
-            match raw {
-                Some(raw) => Error::Io {
-                    op: Op::Write,
-                    raw,
-                    ctx: c,
-                },
-                None => Error::NotWritten {
-                    cause: NotWrittenCause::QueueFull,
-                    ctx: c,
-                },
-            }
-        })?;
-        match done.result {
-            Ok(n) if n == want => Ok(()),
-            other => {
-                let raw = other.err();
-                self.inner.domain.poison(FirstCause {
-                    op: Some(Op::Write),
-                    raw,
-                });
-                self.wake_frontiers();
-                Err(Error::DurabilityUnknown {
-                    op: Op::Write,
-                    raw,
-                    ctx: c,
-                })
-            }
-        }
-    }
-
-    fn wake_frontiers(&self) {
-        for r in self.regions_snapshot() {
-            if let Some(f) = &r.frontier {
-                f.wake_all();
-            }
-        }
-    }
-
-    /// The domain barrier: a flush on flush-required devices, nothing on
-    /// power-safe ones (their writes were durable at completion).
-    fn barrier(&self, lane: &mut Lane<P::Queue>) -> Result<(), Error> {
-        if !self.inner.policy.flush {
-            return match self.inner.domain.poisoned() {
-                Some(first) => Err(Error::Poisoned { first }),
-                None => Ok(()),
-            };
-        }
-        let need = self.inner.domain.ticket();
-        let file = &self.inner.file;
-        self.inner
-            .domain
-            .barrier(need, || flush_data(lane, file))
-            .inspect_err(|_| self.wake_frontiers())
-    }
-
-    fn receipt(&self, r: &LiveRegion, start: u64, through: u64) -> DurableReceipt {
-        DurableReceipt {
-            volume: self.inner.volume,
-            region: r.id,
-            generation: r.generation,
-            class: self.inner.policy.class,
-            label: self.inner.policy.label,
-            start,
-            through,
-            untorn: false,
-        }
-    }
-
-    fn read_at(&self, r: &LiveRegion, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
-        let block = self.inner.layout.block();
-        let c = ctx_range(r, offset, offset.saturating_add(out.len() as u64));
-        if offset % block != 0 {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::Misaligned,
-                ctx: c,
-            });
-        }
-        let len = align_up(out.len() as u64, block).ok_or(Error::NotWritten {
-            cause: NotWrittenCause::TooLarge,
-            ctx: c,
-        })?;
-        if offset.checked_add(len).is_none_or(|e| e > r.data_size) {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::OutOfBounds,
-                ctx: c,
-            });
-        }
-        let buf = self.buffer(&[], len, c)?;
-        let mut lane = self.inner.queues.get(r.id.get() as usize);
-        let done = run(
-            &mut lane,
-            IoOp::Read {
-                file: &self.inner.file,
-                offset: r.data_offset + offset,
-                buf,
-            },
-        )
-        .map_err(|(_b, raw)| match raw {
-            Some(raw) => Error::Io {
-                op: Op::Read,
-                raw,
-                ctx: c,
-            },
-            None => Error::NotWritten {
-                cause: NotWrittenCause::QueueFull,
-                ctx: c,
-            },
-        })?;
-        let n = done.result.map_err(|_raw| Error::Corruption {
-            kind: store_io_core::error::CorruptionKind::MediaError,
-            ctx: c,
-        })?;
-        let Some(buf) = done.buf else { return Ok(0) };
-        let n = n.min(out.len());
-        out[..n].copy_from_slice(&buf.as_slice()[..n]);
-        Ok(n)
-    }
-
     /// Looks up an existing append region.
     ///
     /// # Errors
@@ -314,72 +133,70 @@ where
     P::Queue: Send,
 {
     fn frontier(&self) -> Result<&crate::frontier::AppendFrontier, Error> {
-        self.state.frontier.as_ref().ok_or(Error::NotWritten {
-            cause: NotWrittenCause::NotReady,
-            ctx: ctx(&self.state),
-        })
+        self.state
+            .frontier
+            .as_ref()
+            .ok_or_else(|| not_written(NotWrittenCause::NotReady, ctx(&self.state)))
     }
 
-    /// Appends `data` and returns a ticket once the write has completed. The
-    /// data is not yet durable: pass the ticket to [`Self::sync_through`].
+    /// The checks every append makes before touching the device.
+    pub(crate) fn writable(&self) -> Result<&crate::frontier::AppendFrontier, Error> {
+        self.store.ready()?;
+        let f = self.frontier()?;
+        if !self.state.positioned.load(Ordering::Acquire) {
+            return Err(not_written(
+                NotWrittenCause::NotPositioned,
+                ctx(&self.state),
+            ));
+        }
+        Ok(f)
+    }
+
+    pub(crate) fn store(&self) -> &Store<P> {
+        &self.store
+    }
+
+    pub(crate) fn state(&self) -> &LiveRegion {
+        &self.state
+    }
+
+    /// Appends `data` (any length of at least one byte) and returns a ticket
+    /// once the write has completed. The data is not yet durable: pass the
+    /// ticket to [`Self::sync_through`], or use [`Self::append_durable`].
+    ///
+    /// The append starts at a block boundary chosen by store-io and is
+    /// zero-padded to the next one. Data larger than the largest pooled
+    /// buffer is written in several pieces, kept in flight together.
     ///
     /// # Errors
     ///
-    /// `NotWritten` (empty data, region full, pool exhausted, read-only),
-    /// `Poisoned`, or `DurabilityUnknown` (the domain is now poisoned).
+    /// `NotWritten` (empty data, region full, pool exhausted, read-only, not
+    /// positioned), `Poisoned`, or `DurabilityUnknown` (the domain is now
+    /// poisoned).
     pub fn append(&self, data: &[u8]) -> Result<WriteTicket, Error> {
         let s = &self.store;
-        s.ready()?;
-        let f = self.frontier()?;
-        let block = s.inner.layout.block();
+        let f = self.writable()?;
         let c = ctx(&self.state);
-        if !self
-            .state
-            .positioned
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::NotPositioned,
-                ctx: c,
-            });
-        }
         if data.is_empty() {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::Empty,
-                ctx: c,
-            });
+            return Err(not_written(NotWrittenCause::Empty, c));
         }
-        let aligned = align_up(data.len() as u64, block).ok_or(Error::NotWritten {
-            cause: NotWrittenCause::TooLarge,
-            ctx: c,
-        })?;
-        // Everything that can fail without touching the device happens first.
-        let buf = s.buffer(data, aligned, c)?;
-        let mut lane = s.inner.queues.get(self.state.id.get() as usize);
-        let r = f
-            .reserve(data.len() as u64)
-            .map_err(|cause| Error::NotWritten { cause, ctx: c })?;
-        let c = ctx_range(&self.state, r.start, r.data_end);
-        match s.write_at(&mut lane, self.state.data_offset + r.start, buf, c) {
-            Ok(()) => {
-                f.complete(r);
-                Ok(WriteTicket {
-                    volume: s.inner.volume,
-                    region: self.state.id,
-                    generation: self.state.generation,
-                    start: r.start,
-                    end: r.end,
-                })
+        // Everything that can fail without touching the device happens first:
+        // the first piece is staged before any space is reserved.
+        let mut stream = s.stage(data, c)?;
+        let mut lane = s.lane(&self.state);
+        let reserved = s.reserve(f, data.len() as u64, c)?;
+        let r = reserved.range();
+        stream.at(self.state.data_offset + r.start);
+        match s.pump(&mut lane, &mut stream) {
+            Pumped::All => {
+                reserved.complete();
+                Ok(s.ticket(&self.state, r.start, r.end))
             }
-            Err(e) => {
-                // A reserved range that was not written is a hole: no later
-                // append may be acknowledged past it.
-                s.inner.domain.poison(FirstCause {
-                    op: Some(Op::Write),
-                    raw: None,
-                });
-                s.wake_frontiers();
-                Err(e)
+            // Past the reservation every failure leaves a hole: the guard
+            // poisons when dropped, and the write's fate is unknown.
+            Pumped::Refused(raw) | Pumped::Failed(raw) => {
+                drop(reserved);
+                Err(s.unknown(Op::Write, raw, ctx_range(&self.state, r.start, r.data_end)))
             }
         }
     }
@@ -388,25 +205,25 @@ where
     ///
     /// # Errors
     ///
-    /// `NotWritten(ForeignPosition)` for a ticket of another region or
-    /// generation; `Poisoned`; `DurabilityUnknown` if the flush failed.
+    /// `NotWritten(ForeignPosition | StaleGeneration)` for a ticket of another
+    /// region or generation; `Poisoned`; `DurabilityUnknown` if the flush
+    /// failed.
     pub fn sync_through(&self, ticket: &WriteTicket) -> Result<DurableReceipt, Error> {
         let s = &self.store;
         let f = self.frontier()?;
-        if ticket.volume != s.inner.volume || ticket.region != self.state.id {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::ForeignPosition,
-                ctx: ctx(&self.state),
-            });
+        let c = ctx(&self.state);
+        if ticket.epoch != s.inner.epoch
+            || ticket.volume != s.inner.volume
+            || ticket.region != self.state.id
+        {
+            return Err(not_written(NotWrittenCause::ForeignPosition, c));
         }
         if ticket.generation != self.state.generation {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::StaleGeneration,
-                ctx: ctx(&self.state),
-            });
+            return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
-        if f.durable() >= ticket.end {
-            return Ok(s.receipt(&self.state, 0, f.durable()));
+        let durable = f.durable();
+        if durable >= ticket.end {
+            return Ok(s.receipt(&self.state, 0, durable, 0, true));
         }
         let domain = &s.inner.domain;
         if !f.wait_completed(ticket.end, || domain.poisoned().is_some()) {
@@ -419,10 +236,10 @@ where
         }
         // Snapshot the completed prefix BEFORE the barrier takes its ticket.
         let through = f.completed();
-        let mut lane = s.inner.queues.get(self.state.id.get() as usize);
-        s.barrier(&mut lane)?;
+        let mut lane = s.lane(&self.state);
+        let need = s.barrier(&mut lane)?;
         f.publish_durable(through);
-        Ok(s.receipt(&self.state, 0, through))
+        Ok(s.receipt(&self.state, 0, through, need, true))
     }
 
     /// Appends `data` and makes it durable before returning.
@@ -437,7 +254,16 @@ where
         Ok((pos, r))
     }
 
-    /// Reads raw bytes at a block-aligned offset into `out`.
+    /// A batch: many records packed back to back, written together and made
+    /// durable with one barrier. See [`AppendBatch`].
+    #[must_use]
+    pub fn batch(&self) -> AppendBatch<P> {
+        AppendBatch::new(self.clone())
+    }
+
+    /// Reads raw bytes at a block-aligned offset into `out` (any length).
+    /// Returns the bytes read, fewer than `out.len()` only at the end of the
+    /// region's data area.
     ///
     /// # Errors
     ///
@@ -536,17 +362,11 @@ where
     /// `NotWritten(Misaligned | OutOfBounds)`.
     pub fn pos(&self, offset: u64) -> Result<RegionPos, Error> {
         let c = ctx(&self.state);
-        if offset % self.store.inner.layout.block() != 0 {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::Misaligned,
-                ctx: c,
-            });
+        if offset % self.store.block() != 0 {
+            return Err(not_written(NotWrittenCause::Misaligned, c));
         }
         if offset >= self.state.data_size {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::OutOfBounds,
-                ctx: c,
-            });
+            return Err(not_written(NotWrittenCause::OutOfBounds, c));
         }
         Ok(RegionPos {
             volume: self.store.inner.volume,
@@ -556,72 +376,61 @@ where
         })
     }
 
-    fn check(&self, pos: &RegionPos, len: usize) -> Result<u64, Error> {
+    /// Checks a write of `len` bytes at `pos`; returns its end.
+    pub(crate) fn check(&self, pos: &RegionPos, len: usize) -> Result<u64, Error> {
         let c = ctx(&self.state);
         if pos.volume != self.store.inner.volume || pos.region != self.state.id {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::ForeignPosition,
-                ctx: c,
-            });
+            return Err(not_written(NotWrittenCause::ForeignPosition, c));
         }
         if pos.generation != self.state.generation {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::StaleGeneration,
-                ctx: c,
-            });
+            return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
-        let block = self.store.inner.layout.block();
-        if len == 0 || (len as u64) % block != 0 {
-            return Err(Error::NotWritten {
-                cause: if len == 0 {
-                    NotWrittenCause::Empty
-                } else {
-                    NotWrittenCause::Misaligned
-                },
-                ctx: c,
-            });
+        if len == 0 {
+            return Err(not_written(NotWrittenCause::Empty, c));
         }
-        let end = pos
-            .offset
-            .checked_add(len as u64)
-            .ok_or(Error::NotWritten {
-                cause: NotWrittenCause::OutOfBounds,
-                ctx: c,
-            })?;
-        if end > self.state.data_size {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::OutOfBounds,
-                ctx: c,
-            });
+        if (len as u64) % self.store.block() != 0 {
+            return Err(not_written(NotWrittenCause::Misaligned, c));
         }
-        Ok(end)
+        match pos.offset.checked_add(len as u64) {
+            Some(end) if end <= self.state.data_size => Ok(end),
+            _ => Err(not_written(NotWrittenCause::OutOfBounds, c)),
+        }
+    }
+
+    pub(crate) fn store(&self) -> &Store<P> {
+        &self.store
+    }
+
+    pub(crate) fn state(&self) -> &LiveRegion {
+        &self.state
     }
 
     /// Writes whole blocks at `pos` and returns a ticket once the write has
-    /// completed. `data.len()` must be a multiple of [`Self::block_size`].
+    /// completed. `data.len()` must be a multiple of [`Self::block_size`];
+    /// any size is accepted (large writes go out in several pieces).
     ///
     /// # Errors
     ///
-    /// `NotWritten` (foreign, stale, misaligned, out of range, pool exhausted),
-    /// `Poisoned`, or `DurabilityUnknown`.
+    /// `NotWritten` (foreign, stale, misaligned, out of range, pool
+    /// exhausted), `Io` (refused by the platform before reaching the device;
+    /// nothing is poisoned), `Poisoned`, or `DurabilityUnknown`.
     pub fn write(&self, pos: RegionPos, data: &[u8]) -> Result<WriteTicket, Error> {
         let s = &self.store;
         s.ready()?;
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
-        let buf = s.buffer(data, data.len() as u64, c)?;
-        let mut lane = s.inner.queues.get(self.state.id.get() as usize);
-        s.write_at(&mut lane, self.state.data_offset + pos.offset, buf, c)?;
-        Ok(WriteTicket {
-            volume: s.inner.volume,
-            region: self.state.id,
-            generation: self.state.generation,
-            start: pos.offset,
-            end,
-        })
+        let mut stream = s.stage(data, c)?;
+        stream.at(self.state.data_offset + pos.offset);
+        let mut lane = s.lane(&self.state);
+        match s.pump(&mut lane, &mut stream) {
+            Pumped::All => Ok(s.ticket(&self.state, pos.offset, end)),
+            Pumped::Refused(raw) => Err(Store::<P>::refused(raw, c)),
+            Pumped::Failed(raw) => Err(s.unknown(Op::Write, raw, c)),
+        }
     }
 
-    /// Makes the ticket's write durable.
+    /// Makes the ticket's write durable, together with every other write to
+    /// this store that completed before the call.
     ///
     /// # Errors
     ///
@@ -630,21 +439,18 @@ where
     pub fn sync_through(&self, ticket: &WriteTicket) -> Result<DurableReceipt, Error> {
         let s = &self.store;
         let c = ctx(&self.state);
-        if ticket.volume != s.inner.volume || ticket.region != self.state.id {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::ForeignPosition,
-                ctx: c,
-            });
+        if ticket.epoch != s.inner.epoch
+            || ticket.volume != s.inner.volume
+            || ticket.region != self.state.id
+        {
+            return Err(not_written(NotWrittenCause::ForeignPosition, c));
         }
         if ticket.generation != self.state.generation {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::StaleGeneration,
-                ctx: c,
-            });
+            return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
-        let mut lane = s.inner.queues.get(self.state.id.get() as usize);
-        s.barrier(&mut lane)?;
-        Ok(s.receipt(&self.state, ticket.start, ticket.end))
+        let mut lane = s.lane(&self.state);
+        let need = s.barrier(&mut lane)?;
+        Ok(s.receipt(&self.state, ticket.start, ticket.end, need, false))
     }
 
     /// Writes whole blocks at `pos` and makes them durable before returning.
@@ -657,7 +463,16 @@ where
         self.sync_through(&t)
     }
 
+    /// A batch: many page writes submitted together and made durable with
+    /// one barrier. See [`PageBatch`].
+    #[must_use]
+    pub fn batch(&self) -> PageBatch<P> {
+        PageBatch::new(self.clone())
+    }
+
     /// Reads at `pos` into `out` (any length; reads whole blocks internally).
+    /// Returns the bytes read, fewer than `out.len()` only at the end of the
+    /// region.
     ///
     /// # Errors
     ///
@@ -665,11 +480,11 @@ where
     /// `Corruption(MediaError)` for an unreadable range.
     pub fn read(&self, pos: RegionPos, out: &mut [u8]) -> Result<usize, Error> {
         let c = ctx(&self.state);
-        if pos.region != self.state.id || pos.generation != self.state.generation {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::ForeignPosition,
-                ctx: c,
-            });
+        if pos.volume != self.store.inner.volume || pos.region != self.state.id {
+            return Err(not_written(NotWrittenCause::ForeignPosition, c));
+        }
+        if pos.generation != self.state.generation {
+            return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
         self.store.read_at(&self.state, pos.offset, out)
     }
@@ -786,11 +601,11 @@ where
             .and_then(|p| p.get(..REGION_META_LEN))
             .map(<[u8]>::to_vec)
             .ok_or(Error::Corruption {
-                kind: store_io_core::error::CorruptionKind::Metadata,
+                kind: CorruptionKind::Metadata,
                 ctx: c,
             })?;
         let rm = RegionMeta::decode(&meta_bytes).map_err(|_| Error::Corruption {
-            kind: store_io_core::error::CorruptionKind::Metadata,
+            kind: CorruptionKind::Metadata,
             ctx: c,
         })?;
         if rm.state != Lifecycle::Ready {
@@ -804,12 +619,12 @@ where
         payload.extend_from_slice(data);
         let next =
             plan_next(&header, &payload, s.inner.owner_generation).ok_or(Error::Corruption {
-                kind: store_io_core::error::CorruptionKind::Fork,
+                kind: CorruptionKind::Fork,
                 ctx: c,
             })?;
         let generation = next.generation;
         let at = self.at();
-        let mut lane = s.inner.queues.get(self.state.id.get() as usize);
+        let mut lane = s.lane(&self.state);
         durable_slot::<P>(
             &mut lane,
             &s.inner.file,
@@ -821,7 +636,8 @@ where
         )
         .inspect_err(|_| s.wake_frontiers())?;
         *header = read_pair(&mut lane, &s.inner.file, &s.inner.pool, &at)?;
-        let mut receipt = s.receipt(&self.state, 0, data.len() as u64);
+        // A slot has no tickets: its receipt covers the commit alone.
+        let mut receipt = s.receipt(&self.state, 0, data.len() as u64, 0, false);
         if let Some(g) = store_io_core::id::Generation::from_raw(generation) {
             receipt.generation = g;
         }

@@ -4,6 +4,12 @@
 //! to this crate. A position comes only from a region (checked against its
 //! bounds and alignment), a ticket only from a submitted write, and a receipt
 //! only from a completed durable write or a successful barrier.
+//!
+//! A ticket records the first device flush that can cover its write: the
+//! flush issued after the write completed. A receipt records the flush its
+//! barrier waited for. The receipt proves the ticket's write durable exactly
+//! when the ticket's flush number is not later than the receipt's, which is
+//! the join rule the flush domain enforces.
 
 use core::fmt;
 
@@ -63,6 +69,10 @@ pub struct WriteTicket {
     pub(crate) generation: Generation,
     pub(crate) start: u64,
     pub(crate) end: u64,
+    /// The first flush issued after the write completed.
+    pub(crate) need: u64,
+    /// The open store that issued it.
+    pub(crate) epoch: u64,
 }
 
 impl WriteTicket {
@@ -110,6 +120,13 @@ pub struct DurableReceipt {
     pub(crate) start: u64,
     pub(crate) through: u64,
     pub(crate) untorn: bool,
+    /// The flush the barrier waited for (`u64::MAX` when every completed
+    /// write is durable at completion; 0 when no barrier ran).
+    pub(crate) need: u64,
+    /// `through` is a contiguous durable prefix of an append region.
+    pub(crate) prefix: bool,
+    /// The open store that issued it.
+    pub(crate) epoch: u64,
 }
 
 impl DurableReceipt {
@@ -156,14 +173,18 @@ impl DurableReceipt {
         self.untorn
     }
 
-    /// Whether this receipt proves the ticket's write durable.
+    /// Whether this receipt proves the ticket's write durable: the write
+    /// completed before the receipt's flush was issued, or (append regions)
+    /// it lies inside the durable prefix. Tickets and receipts from different
+    /// opens of a store never match: a reopened store vouches only for its
+    /// own writes.
     #[must_use]
     pub fn covers(&self, t: &WriteTicket) -> bool {
-        self.volume == t.volume
+        self.epoch == t.epoch
+            && self.volume == t.volume
             && self.region == t.region
             && self.generation == t.generation
-            && self.start <= t.start
-            && t.end <= self.through
+            && (t.need <= self.need || (self.prefix && t.end <= self.through))
     }
 }
 

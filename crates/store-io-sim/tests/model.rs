@@ -290,3 +290,43 @@ fn test_out_of_space_on_allocate() {
     assert!(p.allocate(&f, 1 << 16).is_ok());
     assert_eq!(p.allocate(&f, 1 << 17).map_err(|e| e.code), Err(28));
 }
+
+#[test]
+fn test_misaligned_direct_io_completes_with_einval_and_touches_nothing() {
+    let (p, _dir, file, pool) = setup(SimConfig::volatile(40));
+    let mut q = p.queue(QueueConfig { depth: 8 }).unwrap();
+    let before = media(&p);
+    let writes_before = p.with_world(|w| w.writes());
+    // Misaligned offset, then misaligned length.
+    for (tag, offset, len) in [(1u64, 512u64, 4096usize), (2, 0, 1000)] {
+        let mut b = pool.take(4096).unwrap();
+        assert!(b.set_len(len));
+        b.as_mut_slice().fill(0xEE);
+        q.submit(
+            IoOp::Write {
+                file: &file,
+                offset,
+                buf: b,
+                dsync: true,
+            },
+            tag,
+        )
+        .unwrap();
+    }
+    let mut b = pool.take(4096).unwrap();
+    assert!(b.set_len(100));
+    q.submit(
+        IoOp::Read {
+            file: &file,
+            offset: 0,
+            buf: b,
+        },
+        3,
+    )
+    .unwrap();
+    let done = drain(&mut q);
+    assert_eq!(done.len(), 3);
+    assert!(done.iter().all(|(_, r)| r.map_err(|e| e.code) == Err(22)));
+    assert_eq!(p.with_world(|w| w.writes()), writes_before);
+    assert_eq!(media(&p), before);
+}

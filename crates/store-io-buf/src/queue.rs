@@ -9,7 +9,7 @@
 //! queue needs no `unsafe` code.
 
 use crate::pad::CachePadded;
-use crate::sync::{AtomicU32, AtomicUsize, Ordering};
+use crate::sync::{AtomicU32, AtomicUsize, Ordering, spin};
 
 struct Cell {
     seq: AtomicUsize,
@@ -69,11 +69,15 @@ impl IndexQueue {
                         cell.seq.store(pos.wrapping_add(1), Ordering::Release);
                         return Ok(());
                     }
-                    Err(current) => pos = current,
+                    Err(current) => {
+                        pos = current;
+                        spin();
+                    }
                 }
             } else if diff < 0 {
                 return Err(value);
             } else {
+                spin();
                 pos = self.enqueue.load(Ordering::Relaxed);
             }
         }
@@ -101,11 +105,15 @@ impl IndexQueue {
                         );
                         return Some(value);
                     }
-                    Err(current) => pos = current,
+                    Err(current) => {
+                        pos = current;
+                        spin();
+                    }
                 }
             } else if diff < 0 {
                 return None;
             } else {
+                spin();
                 pos = self.dequeue.load(Ordering::Relaxed);
             }
         }
@@ -191,37 +199,36 @@ mod loom_tests {
     use super::*;
     use loom::sync::Arc;
 
+    /// A producer and a consumer race with the main thread doing both; every
+    /// value pushed is popped exactly once and nothing is invented. Run with
+    /// `LOOM_MAX_PREEMPTIONS=3` (CI) to bound the search.
     #[test]
-    fn loom_two_producers_two_consumers_conserve_values() {
+    fn loom_concurrent_push_pop_conserves_values() {
         loom::model(|| {
             let q = Arc::new(IndexQueue::with_capacity(2));
-            let p: Vec<_> = (0..2u32)
-                .map(|v| {
-                    let q = q.clone();
-                    loom::thread::spawn(move || q.push(v).is_ok())
-                })
-                .collect();
-            let c: Vec<_> = (0..2)
-                .map(|_| {
-                    let q = q.clone();
-                    loom::thread::spawn(move || q.pop())
-                })
-                .collect();
-            let pushed = p
-                .into_iter()
-                .map(|h| h.join().unwrap_or(false))
-                .filter(|ok| *ok)
-                .count();
-            let mut got: Vec<u32> = c
-                .into_iter()
-                .filter_map(|h| h.join().ok().flatten())
-                .collect();
+            let producer = {
+                let q = q.clone();
+                loom::thread::spawn(move || q.push(1).is_ok())
+            };
+            let consumer = {
+                let q = q.clone();
+                loom::thread::spawn(move || q.pop())
+            };
+            let main_pushed = q.push(2).is_ok();
+            let p_ok = producer.join().unwrap_or(false);
+            let mut got: Vec<u32> = consumer.join().ok().flatten().into_iter().collect();
             while let Some(v) = q.pop() {
                 got.push(v);
             }
             got.sort_unstable();
-            got.dedup();
-            assert_eq!(got.len(), pushed);
+            let mut want = Vec::new();
+            if p_ok {
+                want.push(1);
+            }
+            if main_pushed {
+                want.push(2);
+            }
+            assert_eq!(got, want);
         });
     }
 }

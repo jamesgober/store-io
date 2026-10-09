@@ -49,6 +49,17 @@
   `wait`, never with a timeout); `IoOp` owns its buffer and the buffer returns
   in the `Completion` or `Rejected`; validated single-component `FileName`;
   a fixed-capacity `CompletionBuf` that never grows on the hot path.
+- `store-io-sim` crate: deterministic simulated platform. One device with a
+  volatile write cache; a flush persists exactly the writes that completed
+  before it was submitted; FUA and power-safe writes are durable at
+  completion; directory entries need a directory sync; operations take
+  effect at completion and can complete out of order; crashes keep any
+  subset (or a seeded random tearing) of cached writes, invalidate handles
+  and release locks; injectable faults (failed writes and flushes, flush
+  failure that drops the cache, lying flushes, short, lost and misdirected
+  writes, latent sector errors, out of space, page-cache pollution); trace
+  hash for same-seed replay checks.
+- `store-io-buf`: loom-aware spin hint in the free-list retry loops.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent

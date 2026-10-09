@@ -1,0 +1,25 @@
+# =============================================================================
+#  R E P S   ·   store-io-sim
+# =============================================================================
+[package]
+name          = "store-io-sim"
+description   = "Deterministic simulated platform for store-io: per-device volatile caches, crash states, fault injection and byte-exact replay."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-sim"
+readme        = "README.md"
+keywords      = ["storage", "simulation", "testing", "crash", "durability"]
+categories    = ["development-tools::testing", "filesystem"]
+
+[lints]
+workspace = true
+
+[dependencies]
+store-io-core     = { path = "../store-io-core", version = "0.1.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.1.0" }

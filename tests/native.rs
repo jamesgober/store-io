@@ -76,11 +76,10 @@ fn test_store_round_trip_on_the_real_file_system() {
     let path = t.path().join("orders");
     let store = Store::create(&path, opts.clone()).unwrap();
     let class = store.report().decision.class;
-    assert_ne!(
-        class,
-        DurabilityClass::Unsafe,
-        "never a silent unsafe store"
-    );
+    // An unsafe store exists only through the explicit, labelled override.
+    if class == DurabilityClass::Unsafe {
+        assert!(overridden, "an unsafe store opened without the override");
+    }
 
     let wal = store.provision_append_region("wal", 8 << 20).unwrap();
     let (pos, receipt) = wal.append_durable(b"order 1001").unwrap();

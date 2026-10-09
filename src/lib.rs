@@ -25,7 +25,8 @@
 //!
 //! ## Quick start
 //!
-//! ```no_run
+#![cfg_attr(any(windows, target_os = "linux"), doc = "```no_run")]
+#![cfg_attr(not(any(windows, target_os = "linux")), doc = "```ignore")]
 //! use store_io::{Store, StoreOptions};
 //!
 //! // First run: create. Every later run: `Store::open`.
@@ -74,6 +75,12 @@
 
 #![deny(warnings)]
 #![forbid(unsafe_code)]
+// Without a native backend the simple-API types do not exist, so the links
+// above have no target there.
+#![cfg_attr(
+    not(any(windows, target_os = "linux")),
+    allow(rustdoc::broken_intra_doc_links)
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// The generic engine under the simple API (stores over any platform,

@@ -546,6 +546,7 @@ fn test_many_writers_on_one_queue_share_flushes_and_never_stall() {
         },
     );
     let wal = s.provision_append_region("wal", 8 << 20).unwrap();
+    let before = s.domain_stats();
     let handles: Vec<_> = (0..32u32)
         .map(|t| {
             let wal = wal.clone();
@@ -561,6 +562,14 @@ fn test_many_writers_on_one_queue_share_flushes_and_never_stall() {
     for h in handles {
         h.join().unwrap();
     }
-    let stats = s.domain_stats();
-    assert!(stats.flushes <= 640, "{stats:?}");
+    // At most one flush per durable append: each barrier led a flush,
+    // joined one, or found its append already in the durable prefix. How
+    // many are shared depends on the scheduler.
+    let after = s.domain_stats();
+    let (led, joined) = (after.led - before.led, after.joined - before.joined);
+    assert!(led + joined <= 640, "{before:?} {after:?}");
+    assert!(
+        after.flushes - before.flushes <= 640,
+        "{before:?} {after:?}"
+    );
 }

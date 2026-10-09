@@ -396,10 +396,10 @@ mod loom_tests {
                     let r = d.barrier(need, || {
                         let _n = flushes.fetch_add(1, loom::sync::atomic::Ordering::SeqCst);
                         if fail {
-                            Err(OsError {
+                            Err(Some(OsError {
                                 code: 5,
                                 source: OsErrorSource::Sim,
-                            })
+                            }))
                         } else {
                             Ok(())
                         }

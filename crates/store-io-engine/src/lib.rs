@@ -37,8 +37,10 @@ mod sync;
 
 pub use batch::{AppendBatch, PageBatch};
 pub use directory::Directory;
+pub use domain::DomainStats;
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
 pub use scan::{ScanItem, ScanSummary};
 pub use space::{Reservation, SpaceReport, TagSpace};
 pub use store::{CONTAINER, Store, StoreOptions, StoreReport};
+pub use store_io_format::meta::RegionKind;

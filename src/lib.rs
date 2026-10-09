@@ -80,7 +80,9 @@
 /// including the simulator).
 pub use store_io_engine as engine;
 
-pub use store_io_core::class::{DurabilityClass, ReceiptLabel};
+pub use store_io_core::class::{
+    CertId, DurabilityClass, Missing, MissingSet, Reason, ReasonSet, ReceiptLabel,
+};
 pub use store_io_core::decide::{ClassDecision, DurableOpen, Trust};
 pub use store_io_core::error::{
     ByteRange, Capability, CorruptionKind, Error, ErrorContext, FirstCause, Named, NotWrittenCause,
@@ -89,8 +91,8 @@ pub use store_io_core::error::{
 pub use store_io_core::evidence::Evidence;
 pub use store_io_core::id::{Generation, RegionId, VolumeId};
 pub use store_io_engine::{
-    CONTAINER, DurableReceipt, RegionPos, ScanItem, ScanSummary, SpaceReport, StoreOptions,
-    StoreReport, TagSpace, WriteTicket,
+    CONTAINER, DomainStats, DurableReceipt, RegionKind, RegionPos, ScanItem, ScanSummary,
+    SpaceReport, StoreOptions, StoreReport, TagSpace, WriteTicket,
 };
 
 /// The operating system's native backend.

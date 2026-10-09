@@ -147,6 +147,14 @@
   directory's device. Every error and evidence type is re-exported.
   `NativePlatform` is the Windows backend on Windows and the Linux backend on
   Linux.
+- `docs/GUIDE.md`: a walk through store-io from the first durable write to
+  recovery (receipts, regions, batches, many writers, slots and directory
+  files, scans and `resume_at`, the device report, every error and what to
+  do, reservations, recycle and release, tuning).
+- `docs/API.md`: every public item, grouped by purpose (replaces the 0.1
+  placeholder).
+- `store-io`: re-exports `RegionKind`, `DomainStats`, `CertId`, `Reason`,
+  `Missing` and their sets, and `DurableOpen`.
 - `store-io` binary (feature `cli`): `store-io probe <dir>` and
   `store-io info <store>` (read-only).
 - End-to-end tests of the simple API on the machine's real file system

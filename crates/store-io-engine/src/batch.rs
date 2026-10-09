@@ -249,7 +249,7 @@ where
         if self.records == 0 {
             return Err(not_written(NotWrittenCause::Empty, c));
         }
-        let f = self.region.writable()?;
+        let (f, _pass) = self.region.writable()?;
         let s = self.region.store();
         let state = self.region.state();
         let block = s.block() as usize;
@@ -426,6 +426,7 @@ where
             return Err(not_written(NotWrittenCause::Empty, c));
         }
         let s = self.region.store();
+        let _pass = self.region.pass()?;
         s.ready()?;
         self.writes.sort_unstable_by_key(|(at, _)| *at);
         let overlap = self
@@ -452,5 +453,24 @@ where
         }
         let need = s.barrier(&mut lane)?;
         Ok(s.receipt(state, start, end, need, false))
+    }
+}
+
+impl<P: Platform> core::fmt::Debug for AppendBatch<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AppendBatch")
+            .field("region", &self.region)
+            .field("records", &self.records)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+impl<P: Platform> core::fmt::Debug for PageBatch<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PageBatch")
+            .field("region", &self.region)
+            .field("writes", &self.writes.len())
+            .finish()
     }
 }

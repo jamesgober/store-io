@@ -128,6 +128,20 @@
   whole blocks on an idle queue, unreadable ranges are reported (adjacent ones
   merged) and skipped, and short reads report their missing bytes. Scans work
   on read-only and poisoned stores and change nothing.
+- `store-io-engine`: recycle and release, run only when the caller asks.
+  `recycle` waits for every operation in flight on the region, writes the
+  next generation into the region header, makes it durable, and returns the
+  new generation's handle; it does no other I/O. `release` marks the region
+  released in the region table, then in its header, then deallocates its
+  space, which later provisioning refills before reuse. The table goes first
+  so an interrupted release never leaks space. Handles, tickets and positions
+  of an old generation or a released region are refused
+  (`StaleGeneration`, `NotReady`); `generation()` on region handles.
+- `store-io-engine`: per-region admission gate. Every data operation holds a
+  pass for its I/O; recycle and release retire the region and wait for the
+  last pass, so no write of an old generation lands after its successor
+  exists. Read-modify-write ordering, proven with loom.
+- `store-io-engine`: `Debug` for `Store`, the region handles and batches.
 - `store-io-core`: `errno::is_media_error` tells device read failures apart
   from bad requests (errno, Win32 and NTSTATUS codes).
 - `store-io-sim`: `World::reads()`, `World::file_id()` and

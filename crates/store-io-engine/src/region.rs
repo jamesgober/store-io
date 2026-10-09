@@ -8,13 +8,16 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
 use store_io_core::error::{CorruptionKind, Error, FirstCause, Named, NotWrittenCause, Op};
+use store_io_core::id::Generation;
 use store_io_format::meta::{REGION_META_LEN, RegionKind, RegionMeta, RegionState as Lifecycle};
 use store_io_format::slot::HEADER_LEN;
 use store_io_platform::Platform;
 
 use crate::batch::{AppendBatch, PageBatch};
 use crate::exec::Pumped;
+use crate::gate::Pass;
 use crate::io::{ctx, ctx_range, not_written};
+use crate::lifecycle::retired_error;
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::scan::{ScanItem, ScanSummary};
 use crate::slots::{PairAt, plan_next, read_pair};
@@ -141,8 +144,10 @@ where
             .ok_or_else(|| not_written(NotWrittenCause::NotReady, ctx(&self.state)))
     }
 
-    /// The checks every append makes before touching the device.
-    pub(crate) fn writable(&self) -> Result<&crate::frontier::AppendFrontier, Error> {
+    /// The checks every append makes before touching the device, and the
+    /// pass that keeps a recycle or release out until the append is done.
+    pub(crate) fn writable(&self) -> Result<(&crate::frontier::AppendFrontier, Pass<'_>), Error> {
+        let pass = self.pass()?;
         self.store.ready()?;
         let f = self.frontier()?;
         if !self.state.positioned.load(Ordering::Acquire) {
@@ -151,7 +156,58 @@ where
                 ctx(&self.state),
             ));
         }
-        Ok(f)
+        Ok((f, pass))
+    }
+
+    fn pass(&self) -> Result<Pass<'_>, Error> {
+        self.state
+            .gate
+            .enter()
+            .map_err(|why| retired_error(why, &self.state))
+    }
+
+    /// The generation this handle writes and reads. Recycling starts the
+    /// next one; embed it in your records to tell generations apart after a
+    /// crash.
+    #[must_use]
+    pub fn generation(&self) -> Generation {
+        self.state.generation
+    }
+
+    /// Starts a new generation: waits for every operation in flight on this
+    /// region, rewrites the region header with the next generation, makes it
+    /// durable, and returns a handle to the new generation with its append
+    /// position at 0. No other I/O: the old bytes stay on disk, so records
+    /// must carry their generation. Every handle, ticket and position of the
+    /// old generation is refused from then on (`StaleGeneration`).
+    ///
+    /// Must not be called from inside this region's own scan visitor.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(StaleGeneration | NotReady)` if the region was already
+    /// recycled or released; `Poisoned`; `DurabilityUnknown`.
+    pub fn recycle(&self) -> Result<Self, Error> {
+        let state = self.store.recycle_region(&self.state)?;
+        Ok(Self {
+            store: self.store.clone(),
+            state,
+        })
+    }
+
+    /// Releases the region: waits for every operation in flight, marks it
+    /// released in the region table and its header (both durable), and gives
+    /// its space back to the file system. Its contents are undefined from
+    /// then on; every handle to it is refused (`NotReady`), and its space is
+    /// reused by later provisioning.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(StaleGeneration | NotReady)`, `Poisoned`,
+    /// `DurabilityUnknown`, or `Io` if the space could not be deallocated
+    /// (the region is released either way).
+    pub fn release(self) -> Result<(), Error> {
+        self.store.release_region(&self.state)
     }
 
     pub(crate) fn store(&self) -> &Store<P> {
@@ -177,7 +233,7 @@ where
     /// poisoned).
     pub fn append(&self, data: &[u8]) -> Result<WriteTicket, Error> {
         let s = &self.store;
-        let f = self.writable()?;
+        let (f, _pass) = self.writable()?;
         let c = ctx(&self.state);
         if data.is_empty() {
             return Err(not_written(NotWrittenCause::Empty, c));
@@ -214,6 +270,10 @@ where
         let s = &self.store;
         let f = self.frontier()?;
         let c = ctx(&self.state);
+        self.state
+            .gate
+            .check()
+            .map_err(|why| retired_error(why, &self.state))?;
         if ticket.epoch != s.inner.epoch
             || ticket.volume != s.inner.volume
             || ticket.region != self.state.id
@@ -272,6 +332,7 @@ where
     /// `NotWritten` for a misaligned or out-of-range read;
     /// `Corruption(MediaError)` if the device reports an unreadable range.
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        let _pass = self.pass()?;
         self.store.read_at(&self.state, offset, out)
     }
 
@@ -293,6 +354,7 @@ where
         from: u64,
         visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
     ) -> Result<ScanSummary, Error> {
+        let _pass = self.pass()?;
         self.store
             .scan_region(&self.state, from, self.state.data_size, visit)
     }
@@ -305,6 +367,7 @@ where
     ///
     /// `NotWritten(TooManyInFlight | OutOfBounds)`.
     pub fn resume_at(&self, offset: u64) -> Result<u64, Error> {
+        let _pass = self.pass()?;
         let at = self
             .frontier()?
             .resume_at(offset)
@@ -429,6 +492,42 @@ where
         &self.state
     }
 
+    pub(crate) fn pass(&self) -> Result<Pass<'_>, Error> {
+        self.state
+            .gate
+            .enter()
+            .map_err(|why| retired_error(why, &self.state))
+    }
+
+    /// The generation this handle writes and reads.
+    #[must_use]
+    pub fn generation(&self) -> Generation {
+        self.state.generation
+    }
+
+    /// Starts a new generation (see [`AppendRegion::recycle`]); positions and
+    /// tickets of the old generation are refused from then on.
+    ///
+    /// # Errors
+    ///
+    /// As [`AppendRegion::recycle`].
+    pub fn recycle(&self) -> Result<Self, Error> {
+        let state = self.store.recycle_region(&self.state)?;
+        Ok(Self {
+            store: self.store.clone(),
+            state,
+        })
+    }
+
+    /// Releases the region (see [`AppendRegion::release`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`AppendRegion::release`].
+    pub fn release(self) -> Result<(), Error> {
+        self.store.release_region(&self.state)
+    }
+
     /// Writes whole blocks at `pos` and returns a ticket once the write has
     /// completed. `data.len()` must be a multiple of [`Self::block_size`];
     /// any size is accepted (large writes go out in several pieces).
@@ -440,6 +539,7 @@ where
     /// nothing is poisoned), `Poisoned`, or `DurabilityUnknown`.
     pub fn write(&self, pos: RegionPos, data: &[u8]) -> Result<WriteTicket, Error> {
         let s = &self.store;
+        let _pass = self.pass()?;
         s.ready()?;
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
@@ -472,6 +572,10 @@ where
         if ticket.generation != self.state.generation {
             return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
+        self.state
+            .gate
+            .check()
+            .map_err(|why| retired_error(why, &self.state))?;
         let mut lane = s.lane(&self.state);
         let need = s.barrier(&mut lane)?;
         Ok(s.receipt(&self.state, ticket.start, ticket.end, need, false))
@@ -510,6 +614,7 @@ where
         if pos.generation != self.state.generation {
             return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
+        let _pass = self.pass()?;
         self.store.read_at(&self.state, pos.offset, out)
     }
 
@@ -531,6 +636,7 @@ where
         from: u64,
         visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
     ) -> Result<ScanSummary, Error> {
+        let _pass = self.pass()?;
         self.store
             .scan_region(&self.state, from, self.state.data_size, visit)
     }
@@ -688,5 +794,35 @@ where
             receipt.generation = g;
         }
         Ok(receipt)
+    }
+}
+
+impl core::fmt::Debug for LiveRegion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Region")
+            .field("name", &self.name.as_str())
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("generation", &self.generation)
+            .field("size", &self.data_size)
+            .finish()
+    }
+}
+
+impl<P: Platform> core::fmt::Debug for AppendRegion<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("AppendRegion").field(&*self.state).finish()
+    }
+}
+
+impl<P: Platform> core::fmt::Debug for PageRegion<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("PageRegion").field(&*self.state).finish()
+    }
+}
+
+impl<P: Platform> core::fmt::Debug for Slot<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("Slot").field(&*self.state).finish()
     }
 }

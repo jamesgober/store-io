@@ -453,7 +453,7 @@ mod tests {
         let p = SimPlatform::new(SimConfig::volatile(1));
         let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
         let wal = s.provision_append_region("wal", 1 << 20).unwrap();
-        let f = wal.writable().unwrap();
+        let (f, _pass) = wal.writable().unwrap();
         let reserved = s
             .reserve(f, 100, store_io_core::error::ErrorContext::default())
             .unwrap();

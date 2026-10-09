@@ -31,6 +31,7 @@ use store_io_platform::{FileMode, FileName, IoOp, Platform, Queue, QueueConfig};
 use crate::domain::Domain;
 use crate::exec::{Lane, QueueSet, run};
 use crate::frontier::AppendFrontier;
+use crate::gate::Gate;
 use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT, choose_log2_block, region_object};
 use crate::slots::{NextSlot, PairAt, PairRead, plan_next, read_pair, write_slot};
 
@@ -171,6 +172,8 @@ pub(crate) struct LiveRegion {
     /// Append regions: whether the append position is known (true when
     /// provisioned in this process; after a reopen, only after `resume_at`).
     pub(crate) positioned: std::sync::atomic::AtomicBool,
+    /// Admission of data operations; closed by recycle and release.
+    pub(crate) gate: Gate,
 }
 
 pub(crate) struct Inner<P: Platform> {
@@ -203,6 +206,17 @@ static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1
 /// A store: one container file on one device.
 pub struct Store<P: Platform> {
     pub(crate) inner: Arc<Inner<P>>,
+}
+
+impl<P: Platform> core::fmt::Debug for Store<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Store")
+            .field("volume", &self.inner.volume)
+            .field("class", &self.inner.policy.class)
+            .field("read_only", &self.inner.read_only)
+            .field("poisoned", &self.inner.domain.poisoned().is_some())
+            .finish()
+    }
 }
 
 impl<P: Platform> Clone for Store<P> {
@@ -561,6 +575,7 @@ where
                 header: Mutex::new(header),
                 frontier,
                 positioned: std::sync::atomic::AtomicBool::new(false),
+                gate: Gate::new(),
             }));
         }
         drop(q);
@@ -899,6 +914,7 @@ where
                 )
             }),
             positioned: std::sync::atomic::AtomicBool::new(true),
+            gate: Gate::new(),
         });
         inner
             .regions
@@ -1006,7 +1022,7 @@ where
         Ok(())
     }
 
-    fn flip_table(
+    pub(crate) fn flip_table(
         &self,
         meta: &mut Meta,
         next_id: u32,

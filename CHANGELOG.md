@@ -113,6 +113,13 @@
   one barrier: 100 records of 64 bytes are one write and one flush.
   `PageBatch` checks writes as they are added, refuses overlaps, and submits
   them together before one barrier. Both report exact positions.
+- `store-io-engine`: a region with at least 1 MiB of data starts its data
+  area on a 1 MiB boundary, so large transfers never straddle the units below
+  the file system. On ext4 over a virtual disk, direct 1 MiB writes 48 KiB off
+  a boundary measured 35% slower; the harness's sequential writes there went
+  from 0.58x to 0.81x of raw. A reservation is charged only the extent: the
+  gap comes from growing the file, or the region is placed unaligned when the
+  disk is full, so a reservation's guarantee holds.
 - `store-io-engine`: reads larger than one pooled buffer keep eight reads
   in flight (the scan pipeline) instead of one at a time; the harness had
   measured them at 33% of raw bandwidth with 8 MiB requests.
@@ -171,6 +178,9 @@
   position or receipt cannot be built by hand, a ticket is not a position and
   a receipt is not a ticket, a ticket cannot be copied, and dropping a ticket
   unused is flagged. Each case has a compiling twin.
+- CI: a Miri job checks the unsafe buffer code (arena, pool, lock-free
+  queue, secure wipe) for undefined behaviour; the heavy concurrency tests
+  run fewer iterations under Miri.
 - CI: a loom job model-checks the buffer pool's free lists, the append
   frontier, the flush domain and the region gate.
 - `harness/`: the performance harness (a standalone, unpublished workspace)

@@ -496,11 +496,14 @@ mod tests {
             .map(|t| {
                 let p = p.clone();
                 std::thread::spawn(move || {
-                    for _ in 0..5_000 {
+                    for _ in 0..if cfg!(miri) { 50 } else { 5_000 } {
                         if let Ok(mut b) = p.take(4096) {
-                            b.as_mut_slice().fill(t);
+                            // Under Miri a small window is enough: its race
+                            // detector flags any byte two threads touch.
+                            let n = if cfg!(miri) { 64 } else { 4096 };
+                            b.as_mut_slice()[..n].fill(t);
                             std::hint::spin_loop();
-                            assert!(b.as_slice().iter().all(|&x| x == t), "slot shared");
+                            assert!(b.as_slice()[..n].iter().all(|&x| x == t), "slot shared");
                         }
                     }
                 })

@@ -146,7 +146,9 @@ mod tests {
         let q = IndexQueue::with_capacity(8);
         let mut model = VecDeque::new();
         let mut seed = 0x1234_5678_u64;
-        for step in 0..100_000u32 {
+        // Miri interprets every operation: fewer steps check the same rules.
+        let steps = if cfg!(miri) { 2_000 } else { 100_000 };
+        for step in 0..steps {
             seed ^= seed << 13;
             seed ^= seed >> 7;
             seed ^= seed << 17;
@@ -175,7 +177,7 @@ mod tests {
             .map(|_| {
                 let q = Arc::clone(&q);
                 std::thread::spawn(move || {
-                    for _ in 0..20_000 {
+                    for _ in 0..if cfg!(miri) { 50 } else { 20_000 } {
                         if let Some(v) = q.pop() {
                             while q.push(v).is_err() {
                                 std::hint::spin_loop();

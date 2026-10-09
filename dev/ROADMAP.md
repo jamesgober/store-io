@@ -70,7 +70,7 @@ Exit criteria:
 - [x] Same seed, same trace (simulator replay test with reordering and random crashes).
 - [x] Every fault class detected, where an I/O layer can detect it: failed and short writes, failed flushes (kept or dropped cache), out of space, unreadable ranges and page-cache pollution each have a test. A lying flush, a lost write and a misdirected write are by nature invisible to a layer that does not frame data: they are detected by the caller's checksums, and certified against with the power-cut rig.
 - [x] Mutation gate: every engine and simulator mutation in the private mutation list (37 so far, each a plausible bug) is killed by the tests. Not yet automated in CI.
-- [ ] loom and Miri clean. loom: clean, in CI. Miri: running on the buffer and format crates.
+- [x] loom and Miri clean: loom in CI (buffer pool, frontier, flush domain, region gate); Miri in CI on the buffer crate (all `unsafe` outside the platform FFI), clean locally on the format crate's CRC paths.
 
 ---
 

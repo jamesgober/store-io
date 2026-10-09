@@ -73,6 +73,19 @@ jobs:
       - name: Loom models
         run: cargo test -p store-io-buf -p store-io-engine --lib --release loom
 
+  # Undefined-behaviour checks of the unsafe buffer code (arena, pool,
+  # lock-free queue, secure wipe) under Miri.
+  miri:
+    name: Miri (buffers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Miri
+        run: cargo miri test -p store-io-buf
+
   # The conformance suite and the end-to-end tests on real Linux file
   # systems with barriers on. The runner's own root is mounted `nobarrier`
   # (store-io classes it unsafe), so each file system is a loop-mounted

@@ -849,46 +849,60 @@ where
             ctx: ErrorContext::default(),
         })?;
         // Space: a reservation must hold the extent; otherwise the tag's cap
-        // must allow it. Reserved bytes that stay outstanding afterwards
-        // must still fit in the container behind the new region.
-        let reserved_after = {
+        // must allow it.
+        {
             let mut acct = lock_acct(&inner.acct);
             match &from {
                 Some(r) if extent > r.remaining() => return Err(no_space(tag)),
-                Some(_) => acct.reserved().saturating_sub(extent),
                 None if !acct.fits(tag, extent) => return Err(no_space(tag)),
+                _ => {}
+            }
+        }
+        // Placement. A large region's data area is aligned (see
+        // `Layout::place`). A reservation pays only for the extent: the
+        // alignment gap comes from growing the container past every
+        // reservation, and when that growth finds no space the region is
+        // placed unaligned instead, which needs no growth at all (the
+        // container already holds the reservation), so a reservation's
+        // guarantee always holds.
+        let too_large = || Error::NotWritten {
+            cause: NotWrittenCause::TooLarge,
+            ctx: ErrorContext::default(),
+        };
+        let reserved_after = {
+            let acct = lock_acct(&inner.acct);
+            match &from {
+                Some(_) => acct.reserved().saturating_sub(extent),
                 None => acct.reserved(),
             }
         };
-        let (offset, reuse, _grow) = inner
-            .layout
-            .place(&meta.entries, meta.container_len, extent)
-            .ok_or(Error::NotWritten {
-                cause: NotWrittenCause::TooLarge,
-                ctx: ErrorContext::default(),
-            })?;
-        let end = offset.checked_add(extent).ok_or(Error::NotWritten {
-            cause: NotWrittenCause::TooLarge,
-            ctx: ErrorContext::default(),
-        })?;
-        // The new table must fit its slot. Released entries stay in the table
-        // until their space is reused, so they count; a reused entry is
-        // replaced in place. Checked before any I/O.
-        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {
-            return Err(Error::NoSpace {
-                tag: ReserveTag::Table,
-                ctx: ErrorContext::default(),
-            });
-        }
-        let target = self
-            .tail(&meta)
-            .max(end)
-            .checked_add(reserved_after)
-            .ok_or(Error::NotWritten {
-                cause: NotWrittenCause::TooLarge,
-                ctx: ErrorContext::default(),
-            })?;
-        self.grow_to(&mut meta, target, tag)?;
+        let mut align = true;
+        let (offset, reuse) = loop {
+            let (offset, reuse, _grow) = inner
+                .layout
+                .place(&meta.entries, meta.container_len, extent, align)
+                .ok_or_else(too_large)?;
+            let end = offset.checked_add(extent).ok_or_else(too_large)?;
+            // The new table must fit its slot. Released entries stay in the
+            // table until their space is reused, so they count; a reused
+            // entry is replaced in place. Checked before any I/O.
+            if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {
+                return Err(Error::NoSpace {
+                    tag: ReserveTag::Table,
+                    ctx: ErrorContext::default(),
+                });
+            }
+            let target = self
+                .tail(&meta)
+                .max(end)
+                .checked_add(reserved_after)
+                .ok_or_else(too_large)?;
+            match self.grow_to(&mut meta, target, tag) {
+                Ok(()) => break (offset, reuse),
+                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,
+                Err(e) => return Err(e),
+            }
+        };
         let id = meta.next_region_id;
         let next_id = id.checked_add(1).ok_or(Error::NoSpace {
             tag: ReserveTag::Table,

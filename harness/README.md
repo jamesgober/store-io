@@ -6,7 +6,7 @@ Measures store-io against the raw platform primitive and against fsys 1.1.3 on t
 cd harness
 cargo run --release -- all            # every workload; a few minutes
 cargo run --release -- lone           # one workload: lone, concurrent, caller-batch, page-batch, sequential
-cargo run --release -- --help
+cargo run --release -- help
 ```
 
 Each run writes `results/<date>-<os>-<device>.{md,json}`: the device report and evidence, the exact store options, every point with throughput and latency percentiles, a summary table against raw and fsys, and any anomaly or integrity failure. Every workload verifies its data at least once. On a device store-io refuses (a virtual disk, a `nobarrier` mount) the run uses the labelled override and says so at the top of the report.

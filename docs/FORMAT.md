@@ -420,9 +420,9 @@ A region asked for `size` bytes gets `data_size = size` rounded up to a multiple
 Placement uses the region table only:
 
 1. **Reuse.** The first Released entry, in table order, whose extent length equals the new extent length exactly, and whose extent overlaps no Ready entry, is reused: the new region goes at its `offset`, and the new entry *replaces* the released entry in the table at the same index.
-2. **Append.** Otherwise the extent goes at the **tail**: the end of the furthest extent in the table (Ready or Released), or `2B + 2T` for an empty table. The new entry is appended to the table.
+2. **Append.** Otherwise the extent goes at the **tail**: the end of the furthest extent in the table (Ready or Released), or `2B + 2T` for an empty table. A region with at least 1 MiB of data is placed so that its data area starts on a 1 MiB boundary (its two header blocks just before it); the gap between the tail and the header stays unused. The new entry is appended to the table.
 
-The file is then grown, if needed, to the end of the new extent plus every byte reserved and not yet provisioned. Released extents of other lengths are neither reused nor merged, the tail never moves back, and the file never shrinks.
+The file is then grown, if needed, to the end of the new extent plus every byte reserved and not yet provisioned. A region provisioned from a reservation is charged its extent only: its alignment gap comes from growing the file, and when that growth finds no space the region goes at the tail unaligned instead. Readers find every region by its table entry and must not assume either placement. Released extents of other lengths are neither reused nor merged, the tail never moves back, and the file never shrinks.
 
 A Released entry stays in the table until a region of the same extent length reuses it, so it continues to count against the table's capacity.
 

@@ -49,3 +49,10 @@
 - [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
 - [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
 - [ ] A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).
+
+## Performance follow-ups from the harness (2026-10-09)
+
+- [ ] Unbatched small appends: N × `append` + one `sync_through` writes one block-padded write per append (2-9% of fsys on 64-byte records, where fsys buffers appends in memory). `AppendBatch` is the fast path (1.4-4x fsys); the engine layer (0.4) should also let appends be submitted without waiting for each completion.
+- [ ] Linux synchronous tier runs batches and large reads one operation at a time (page batches 0.13x fsys at 256 pages on WSL, 8 MiB reads 0.37x raw). Needs io_uring (0.4) or a bounded submit pool / vectored transfers.
+- [ ] Region reads copy from the pooled buffer into the caller's (the remaining 1 MiB read gap, about 20%). Lending pooled buffers (engine layer) removes it.
+- [ ] Harness: store-io variants always run first in a workload, so they pay for a consumer SSD's recovery after the previous workload's writes (one run measured `append_durable` at 0.12x raw, the same calls split in two at 0.8x moments later). Interleave the systems or idle between workloads.

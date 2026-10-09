@@ -230,11 +230,13 @@ fn test_misaligned_direct_write_is_judged_by_the_kernel_not_rejected() {
     p.allocate(&file, 1 << 16).unwrap();
     let ev = p.probe(&dir, &file).unwrap();
     // A misaligned write is not refused by `submit`: the kernel decides, and
-    // its answer arrives in the completion. Kernels before 6.17 or so refuse
-    // it (EINVAL); newer ext4 serves it through the page cache instead. Either
-    // way it is never silently treated as direct I/O.
+    // its answer arrives in the completion. Older kernels refuse it (EINVAL).
+    // Newer ones (direct_write_fallback, 6.5+) write it through the page
+    // cache, write it back and drop those pages again; then the bytes must
+    // be exactly where they were aimed, as an aligned direct read shows.
     let mut b = pool.take(4096).unwrap();
     assert!(b.set_len(100));
+    b.as_mut_slice().fill(0x5A);
     q.submit(
         IoOp::Write {
             file: &file,
@@ -249,12 +251,12 @@ fn test_misaligned_direct_write_is_judged_by_the_kernel_not_rejected() {
     match done[0].1.map_err(|e| e.code) {
         Err(libc::EINVAL) => {}
         Ok(100) => {
-            // Accepted: the bytes must be in the page cache, where cachestat
-            // can see them.
-            let cached = p.range_state(&file, 0, 4096).unwrap().cached_pages;
-            if ev.kernel.is_some_and(|k| k >= (6, 5, 0)) {
-                assert!(cached.is_some_and(|n| n > 0), "{cached:?}");
-            }
+            let (r, back) = read(&mut q, &file, &pool, 0, 4096);
+            assert_eq!(r, Ok(4096));
+            let bytes = back.as_slice();
+            assert!(bytes[..3].iter().all(|&x| x == 0), "{:?}", &bytes[..8]);
+            assert!(bytes[3..103].iter().all(|&x| x == 0x5A));
+            assert!(bytes[103..].iter().all(|&x| x == 0));
         }
         other => panic!("{other:?} {:?} {:?}", ev.kernel, ev.fs),
     }

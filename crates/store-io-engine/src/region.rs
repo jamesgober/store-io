@@ -47,7 +47,7 @@ where
     ///
     /// [`Error::AlreadyExists`], [`Error::NoSpace`], or a platform error.
     pub fn provision_append_region(&self, name: &str, size: u64) -> Result<AppendRegion<P>, Error> {
-        let state = self.provision(name, RegionKind::Append, size)?;
+        let state = self.provision(name, RegionKind::Append, size, None)?;
         Ok(AppendRegion {
             store: self.clone(),
             state,
@@ -73,7 +73,7 @@ where
     ///
     /// [`Error::AlreadyExists`], [`Error::NoSpace`], or a platform error.
     pub fn provision_page_region(&self, name: &str, size: u64) -> Result<PageRegion<P>, Error> {
-        let state = self.provision(name, RegionKind::Page, size)?;
+        let state = self.provision(name, RegionKind::Page, size, None)?;
         Ok(PageRegion {
             store: self.clone(),
             state,
@@ -100,7 +100,7 @@ where
     ///
     /// [`Error::AlreadyExists`], [`Error::NoSpace`], or a platform error.
     pub fn provision_slot(&self, name: &str) -> Result<Slot<P>, Error> {
-        let state = self.provision(name, RegionKind::Slot, 0)?;
+        let state = self.provision(name, RegionKind::Slot, 0, None)?;
         Ok(Slot {
             store: self.clone(),
             state,
@@ -122,6 +122,12 @@ where
 pub struct AppendRegion<P: Platform> {
     store: Store<P>,
     state: Arc<LiveRegion>,
+}
+
+impl<P: Platform> AppendRegion<P> {
+    pub(crate) fn from_parts(store: Store<P>, state: Arc<LiveRegion>) -> Self {
+        Self { store, state }
+    }
 }
 
 impl<P: Platform> Clone for AppendRegion<P> {
@@ -242,7 +248,7 @@ where
         // the first piece is staged before any space is reserved.
         let mut stream = s.stage(data, c)?;
         let mut lane = s.lane(&self.state);
-        let reserved = s.reserve(f, data.len() as u64, c)?;
+        let reserved = s.reserve_append(f, data.len() as u64, c)?;
         let r = reserved.range();
         stream.at(self.state.data_offset + r.start);
         match s.pump(&mut lane, &mut stream) {
@@ -426,6 +432,12 @@ where
 pub struct PageRegion<P: Platform> {
     store: Store<P>,
     state: Arc<LiveRegion>,
+}
+
+impl<P: Platform> PageRegion<P> {
+    pub(crate) fn from_parts(store: Store<P>, state: Arc<LiveRegion>) -> Self {
+        Self { store, state }
+    }
 }
 
 impl<P: Platform> Clone for PageRegion<P> {
@@ -672,6 +684,12 @@ where
 pub struct Slot<P: Platform> {
     store: Store<P>,
     state: Arc<LiveRegion>,
+}
+
+impl<P: Platform> Slot<P> {
+    pub(crate) fn from_parts(store: Store<P>, state: Arc<LiveRegion>) -> Self {
+        Self { store, state }
+    }
 }
 
 impl<P: Platform> Clone for Slot<P> {

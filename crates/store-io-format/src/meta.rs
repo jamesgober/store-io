@@ -298,6 +298,9 @@ pub struct TableEntry {
     pub data_size: u64,
     /// Fill pattern used at provisioning.
     pub fill: FillPattern,
+    /// The caller's space-accounting tag (tenant, class); opaque to
+    /// store-io. 0 when provisioned without a reservation.
+    pub tag: u32,
 }
 
 impl TableEntry {
@@ -337,7 +340,8 @@ pub fn encode_table(
         w.bytes(&e.name.bytes)?;
         w.u64(e.offset)?;
         w.u64(e.data_size)?;
-        w.zeros(16)?;
+        w.u32(e.tag)?;
+        w.zeros(12)?;
     }
     Ok(w.position())
 }
@@ -383,7 +387,8 @@ fn decode_entry(chunk: &[u8]) -> Result<TableEntry, MetaError> {
     let name = RegionName::from_padded(r.array::<NAME_MAX>()?)?;
     let offset = r.u64()?;
     let data_size = r.u64()?;
-    if r.bytes(16)?.iter().any(|&b| b != 0) {
+    let tag = r.u32()?;
+    if r.bytes(12)?.iter().any(|&b| b != 0) {
         return Err(MetaError::Field("reserved"));
     }
     Ok(TableEntry {
@@ -394,6 +399,7 @@ fn decode_entry(chunk: &[u8]) -> Result<TableEntry, MetaError> {
         offset,
         data_size,
         fill,
+        tag,
     })
 }
 
@@ -555,6 +561,7 @@ mod tests {
             offset,
             data_size: data,
             fill: FillPattern::Zeros,
+            tag: 0,
         }
     }
 
@@ -596,10 +603,9 @@ mod tests {
 
     #[test]
     fn test_table_roundtrip() {
-        let entries = [
-            entry(0, "wal", 16384, 4096 * 10),
-            entry(1, "pages", 16384 + 4096 * 12, 4096),
-        ];
+        let mut tagged = entry(1, "pages", 16384 + 4096 * 12, 4096);
+        tagged.tag = 0xDEAD_BEEF;
+        let entries = [entry(0, "wal", 16384, 4096 * 10), tagged];
         let mut buf = vec![0u8; 512];
         let n = encode_table(&mut buf, 2, &entries).unwrap_or(0);
         let t = decode_table(&buf[..n], 4096);

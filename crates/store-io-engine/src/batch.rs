@@ -254,7 +254,7 @@ where
         let state = self.region.state();
         let block = s.block() as usize;
         let mut lane = s.lane(state);
-        let reserved = s.reserve(f, self.bytes, c)?;
+        let reserved = s.reserve_append(f, self.bytes, c)?;
         let r = reserved.range();
         if let Some(last) = self.chunks.last_mut() {
             let l = last.len();

@@ -115,13 +115,19 @@ impl Layout {
                 return Some((e.offset, Some(i), false));
             }
         }
-        let end = entries
-            .iter()
-            .filter_map(|e| e.offset.checked_add(e.extent_len(block)?))
-            .fold(self.data_start(), u64::max);
-        let start = end.max(self.data_start());
+        let start = self.tail(entries);
         let grow = start.checked_add(len)? > container_len;
         Some((start, None, grow))
+    }
+
+    /// The end of the last extent in the table, or the data start of an
+    /// empty container: where the free tail begins.
+    pub(crate) fn tail(&self, entries: &[TableEntry]) -> u64 {
+        let block = self.block();
+        entries
+            .iter()
+            .filter_map(|e| e.offset.checked_add(e.extent_len(block)?))
+            .fold(self.data_start(), u64::max)
     }
 }
 
@@ -185,6 +191,7 @@ mod tests {
             offset,
             data_size: data,
             fill: FillPattern::Zeros,
+            tag: 0,
         };
         let start = l.data_start();
         assert_eq!(l.place(&[], start, 3 * 4096), Some((start, None, true)));

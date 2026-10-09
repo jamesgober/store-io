@@ -34,6 +34,7 @@ use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
 use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT, choose_log2_block, region_object};
 use crate::slots::{NextSlot, PairAt, PairRead, plan_next, read_pair, write_slot};
+use crate::space::{Accounting, Reservation, lock_acct, no_space};
 
 /// The container file name inside the store directory.
 pub const CONTAINER: &str = "store.sio";
@@ -195,6 +196,8 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) read_only: bool,
     pub(crate) owner_generation: u64,
     pub(crate) opts: StoreOptions,
+    /// Space accounting (lock order: `meta`, then `acct`).
+    pub(crate) acct: Mutex<Accounting>,
     /// Unique per open store in this process: tickets and receipts of one
     /// open never vouch for another's writes.
     pub(crate) epoch: u64,
@@ -373,7 +376,7 @@ where
         let header_len = layout.data_start();
         platform
             .allocate(file, header_len)
-            .map_err(|e| space_err(Op::Allocate, e))?;
+            .map_err(|e| space_err(Op::Allocate, e, 0))?;
         let vmeta = VolumeMeta {
             log2_block_size: layout.log2_block,
             log2_table_slot_size: layout.log2_table,
@@ -656,6 +659,7 @@ where
         owner_generation: u64,
         opts: StoreOptions,
     ) -> Self {
+        let acct = Accounting::from_entries(&meta.entries, layout.block());
         Self {
             inner: Arc::new(Inner {
                 platform,
@@ -675,6 +679,7 @@ where
                 read_only,
                 owner_generation,
                 opts,
+                acct: Mutex::new(acct),
                 epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             }),
         }
@@ -747,14 +752,18 @@ where
     }
 
     /// Provisions a region of `data_size` bytes (rounded up to the block size)
-    /// and returns its state.
+    /// and returns its state, taking the space from `from` when given (else
+    /// under tag 0, growing the container past every outstanding
+    /// reservation).
     pub(crate) fn provision(
         &self,
         name: &str,
         kind: RegionKind,
         data_size: u64,
+        from: Option<&mut Reservation<P>>,
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
+        let tag = from.as_ref().map_or(0, |r| r.tag());
         if inner.read_only {
             return Err(Error::NotWritten {
                 cause: NotWrittenCause::ReadOnly,
@@ -801,7 +810,19 @@ where
             cause: NotWrittenCause::TooLarge,
             ctx: ErrorContext::default(),
         })?;
-        let (offset, reuse, grow) = inner
+        // Space: a reservation must hold the extent; otherwise the tag's cap
+        // must allow it. Reserved bytes that stay outstanding afterwards
+        // must still fit in the container behind the new region.
+        let reserved_after = {
+            let mut acct = lock_acct(&inner.acct);
+            match &from {
+                Some(r) if extent > r.remaining() => return Err(no_space(tag)),
+                Some(_) => acct.reserved().saturating_sub(extent),
+                None if !acct.fits(tag, extent) => return Err(no_space(tag)),
+                None => acct.reserved(),
+            }
+        };
+        let (offset, reuse, _grow) = inner
             .layout
             .place(&meta.entries, meta.container_len, extent)
             .ok_or(Error::NotWritten {
@@ -812,13 +833,15 @@ where
             cause: NotWrittenCause::TooLarge,
             ctx: ErrorContext::default(),
         })?;
-        if grow {
-            inner
-                .platform
-                .allocate(&inner.file, end)
-                .map_err(|e| space_err(Op::Allocate, e))?;
-            meta.container_len = end;
-        }
+        let target = self
+            .tail(&meta)
+            .max(end)
+            .checked_add(reserved_after)
+            .ok_or(Error::NotWritten {
+                cause: NotWrittenCause::TooLarge,
+                ctx: ErrorContext::default(),
+            })?;
+        self.grow_to(&mut meta, target, tag)?;
         let id = meta.next_region_id;
         let next_id = id.checked_add(1).ok_or(Error::NoSpace {
             tag: ReserveTag::Table,
@@ -861,6 +884,7 @@ where
             offset,
             data_size,
             fill,
+            tag,
         };
         let at = pair_region(inner.volume, &inner.layout, &entry);
         let blank = PairRead {
@@ -893,6 +917,11 @@ where
         self.flip_table(&mut meta, next_id, &entries)?;
         meta.entries = entries;
         meta.next_region_id = next_id;
+        if let Some(r) = from {
+            // Checked above against `remaining`, under the same `meta` lock.
+            r.consume(extent)?;
+        }
+        lock_acct(&inner.acct).add(&entry, block);
         let header = {
             let mut q = inner.queues.get(id as usize);
             read_pair(&mut q, &inner.file, &inner.pool, &at)?
@@ -968,7 +997,7 @@ where
                         cause: NotWrittenCause::QueueFull,
                         ctx: ErrorContext::default(),
                     },
-                    |r| space_err(Op::Write, r),
+                    |r| space_err(Op::Write, r, 0),
                 )
             })?;
             match done.result {
@@ -980,7 +1009,7 @@ where
                         ctx: ErrorContext::default(),
                     });
                 }
-                Err(raw) => return Err(space_err(Op::Write, raw)),
+                Err(raw) => return Err(space_err(Op::Write, raw, 0)),
             }
             at += len;
         }
@@ -1164,10 +1193,10 @@ fn make_queues<P: Platform>(
     Ok(QueueSet::new(qs, cfg.depth as usize))
 }
 
-fn space_err(op: Op, raw: OsError) -> Error {
+pub(crate) fn space_err(op: Op, raw: OsError, tag: u32) -> Error {
     match classify(Stage::Space, raw) {
         store_io_core::errno::ErrorKind::NoSpace => Error::NoSpace {
-            tag: ReserveTag::Caller(0),
+            tag: ReserveTag::Caller(tag),
             ctx: ErrorContext::default(),
         },
         _ => io(op, raw),

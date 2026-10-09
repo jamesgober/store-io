@@ -175,6 +175,7 @@ where
         };
         entry.state = RegionState::Released;
         let offset = entry.offset;
+        let released = *entry;
         let next_id = meta.next_region_id;
         if let Err(e) = self.flip_table(&mut meta, next_id, &entries) {
             if matches!(e, Error::NotWritten { .. } | Error::NoSpace { .. }) {
@@ -183,6 +184,7 @@ where
             return Err(e);
         }
         meta.entries = entries;
+        crate::space::lock_acct(&inner.acct).remove(&released, inner.layout.block());
         inner
             .regions
             .lock()

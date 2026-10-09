@@ -295,7 +295,7 @@ where
 
     /// Reserves `len` bytes on an append frontier, waiting (never failing)
     /// while too many appends are in flight ahead of it.
-    pub(crate) fn reserve<'a>(
+    pub(crate) fn reserve_append<'a>(
         &'a self,
         f: &'a AppendFrontier,
         len: u64,
@@ -455,7 +455,7 @@ mod tests {
         let wal = s.provision_append_region("wal", 1 << 20).unwrap();
         let (f, _pass) = wal.writable().unwrap();
         let reserved = s
-            .reserve(f, 100, store_io_core::error::ErrorContext::default())
+            .reserve_append(f, 100, store_io_core::error::ErrorContext::default())
             .unwrap();
         assert!(s.inner.domain.poisoned().is_none());
         drop(reserved);

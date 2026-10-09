@@ -137,6 +137,18 @@
   so an interrupted release never leaks space. Handles, tickets and positions
   of an old generation or a released region are refused
   (`StaleGeneration`, `NotReady`); `generation()` on region handles.
+- `store-io-engine`: space reservations and accounting. `Store::reserve`
+  checks the tag's hard cap (`Store::set_cap`) and grows the container so that
+  regions provisioned from the `Reservation` can never run out of space; it
+  is the only place a full file system or quota surfaces, as
+  `NoSpace { tag }`, and nothing is poisoned. Provisioning without a
+  reservation grows the container past every outstanding reservation, so it
+  never takes space promised to another tag. `Store::space` reports the
+  container, ready and released regions, reservations, and logical and
+  physical usage per tag; `Store::extent_of` gives a region's footprint.
+- `store-io-format`: region table entries record the caller's
+  space-accounting tag (4 of the 16 reserved bytes), so per-tag usage is
+  derived again on every open.
 - `store-io-engine`: per-region admission gate. Every data operation holds a
   pass for its I/O; recycle and release retire the region and wait for the
   last pass, so no write of an old generation lands after its successor

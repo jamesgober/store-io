@@ -66,11 +66,11 @@ Exit criteria:
 Core types, errors and traits; the deterministic simulated backend with the full fault and crash model; the conformance crate skeleton; the harness skeleton with per-stage metrics.
 
 Exit criteria:
-- [ ] Compile-fail suite green (no integer, sequence number or forged ticket or receipt type-checks).
-- [ ] Same seed, same trace.
-- [ ] Every fault class detected.
-- [ ] Mutation gate on the reference model.
-- [ ] loom and Miri clean.
+- [x] Compile-fail suite green (no integer, sequence number or forged ticket or receipt type-checks): rustdoc `compile_fail` tests in `store-io-engine`, each with a compiling twin.
+- [x] Same seed, same trace (simulator replay test with reordering and random crashes).
+- [x] Every fault class detected, where an I/O layer can detect it: failed and short writes, failed flushes (kept or dropped cache), out of space, unreadable ranges and page-cache pollution each have a test. A lying flush, a lost write and a misdirected write are by nature invisible to a layer that does not frame data: they are detected by the caller's checksums, and certified against with the power-cut rig.
+- [x] Mutation gate: every engine and simulator mutation in the private mutation list (37 so far, each a plausible bug) is killed by the tests. Not yet automated in CI.
+- [ ] loom and Miri clean. loom: clean, in CI. Miri: running on the buffer and format crates.
 
 ---
 
@@ -79,7 +79,7 @@ Exit criteria:
 The first release a database can build on. Probe with evidence and classes; Windows backend (IOCP, bounded flush pool, rename and directory protocol); Linux synchronous backend (`pwritev2`, O_DIRECT, `RWF_DSYNC`, fdatasync); provisioning, recycle and release; regions; durable writes and barriers with flush sharing; A/B slots; atomic replace; ownership locks; the simple and batch API layers and `docs/GUIDE.md`.
 
 Exit criteria:
-- [ ] Conformance green on NTFS (dev box) and ext4 (Linux CI), plus XFS where the runner allows.
+- [x] Conformance green on NTFS (dev box) and ext4 (WSL2), plus ext4 and XFS loop images in Linux CI (`store-io-conformance`).
   GitHub's Ubuntu runners mount their ext4 root `nobarrier` (found by the probe, 2026-10-09), which store-io classes as Unsafe; Linux CI conformance therefore runs on a loop-mounted ext4 (and XFS) image with barriers on, never on the runner's root filesystem.
 - [ ] dm-log-writes and dm-error runs in Linux CI.
 - [ ] Barrier within 3% of the raw primitive on the dev box; no timer quantum on any path.

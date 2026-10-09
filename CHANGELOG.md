@@ -234,6 +234,7 @@
 - `store-io-buf`: loom-aware spin hint in the free-list retry loops.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - CI packages every crate in dependency order (`cargo package --workspace`).
+- `dev/ROADMAP.md`: v0.2 and v0.3 exit criteria marked with what is verified and what remains.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent
   writers and caller batches are all fast and all gated.

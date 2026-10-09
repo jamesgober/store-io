@@ -38,6 +38,7 @@ authors = ["James Gober <me@jamesgober.com>"]
 # packaged. Development notes, CI and benchmarks stay in the repository.
 include = [
     "src/**/*",
+    "tests/**/*",
     "Cargo.toml",
     "README.md",
     "CHANGELOG.md",
@@ -49,9 +50,44 @@ include = [
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
+[lints]
+workspace = true
+
 [lib]
 name = "store_io"
 path = "src/lib.rs"
+
+# The `store-io` command-line tool (`store-io probe <dir>`, `store-io info
+# <store>`). Off by default so libraries depending on store-io build no
+# binary.
+[[bin]]
+name = "store-io"
+path = "src/bin/store-io.rs"
+required-features = ["cli"]
+
+# FEATURE FLAGS
+# #################################
+[features]
+default = []
+# Builds the `store-io` binary.
+cli = []
+
+# DEPENDENCIES
+# #################################
+# Only store-io's own crates: the engine and its types, and the native
+# backend for this operating system. Every third-party dependency is
+# justified in the crate that adds it.
+[dependencies]
+store-io-core     = { path = "crates/store-io-core", version = "0.1.0" }
+store-io-platform = { path = "crates/store-io-platform", version = "0.1.0" }
+store-io-engine   = { path = "crates/store-io-engine", version = "0.1.0" }
+
+# The native backend: one per operating system.
+[target.'cfg(windows)'.dependencies]
+store-io-win = { path = "crates/store-io-win", version = "0.1.0" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+store-io-posix = { path = "crates/store-io-posix", version = "0.1.0" }
 
 
 # WORKSPACE
@@ -90,18 +126,6 @@ dbg_macro                   = "deny"
 unreachable                 = "deny"
 undocumented_unsafe_blocks  = "deny"
 missing_safety_doc          = "deny"
-
-
-# FEATURE FLAGS
-# #################################
-[features]
-default = []
-
-
-# DEPENDENCIES
-# #################################
-# None. Every dependency is justified in this file before it is added.
-[dependencies]
 
 
 # PROFILES

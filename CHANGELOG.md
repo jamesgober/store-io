@@ -137,6 +137,21 @@
   so an interrupted release never leaks space. Handles, tickets and positions
   of an old generation or a released region are refused
   (`StaleGeneration`, `NotReady`); `generation()` on region handles.
+- `store-io` (facade): the simple API on the native backend, with no
+  generics in user code. `Store::create`, `Store::open`, `Store::open_with`
+  and `Store::open_readonly` take a path; the store derefs to the engine for
+  regions, slots, batches, scans, recycle, release, reservations and the
+  report. `AppendRegion`, `PageRegion`, `Slot`, `AppendBatch`, `PageBatch`
+  and `Reservation` name the native types; `Directory::open` opens a
+  directory-mode handle; `probe` reports the evidence and class of a
+  directory's device. Every error and evidence type is re-exported.
+  `NativePlatform` is the Windows backend on Windows and the Linux backend on
+  Linux.
+- `store-io` binary (feature `cli`): `store-io probe <dir>` and
+  `store-io info <store>` (read-only).
+- End-to-end tests of the simple API on the machine's real file system
+  (NTFS, ext4); where a device is refused they use the labelled override and
+  check that every receipt carries it.
 - `store-io-engine`: directory mode. `Directory::replace` swaps a whole
   file atomically and durably (temporary file in the same directory, exact
   length, full flush, rename over the target, directory flush); after any
@@ -181,6 +196,7 @@
 - `store-io-sim`: `World::flushes()` for arming flush faults.
 - `store-io-buf`: loom-aware spin hint in the free-list retry loops.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
+- CI packages every crate in dependency order (`cargo package --workspace`).
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent
   writers and caller batches are all fast and all gated.

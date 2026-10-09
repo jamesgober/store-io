@@ -124,7 +124,7 @@ flag_enum! {
         MountOptions = 8,
         /// file attribute flags
         InodeFlags = 9,
-        /// page-cache residency (cachestat)
+        /// page-cache residency of a range (Linux `cachestat`)
         PageCache = 10,
     }
 }

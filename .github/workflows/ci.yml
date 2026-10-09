@@ -63,8 +63,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Every crate, in dependency order: sibling crates resolve from a local
+      # overlay until they are on crates.io.
       - name: Package (dry run)
-        run: cargo package --locked
+        run: cargo package --workspace --locked
 
   security:
     name: Security (audit + deny)

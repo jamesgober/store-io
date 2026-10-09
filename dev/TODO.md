@@ -1,0 +1,39 @@
+# store-io &mdash; Later List
+
+> Work that is parked, not dropped. Nothing here blocks a usable store-io release; everything here blocks the *certified* 1.0. Each item says what it unlocks. Tick it when done and note the date.
+
+---
+
+## Hardware we do not have yet
+
+- [ ] **Power-loss-protected enterprise NVMe** (for example a used Samsung PM9A3, ~$100-200). Unlocks: the power-safe performance gates (durable write in ~6-12 us) and every "power-safe" measurement.
+- [ ] **Bare-metal Linux box** (any machine that boots Linux directly, not WSL). Unlocks: real Linux latency numbers, kernel-version matrix (5.15, 6.1, 6.6, 6.12, mainline), `blktrace`/`nvme` traces, null_blk CPU ceilings.
+- [ ] **Power-cut rig** (relay that cuts the drive's own power + a second controller logging acknowledgements; ~$300-600 in parts, design in the research notes). Unlocks: proof that acknowledged writes survive real power loss, 500 / 3,000-cycle certification, and certifying (or ruling out) the fast write-through path on Windows.
+- [ ] **A Mac** (one Apple-silicon machine, plus an external Thunderbolt NVMe if possible). Unlocks: macOS flush costs and macOS gates.
+
+## Measurements waiting on that hardware
+
+- [ ] Linux: FUA write vs write + flush, per kernel and filesystem (needs bare metal + PLP drive).
+- [ ] Linux: raw block device flush counts and latency (bare metal).
+- [ ] Linux: flush sharing between concurrent writers (bare metal).
+- [ ] Linux: lock release vs a crashed owner's in-flight writes, across kernels (bare metal or VMs).
+- [ ] Linux: io_uring wake-up and reap costs; null_blk per-core ceilings (bare metal).
+- [ ] Probe golden captures from real drives (bare metal + PLP drive).
+- [ ] macOS: flush costs per model, directory flush support (Mac).
+- [ ] Windows: does a flush stall writes in the driver or the drive? (ETW timeline; can run on the dev box later).
+
+## Settings changes James runs and reverts
+
+- [ ] Turn this drive's write cache **off** for one test, then back on (tells us whether the 55 us write-through result is real or the drive ignoring it).
+- [ ] Turn the NVMe idle power timeout **off** for one test, then back on (removes wake-up delay from flush measurements).
+
+## Our own replacements for third-party crates
+
+- [ ] **Error-derive crate** (our own `thiserror`): a small macro that writes `Display` and `Error` impls for error enums. store-io hand-writes these impls for now.
+- [ ] **Secure-wipe crate** (our own `zeroize`): wipe secret bytes so the compiler cannot skip the wipe (volatile writes + a compiler fence). store-io carries a small internal version for now.
+
+## Design gaps carried into the architecture phase
+
+- [ ] Streaming copy for backup and replication (sink protocol, bounded memory).
+- [ ] Finding the exact bad sector when a read fails (split the read down to one block).
+- [ ] Keeping commit writes fast while background writes run (store-io's own pacing).

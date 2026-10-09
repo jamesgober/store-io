@@ -44,7 +44,8 @@ Exit criteria:
 - [x] Every requirement mapped to a chosen mechanism per platform and device class, with the rejected alternatives and the labelled fallback for each cell (64 fully, 28 pending a measurement, 3 design gaps carried into phase 1).
 - [x] Critic findings resolved (dispositions recorded; two overridden by measurement).
 - [ ] Requirement amendments approved.
-- [ ] Baseline measurement plan written (done), and run where hardware exists (Windows dev box and WSL2 partial; bare-metal Linux, a power-loss-protected NVMe and macOS outstanding): a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
+- [x] Baseline measurement plan written, and run where hardware exists (Windows dev box and WSL2). **Moved:** measurements that need bare-metal Linux, a power-loss-protected NVMe, a Mac or the power-cut rig move to [`dev/TODO.md`](./TODO.md). Reason: the maintainer wants a usable release before that hardware exists; those measurements gate the certified 1.0, not usable 0.x releases. Durability claims stay honest in the meantime because every receipt names its device class and evidence.
+- Measurement items (all bound to the hardware above): a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
 
 ---
 

@@ -18,6 +18,8 @@
   writers and caller batches are all fast and all gated.
 - `dev/ROADMAP.md`: performance gates for the lone-writer, concurrent-writer
   and caller-batch patterns; the phase 1 API sketch is layered.
+- `dev/TODO.md`: the later list (hardware, measurements, settings changes,
+  in-house replacements for `thiserror` and `zeroize`, design gaps).
 
 ### Changed
 
@@ -25,6 +27,9 @@
   critic pass and the synthesis are complete; requirement amendments await
   approval; measurements on bare-metal Linux, a power-loss-protected NVMe and
   macOS are outstanding.
+- Hardware-bound measurements move to `dev/TODO.md` (recorded in the roadmap
+  per the anti-deferral rule); they gate the certified 1.0, not usable 0.x
+  releases.
 
 ### Fixed
 

@@ -56,6 +56,23 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+  # Exhaustive interleaving checks of the lock-free code: the buffer pool's
+  # free lists, the append frontier, the flush domain and the region gate.
+  loom:
+    name: Loom (model checking)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "--cfg loom"
+      LOOM_MAX_PREEMPTIONS: "3"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: loom
+      - name: Loom models
+        run: cargo test -p store-io-buf -p store-io-engine --lib --release loom
+
   package:
     name: Package
     runs-on: ubuntu-latest

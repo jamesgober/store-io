@@ -10,6 +10,100 @@
 //! barrier waited for. The receipt proves the ticket's write durable exactly
 //! when the ticket's flush number is not later than the receipt's, which is
 //! the join rule the flush domain enforces.
+//!
+//! # Compile-time guarantees
+//!
+//! The valid forms compile:
+//!
+//! ```
+//! # use std::path::Path;
+//! # use store_io_engine::{Store, StoreOptions};
+//! # use store_io_sim::{SimConfig, SimPlatform};
+//! # let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), StoreOptions::default()).unwrap();
+//! # let pages = store.provision_page_region("p", 1 << 20).unwrap();
+//! # let wal = store.provision_append_region("w", 1 << 20).unwrap();
+//! let pos = pages.pos(4096)?;                       // a checked position
+//! let ticket = pages.write(pos, &[0u8; 4096])?;     // a ticket per write
+//! let receipt = pages.sync_through(&ticket)?;       // a receipt per barrier
+//! assert!(receipt.covers(&ticket));
+//! let appended = wal.append(b"x")?;
+//! let _durable = wal.sync_through(&appended)?;
+//! # Ok::<(), store_io_core::error::Error>(())
+//! ```
+//!
+//! An integer is never a position:
+//!
+//! ```compile_fail,E0308
+//! # use std::path::Path;
+//! # use store_io_engine::{Store, StoreOptions};
+//! # use store_io_sim::{SimConfig, SimPlatform};
+//! # let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), StoreOptions::default()).unwrap();
+//! # let pages = store.provision_page_region("p", 1 << 20).unwrap();
+//! let _ticket = pages.write(4096, &[0u8; 4096]);
+//! ```
+//!
+//! A position cannot be built by hand:
+//!
+//! ```compile_fail,E0451
+//! # use store_io_engine::RegionPos;
+//! let _pos = RegionPos { offset: 4096 };
+//! ```
+//!
+//! A receipt cannot be forged:
+//!
+//! ```compile_fail,E0451
+//! # use store_io_engine::DurableReceipt;
+//! let _receipt = DurableReceipt { through: u64::MAX };
+//! ```
+//!
+//! A ticket is not a position, and a receipt is not a ticket:
+//!
+//! ```compile_fail,E0308
+//! # use std::path::Path;
+//! # use store_io_engine::{Store, StoreOptions};
+//! # use store_io_sim::{SimConfig, SimPlatform};
+//! # let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), StoreOptions::default()).unwrap();
+//! # let pages = store.provision_page_region("p", 1 << 20).unwrap();
+//! let ticket = pages.write(pages.pos(0).unwrap(), &[0u8; 4096]).unwrap();
+//! let _again = pages.write(ticket, &[0u8; 4096]);
+//! ```
+//!
+//! ```compile_fail,E0308
+//! # use std::path::Path;
+//! # use store_io_engine::{Store, StoreOptions};
+//! # use store_io_sim::{SimConfig, SimPlatform};
+//! # let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), StoreOptions::default()).unwrap();
+//! # let wal = store.provision_append_region("w", 1 << 20).unwrap();
+//! let (_pos, receipt) = wal.append_durable(b"x").unwrap();
+//! let _again = wal.sync_through(&receipt);
+//! ```
+//!
+//! A ticket stands for one write and cannot be copied:
+//!
+//! ```compile_fail,E0599
+//! # use std::path::Path;
+//! # use store_io_engine::{Store, StoreOptions};
+//! # use store_io_sim::{SimConfig, SimPlatform};
+//! # let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), StoreOptions::default()).unwrap();
+//! # let wal = store.provision_append_region("w", 1 << 20).unwrap();
+//! let ticket = wal.append(b"x").unwrap();
+//! let _copy = ticket.clone();
+//! ```
+//!
+//! Dropping a ticket unused is flagged (here made an error):
+//!
+//! ```compile_fail
+//! #![deny(unused_must_use)]
+//! # use std::path::Path;
+//! # use store_io_engine::{Store, StoreOptions};
+//! # use store_io_sim::{SimConfig, SimPlatform};
+//! # fn main() -> Result<(), store_io_core::error::Error> {
+//! # let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), StoreOptions::default())?;
+//! # let wal = store.provision_append_region("w", 1 << 20)?;
+//! wal.append(b"x")?;
+//! # Ok(())
+//! # }
+//! ```
 
 use core::fmt;
 

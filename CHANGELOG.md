@@ -147,6 +147,13 @@
   directory's device. Every error and evidence type is re-exported.
   `NativePlatform` is the Windows backend on Windows and the Linux backend on
   Linux.
+- `store-io-engine`: compile-fail suite (rustdoc `compile_fail` tests, no
+  third-party harness): an integer never type-checks as a position, a
+  position or receipt cannot be built by hand, a ticket is not a position and
+  a receipt is not a ticket, a ticket cannot be copied, and dropping a ticket
+  unused is flagged. Each case has a compiling twin.
+- CI: a loom job model-checks the buffer pool's free lists, the append
+  frontier, the flush domain and the region gate.
 - `docs/GUIDE.md`: a walk through store-io from the first durable write to
   recovery (receipts, regions, batches, many writers, slots and directory
   files, scans and `resume_at`, the device report, every error and what to

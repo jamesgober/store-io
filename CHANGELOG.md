@@ -13,6 +13,12 @@
 
 ### Added
 
+- `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
+  `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent
+  writers and caller batches are all fast and all gated.
+- `dev/ROADMAP.md`: performance gates for the lone-writer, concurrent-writer
+  and caller-batch patterns; the phase 1 API sketch is layered.
+
 ### Changed
 
 ### Fixed

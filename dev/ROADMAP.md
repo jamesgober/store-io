@@ -47,7 +47,7 @@ Exit criteria:
 
 ## Phase 1 &mdash; Architecture
 
-`PLANNING`, `FILEMAP` (every file, every field), public API sketch, on-disk header formats with versioning, error model, crate layout, instrumentation stage list, harness design.
+`PLANNING`, `FILEMAP` (every file, every field), public API sketch in three layers (simple, batch, engine) with the `docs/GUIDE.md` outline, on-disk header formats with versioning, error model, crate layout, instrumentation stage list, harness design.
 
 Exit criteria:
 - [ ] Scenario review passes: every scenario has an owning file.
@@ -167,3 +167,6 @@ Every gate is relative to fio on the same box, kernel, filesystem and flags. Eve
 | Observer | compiled out when off; at most 20 ns/op and 5% IOPS when on | same |
 | Multi-device | at least 90% of summed per-device fio, up to 4 devices | same |
 | Against fsys | at least 20% faster per comparable operation, or proven at the device floor | same |
+| Lone writer | one durable write costs one primitive, never waits for company | same |
+| Concurrent writers | durable ops/s rises with writer count through flush sharing (no window, no timer) | same |
+| Caller batch | N writes + one barrier costs N writes + one primitive | same |

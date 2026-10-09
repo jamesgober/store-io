@@ -1,4 +1,12 @@
-//! Open data files: `FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED` handles.
+//! Open data files: `FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED` handles
+//! for I/O, plus one synchronous handle per writable file for flushes.
+//!
+//! Flushes never go through an overlapped handle. On one, the flush may
+//! return `STATUS_PENDING` and finish later: the call would have to be
+//! waited for (impossible on the queues' handles, which never signal), and
+//! the kernel would write the status block after the caller returned. On a
+//! synchronous handle the I/O manager waits inside the call, so a flush that
+//! returns has finished.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +40,8 @@ static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 pub(crate) struct FileInner {
     pub(crate) handle: Handle,
+    /// Synchronous (non-overlapped) handle for flushes; writable files only.
+    pub(crate) flush: Option<Arc<Handle>>,
     pub(crate) id: u64,
     pub(crate) writable: bool,
     pub(crate) flush_mode: FlushMode,
@@ -69,9 +79,20 @@ impl WinFile {
         } else {
             FlushMode::Full
         };
+        let flush = if mode == FileMode::ReadWrite {
+            Some(Arc::new(sys::reopen(
+                &handle,
+                GENERIC_READ | GENERIC_WRITE,
+                sys::SHARE_ALL,
+                FILE_FLAG_NO_BUFFERING,
+            )?))
+        } else {
+            None
+        };
         Ok(Self {
             inner: Arc::new(FileInner {
                 handle,
+                flush,
                 id: NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed),
                 writable: mode == FileMode::ReadWrite,
                 flush_mode,
@@ -114,12 +135,23 @@ impl WinFile {
     ///
     /// The raw error; a failed flush is never retried by this crate.
     pub fn flush_data(&self) -> RawResult<()> {
-        flush_data(&self.inner.handle, self.inner.flush_mode)
+        flush_data(self.inner.flush.as_deref(), self.inner.flush_mode)
+    }
+
+    /// The synchronous flush handle (`None` for read-only files).
+    pub(crate) fn flush_handle(&self) -> Option<&Arc<Handle>> {
+        self.inner.flush.as_ref()
     }
 }
 
-/// Performs a data flush with the given primitive on a raw handle.
-pub(crate) fn flush_data(h: &Handle, mode: FlushMode) -> RawResult<()> {
+/// Performs a data flush with the given primitive on a synchronous handle;
+/// `None` (a read-only file) is refused.
+pub(crate) fn flush_data(h: Option<&Handle>, mode: FlushMode) -> RawResult<()> {
+    let Some(h) = h else {
+        return Err(sys::win32(
+            windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED,
+        ));
+    };
     match mode {
         FlushMode::DataSyncOnly => sys::flush_data_sync_only(h),
         FlushMode::Full => sys::flush_file_buffers(h),

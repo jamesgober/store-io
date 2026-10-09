@@ -309,19 +309,32 @@ pub fn flush_file_buffers(h: &Handle) -> RawResult<()> {
 /// # Errors
 ///
 /// The NTSTATUS.
+///
+/// `h` must be a synchronous (non-overlapped) handle, on which the call
+/// completes before it returns. If it ever reports `STATUS_PENDING` anyway,
+/// the flush is not known to have finished: that is an error, and the status
+/// block (which the kernel may still write) is deliberately leaked rather
+/// than freed.
 pub fn flush_data_sync_only(h: &Handle) -> RawResult<()> {
-    let mut iosb = IO_STATUS_BLOCK::default();
+    /// `STATUS_PENDING`: a success code that means "not finished yet".
+    const STATUS_PENDING: i32 = 0x103;
+    let mut iosb = Box::new(IO_STATUS_BLOCK::default());
     // SAFETY: no parameters are passed (null, 0) as the ntifs contract allows;
-    // `iosb` is writable for the call; the call is synchronous.
+    // `iosb` is a heap block writable for the call and, if the call returns
+    // pending, for as long as the kernel may write it (it is leaked below).
     let status = unsafe {
         NtFlushBuffersFileEx(
             h.raw(),
             FLUSH_FLAGS_FILE_DATA_SYNC_ONLY,
             ptr::null(),
             0,
-            &mut iosb,
+            &mut *iosb,
         )
     };
+    if status == STATUS_PENDING {
+        let _kernel_may_still_write = Box::leak(iosb);
+        return Err(nt(status));
+    }
     if status >= 0 { Ok(()) } else { Err(nt(status)) }
 }
 

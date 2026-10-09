@@ -40,6 +40,7 @@
 //! for every completion packet before any buffer or handle is released.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use store_io_platform::{
     Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected,
@@ -84,6 +85,9 @@ struct Slot {
 struct FileEntry {
     id: u64,
     handle: Handle,
+    /// The file's synchronous flush handle (never this queue's overlapped
+    /// one: see `crate::file`).
+    flush: Option<Arc<Handle>>,
     flush_mode: FlushMode,
     in_flight: u32,
 }
@@ -179,6 +183,7 @@ impl WinQueue {
         self.files[slot] = Some(FileEntry {
             id: file.id(),
             handle,
+            flush: file.flush_handle().cloned(),
             flush_mode: file.flush_mode(),
             in_flight: 0,
         });
@@ -231,7 +236,7 @@ impl WinQueue {
         let result = match (self.slots[idx].kind, result) {
             (Kind::Write { dsync: true }, Ok(n)) if !self.draining => {
                 match self.entry(self.slots[idx].entry) {
-                    Some(e) => file::flush_data(&e.handle, e.flush_mode).map(|()| n),
+                    Some(e) => file::flush_data(e.flush.as_deref(), e.flush_mode).map(|()| n),
                     None => Err(sys::win32(ERROR_INVALID_PARAMETER)),
                 }
             }
@@ -397,7 +402,7 @@ impl Queue for WinQueue {
                 };
                 let idx = self.take_slot(tag, Kind::Flush, None, entry, 0)?;
                 let result = match self.entry(entry) {
-                    Some(e) => file::flush_data(&e.handle, e.flush_mode).map(|()| 0),
+                    Some(e) => file::flush_data(e.flush.as_deref(), e.flush_mode).map(|()| 0),
                     None => Err(sys::win32(ERROR_INVALID_PARAMETER)),
                 };
                 self.finish(idx, result);

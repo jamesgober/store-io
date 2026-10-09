@@ -71,7 +71,7 @@ Source: [`crates/store-io-win/src/queue.rs`](../crates/store-io-win/src/queue.rs
 
 ### Flushes
 
-The data-flush primitive is chosen once, when a file is opened, from its file system and recorded on the handle: `NtFlushBuffersFileEx` with `FLUSH_FLAGS_FILE_DATA_SYNC_ONLY` on NTFS (data, the metadata needed to read it, and a device cache flush), and `FlushFileBuffers` on any other file system. A full flush is always `FlushFileBuffers`. A durable write is the write followed by the data flush; durability at completion never depends on `FILE_FLAG_WRITE_THROUGH`. On a power-safe store this means every write also pays a flush call, which the device itself should complete without work.
+The data-flush primitive is chosen once, when a file is opened, from its file system and recorded on the handle: `NtFlushBuffersFileEx` with `FLUSH_FLAGS_FILE_DATA_SYNC_ONLY` on NTFS (data, the metadata needed to read it, and a device cache flush), and `FlushFileBuffers` on any other file system. A full flush is always `FlushFileBuffers`. Every flush goes through one synchronous (non-overlapped, unbuffered) handle per writable file, never through an overlapped I/O handle: on an overlapped handle a flush may return `STATUS_PENDING` and finish later, so a flush that returned would not prove anything. A pending status, should one ever appear, is an error. A durable write is the write followed by the data flush; durability at completion never depends on `FILE_FLAG_WRITE_THROUGH`. On a power-safe store this means every write also pays a flush call, which the device itself should complete without work.
 
 ### Space
 

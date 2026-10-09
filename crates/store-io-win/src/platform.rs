@@ -126,7 +126,13 @@ impl Platform for WinPlatform {
     }
 
     fn flush_all(&self, file: &WinFile) -> RawResult<()> {
-        sys::flush_file_buffers(file.handle())
+        // Through the synchronous handle (see `crate::file`).
+        match file.flush_handle() {
+            Some(h) => sys::flush_file_buffers(h),
+            None => Err(sys::win32(
+                windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED,
+            )),
+        }
     }
 
     fn probe(&self, dir: &WinDir, file: &WinFile) -> RawResult<Evidence> {

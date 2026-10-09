@@ -272,6 +272,15 @@
 
 ### Fixed
 
+- `store-io-win`: data flushes went through overlapped handles. On such a
+  handle `NtFlushBuffersFileEx` may return `STATUS_PENDING`, which was
+  counted as success (a barrier could report durability before the flush
+  finished), and the kernel would then write its status block into a stack
+  frame that had already returned; `FlushFileBuffers` would wait forever on
+  a queue handle that never signals. Every flush now goes through one
+  synchronous handle per writable file, and a pending status is an error
+  with its status block kept alive. It never triggered in 800 attempts on
+  the development machine (found by the benchmark harness).
 - `store-io-win`: `allocate` to a smaller size truncated the file, unlike the
   other backends; it now never shrinks, as the platform contract says (found
   by the conformance suite).

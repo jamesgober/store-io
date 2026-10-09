@@ -81,7 +81,7 @@ The first release a database can build on. Probe with evidence and classes; Wind
 Exit criteria:
 - [x] Conformance green on NTFS (dev box) and ext4 (WSL2), plus ext4 and XFS loop images in Linux CI (`store-io-conformance`).
   GitHub's Ubuntu runners mount their ext4 root `nobarrier` (found by the probe, 2026-10-09), which store-io classes as Unsafe; Linux CI conformance therefore runs on a loop-mounted ext4 (and XFS) image with barriers on, never on the runner's root filesystem.
-- [ ] dm-error run in Linux CI: a file system on a device-mapper target switched mid-run to fail every I/O; no success after the first failure, every acknowledged record intact after healing (`tests/dm.rs`, CI job "Fail-stop under device errors").
+- [x] dm-error run in Linux CI (first run: 582 records acknowledged, the first failure `DurabilityUnknown` with errno 5 and its exact byte range, no success after it, all 582 intact after healing): a file system on a device-mapper target switched mid-run to fail every I/O; no success after the first failure, every acknowledged record intact after healing (`tests/dm.rs`, CI job "Fail-stop under device errors").
   **Moved to v0.4:** the dm-log-writes replay (crash states at every flush mark on a real kernel). Reason: it needs the xfstests `replay-log` tooling built in CI, while the same crash enumeration already runs on the simulator; the maintainer asked for a usable release first. Recorded 2026-10-09.
 - [ ] Barrier within 3% of the raw primitive on the dev box; no timer quantum on any path.
 - [ ] Lone-writer, concurrent-writer and caller-batch gates on the dev box; at least 20% better than fsys per comparable operation or proven at the device floor.

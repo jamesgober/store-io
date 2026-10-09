@@ -33,6 +33,14 @@ jobs:
           toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The Linux backend tests run on the runner's own filesystem; record its
+      # kernel and mount options so every result can be read against them.
+      - name: Storage facts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          uname -r
+          findmnt -no SOURCE,FSTYPE,OPTIONS --target "$HOME"
+          for f in /proc/fs/ext4/*/options; do echo "== $f"; paste -sd, "$f"; done
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy (default features)

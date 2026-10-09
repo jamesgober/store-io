@@ -49,6 +49,40 @@ impl Drop for TempDir {
     }
 }
 
+/// The options of the mount holding `path`: per-mount and superblock
+/// options from `/proc/self/mountinfo`, plus, on ext4, the full list from
+/// `/proc/fs/ext4/<dev>/options` (which includes the defaults mountinfo
+/// omits). The device is found by its `major:minor`, since the root mount's
+/// source is often the alias `/dev/root`.
+fn mount_options(path: &Path) -> Vec<String> {
+    let path = std::fs::canonicalize(path).unwrap();
+    let info = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
+    // mountinfo(5): id parent maj:min root mount-point options [tags] - fstype source super-options
+    let line = info
+        .lines()
+        .filter(|l| l.split(' ').nth(4).is_some_and(|mp| path.starts_with(mp)))
+        .max_by_key(|l| l.split(' ').nth(4).map_or(0, str::len))
+        .unwrap();
+    let fields: Vec<&str> = line.split(' ').collect();
+    let sep = fields.iter().position(|f| *f == "-").unwrap();
+    let mut opts: Vec<String> = fields[5]
+        .split(',')
+        .chain(fields[sep + 3].split(','))
+        .map(str::to_owned)
+        .collect();
+    if fields[sep + 1] == "ext4" {
+        let dev = std::fs::read_link(format!("/sys/dev/block/{}", fields[2]))
+            .ok()
+            .and_then(|l| l.file_name().map(|n| n.to_string_lossy().into_owned()));
+        if let Some(text) =
+            dev.and_then(|d| std::fs::read_to_string(format!("/proc/fs/ext4/{d}/options")).ok())
+        {
+            opts.extend(text.lines().map(str::to_owned));
+        }
+    }
+    opts
+}
+
 fn name(s: &str) -> FileName {
     FileName::new(s).unwrap()
 }
@@ -188,8 +222,17 @@ fn test_dsync_write_flush_data_and_flush_all_complete_inline() {
     assert_eq!(done[0].1, Ok(0));
     assert!(done[0].2.is_none());
     p.flush_all(&file).unwrap();
-    // Misaligned direct I/O is an error returned in the completion, not a
-    // rejection: the kernel saw it.
+}
+
+#[test]
+fn test_misaligned_direct_write_is_judged_by_the_kernel_not_rejected() {
+    let (_t, p, dir, file, pool, mut q) = setup();
+    p.allocate(&file, 1 << 16).unwrap();
+    let ev = p.probe(&dir, &file).unwrap();
+    // A misaligned write is not refused by `submit`: the kernel decides, and
+    // its answer arrives in the completion. With direct I/O in effect that
+    // answer is EINVAL; with data journaling ext4 turns direct I/O into
+    // buffered I/O and accepts it, which the probe must have reported.
     let mut b = pool.take(4096).unwrap();
     assert!(b.set_len(100));
     q.submit(
@@ -203,7 +246,12 @@ fn test_dsync_write_flush_data_and_flush_all_complete_inline() {
     )
     .unwrap();
     let done = drain(&mut q);
-    assert_eq!(done[0].1.map_err(|e| e.code), Err(libc::EINVAL));
+    let result = done[0].1.map_err(|e| e.code);
+    if ev.fs.data_journal {
+        assert_eq!(result, Ok(100), "{:?} {:?}", ev.kernel, ev.fs);
+    } else {
+        assert_eq!(result, Err(libc::EINVAL), "{:?} {:?}", ev.kernel, ev.fs);
+    }
     assert!(done[0].2.is_some());
 }
 
@@ -434,7 +482,7 @@ fn test_cachestat_sees_a_buffered_read_and_direct_writes_leave_none() {
 
 #[test]
 fn test_probe_on_ext4_reports_filesystem_alignment_stack_and_device() {
-    let (_t, p, dir, file, _pool, _q) = setup();
+    let (t, p, dir, file, _pool, _q) = setup();
     p.allocate(&file, 4096).unwrap();
     let ev = p.probe(&dir, &file).unwrap();
     assert_eq!(ev.fs.kind, FsKind::Ext4, "{ev:?}");
@@ -457,7 +505,19 @@ fn test_probe_on_ext4_reports_filesystem_alignment_stack_and_device() {
     assert_ne!(ev.fs.direct_io, Tri::No);
     assert_eq!(ev.fs.cow, Tri::No);
     assert_eq!(ev.fs.full_flush, Tri::Yes);
-    assert!(!ev.fs.data_journal && !ev.fs.no_barrier);
+    // The probe's mount flags must match the mount itself, whatever this
+    // machine's configuration is.
+    let opts = mount_options(t.path());
+    assert_eq!(
+        ev.fs.no_barrier,
+        opts.iter()
+            .any(|o| matches!(o.as_str(), "nobarrier" | "barrier=0")),
+        "{opts:?} {:?}",
+        ev.fs
+    );
+    if opts.iter().any(|o| o == "data=journal") {
+        assert!(ev.fs.data_journal, "{opts:?} {:?}", ev.fs);
+    }
     assert!(ev.kernel.is_some_and(|(maj, _, _)| maj >= 4), "{ev:?}");
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     if release.contains("microsoft") {

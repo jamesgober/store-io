@@ -107,6 +107,8 @@
   options, the block stack from sysfs (device-mapper, MD, loop, virtual
   disks, hypervisor detection) and, where permitted, NVMe identify data.
 - `store-io-core`: `NotWrittenCause::NotPositioned`.
+- `store-io-core`: `OsError` implements `std::error::Error`, so raw
+  platform results work with `?` in callers returning boxed errors.
 - `store-io-sim`: `World::flushes()` for arming flush faults.
 - `store-io-buf`: loom-aware spin hint in the free-list retry loops.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.

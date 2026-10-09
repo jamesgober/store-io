@@ -35,18 +35,18 @@ use crate::sys;
 /// use store_io_posix::PosixPlatform;
 ///
 /// let p = PosixPlatform::new();
-/// let dir = p.open_dir(Path::new("/var/lib/example"), true).map_err(|e| e.to_string())?;
+/// let dir = p.open_dir(Path::new("/var/lib/example"), true)?;
 /// let name = FileName::new("data")?;
-/// let file = p.create_file(&dir, &name).map_err(|e| e.to_string())?;
-/// p.allocate(&file, 4096).map_err(|e| e.to_string())?;
+/// let file = p.create_file(&dir, &name)?;
+/// p.allocate(&file, 4096)?;
 /// let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 4096, 4))?;
-/// let mut q = p.queue(QueueConfig::default()).map_err(|e| e.to_string())?;
+/// let mut q = p.queue(QueueConfig::default())?;
 /// let mut buf = pool.take(4096).map_err(|_| "pool exhausted")?;
 /// buf.as_mut_slice().fill(0xAB);
 /// q.submit(IoOp::Write { file: &file, offset: 0, buf, dsync: true }, 7)
 ///     .map_err(|_| "rejected")?;
 /// let mut out = CompletionBuf::with_capacity(8);
-/// assert_eq!(q.wait(1, &mut out).map_err(|e| e.to_string())?, 1);
+/// assert_eq!(q.wait(1, &mut out)?, 1);
 /// let c = out.drain().next().ok_or("no completion")?;
 /// assert_eq!((c.tag, c.result), (7, Ok(4096)));
 /// # Ok::<(), Box<dyn std::error::Error>>(())

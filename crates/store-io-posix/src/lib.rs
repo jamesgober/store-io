@@ -102,11 +102,11 @@ mod platform {
     ///
     /// // Raw OS errors carry only the errno; the engine classifies them.
     /// let p = PosixPlatform::new();
-    /// let dir = p.open_dir(Path::new("/var/lib/example"), true).map_err(|e| e.to_string())?;
+    /// let dir = p.open_dir(Path::new("/var/lib/example"), true)?;
     /// let name = FileName::new("store.sio")?;
-    /// let file = p.create_file(&dir, &name).map_err(|e| e.to_string())?;
-    /// p.allocate(&file, 1 << 20).map_err(|e| e.to_string())?;
-    /// let _lock = p.lock_exclusive(&file).map_err(|e| e.to_string())?;
+    /// let file = p.create_file(&dir, &name)?;
+    /// p.allocate(&file, 1 << 20)?;
+    /// let _lock = p.lock_exclusive(&file)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[derive(Debug)]

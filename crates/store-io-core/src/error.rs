@@ -53,6 +53,8 @@ impl fmt::Display for OsError {
     }
 }
 
+impl std::error::Error for OsError {}
+
 /// The operation that failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {

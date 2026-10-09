@@ -8,9 +8,12 @@ use store_io_core::error::{
 };
 use store_io_platform::{IoBuf, IoOp, Platform};
 
+use std::ops::ControlFlow;
+
 use crate::exec::{Lane, LaneGuard, Next, Pumped, Source, pump, run};
 use crate::frontier::{AppendFrontier, Reservation};
 use crate::receipt::{DurableReceipt, WriteTicket};
+use crate::scan::ScanItem;
 use crate::store::{LiveRegion, Store, flush_data};
 
 /// Spare buffers a [`Stream`] keeps in flight for one large write.
@@ -394,6 +397,9 @@ where
             return Err(not_written(NotWrittenCause::OutOfBounds, c));
         }
         let chunk = self.chunk() as u64;
+        if len > chunk {
+            return self.read_pipelined(r, offset, len, out, c);
+        }
         let mut lane = self.lane(r);
         let mut done = 0usize;
         while (done as u64) < len {
@@ -432,6 +438,43 @@ where
             }
         }
         Ok(done)
+    }
+
+    /// A read larger than one pooled buffer: the scan's pipeline (several
+    /// large reads in flight, delivered in order) copying into `out`. A range
+    /// the device cannot read is a media error, as for a single read.
+    fn read_pipelined(
+        &self,
+        r: &LiveRegion,
+        offset: u64,
+        len: u64,
+        out: &mut [u8],
+        c: ErrorContext,
+    ) -> Result<usize, Error> {
+        let mut copied = 0usize;
+        let mut unreadable = false;
+        let summary = self.scan_region(r, offset, offset + len, |item| match item {
+            ScanItem::Data { offset: at, bytes } => {
+                let start = (at - offset) as usize;
+                if start < out.len() {
+                    let n = bytes.len().min(out.len() - start);
+                    out[start..start + n].copy_from_slice(&bytes[..n]);
+                    copied = copied.max(start + n);
+                }
+                ControlFlow::Continue(())
+            }
+            ScanItem::Unreadable { .. } => {
+                unreadable = true;
+                ControlFlow::Break(())
+            }
+        })?;
+        if unreadable || summary.unreadable > 0 {
+            return Err(Error::Corruption {
+                kind: CorruptionKind::MediaError,
+                ctx: c,
+            });
+        }
+        Ok(copied)
     }
 }
 

@@ -113,6 +113,9 @@
   one barrier: 100 records of 64 bytes are one write and one flush.
   `PageBatch` checks writes as they are added, refuses overlaps, and submits
   them together before one barrier. Both report exact positions.
+- `store-io-engine`: reads larger than one pooled buffer keep eight reads
+  in flight (the scan pipeline) instead of one at a time; the harness had
+  measured them at 33% of raw bandwidth with 8 MiB requests.
 - `store-io-engine`: appends and page writes of any length; data larger
   than the largest pooled buffer is written in pieces kept in flight together,
   reusing at most eight buffers.

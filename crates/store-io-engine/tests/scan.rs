@@ -251,3 +251,33 @@ fn test_a_short_read_reports_the_missing_bytes_as_unreadable() {
     assert!(got[..half as usize] == data[..half as usize]);
     assert!(got[CHUNK..] == data[CHUNK..]);
 }
+
+#[test]
+fn test_a_large_read_across_a_bad_range_is_a_media_error() {
+    let p = SimPlatform::new(SimConfig::volatile(37));
+    let s = Store::create(p.clone(), Path::new(DIR), opts()).unwrap();
+    let wal = s.provision_append_region("wal", 4 * CHUNK as u64).unwrap();
+    let data = record(5, 3 * CHUNK);
+    wal.append_durable(&data).unwrap();
+    // A large read is pipelined and returns every byte.
+    let mut out = vec![0u8; data.len()];
+    assert_eq!(wal.read(0, &mut out).unwrap(), data.len());
+    assert!(out == data);
+    // One bad block in the middle turns it into a media error.
+    let base = media_offset(&p, &data[..64]);
+    p.with_world(|w| {
+        let file = w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap();
+        w.faults_mut().bad_ranges = vec![(
+            file,
+            base + 2 * CHUNK as u64,
+            base + 2 * CHUNK as u64 + 4096,
+        )];
+    });
+    assert!(matches!(
+        wal.read(0, &mut out),
+        Err(Error::Corruption {
+            kind: store_io_core::error::CorruptionKind::MediaError,
+            ..
+        })
+    ));
+}

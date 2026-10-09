@@ -1,0 +1,38 @@
+# =============================================================================
+#  R E P S   ·   store-io-posix
+# =============================================================================
+[package]
+name          = "store-io-posix"
+description   = "Linux synchronous backend for store-io: direct I/O, OFD locks, fallocate, FIEMAP, cachestat and the sysfs, procfs and NVMe evidence probe."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-posix"
+readme        = "README.md"
+keywords      = ["storage", "linux", "direct-io", "durability", "fsync"]
+categories    = ["filesystem", "os::linux-apis"]
+
+# Documented on the one platform where its types exist.
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets        = ["x86_64-unknown-linux-gnu"]
+
+[lints]
+workspace = true
+
+# Every dependency is Linux-only: on other targets the crate is an empty shell
+# so a workspace build never fails on a foreign platform.
+[target.'cfg(target_os = "linux")'.dependencies]
+store-io-core     = { path = "../store-io-core", version = "0.1.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.1.0" }
+
+# The Linux ABI: open flags, openat2 resolve flags, fallocate modes, OFD lock
+# commands, pwritev2/preadv2, fstatfs, uname and the ioctl entry point. The
+# structures libc does not expose (statx with its direct-I/O and atomic-write
+# fields, FIEMAP, cachestat, the NVMe admin command) are declared in sys.rs.
+libc = { version = "0.2.190", default-features = false }

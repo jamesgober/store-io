@@ -208,12 +208,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "store-io-posix"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "store-io-buf",
+ "store-io-core",
+ "store-io-platform",
+]
+
+[[package]]
 name = "store-io-sim"
 version = "0.1.0"
 dependencies = [
  "store-io-buf",
  "store-io-core",
  "store-io-platform",
+]
+
+[[package]]
+name = "store-io-win"
+version = "0.1.0"
+dependencies = [
+ "store-io-buf",
+ "store-io-core",
+ "store-io-platform",
+ "windows-sys",
 ]
 
 [[package]]

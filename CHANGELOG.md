@@ -96,6 +96,16 @@
   health log, all parsed as untrusted bytes. Dropping a queue with I/O in
   flight cancels it and waits for every completion before any buffer is
   released.
+- `store-io-posix` crate: the Linux synchronous backend (tier T3).
+  `O_DIRECT` handles opened relative to their directory with `openat2`
+  (no symlinks, no escaping the directory), or `openat` with `O_NOFOLLOW` on
+  older kernels; `pwritev2` / `preadv2`, with `RWF_DSYNC` for a durable write on a
+  file and write then `fdatasync` on a raw block device; open-file-description
+  locks; `fallocate` with size checks; unwritten and shared extents from
+  FIEMAP and resident pages from `cachestat`; the probe reads `statx`
+  (direct-I/O and atomic-write limits), the file system and its mount
+  options, the block stack from sysfs (device-mapper, MD, loop, virtual
+  disks, hypervisor detection) and, where permitted, NVMe identify data.
 - `store-io-core`: `NotWrittenCause::NotPositioned`.
 - `store-io-sim`: `World::flushes()` for arming flush faults.
 - `store-io-buf`: loom-aware spin hint in the free-list retry loops.

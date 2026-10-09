@@ -167,6 +167,9 @@ pub enum NotWrittenCause {
     QueueFull,
     /// The operation was interrupted before any I/O was issued.
     Interrupted,
+    /// The append region was reopened and its append position is not known
+    /// yet: call `resume_at` with the end of your valid data first.
+    NotPositioned,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -187,6 +190,7 @@ impl fmt::Display for NotWrittenCause {
             Self::ReadOnly => "store is open read-only",
             Self::QueueFull => "device queue is full",
             Self::Interrupted => "interrupted before any I/O was issued",
+            Self::NotPositioned => "append position unknown after reopen; call resume_at first",
         })
     }
 }

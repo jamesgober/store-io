@@ -32,6 +32,7 @@ libc = { version = "0.2.190", default-features = false }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_System_SystemInformation"] }
 
-# Model checker for the lock-free free list (test-only; run with --cfg loom).
-[target.'cfg(loom)'.dev-dependencies]
+# Model checker, compiled only with RUSTFLAGS="--cfg loom" (never in a
+# normal build) so dependent crates' loom runs model these atomics too.
+[target.'cfg(loom)'.dependencies]
 loom = "0.7"

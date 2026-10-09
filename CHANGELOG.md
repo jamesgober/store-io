@@ -59,6 +59,32 @@
   failure that drops the cache, lying flushes, short, lost and misdirected
   writes, latent sector errors, out of space, page-cache pollution); trace
   hash for same-seed replay checks.
+- `store-io-engine` crate: the engine over any platform.
+  - Flush domain with the join rule and leader-inline flushing: a lone
+    durable write costs one flush; concurrent barriers share flushes with no
+    timer or window; a flush is issued only after the barrier's ticket, so it
+    covers every write that completed before it; a failed flush poisons the
+    device forever and is never retried.
+  - Lock-free append frontier: atomic tail reservation, out-of-order
+    completion, contiguous completed and durable prefixes; ring-slot
+    accesses are acquire-release read-modify-writes so no completion is
+    stranded under any memory model (found by loom).
+  - `Store`: `create` (exclusive, probed, refused on unsafe or unverified
+    devices unless attested or overridden, parent directory synced), `open`
+    (ownership lock, drain a dead owner's writes, metadata from A/B slots,
+    every ready region verified against its header, owner generation bumped),
+    `open_readonly` (no write rights, modifies nothing), provisioning with
+    direct-I/O fill, full flush, verification and table flip, never-reused
+    region ids, the device report, explicit `poison`.
+  - `AppendRegion` (store-chosen positions, blocks never rewritten,
+    `NotPositioned` after a reopen until `resume_at`), `PageRegion` (checked
+    positions, foreign and stale positions rejected), `Slot` (old or new after
+    any crash), unforgeable `RegionPos`, `WriteTicket` and `DurableReceipt`.
+  - End-to-end simulator tests: receipts survive every crash subset, fsyncgate
+    stays poisoned, slots never mix, power-safe barriers never flush, read-only
+    opens change nothing.
+- `store-io-core`: `NotWrittenCause::NotPositioned`.
+- `store-io-sim`: `World::flushes()` for arming flush faults.
 - `store-io-buf`: loom-aware spin hint in the free-list retry loops.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;

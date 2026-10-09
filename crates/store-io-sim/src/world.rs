@@ -244,6 +244,13 @@ impl World {
         self.epoch
     }
 
+    /// Flushes (data and full) completed so far, successful or not. Arm
+    /// `fail_flush = Some(flushes() + 1)` to fail the next one.
+    #[must_use]
+    pub fn flushes(&self) -> u64 {
+        self.flushes_completed
+    }
+
     /// Writes in the volatile cache.
     #[must_use]
     pub fn cached_writes(&self) -> usize {

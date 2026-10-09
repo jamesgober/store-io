@@ -1,0 +1,34 @@
+# =============================================================================
+#  R E P S   ·   store-io-engine
+# =============================================================================
+[package]
+name          = "store-io-engine"
+description   = "The store-io engine: volumes, regions, barriers with flush sharing, receipts, provisioning and A/B slot objects over any store-io platform."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-engine"
+readme        = "README.md"
+keywords      = ["storage", "durability", "database", "wal", "direct-io"]
+categories    = ["filesystem", "database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+store-io-core     = { path = "../store-io-core", version = "0.1.0" }
+store-io-format   = { path = "../store-io-format", version = "0.1.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.1.0" }
+
+[dev-dependencies]
+store-io-sim = { path = "../store-io-sim", version = "0.1.0" }
+
+# Model checker, compiled only with RUSTFLAGS="--cfg loom" (never in a
+# normal build) so dependent crates' loom runs model these atomics too.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"

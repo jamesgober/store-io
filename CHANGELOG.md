@@ -18,6 +18,9 @@
   compile-time shift tables, plus a slicing-by-8 fallback; verified against
   the standard check value, the RFC 3720 vectors and a bit-at-a-time
   reference at every tail length and alignment.
+- `dev/ROADMAP.md`: architecture phase closed (file map, scenario review,
+  requirement traceability, independent critique resolved).
+- `dev/TODO.md`: Windows ownership-lock kill test.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent

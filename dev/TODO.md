@@ -21,6 +21,7 @@
 - [ ] Probe golden captures from real drives (bare metal + PLP drive).
 - [ ] macOS: flush costs per model, directory flush support (Mac).
 - [ ] Windows: does a flush stall writes in the driver or the drive? (ETW timeline; can run on the dev box later).
+- [ ] Windows: kill a process with writes in flight and prove the ownership lock is not released until they have landed (can run on the dev box; until it passes, store-io reports Windows fencing as unverified).
 
 ## Settings changes James runs and reverts
 

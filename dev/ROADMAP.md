@@ -49,14 +49,15 @@ Exit criteria:
 
 ---
 
-## Phase 1 &mdash; Architecture (IN PROGRESS)
+## Phase 1 &mdash; Architecture (DONE)
 
 `PLANNING`, `FILEMAP` (every file, every field), public API sketch in three layers (simple, batch, engine) with the `docs/GUIDE.md` outline, on-disk header formats with versioning, error model, crate layout, instrumentation stage list, harness design.
 
 Exit criteria:
-- [ ] Scenario review passes: every scenario has an owning file.
-- [ ] Requirement traceability table (requirement, file, test).
-- [ ] **No library code before this gate.**
+- [x] Scenario review passes: every scenario has an owning file.
+- [x] Requirement traceability table (requirement, file, test).
+- [x] Independent architecture critique (a second model) resolved: 4 critical and 11 major findings adopted before any engine code.
+- [x] **No library code before this gate.**
 
 ---
 

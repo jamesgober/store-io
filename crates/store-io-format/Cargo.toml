@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name          = "store-io-format"
-description   = "On-disk formats for store-io: CRC32C, A/B slot headers and metadata codecs. Pure, allocation-free, fuzzed."
+description   = "On-disk formats for store-io: CRC32C, A/B slot headers and metadata codecs. Pure and allocation-free."
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true

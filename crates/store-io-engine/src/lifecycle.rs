@@ -19,6 +19,7 @@
 use std::sync::{Arc, PoisonError};
 
 use store_io_core::error::{CorruptionKind, Error, ErrorContext, NotWrittenCause, Op};
+use store_io_core::evidence::PlatformKind;
 use store_io_core::id::Generation;
 use store_io_format::meta::{REGION_META_LEN, RegionKind, RegionMeta, RegionState};
 use store_io_platform::{Platform, ReleaseHow};
@@ -80,11 +81,7 @@ where
         rm.state = state;
         let mut payload = [0u8; REGION_META_LEN];
         let _len = rm.encode(&mut payload).map_err(|_| metadata(c))?;
-        let next =
-            plan_next(&header, &payload, inner.owner_generation).ok_or(Error::Corruption {
-                kind: CorruptionKind::Fork,
-                ctx: c,
-            })?;
+        let next = plan_next(&header, &payload, inner.owner_generation)?;
         let at = self.header_at(r);
         let mut lane = self.lane(r);
         durable_slot::<P>(
@@ -174,7 +171,6 @@ where
             return Err(metadata(c));
         };
         entry.state = RegionState::Released;
-        let offset = entry.offset;
         let released = *entry;
         let next_id = meta.next_region_id;
         if let Err(e) = self.flip_table(&mut meta, next_id, &entries) {
@@ -193,19 +189,32 @@ where
         drop(meta);
         // 2. The header, for tools that list regions from headers.
         let _generation = self.rewrite_header(r, RegionState::Released)?;
-        // 3. The space. Contents are undefined from here; provisioning
+        // 3. The data area (never the header, which must keep saying
+        //    "released"). Contents are undefined from here; provisioning
         //    refills the range before any reuse.
-        let extent = inner
-            .layout
-            .extent(r.data_size)
-            .ok_or_else(|| metadata(c))?;
-        inner
+        //
+        //    Linux punches a hole. Windows trims in place: deallocating would
+        //    make the whole container sparse for good, and a sparse file may
+        //    allocate on overwrite, which costs the store its power-safe
+        //    class. A trim the device or file system does not support only
+        //    means the space stays as it was, so it is not an error there.
+        let windows = inner.report.evidence.platform == PlatformKind::Windows;
+        let how = if windows {
+            ReleaseHow::TrimInPlace
+        } else {
+            ReleaseHow::Deallocate
+        };
+        match inner
             .platform
-            .release_range(&inner.file, offset, extent, ReleaseHow::Deallocate)
-            .map_err(|raw| Error::Io {
+            .release_range(&inner.file, r.data_offset, r.data_size, how)
+        {
+            Ok(()) => Ok(()),
+            Err(_) if windows => Ok(()),
+            Err(raw) => Err(Error::Io {
                 op: Op::Release,
                 raw,
                 ctx: c,
-            })
+            }),
+        }
     }
 }

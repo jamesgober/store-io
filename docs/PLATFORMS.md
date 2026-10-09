@@ -76,7 +76,7 @@ The data-flush primitive is chosen once, when a file is opened, from its file sy
 ### Space
 
 - **Allocation** sets `FileAllocationInfo` and then `FileEndOfFileInfo` to the new length. It never calls `SetFileValidData`, which needs a privilege and would expose stale clusters; the engine fills new space with sequential direct writes, which moves the valid data length forward with them.
-- **Release** marks the file sparse (`FSCTL_SET_SPARSE`) and zeroes the range (`FSCTL_SET_ZERO_DATA`), which gives the clusters back. A trim-in-place primitive (`FSCTL_FILE_LEVEL_TRIM`) exists in the backend; the engine does not use it.
+- **Release** trims the region's data area in place (`FSCTL_FILE_LEVEL_TRIM`): the clusters stay allocated to the container and the device may discard their contents. The engine never deallocates on Windows, because that needs the file marked sparse (`FSCTL_SET_SPARSE`) for good, and a sparse file may allocate on overwrite, which would cost the store its power-safe class. A trim the volume does not support is not an error: the space simply stays as it was, and later provisioning refills it before reuse. The backend still implements deallocation (`FSCTL_SET_ZERO_DATA` on a sparse file) for callers of the platform layer.
 - **Range state** for provisioning checks: whether the range lies below the valid data length, from `FSCTL_QUERY_FILE_REGIONS` (NTFS answers only the cached-data query, and reports `Unknown` if it refuses or truncates the answer). Page-cache residency is reported as zero, because every handle the backend opens bypasses the cache. Unwritten and shared extents are `Unknown`: there is no unprivileged NTFS query for them.
 
 ### The probe
@@ -113,7 +113,7 @@ The write-cache property query makes the class driver send one device cache flus
 - **No storage-stack walk.** The layers below the volume (BitLocker, Storage Spaces, other filter drivers) are not inspected, and `Stack` is always reported missing. A Storage Spaces disk reports a virtual bus and is therefore classed `Unverified` with the reason `Hypervisor`.
 - **Fencing after a killed process is unverified.** Whether the ownership lock can be released before a killed owner's in-flight writes have landed has not been tested; a kill test is planned ([later list](../dev/TODO.md)). The device report does not show this yet.
 - **No certified fast write path.** Write-through (FUA) writes are not used until a power-cut rig can certify or rule them out (1.0).
-- **A release makes the container sparse, permanently.** The sparse attribute is then seen by every later probe, which counts a sparse file as a layer that may allocate on overwrite: from then on the store cannot be classed power-safe.
+- **Released space is not returned to the file system.** It stays in the container and is reused by later regions of the same size (see [the format](./FORMAT.md)).
 - **Page cache, unwritten and shared extents are unknown** (`PageCache` always missing).
 - **Direct I/O and copy-on-write are known only on NTFS.** ReFS is `Unverified` (`FsUnqualified`); FAT and exFAT are `Unsafe`.
 - **Paths.** Files are opened by full path under the store directory. Reparse points are refused for the store directory itself and the file, not for the directories above it.

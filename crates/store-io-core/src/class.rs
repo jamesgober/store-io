@@ -74,7 +74,7 @@ flag_enum! {
         FlushSuppressed = 7,
         /// operating system reports that cache flushes are not supported
         FlushUnsupported = 8,
-        /// "turn off write-cache buffer flushing" is set and no power protection is attested
+        /// "turn off write-cache buffer flushing" is set: flushes never reach the device
         UserPowerProtection = 9,
         /// parity RAID without a write journal or partial parity log
         ParityWriteHole = 10,
@@ -88,7 +88,7 @@ flag_enum! {
         Hypervisor = 14,
         /// a filter driver or software encryption layer sits in the stack
         FilterDriver = 15,
-        /// device bus (USB, unknown) commonly drops or reorders flushes
+        /// device bus (USB) commonly drops or reorders flushes
         UntrustedBus = 16,
         /// SMART reports the volatile-memory backup has failed
         BackupFailed = 17,

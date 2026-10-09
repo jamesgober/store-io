@@ -184,17 +184,36 @@ pub(crate) fn write_slot<Q: Queue>(
 }
 
 /// The slot to write next and the generation/CRC chain for it.
+///
+/// # Errors
+///
+/// `Corruption(Fork)` when the pair has no safe next write (a fork, a
+/// refused or lost pair, or an exhausted generation); `Unsupported` when the
+/// current version carries a read-only-compatible feature this version of
+/// store-io does not know, so it must not be overwritten.
 pub(crate) fn plan_next<'a>(
     read: &PairRead,
     payload: &'a [u8],
     owner_generation: u64,
-) -> Option<NextSlot<'a>> {
-    let index = read.report.next_write()?;
+) -> Result<NextSlot<'a>, Error> {
+    let fork = || Error::Corruption {
+        kind: store_io_core::error::CorruptionKind::Fork,
+        ctx: ErrorContext::default(),
+    };
+    let index = read.report.next_write().ok_or_else(fork)?;
     let (generation, prev) = match read.report.winner_info() {
-        Some((_, info)) => (info.generation.checked_add(1)?, info.header_crc32c),
+        Some((_, info)) if !info.writable() => {
+            return Err(Error::Unsupported {
+                what: store_io_core::error::Capability::FormatVersion,
+            });
+        }
+        Some((_, info)) => (
+            info.generation.checked_add(1).ok_or_else(fork)?,
+            info.header_crc32c,
+        ),
         None => (1, 0),
     };
-    Some(NextSlot {
+    Ok(NextSlot {
         index,
         generation,
         owner_generation,

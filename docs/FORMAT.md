@@ -379,7 +379,7 @@ All arithmetic wraps modulo 2^64. With an all-zero key, words 0 and 1 are `0xE22
 
 The fill pattern describes what provisioning *writes*; the format makes no promise about what a data area holds afterwards. Recycling keeps the old bytes, releasing makes them undefined, and the caller's own records decide where valid data ends. The two header blocks are always filled with zeros, whatever the pattern.
 
-> **Known deviation.** The current engine writes the fill in chunks of the buffer pool's largest buffer (1 MiB by default) starting at the extent's first byte, and fills any chunk that starts inside the header blocks with zeros. With keyed fill enabled, the first chunk of the extent, which includes the start of the data area, is therefore written as zeros rather than as the pattern (`crates/store-io-engine/src/store.rs`, `fill`). Readers must not assume the pattern is present.
+The two header blocks of an extent are always written as zeros; the data area carries the pattern from its first byte, whatever chunk size the writer uses.
 
 Source: [`crates/store-io-format/src/fill.rs`](../crates/store-io-format/src/fill.rs), [`crates/store-io-engine/src/store.rs`](../crates/store-io-engine/src/store.rs) (`provision`, `fill`)
 
@@ -442,7 +442,7 @@ Source: [`crates/store-io-engine/src/layout.rs`](../crates/store-io-engine/src/l
 | `features` | Volume record, offset 32 | Must be `0`. A non-zero value fails decoding, and the open reports `Corruption(Metadata)`, not a version refusal. |
 | `kind`, `state`, `fill` | Table entries, region headers | Undefined values fail decoding. A new fill pattern gets a new `fill` value; version 1 never changes. |
 
-store-io writes `incompat_flags`, `ro_compat_flags` and `compat_flags` as zero and does not yet check `ro_compat_flags` before writing a pair: the rule in the table above is part of the format, but today's writer would overwrite such a pair. No released format sets the bit, so this matters only once one does.
+store-io writes `incompat_flags`, `ro_compat_flags` and `compat_flags` as zero. Before writing a pair it checks the current winner's `ro_compat_flags`: a bit it does not know makes the write fail with `Unsupported(FormatVersion)`, so a pair written by a newer store-io is never overwritten by an older one.
 
 Source: [`crates/store-io-format/src/slot.rs`](../crates/store-io-format/src/slot.rs) (`KNOWN_INCOMPAT`, `KNOWN_RO_COMPAT`, `SlotInfo::writable`), [`crates/store-io-format/src/meta.rs`](../crates/store-io-format/src/meta.rs), [`crates/store-io-engine/src/slots.rs`](../crates/store-io-engine/src/slots.rs) (`plan_next`)
 
@@ -470,7 +470,7 @@ A crash before step 2 completes leaves the current version untouched in its slot
 5. Full flush; re-read both pairs.
 6. Flush the directory.
 
-A failure in steps 2&ndash;5 removes the file again. A *crash* before step 6 completes may leave no file, or a file whose volume slots are blank or incomplete. Such a file does not open (`Corruption(HeaderCrc)`), and `create` on the same directory then fails with `AlreadyExists`, so the leftover file must be deleted by hand. Creation is not atomic with respect to a crash.
+A failure in steps 2&ndash;5 removes the file again. A *crash* before step 6 completes may leave no file, or a file whose volume slots are blank or incomplete. Such a file does not open, but the next `create` takes it over: when `store.sio` already exists, `create` reuses it only if no one holds its lock, it is no longer than the largest metadata area (`4 × 64 KiB`, so it cannot hold region data), and no volume record can be found in it; it is then truncated and created afresh. Any other existing file is a store, and `create` fails with `AlreadyExists` without touching it.
 
 ### Writable open
 
@@ -511,7 +511,7 @@ No other byte is written: the data area keeps the old generation's bytes. A cras
 1. Stop admitting operations on the region and wait for every one in flight.
 2. Write the region table's next generation with the entry's state set to Released, durably.
 3. Write the region header's next generation with state Released, durably.
-4. Deallocate the whole extent, header blocks included (punch a hole on Linux; mark the file sparse and zero the range on Windows).
+4. Release the data area only: the header blocks keep the Released record. Linux punches a hole; Windows trims in place (`FSCTL_FILE_LEVEL_TRIM`), keeping the file's allocation and never making it sparse.
 
 The table goes first because it is the only authority on open:
 
@@ -537,7 +537,6 @@ A reader that wants to be stricter than store-io can add these checks; store-io 
 - That a region header's `data_offset`, `data_size` and `fill` agree with its table entry; only `region_id`, `kind` and the Ready state are compared.
 - `owner_generation` in slot headers: it is recorded, never used to accept or refuse a slot.
 - The generation-gap and chain-break anomalies of a pair (computed, not acted on).
-- `ro_compat_flags` before writing (see section 12).
 
 ---
 

@@ -21,7 +21,7 @@
 - [ ] Probe golden captures from real drives (bare metal + PLP drive).
 - [ ] macOS: flush costs per model, directory flush support (Mac).
 - [ ] Windows: does a flush stall writes in the driver or the drive? (ETW timeline; can run on the dev box later).
-- [ ] Windows: kill a process with writes in flight and prove the ownership lock is not released until they have landed (can run on the dev box; until it passes, store-io reports Windows fencing as unverified).
+- [ ] Windows: kill a process with writes in flight and prove the ownership lock is not released until they have landed (can run on the dev box). Until it passes, fencing on Windows rests on the lock alone and is not certified.
 
 ## Settings changes James runs and reverts
 
@@ -36,5 +36,16 @@
 ## Design gaps carried into the architecture phase
 
 - [ ] Streaming copy for backup and replication (sink protocol, bounded memory).
-- [ ] Finding the exact bad sector when a read fails (split the read down to one block).
+- [x] Finding the exact bad sector when a read fails: scans bisect a failing read down to one store block (LBA-exact where the block is larger than the logical block is still open).
 - [ ] Keeping commit writes fast while background writes run (store-io's own pacing).
+
+## Found while documenting (2026-10-09), not yet fixed
+
+- [ ] Windows probe: a Storage Spaces disk reports a virtual bus and is classed `Unverified` with the reason `Hypervisor`; it should be a storage-stack layer with its own reason.
+- [ ] Linux probe: NVMe over fabrics transports are reported as a local NVMe bus.
+- [ ] Windows probe: Identify Namespace always asks for namespace 1.
+- [ ] Defined but never produced: `Reason::KnownBug`, `Error::Fenced`, the `Filter` and `VirtualDisk` stack layers, and `DurableReceipt::untorn()` (always false until untorn writes are certified).
+- [ ] Open is lenient where it could be strict: a non-zero volume `features` value reports `Corruption` instead of `Unsupported`; the volume record's reserved bytes are not checked; a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently.
+- [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
+- [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
+- [ ] A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).

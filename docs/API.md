@@ -35,7 +35,7 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | `Store::create(path, StoreOptions) -> Result<Store>` | Creates a store in `path` (a directory of its own; created if needed). Probes the device and refuses unsafe or unverified devices unless the options' `trust` says otherwise. |
 | `Store::open(path) -> Result<Store>` | Opens an existing store for writing with default options. Takes the ownership lock, flushes whatever a dead owner left in the device cache, and verifies every region against its header. |
 | `Store::open_with(path, StoreOptions) -> Result<Store>` | As `open`, with explicit options. |
-| `Store::open_readonly(path) -> Result<Store>` | Opens for reading and recovery: no write rights; nothing on disk changes. |
+| `Store::open_readonly(path) -> Result<Store>` | Opens for reading and recovery: all I/O through a handle without write rights; nothing on disk changes. Takes the ownership lock, so no writer runs meanwhile. |
 | `store.append_region(name)` / `page_region(name)` / `slot(name)` | Looks up an existing region or slot. Never creates one. |
 | `store.provision_append_region(name, bytes)` | Creates an append region with at least `bytes` of data area, writing and verifying every block first. |
 | `store.provision_page_region(name, bytes)` | Creates a page region likewise. |

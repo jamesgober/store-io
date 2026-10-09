@@ -222,7 +222,7 @@ The domain is poisoned by:
 | A data or metadata write that fails, or transfers fewer bytes than asked, after it was submitted | `DurabilityUnknown` |
 | An append's reserved range abandoned unwritten (an error, or a panic while the reservation is held) | `DurabilityUnknown`, or the original error |
 | A full flush that fails while provisioning | `DurabilityUnknown` |
-| Any failure of a metadata write while provisioning or updating the region table (including some refused before reaching the device) | the original error |
+| A metadata write (region header, region table, slot) that fails after it was submitted, or whose flush fails | `DurabilityUnknown` |
 | `Store::poison()`, for a caller's watchdog that decided the device is hung | &mdash; |
 
 After that:

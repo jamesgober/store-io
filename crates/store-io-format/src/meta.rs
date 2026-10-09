@@ -408,7 +408,7 @@ fn decode_entry(chunk: &[u8]) -> Result<TableEntry, MetaError> {
 /// Checks: every entry decodes; ids are unique and below `next_region_id`;
 /// names are unique among non-released entries; offsets and sizes are
 /// block-aligned; slot regions have no data area; no two extents overlap.
-/// The overlap check is quadratic and allocation-free (at most 1,022 entries).
+/// The overlap check is quadratic and allocation-free (at most 1,021 entries, in a 64 KiB table slot).
 ///
 /// # Errors
 ///

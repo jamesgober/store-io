@@ -185,6 +185,7 @@
   device is probed with the first file and refused per the caller's `Trust`.
 - `store-io-platform`: `Platform::set_len` (exact file size; `ftruncate` on
   Linux, end-of-file information on Windows).
+- `store-io-core`: `errno::is_already_exists`, judged per numbering.
 - `store-io-core`: `errno::is_not_found`, judged per numbering (errno,
   Win32, NTSTATUS); the engine no longer treats errno 3 as "not found".
 - `store-io-sim`: `FaultPlan::fail_dir_sync` and `World::dir_syncs()`.
@@ -254,6 +255,37 @@
 
 ### Fixed
 
+- `store-io-engine`: with keyed fill, the first chunk of every region (about
+  1 MiB) was written as zeros instead of the pattern; the pattern now starts
+  at the first byte of the data area.
+- `store-io-engine`: provisioning counted only ready entries against the
+  region table's capacity and sized the table encoding for the whole slot,
+  so a table near full failed in the middle of provisioning and poisoned the
+  store. Released entries now count, and a full table is refused with
+  `NoSpace(Table)` before any I/O.
+- `store-io-engine`: a metadata write that failed before reaching the
+  device poisoned the store; only failures after submission poison now.
+- `store-io-engine`: a region skipped at open (its header failed to verify)
+  left its name free, and reusing the name made the table undecodable; names
+  are now checked against every ready table entry.
+- `store-io-engine`: a slot pair carrying a read-only-compatible feature
+  this version does not know is refused (`Unsupported(FormatVersion)`)
+  instead of overwritten.
+- `store-io-engine`: release deallocated the region's header together with
+  its data, undoing the Released record; only the data area is released now.
+  On Windows release trims in place instead of making the container sparse,
+  which had cost the store its power-safe class for good.
+- `store-io-engine`: a crash during `create` left a container that would not
+  open and blocked every later `create`; `create` now takes over a container
+  that never finished (unlocked, no larger than the metadata area, no volume
+  record) and refuses anything else.
+- `store-io-engine`: a flush refused without an OS error was reported with
+  an invented error code; it now carries none.
+- `store-io-sim`: a read wholly past the end of a file panicked instead of
+  transferring nothing.
+- Doc comments that promised more than the code does (`UntrustedBus`,
+  `UserPowerProtection`, the table's entry limit, fuzzing of the format
+  crate).
 - `store-io-engine`: concurrent durable writers no longer queue behind one
   another's flushes. A barrier's followers held an I/O queue for the whole
   flush wait, and a caller finding every queue busy blocked on one fixed

@@ -157,7 +157,7 @@ let current = meta.read("CURRENT")?;
 
 store-io never decides what you keep after a crash; it gives you the bytes and gets out of the way.
 
-**Inspect without changing anything.** A read-only open takes no write rights and modifies nothing on disk:
+**Inspect without changing anything.** A read-only open modifies nothing on disk and does all its I/O through a handle with no write rights. It does take the store's ownership lock, so no writer can be mid-write while you read (and a writer cannot open the store until you drop it):
 
 ```rust
 let store = Store::open_readonly("data/orders")?;

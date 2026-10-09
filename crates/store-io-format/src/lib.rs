@@ -5,8 +5,9 @@
 //! the payloads those slots carry.
 //!
 //! Everything here is pure: no I/O, no allocation, no global state. Every
-//! decoder treats its input as hostile, checks every bound before reading,
-//! and is fuzzed. The byte-level specification is `docs/FORMAT.md` in the
+//! decoder treats its input as hostile and checks every bound before
+//! reading; tests flip every bit and tear every byte boundary of a slot, and
+//! fuzz targets are planned. The byte-level specification is `docs/FORMAT.md` in the
 //! repository.
 
 #![deny(warnings)]

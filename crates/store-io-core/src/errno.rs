@@ -71,6 +71,19 @@ pub fn is_no_space(raw: OsError) -> bool {
     }
 }
 
+/// Whether the code means the file to create already exists.
+#[must_use]
+pub fn is_already_exists(raw: OsError) -> bool {
+    match raw.source {
+        // EEXIST.
+        OsErrorSource::Errno | OsErrorSource::Sim => raw.code == 17,
+        // ERROR_FILE_EXISTS = 80, ERROR_ALREADY_EXISTS = 183.
+        OsErrorSource::Win32 => matches!(raw.code, 80 | 183),
+        // STATUS_OBJECT_NAME_COLLISION.
+        OsErrorSource::NtStatus => raw.code as u32 == 0xC000_0035,
+    }
+}
+
 /// Whether the code means the named file or directory does not exist.
 #[must_use]
 pub fn is_not_found(raw: OsError) -> bool {
@@ -186,6 +199,18 @@ mod tests {
         assert_eq!(classify(Stage::Setup, errno(13)), ErrorKind::Io);
         assert!(is_interrupted(errno(4)));
         assert!(!is_interrupted(win(4)));
+    }
+
+    #[test]
+    fn test_already_exists_is_judged_per_numbering() {
+        assert!(is_already_exists(errno(17)));
+        assert!(!is_already_exists(errno(80)), "errno 80 is not EEXIST");
+        let win = |code| OsError {
+            code,
+            source: OsErrorSource::Win32,
+        };
+        assert!(is_already_exists(win(80)) && is_already_exists(win(183)));
+        assert!(!is_already_exists(win(17)));
     }
 
     #[test]

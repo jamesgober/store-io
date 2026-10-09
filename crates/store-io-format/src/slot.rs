@@ -277,7 +277,8 @@ impl SlotInfo {
     }
 }
 
-/// Result of validating one slot, in the order the checks are applied.
+/// Result of validating one slot (`docs/FORMAT.md` lists the order of the
+/// checks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotStatus {
     /// The device reported an error reading the slot (set by the caller).

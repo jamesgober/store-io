@@ -294,14 +294,16 @@ where
             .open_dir(path, true)
             .map_err(|e| io(Op::Create, e))?;
         let name = container_name()?;
-        let file = platform.create_file(&dir, &name).map_err(|e| {
-            if e.code == 17 || e.code == 80 {
-                Error::AlreadyExists { what: Named::Store }
-            } else {
-                io(Op::Create, e)
+        let (file, lock) = match platform.create_file(&dir, &name) {
+            Ok(file) => {
+                let lock = platform.lock_exclusive(&file).map_err(|_| Error::Locked)?;
+                (file, lock)
             }
-        })?;
-        let lock = platform.lock_exclusive(&file).map_err(|_| Error::Locked)?;
+            Err(e) if store_io_core::errno::is_already_exists(e) => {
+                Self::reclaim_abandoned(&platform, &dir, &name, &opts)?
+            }
+            Err(e) => return Err(io(Op::Create, e)),
+        };
         let built = Self::build_new(&platform, &dir, &file, &opts);
         match built {
             Ok((meta, report, layout, policy, pool, queues)) => {
@@ -340,6 +342,47 @@ where
                 Err(e)
             }
         }
+    }
+
+    /// A container left by a create that never finished (a crash before its
+    /// metadata was durable) is taken over by the next create; anything else
+    /// is a store and stays untouched (`AlreadyExists`). Abandoned means: no
+    /// one holds its lock, it is no longer than the largest metadata area, so
+    /// it cannot hold region data, and no volume record can be found in it.
+    fn reclaim_abandoned(
+        platform: &P,
+        dir: &P::Dir,
+        name: &FileName,
+        opts: &StoreOptions,
+    ) -> Result<(P::File, P::Lock), Error> {
+        let exists = || Error::AlreadyExists { what: Named::Store };
+        let file = platform
+            .open_file(dir, name, FileMode::ReadWrite)
+            .map_err(|_| exists())?;
+        let lock = platform.lock_exclusive(&file).map_err(|_| exists())?;
+        let largest_metadata = 4u64 << crate::layout::MAX_LOG2_BLOCK;
+        if platform.size(&file).map_err(|e| io(Op::Open, e))? > largest_metadata {
+            return Err(exists());
+        }
+        let evidence = platform.probe(dir, &file).map_err(|e| io(Op::Probe, e))?;
+        let boot_pool = make_pool(
+            &evidence,
+            &Layout {
+                log2_block: crate::layout::MAX_LOG2_BLOCK,
+                log2_table: crate::layout::MAX_LOG2_BLOCK,
+            },
+            opts,
+        )?;
+        let queues = make_queues(platform, opts)?;
+        let found = {
+            let mut q = queues.get(0);
+            find_volume(&mut q, &file, &boot_pool)
+        };
+        if found.is_ok() {
+            return Err(exists());
+        }
+        platform.set_len(&file, 0).map_err(|e| io(Op::Create, e))?;
+        Ok((file, lock))
     }
 
     #[allow(clippy::type_complexity)]
@@ -401,9 +444,9 @@ where
             payload: None,
         };
         let mut q = queues.get(0);
-        let next_v = plan_next(&empty, &vbuf, 1).ok_or_else(meta_err)?;
+        let next_v = plan_next(&empty, &vbuf, 1)?;
         let _crc = write_slot(&mut q, file, &pool, &vat, &next_v, false)?;
-        let next_t = plan_next(&empty, &tbuf[..tlen], 1).ok_or_else(meta_err)?;
+        let next_t = plan_next(&empty, &tbuf[..tlen], 1)?;
         let _crc = write_slot(&mut q, file, &pool, &tat, &next_t, false)?;
         drop(q);
         platform
@@ -603,7 +646,7 @@ where
             let _len = vm.encode(&mut vbuf).map_err(|_| meta_err())?;
             let vat = pair_volume(volume, &layout);
             let mut q = queues.get(0);
-            let next = plan_next(&meta.volume_pair, &vbuf, og).ok_or_else(corrupt)?;
+            let next = plan_next(&meta.volume_pair, &vbuf, og)?;
             let domain = Domain::new();
             durable_slot::<P>(&mut q, &file, &pool, &vat, &next, &policy, &domain)?;
             meta.volume_pair = read_pair(&mut q, &file, &pool, &vat)?;
@@ -789,20 +832,16 @@ where
             });
         }
         let mut meta = lock_meta(&inner.meta);
-        if self.regions_snapshot().iter().any(|r| r.name == rname) {
-            return Err(Error::AlreadyExists {
-                what: Named::Region,
-            });
-        }
-        let ready_entries = meta
+        // Names are unique among the table's ready entries, including any
+        // region this open could not load (its header failed to verify):
+        // reusing such a name would make the table undecodable.
+        if meta
             .entries
             .iter()
-            .filter(|e| e.state == RegionState::Ready)
-            .count();
-        if ready_entries >= inner.layout.table_capacity() {
-            return Err(Error::NoSpace {
-                tag: ReserveTag::Table,
-                ctx: ErrorContext::default(),
+            .any(|e| e.state == RegionState::Ready && e.name == rname)
+        {
+            return Err(Error::AlreadyExists {
+                what: Named::Region,
             });
         }
         let extent = inner.layout.extent(data_size).ok_or(Error::NotWritten {
@@ -832,6 +871,15 @@ where
             cause: NotWrittenCause::TooLarge,
             ctx: ErrorContext::default(),
         })?;
+        // The new table must fit its slot. Released entries stay in the table
+        // until their space is reused, so they count; a reused entry is
+        // replaced in place. Checked before any I/O.
+        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {
+            return Err(Error::NoSpace {
+                tag: ReserveTag::Table,
+                ctx: ErrorContext::default(),
+            });
+        }
         let target = self
             .tail(&meta)
             .max(end)
@@ -893,8 +941,10 @@ where
             ),
             payload: None,
         };
-        let next = plan_next(&blank, &rbuf, inner.owner_generation).ok_or_else(meta_err)?;
+        let next = plan_next(&blank, &rbuf, inner.owner_generation)?;
         {
+            // `durable_slot` poisons exactly when durability became unknown;
+            // an error before submission leaves the store usable.
             let mut q = inner.queues.get(id as usize);
             durable_slot::<P>(
                 &mut q,
@@ -905,7 +955,7 @@ where
                 &inner.policy,
                 &inner.domain,
             )
-            .inspect_err(|_| self.poison())?;
+            .inspect_err(|_| self.wake_frontiers())?;
         }
         // 5. Table flip adding the entry (replacing a reused released entry).
         let mut entries = meta.entries.clone();
@@ -973,13 +1023,17 @@ where
                     cause: NotWrittenCause::PoolExhausted,
                     ctx: ErrorContext::default(),
                 })?;
+            // The two header blocks are always zero so no old header
+            // survives; the data area gets the pattern from its first byte,
+            // even inside a chunk that also covers the headers.
+            let dst = buf.as_mut_slice();
+            let zeros = (2 * block).saturating_sub(at).min(len) as usize;
+            dst[..zeros].fill(0);
             match fill {
-                // The two header blocks are always zero so no old header
-                // survives; the data area gets the pattern.
-                FillPattern::KeyedV1 if at >= 2 * block => {
-                    fill_keyed_v1(key, at - 2 * block, buf.as_mut_slice())
+                FillPattern::KeyedV1 => {
+                    fill_keyed_v1(key, at + zeros as u64 - 2 * block, &mut dst[zeros..]);
                 }
-                _ => buf.as_mut_slice().fill(0),
+                FillPattern::Zeros => dst[zeros..].fill(0),
             }
             let done = run(
                 &mut q,
@@ -1057,15 +1111,16 @@ where
         entries: &[TableEntry],
     ) -> Result<(), Error> {
         let inner = &self.inner;
-        let mut tbuf = vec![0u8; inner.layout.table() as usize];
+        // The payload room of the table slot: the slot less its header.
+        let mut tbuf = vec![0u8; inner.layout.table() as usize - store_io_format::slot::HEADER_LEN];
         let len = encode_table(&mut tbuf, next_id, entries).map_err(|_| Error::NoSpace {
             tag: ReserveTag::Table,
             ctx: ErrorContext::default(),
         })?;
         let tat = pair_table(inner.volume, &inner.layout);
-        let next = plan_next(&meta.table_pair, &tbuf[..len], inner.owner_generation)
-            .ok_or_else(corrupt)?;
+        let next = plan_next(&meta.table_pair, &tbuf[..len], inner.owner_generation)?;
         let mut q = inner.queues.get(1);
+        // `durable_slot` poisons exactly when durability became unknown.
         durable_slot::<P>(
             &mut q,
             &inner.file,
@@ -1075,7 +1130,7 @@ where
             &inner.policy,
             &inner.domain,
         )
-        .inspect_err(|_| self.poison())?;
+        .inspect_err(|_| self.wake_frontiers())?;
         meta.table_pair = read_pair(&mut q, &inner.file, &inner.pool, &tat)?;
         Ok(())
     }
@@ -1110,14 +1165,12 @@ pub(crate) fn durable_slot<P: Platform>(
     Ok(())
 }
 
-/// One device flush through a queue.
-pub(crate) fn flush_data<Q: Queue>(q: &mut Lane<Q>, file: &Q::File) -> Result<(), OsError> {
+/// One device flush through a queue. A flush refused without an OS error
+/// (a full queue) carries no code: none is invented.
+pub(crate) fn flush_data<Q: Queue>(q: &mut Lane<Q>, file: &Q::File) -> Result<(), Option<OsError>> {
     match run(q, IoOp::FlushData { file }) {
-        Ok(done) => done.result.map(|_| ()),
-        Err((_b, raw)) => Err(raw.unwrap_or(OsError {
-            code: 11,
-            source: store_io_core::error::OsErrorSource::Sim,
-        })),
+        Ok(done) => done.result.map(|_| ()).map_err(Some),
+        Err((_b, raw)) => Err(raw),
     }
 }
 

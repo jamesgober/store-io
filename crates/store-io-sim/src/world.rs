@@ -560,8 +560,11 @@ impl World {
             let lb = self.cfg.logical_block.max(1) as usize;
             n = n / 2 / lb * lb;
         }
-        let s = offset as usize;
-        out[..n].copy_from_slice(&f.visible[s..s + n]);
+        // A read wholly past the end of the file transfers nothing.
+        if n > 0 {
+            let s = offset as usize;
+            out[..n].copy_from_slice(&f.visible[s..s + n]);
+        }
         self.trace.push(TraceEvent::Read {
             file,
             offset,

@@ -132,7 +132,7 @@ impl Domain {
     pub fn barrier(
         &self,
         need: u64,
-        mut flush: impl FnMut() -> Result<(), OsError>,
+        mut flush: impl FnMut() -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
         let mut led_flush = false;
         loop {
@@ -172,12 +172,12 @@ impl Domain {
                     Err(raw) => {
                         let _first_cause_kept = self.poison.set(FirstCause {
                             op: Some(Op::FlushData),
-                            raw: Some(raw),
+                            raw,
                         });
                         self.release_leadership();
                         return Err(Error::DurabilityUnknown {
                             op: Op::FlushData,
-                            raw: Some(raw),
+                            raw,
                             ctx: ErrorContext::default(),
                         });
                     }
@@ -248,7 +248,7 @@ mod tests {
         );
         assert_eq!(calls, 1);
         // The same need is now satisfied without another flush.
-        assert!(d.barrier(need, || Err(EIO)).is_ok());
+        assert!(d.barrier(need, || Err(Some(EIO))).is_ok());
         assert_eq!(
             d.stats(),
             DomainStats {
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_failed_flush_poisons_and_is_never_retried() {
         let d = Domain::new();
-        let r = d.barrier(d.ticket(), || Err(EIO));
+        let r = d.barrier(d.ticket(), || Err(Some(EIO)));
         assert!(matches!(
             r,
             Err(Error::DurabilityUnknown {
@@ -299,7 +299,7 @@ mod tests {
         let d = Domain::new();
         let need = d.ticket();
         assert!(d.barrier(need, || Ok(())).is_ok());
-        let _ = d.barrier(d.ticket(), || Err(EIO));
+        let _ = d.barrier(d.ticket(), || Err(Some(EIO)));
         assert!(
             d.barrier(need, || Ok(())).is_ok(),
             "already-durable data stays durable"

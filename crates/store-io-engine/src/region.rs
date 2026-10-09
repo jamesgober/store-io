@@ -785,11 +785,7 @@ where
         let mut payload = Vec::with_capacity(REGION_META_LEN + data.len());
         payload.extend_from_slice(&meta_bytes);
         payload.extend_from_slice(data);
-        let next =
-            plan_next(&header, &payload, s.inner.owner_generation).ok_or(Error::Corruption {
-                kind: CorruptionKind::Fork,
-                ctx: c,
-            })?;
+        let next = plan_next(&header, &payload, s.inner.owner_generation)?;
         let generation = next.generation;
         let at = self.at();
         let mut lane = s.lane(&self.state);

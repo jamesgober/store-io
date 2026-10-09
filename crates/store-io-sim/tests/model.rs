@@ -330,3 +330,21 @@ fn test_misaligned_direct_io_completes_with_einval_and_touches_nothing() {
     assert_eq!(p.with_world(|w| w.writes()), writes_before);
     assert_eq!(media(&p), before);
 }
+
+#[test]
+fn test_a_read_past_the_end_of_the_file_transfers_nothing() {
+    let (p, _dir, file, pool) = setup(SimConfig::volatile(41));
+    let mut q = p.queue(QueueConfig { depth: 2 }).unwrap();
+    let end = p.size(&file).unwrap();
+    q.submit(
+        IoOp::Read {
+            file: &file,
+            offset: end + 8192,
+            buf: pool.take(4096).unwrap(),
+        },
+        9,
+    )
+    .unwrap();
+    let done = drain(&mut q);
+    assert_eq!(done, vec![(9, Ok(0))]);
+}

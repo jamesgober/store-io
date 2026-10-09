@@ -37,11 +37,14 @@ Research tracks, one note each:
 
 Then a critic pass over every track, and a synthesis with seven matrices: durability primitive, submission engine, provisioning and space, small-object commit, device feature, crash-testing tool, crate.
 
+Progress: all thirteen tracks written; an independent critic pass (a second model) adjudicated every cross-track conflict against kernel and driver source; the synthesis maps every requirement and proposes 37 amendments to the requirements, each awaiting maintainer approval. First measurements on the development box (Windows, consumer NVMe; Linux behaviour under WSL2) are recorded.
+
 Exit criteria:
-- [ ] Every number labelled.
-- [ ] Every requirement mapped to a chosen mechanism per platform and device class, with the rejected alternatives and the labelled fallback for each cell.
-- [ ] Critic findings resolved.
-- [ ] Baseline measurement plan written, and run where hardware exists: a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
+- [x] Every number labelled.
+- [x] Every requirement mapped to a chosen mechanism per platform and device class, with the rejected alternatives and the labelled fallback for each cell (64 fully, 28 pending a measurement, 3 design gaps carried into phase 1).
+- [x] Critic findings resolved (dispositions recorded; two overridden by measurement).
+- [ ] Requirement amendments approved.
+- [ ] Baseline measurement plan written (done), and run where hardware exists (Windows dev box and WSL2 partial; bare-metal Linux, a power-loss-protected NVMe and macOS outstanding): a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
 
 ---
 

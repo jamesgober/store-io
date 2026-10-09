@@ -21,6 +21,11 @@
 
 ### Changed
 
+- `dev/ROADMAP.md`: research phase progress. Thirteen research tracks, a
+  critic pass and the synthesis are complete; requirement amendments await
+  approval; measurements on bare-metal Linux, a power-loss-protected NVMe and
+  macOS are outstanding.
+
 ### Fixed
 
 ### Security

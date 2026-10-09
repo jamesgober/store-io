@@ -158,6 +158,14 @@
   recovery (receipts, regions, batches, many writers, slots and directory
   files, scans and `resume_at`, the device report, every error and what to
   do, reservations, recycle and release, tuning).
+- `docs/FORMAT.md`: the on-disk format of a store, precise enough for an
+  independent reader (byte layouts, CRC coverage, validation order, winner
+  rules, fill pattern, crash consistency of every change).
+- `docs/PLATFORMS.md`: what store-io does on Windows and Linux, the
+  durability primitive behind each operation, and known limits.
+- `docs/DURABILITY.md`: classes, evidence, every reason and missing item,
+  trust and labels, the flush domain and join rule, `covers()`, fail-stop.
+- `README.md`: status, quick start and the documentation index.
 - `docs/API.md`: every public item, grouped by purpose (replaces the 0.1
   placeholder).
 - `store-io`: re-exports `RegionKind`, `DomainStats`, `CertId`, `Reason`,

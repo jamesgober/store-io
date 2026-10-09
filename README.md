@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: 0.1 &mdash; scaffold.</strong> This release reserves the crate name. There is no public API yet: the research sweep and the architecture are completed and approved before any library code is written. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: pre-release.</strong> The published <code>0.1</code> only reserves the crate name. The repository holds the first usable version, which ships as <code>0.3</code>: the simple and batch APIs on Windows and Linux, evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. Conformance runs on real file systems and the performance gates come before that release. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -61,14 +61,45 @@ store-io replaces [fsys](https://github.com/jamesgober/fsys-rs) as the only code
 <hr>
 <br>
 
+## Quick start
+
+```rust
+use store_io::{Store, StoreOptions};
+
+// First run: create (the device is probed; unsafe devices are refused).
+let store = Store::create("data/orders", StoreOptions::default())?;
+let wal = store.provision_append_region("wal", 256 << 20)?;
+
+// Durable when this returns: one write, one flush.
+let (pos, receipt) = wal.append_durable(b"order 1001: 3 widgets")?;
+println!("durable through {} at class {}", receipt.durable_through(), receipt.class());
+
+// Many records: packed into the device's own buffers, one write, one flush.
+let mut batch = wal.batch();
+batch.append(b"order 1002")?;
+batch.append(b"order 1003")?;
+let (start, receipt) = batch.commit()?;
+```
+
+## Documentation
+
+| Document | What it covers |
+|---|---|
+| [`docs/GUIDE.md`](./docs/GUIDE.md) | A walk through store-io: receipts, regions, batches, many writers, small objects, recovery, the device report, errors, space, recycling, tuning. |
+| [`docs/API.md`](./docs/API.md) | Every public item, grouped by purpose. |
+| [`docs/DURABILITY.md`](./docs/DURABILITY.md) | The durability model: classes, evidence, trust, receipts, flush sharing, fail-stop. |
+| [`docs/PLATFORMS.md`](./docs/PLATFORMS.md) | What store-io does on Windows and Linux, and the known limits of each. |
+| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk format of a store. |
+| [`CHANGELOG.md`](./CHANGELOG.md) | Every change. |
+
 ## Installation
 
 ```toml
 [dependencies]
-store-io = "0.1"
+store-io = "0.3"   # once published; the current 0.1 reserves the name only
 ```
 
-The `0.1` release contains no public API; depend on it only to follow the project.
+The `store-io` command-line tool (`store-io probe <dir>`, `store-io info <store>`) is behind the `cli` feature.
 
 <hr>
 <br>

@@ -370,7 +370,9 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error.
     fn set_len(&self, file: &Self::File, len: u64) -> RawResult<()>;
 
-    /// Allocates real blocks up to `len` bytes (file size becomes `len`).
+    /// Allocates real blocks up to `len` bytes, so the file size becomes
+    /// `len`. A file already at least `len` long is left as it is: this never
+    /// shrinks a file (that is [`Self::set_len`]).
     /// Never leaves unwritten extents' contents readable as other files' data.
     ///
     /// # Errors

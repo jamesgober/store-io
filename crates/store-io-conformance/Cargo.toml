@@ -1,0 +1,29 @@
+# =============================================================================
+#  R E P S   ·   store-io-conformance
+# =============================================================================
+[package]
+name          = "store-io-conformance"
+description   = "The conformance suite every store-io platform backend must pass: the platform contract and store behaviour, on any file system."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-conformance"
+readme        = "README.md"
+keywords      = ["storage", "conformance", "testing", "durability"]
+categories    = ["development-tools::testing", "filesystem"]
+
+[lints]
+workspace = true
+
+[dependencies]
+store-io-core     = { path = "../store-io-core", version = "0.1.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.1.0" }
+store-io-engine   = { path = "../store-io-engine", version = "0.1.0" }
+
+[dev-dependencies]
+store-io-sim = { path = "../store-io-sim", version = "0.1.0" }

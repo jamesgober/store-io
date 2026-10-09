@@ -72,6 +72,7 @@ pub use queue::PosixQueue;
 mod platform {
     use core::sync::atomic::{AtomicU64, Ordering};
     use std::path::Path;
+    use std::sync::Arc;
 
     use store_io_platform::{
         Evidence, FileMode, FileName, Platform, QueueConfig, RangeState, RawResult, ReleaseHow,
@@ -109,11 +110,13 @@ mod platform {
     /// let _lock = p.lock_exclusive(&file)?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[derive(Debug)]
+    ///
+    /// Clones are handles to the same platform: they share the retry counters.
+    #[derive(Debug, Clone)]
     pub struct PosixPlatform {
         openat2: bool,
-        eintr_retries: AtomicU64,
-        eagain_retries: AtomicU64,
+        eintr_retries: Arc<AtomicU64>,
+        eagain_retries: Arc<AtomicU64>,
     }
 
     impl Default for PosixPlatform {
@@ -128,8 +131,8 @@ mod platform {
         pub fn new() -> Self {
             Self {
                 openat2: sys::openat2_supported(),
-                eintr_retries: AtomicU64::new(0),
-                eagain_retries: AtomicU64::new(0),
+                eintr_retries: Arc::new(AtomicU64::new(0)),
+                eagain_retries: Arc::new(AtomicU64::new(0)),
             }
         }
 

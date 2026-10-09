@@ -22,10 +22,15 @@ const VALID_USAGE: u32 =
     FILE_REGION_USAGE_VALID_CACHED_DATA | FILE_REGION_USAGE_VALID_NONCACHED_DATA;
 
 /// Allocates `len` bytes of real clusters and sets the end of file to `len`.
+/// A file already at least `len` long is left as it is: this never shrinks
+/// (use [`set_len`] for that).
 pub(crate) fn allocate(file: &WinFile, len: u64) -> RawResult<()> {
     let Ok(signed) = i64::try_from(len) else {
         return Err(sys::win32(ERROR_INVALID_PARAMETER));
     };
+    if size(file)? >= len {
+        return Ok(());
+    }
     let rec = signed.to_le_bytes();
     sys::set_file_info(file.handle(), FileAllocationInfo, &rec)?;
     sys::set_file_info(file.handle(), FileEndOfFileInfo, &rec)

@@ -73,13 +73,45 @@ jobs:
       - name: Loom models
         run: cargo test -p store-io-buf -p store-io-engine --lib --release loom
 
+  # The conformance suite and the end-to-end tests on real Linux file
+  # systems with barriers on. The runner's own root is mounted `nobarrier`
+  # (store-io classes it unsafe), so each file system is a loop-mounted
+  # image. The image's backing file still lives on that root, so these runs
+  # check behaviour, not power-loss durability.
+  conformance-linux:
+    name: Conformance (${{ matrix.fs }} image)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [ext4, xfs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Mount a ${{ matrix.fs }} image
+        run: |
+          if [ "${{ matrix.fs }}" = xfs ]; then sudo apt-get install -y -qq xfsprogs; fi
+          truncate -s 4G "$RUNNER_TEMP/fs.img"
+          sudo mkfs.${{ matrix.fs }} -q "$RUNNER_TEMP/fs.img"
+          sudo mkdir -p /mnt/sio
+          sudo mount -o loop "$RUNNER_TEMP/fs.img" /mnt/sio
+          sudo chown "$(id -u):$(id -g)" /mnt/sio
+          findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/sio
+      - name: Conformance and end-to-end tests
+        run: cargo test --test conformance --test native -- --nocapture
+        env:
+          STORE_IO_TEST_DIR: /mnt/sio
+
   package:
     name: Package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # No cache: cargo extracts the overlay crates into the registry cache
+      # by name and version, and a cached extract of an unchanged version
+      # would hide new code.
       # Every crate, in dependency order: sibling crates resolve from a local
       # overlay until they are on crates.io.
       - name: Package (dry run)

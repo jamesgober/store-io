@@ -29,9 +29,10 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new(tag: &str) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
-        // Linux: $HOME (a real file system; /tmp may be tmpfs). Windows: %TEMP%.
-        let base = std::env::var_os("HOME")
-            .filter(|_| cfg!(target_os = "linux"))
+        // $STORE_IO_TEST_DIR when set (CI: loop-mounted ext4 and XFS);
+        // else $HOME on Linux (/tmp may be tmpfs) and %TEMP% on Windows.
+        let base = std::env::var_os("STORE_IO_TEST_DIR")
+            .or_else(|| std::env::var_os("HOME").filter(|_| cfg!(target_os = "linux")))
             .map_or_else(std::env::temp_dir, PathBuf::from);
         let d = base.join(format!(
             ".store-io-native-{}-{}-{tag}",

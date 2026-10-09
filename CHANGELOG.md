@@ -147,6 +147,19 @@
   directory's device. Every error and evidence type is re-exported.
   `NativePlatform` is the Windows backend on Windows and the Linux backend on
   Linux.
+- `store-io-conformance` crate: the suite every platform backend must pass,
+  on any file system. Fifteen scenarios: the platform contract (exclusive
+  create and not-found mapping, sizes, many operations in flight completing
+  once each with their buffers, durable writes and flushes, queue limits,
+  read-only handles, rename, unlink and directory sync, the ownership lock,
+  range state after a full write, release, the probe listing what it could
+  not read) and store behaviour on the platform (round trip through a
+  reopen, a read-only open that changes nothing, ownership, directory
+  replace). It passes on the simulator, NTFS and ext4.
+- CI: conformance and end-to-end tests on loop-mounted ext4 and XFS images
+  with barriers on (`STORE_IO_TEST_DIR`).
+- `store-io-posix`: `PosixPlatform` is `Clone` (clones share the retry
+  counters).
 - `store-io-engine`: compile-fail suite (rustdoc `compile_fail` tests, no
   third-party harness): an integer never type-checks as a position, a
   position or receipt cannot be built by hand, a ticket is not a position and
@@ -255,6 +268,9 @@
 
 ### Fixed
 
+- `store-io-win`: `allocate` to a smaller size truncated the file, unlike the
+  other backends; it now never shrinks, as the platform contract says (found
+  by the conformance suite).
 - `store-io-engine`: with keyed fill, the first chunk of every region (about
   1 MiB) was written as zeros instead of the pattern; the pattern now starts
   at the first byte of the data area.

@@ -1,0 +1,61 @@
+# =============================================================================
+#  store-io performance harness (standalone workspace, never published)
+# =============================================================================
+# Measures store-io on a real device against the raw platform primitives and
+# against fsys 1.1.3, and writes a labelled Markdown + JSON report to
+# results/. It is deliberately NOT a member of the root workspace: it has its
+# own lock file and target directory, and depends on the store-io crates by
+# path.
+[package]
+name         = "store-io-harness"
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.85"
+publish      = false
+description  = "Time-boxed durability and throughput workloads: store-io vs raw primitives vs fsys."
+license      = "Apache-2.0 OR MIT"
+
+[workspace]
+
+[[bin]]
+name = "store-io-harness"
+path = "src/main.rs"
+
+[dependencies]
+store-io-core   = { path = "../crates/store-io-core" }
+store-io-engine = { path = "../crates/store-io-engine" }
+# Only for the W5 diagnostic that runs the raw primitive on a buffer from
+# store-io's own pool (separates pool-memory cost from engine-path cost).
+store-io-buf    = { path = "../crates/store-io-buf" }
+# The comparison baseline, pinned to the version Phase 0 measured
+# (.dev/research/baseline-02-fsys-devbox.md).
+fsys = "=1.1.3"
+
+[target.'cfg(windows)'.dependencies]
+store-io-win = { path = "../crates/store-io-win" }
+# Raw primitives: the same calls the Windows backend makes (WriteFile on a
+# FILE_FLAG_NO_BUFFERING handle, NtFlushBuffersFileEx DATA_SYNC_ONLY), plus
+# the process I/O counters.
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+store-io-posix = { path = "../crates/store-io-posix" }
+# Raw primitives: pwritev2 / preadv2 on an O_DIRECT descriptor and fdatasync,
+# the same calls the Linux backend makes.
+libc = { version = "0.2.190", default-features = false }
+
+[profile.release]
+# Same code generation as the store-io release profile, so the library is
+# measured as it ships; symbols kept for profiling.
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+debug         = true

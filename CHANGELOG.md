@@ -173,6 +173,14 @@
   unused is flagged. Each case has a compiling twin.
 - CI: a loom job model-checks the buffer pool's free lists, the append
   frontier, the flush domain and the region gate.
+- `harness/`: the performance harness (a standalone, unpublished workspace)
+  and its first results on the development machine (Windows NTFS on a
+  consumer NVMe; WSL2 ext4). Against the raw write-and-flush primitive and
+  fsys 1.1.3: a lone durable 4 KiB append runs at 1.06x raw and 1.29x fsys
+  (43x fsys's default configuration); 64 concurrent durable writers at 23x
+  raw and 1.76x fsys; `AppendBatch` at 1.0-2.6x raw and 1.2-4x fsys;
+  sequential 1 MiB writes at 1.06x raw and 3.5x fsys. Results name the
+  device, class, file system, OS and store options.
 - `docs/GUIDE.md`: a walk through store-io from the first durable write to
   recovery (receipts, regions, batches, many writers, slots and directory
   files, scans and `resume_at`, the device report, every error and what to

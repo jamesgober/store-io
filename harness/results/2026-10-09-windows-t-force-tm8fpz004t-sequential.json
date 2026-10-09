@@ -1,0 +1,430 @@
+{
+  "schema": "store-io-harness/1",
+  "incomplete": null,
+  "run": {
+    "date": "2026-10-09T08:58:23Z",
+    "command": "sequential",
+    "commit": "6551652186be080c31a2e3ec97d6510d5f0525d9",
+    "os": "windows",
+    "os_version": "Microsoft Windows [Version 10.0.26200.9457]",
+    "kernel": "NT build 10.0.26200.9457",
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "cpus": 32,
+    "filesystem": "Ntfs (volume C:)",
+    "dir": "C:\\Users\\james\\AppData\\Local\\Temp\\store-io-harness-97944",
+    "device": "t-force-tm8fpz004t",
+    "backend": "store-io-win (WinPlatform: overlapped I/O on IOCP, NO_BUFFERING)",
+    "secs_per_point": 5,
+    "warmup_secs": 0.5,
+    "total_secs": 47.9623032,
+    "fsys": "fsys 1.1.3 (crates.io), Handle method Sync, durability primitive fsync",
+    "raw_primitives": [
+      "WriteFile on a FILE_FLAG_NO_BUFFERING handle + NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)",
+      "ReadFile on a FILE_FLAG_NO_BUFFERING handle (one call per request)"
+    ]
+  },
+  "store": {
+    "report": "volume           c8a45c99-0fc7-c385-1686-2669ec04b6d7\nclass            flush-required\nlabel            evidence\ndurable open     Allowed\nmissing          storage stack layers below the filesystem\nmissing          page-cache residency of a range (Linux `cachestat`)\nflush execution  inline (leader)\nblock size       4096\ntable capacity   253 regions\nfilesystem       Ntfs\nbus              Nvme\nmodel            T-FORCE TM8FPZ004T\nmode             read-write",
+    "class": "flush-required (receipt label evidence, durable open Allowed, block size 4096 B)",
+    "override_in_effect": false,
+    "override_refusal": null,
+    "options": "StoreOptions {\n    trust: Trust {\n        certificate: None,\n        attestation: None,\n        override_refusal: false,\n    },\n    block_size: None,\n    log2_table_slot: 14,\n    max_io: 1048576,\n    buffers_per_class: 64,\n    queues: 0,\n    queue_depth: 64,\n    append_ring: 4096,\n    keyed_fill: false,\n}",
+    "evidence": "Evidence {\n    platform: Windows,\n    device: DeviceFacts {\n        model: Some(\n            \"T-FORCE TM8FPZ004T\",\n        ),\n        firmware: Some(\n            \"EIFM70.3\",\n        ),\n        bus: Nvme,\n        cache_present: Yes,\n        cache_enabled: Yes,\n        os_cache_mode: WriteBack,\n        os_flush_supported: Yes,\n        user_power_protection: No,\n        backup_failed: No,\n        fua_supported: Yes,\n        logical_block: 512,\n        physical_block: 4096,\n        optimal_write: 0,\n        max_transfer: 524288,\n        atomic: AtomicFields {\n            awupf: Some(\n                0,\n            ),\n            nsabp: false,\n            nawupf: 0,\n            nabspf: 0,\n            nabo: 0,\n        },\n        numa_node: Some(\n            0,\n        ),\n        multi_controller: false,\n    },\n    fs: FsFacts {\n        kind: Ntfs,\n        data_journal: false,\n        no_barrier: false,\n        sync_disabled: false,\n        weak_error_mode: false,\n        transformed: false,\n        cow: No,\n        direct_io: Yes,\n        full_flush: Yes,\n        dir_flush: Yes,\n        os_atomic_unit: 4096,\n        dio_mem_align: 4096,\n        dio_offset_align: 512,\n    },\n    stack: [],\n    hypervisor: None,\n    privilege: Full,\n    kernel: Some(\n        (\n            10,\n            0,\n            26200,\n        ),\n    ),\n    timings: Timings {\n        flush_idle_ns: None,\n        flush_loaded_ns: None,\n        fua_extra_ns: None,\n        flush_blocks_writes_pct: None,\n    },\n    missing: {\n        Stack,\n        PageCache,\n    },\n}"
+  },
+  "diagnostics": [
+    "NtFlushBuffersFileEx(DATA_SYNC_ONLY) on a FILE_FLAG_OVERLAPPED | NO_BUFFERING handle (the kind store-io-win flushes through) after a dirty 4 KiB write never returned STATUS_PENDING: 0 of 400 idle and 0 of 400 while a second thread wrote the same file [measured]. The latent hazard in store-io-win's flush wrapper (STATUS_PENDING counted as success, IO_STATUS_BLOCK dropped) did not trigger on this machine; that is not proof it cannot"
+  ],
+  "workloads": [
+    {
+      "key": "sequential",
+      "title": "W5: sequential bandwidth (1 MiB writes, 1/8 MiB reads)",
+      "elapsed_secs": 47.4368418,
+      "method": [
+        "Write: one thread writes 1 MiB chunks back to back (not durable), then one durability barrier; MB/s = bytes / (time inside the write calls + the barrier); payload generation between writes is excluded (the wall clock is recorded as `wall_s` in the JSON). No warm-up (the region is written once); the point stops at 1 GiB or at the time box.",
+        "store-io: `AppendRegion::append(1 MiB)` into a fresh 1 GiB append region, then `sync_through(last ticket)`. raw: copy into an aligned buffer + WriteFile per chunk into a ready 1 GiB file, then one data flush. fsys: journal `append(1 MiB)` + one `sync_through` on a fresh journal (buffered and direct, window off; fsys extends its file as it appends, store-io and raw overwrite preallocated space).",
+        "Read: the bytes just written, front to back, repeated until the time box: store-io `AppendRegion::read(offset, &mut out)` with 1 MiB and 8 MiB `out`; raw ReadFile on a FILE_FLAG_NO_BUFFERING handle (one call per request) with the same request sizes. Latency is per request; MB/s = bytes / time inside the read calls (the content spot-check between requests is excluded).",
+        "fsys read: not measured. fsys 1.1.3 has no unbuffered positioned read (`Handle::read_at` opens the file buffered on every call, and `JournalReader` replays through a buffered reader), so it would measure the page cache, not the device.",
+        "MB = 10^6 bytes."
+      ],
+      "points": [
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append(1 MiB) x N + sync_through",
+          "params": {
+            "chunk_bytes": 1048576
+          },
+          "metrics": {
+            "provision_mb_per_s": 2400.9349887817625,
+            "request_bytes": 1048576,
+            "mb_per_s": 2562.411938269684,
+            "bytes": 1073741824,
+            "seconds": 0.4190356,
+            "barrier_ms": 0.6671999999999999,
+            "wall_s": 0.5599175,
+            "mb_per_s_before_barrier": 2566.498387545522,
+            "samples": 1024,
+            "p50_us": 369.3,
+            "p90_us": 540.5,
+            "p99_us": 849,
+            "p999_us": 5837.5,
+            "max_us": 5996.2,
+            "mean_us": 408.562890625,
+            "flushes_per_op": 0.0009765625,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 1048576,
+            "other_calls_per_op": 0.0009765625
+          },
+          "verify": "passed: all 1024 MiB read back through AppendRegion::read and compared byte for byte",
+          "error": null,
+          "notes": [
+            "provisioned a 1024 MiB append region in 0.45 s (2401 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::read, 1 MiB requests",
+          "params": {
+            "request_bytes": 1048576
+          },
+          "metrics": {
+            "requests_per_s": 2062.153530644654,
+            "samples": 9053,
+            "p50_us": 458.2,
+            "p90_us": 591.9,
+            "p99_us": 853,
+            "p999_us": 5392.9,
+            "max_us": 5608.8,
+            "mean_us": 484.9299458742958,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.0006127,
+            "ops_total_incl_warmup": 9978,
+            "mb_per_s": 2162.3247005492485,
+            "bytes": 9492758528,
+            "seconds": 4.3900708
+          },
+          "verify": "passed: first 1 MiB of each of 9978 requests compared against what was written",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::read, 8 MiB requests",
+          "params": {
+            "request_bytes": 8388608
+          },
+          "metrics": {
+            "requests_per_s": 221.84542071835494,
+            "samples": 1072,
+            "p50_us": 4324,
+            "p90_us": 5378,
+            "p99_us": 9304.8,
+            "p999_us": 10469,
+            "max_us": 12838.3,
+            "mean_us": 4507.643190298508,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.0032189,
+            "ops_total_incl_warmup": 1187,
+            "mb_per_s": 1860.974271001358,
+            "bytes": 8992587776,
+            "seconds": 4.8321935
+          },
+          "verify": "passed: first 1 MiB of each of 1187 requests compared against what was written",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "1 MiB writes + one data flush",
+          "params": {
+            "chunk_bytes": 1048576
+          },
+          "metrics": {
+            "request_bytes": 1048576,
+            "mb_per_s": 3135.9465417438187,
+            "bytes": 1073741824,
+            "seconds": 0.342398,
+            "barrier_ms": 0.2495,
+            "wall_s": 0.4273185,
+            "mb_per_s_before_barrier": 3138.233322665451,
+            "samples": 1024,
+            "p50_us": 261.2,
+            "p90_us": 482.3,
+            "p99_us": 750.2,
+            "p999_us": 3817.4,
+            "max_us": 6338.8,
+            "mean_us": 334.12939453125,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 1048576,
+            "other_calls_per_op": 0.0009765625
+          },
+          "verify": "passed: all 1024 MiB read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": [
+            "file made ready (zero-filled unbuffered 1 MiB writes + flushed) in 0.30 s (3552 MB/s); compare store-io's provisioning note"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "unbuffered read, 1 MiB requests",
+          "params": {
+            "request_bytes": 1048576
+          },
+          "metrics": {
+            "requests_per_s": 2523.0197933226923,
+            "samples": 9933,
+            "p50_us": 357.2,
+            "p90_us": 476.7,
+            "p99_us": 700.5,
+            "p999_us": 5433,
+            "max_us": 17358.2,
+            "mean_us": 396.35043793415883,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.0002769,
+            "ops_total_incl_warmup": 10910,
+            "mb_per_s": 2645.5780028031354,
+            "bytes": 10415505408,
+            "seconds": 3.9369489
+          },
+          "verify": "passed: first 1 MiB of each of 10910 requests compared against what was written",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "unbuffered read, 8 MiB requests",
+          "params": {
+            "request_bytes": 8388608
+          },
+          "metrics": {
+            "requests_per_s": 634.5688293535924,
+            "samples": 2942,
+            "p50_us": 1503,
+            "p90_us": 1790.4,
+            "p99_us": 2131.5,
+            "p999_us": 6864,
+            "max_us": 8407,
+            "mean_us": 1575.8731815091774,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.0012373,
+            "ops_total_incl_warmup": 3249,
+            "mb_per_s": 5323.14915846618,
+            "bytes": 24679284736,
+            "seconds": 4.6362189
+          },
+          "verify": "passed: first 1 MiB of each of 3249 requests compared against what was written",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "diagnostic: unbuffered read into a store-io-buf pool buffer, 1 MiB requests",
+          "params": {
+            "request_bytes": 1048576
+          },
+          "metrics": {
+            "requests_per_s": 2261.6205222251024,
+            "samples": 9047,
+            "p50_us": 414.9,
+            "p90_us": 494.8,
+            "p99_us": 745.8,
+            "p999_us": 5394.7,
+            "max_us": 5689,
+            "mean_us": 442.1608267934121,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.00068,
+            "ops_total_incl_warmup": 9903,
+            "mb_per_s": 2371.481000712709,
+            "bytes": 9486467072,
+            "seconds": 4.000229
+          },
+          "verify": "passed: first 1 MiB of each of 9903 requests compared against what was written",
+          "error": null,
+          "notes": [
+            "not a comparison row: separates pool-memory cost from engine-path cost"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "diagnostic: unbuffered read into a pool buffer + copy into a caller Vec, 1 MiB requests",
+          "params": {
+            "request_bytes": 1048576
+          },
+          "metrics": {
+            "requests_per_s": 1119.087647434818,
+            "samples": 5113,
+            "p50_us": 537.2,
+            "p90_us": 2021.9,
+            "p99_us": 5452.4,
+            "p999_us": 7466,
+            "max_us": 12151.2,
+            "mean_us": 893.5850576960689,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.0002538,
+            "ops_total_incl_warmup": 5925,
+            "mb_per_s": 1173.448448996612,
+            "bytes": 5361369088,
+            "seconds": 4.5689004
+          },
+          "verify": "passed: first 1 MiB of each of 5925 requests compared against what was written",
+          "error": null,
+          "notes": [
+            "not a comparison row: reproduces store-io's read path (device read into a pooled buffer, then a copy into the caller's buffer)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "diagnostic: unbuffered read at offsets + 48 KiB (store-io's data alignment), 1 MiB requests",
+          "params": {
+            "request_bytes": 1048576
+          },
+          "metrics": {
+            "requests_per_s": 1915.1533984812522,
+            "samples": 9565,
+            "p50_us": 508,
+            "p90_us": 606.7,
+            "p99_us": 816.8,
+            "p999_us": 5522.5,
+            "max_us": 5692.2,
+            "mean_us": 522.1513852587559,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": 0,
+            "window_s": 5.0000556,
+            "ops_total_incl_warmup": 10490,
+            "mb_per_s": 2008.1838899658776,
+            "bytes": 10029629440,
+            "seconds": 4.994378
+          },
+          "verify": "not checked: shifted requests straddle written chunks; the unshifted rows check content",
+          "error": null,
+          "notes": [
+            "not a comparison row: tests whether store-io's region data offset (48 KiB past a 1 MiB boundary) costs bandwidth on this stack"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: append(1 MiB) x N + sync_through",
+          "params": {
+            "chunk_bytes": 1048576
+          },
+          "metrics": {
+            "request_bytes": 1048576,
+            "mb_per_s": 761.8533750840439,
+            "bytes": 1073741824,
+            "seconds": 1.4093812,
+            "barrier_ms": 536.5801,
+            "wall_s": 1.4910501,
+            "mb_per_s_before_barrier": 1230.225103978444,
+            "samples": 1024,
+            "p50_us": 796.6,
+            "p90_us": 1123.5,
+            "p99_us": 1707.6,
+            "p999_us": 2388.9,
+            "max_us": 2728.3,
+            "mean_us": 852.34482421875,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 1048588,
+            "other_calls_per_op": 0.0009765625
+          },
+          "verify": "passed: all 1024 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, direct, window off: append(1 MiB) x N + sync_through",
+          "params": {
+            "chunk_bytes": 1048576
+          },
+          "metrics": {
+            "request_bytes": 1048576,
+            "mb_per_s": 556.8118187818995,
+            "bytes": 1073741824,
+            "seconds": 1.9283747,
+            "barrier_ms": 580.2356,
+            "wall_s": 2.0788125,
+            "mb_per_s_before_barrier": 796.4621929591686,
+            "samples": 1024,
+            "p50_us": 1034.8,
+            "p90_us": 1719.9,
+            "p99_us": 4595.9,
+            "p999_us": 20043.6,
+            "max_us": 70646.2,
+            "mean_us": 1316.54208984375,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 1048588,
+            "other_calls_per_op": 0.0009765625
+          },
+          "verify": "passed: all 1024 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "sequential 1 MiB writes, one barrier at the end",
+          "metric": "MB/s",
+          "better": "higher",
+          "store_io": 2562.411938269684,
+          "raw": 3135.9465417438187,
+          "fsys": 761.8533750840439,
+          "store_io_vs_raw_ratio": 0.8171095725518309,
+          "store_io_vs_fsys_ratio": 3.3633925136670966,
+          "store_io_advantage_vs_raw_pct": -18.289042744816907,
+          "store_io_advantage_vs_fsys_pct": 236.33925136670965,
+          "note": "fsys: the better of its buffered and direct journals"
+        },
+        {
+          "case": "sequential read, 1 MiB requests",
+          "metric": "MB/s",
+          "better": "higher",
+          "store_io": 2162.3247005492485,
+          "raw": 2645.5780028031354,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.8173354549584804,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -18.266454504151962,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "fsys: no comparable unbuffered read (see method)"
+        },
+        {
+          "case": "sequential read, 8 MiB requests",
+          "metric": "MB/s",
+          "better": "higher",
+          "store_io": 1860.974271001358,
+          "raw": 5323.14915846618,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.349600248950676,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -65.0399751049324,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "fsys: no comparable unbuffered read (see method)"
+        }
+      ],
+      "findings": [],
+      "anomalies": []
+    }
+  ]
+}

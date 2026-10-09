@@ -184,6 +184,18 @@ name = "store-io-core"
 version = "0.1.0"
 
 [[package]]
+name = "store-io-engine"
+version = "0.1.0"
+dependencies = [
+ "loom",
+ "store-io-buf",
+ "store-io-core",
+ "store-io-format",
+ "store-io-platform",
+ "store-io-sim",
+]
+
+[[package]]
 name = "store-io-format"
 version = "0.1.0"
 

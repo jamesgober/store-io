@@ -588,7 +588,7 @@ impl World {
 
     /// Simulates power loss.
     pub fn crash(&mut self, mode: &CrashMode) {
-        let cached: Vec<CachedWrite> = self.cache.drain(..).collect();
+        let cached: Vec<CachedWrite> = std::mem::take(&mut self.cache);
         let lb = self.cfg.logical_block.max(1) as usize;
         for (i, w) in cached.iter().enumerate() {
             let keep = match mode {

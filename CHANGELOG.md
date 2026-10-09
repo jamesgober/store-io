@@ -111,6 +111,11 @@
 
 ### Fixed
 
+- Lints that only fire on some toolchains and platforms: the free-list
+  sequence comparison is a `match` (clippy 1.85), Linux `madvise` calls
+  carry their safety comments in dedicated helpers, and the simulator's
+  crash path takes the cache with `mem::take`.
+
 ### Security
 
 ---

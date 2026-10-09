@@ -147,30 +147,31 @@ mod sys {
         if p == libc::MAP_FAILED {
             return Err(ArenaError { code: errno() });
         }
-        #[cfg(target_os = "linux")]
-        {
-            // SAFETY: `p`/`len` is the mapping just created. MADV_DONTFORK only
-            // changes fork behaviour; failure is harmless and ignored by design
-            // (it never affects this process's view of the memory).
-            let _advice_status = unsafe { libc::madvise(p, len, libc::MADV_DONTFORK) };
-        }
+        dont_fork(p, len);
         NonNull::new(p.cast::<u8>()).ok_or(ArenaError { code: 0 })
     }
 
     pub(super) fn protect(ptr: NonNull<u8>, len: usize) -> super::Protection {
-        // SAFETY: `ptr`/`len` is a live mapping owned by the arena; mlock and
-        // madvise only change paging and dump behaviour.
+        // SAFETY: `ptr`/`len` is a live mapping owned by the arena; mlock only
+        // pins its pages in RAM.
         let locked = unsafe { libc::mlock(ptr.as_ptr().cast(), len) } == 0;
-        #[cfg(target_os = "linux")]
-        // SAFETY: as above.
-        let excluded_from_dumps =
-            unsafe { libc::madvise(ptr.as_ptr().cast(), len, libc::MADV_DONTDUMP) } == 0;
-        #[cfg(not(target_os = "linux"))]
-        let excluded_from_dumps = false;
+        let excluded_from_dumps = exclude_from_dumps(ptr, len);
         super::Protection {
             locked,
             excluded_from_dumps,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn exclude_from_dumps(ptr: NonNull<u8>, len: usize) -> bool {
+        // SAFETY: `ptr`/`len` is a live mapping owned by the arena; madvise
+        // only changes core-dump behaviour.
+        unsafe { libc::madvise(ptr.as_ptr().cast(), len, libc::MADV_DONTDUMP) == 0 }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn exclude_from_dumps(_ptr: NonNull<u8>, _len: usize) -> bool {
+        false
     }
 
     /// # Safety
@@ -181,6 +182,17 @@ mod sys {
         // failure leaks the mapping and cannot be reported from Drop.
         let _unmap_status = unsafe { libc::munmap(ptr.as_ptr().cast(), len) };
     }
+
+    #[cfg(target_os = "linux")]
+    fn dont_fork(p: *mut libc::c_void, len: usize) {
+        // SAFETY: `p`/`len` is the mapping just created. MADV_DONTFORK only
+        // changes fork behaviour; a failure is harmless (it never affects this
+        // process's view of the memory), so its status is not needed.
+        let _advice_status = unsafe { libc::madvise(p, len, libc::MADV_DONTFORK) };
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn dont_fork(_p: *mut libc::c_void, _len: usize) {}
 
     fn errno() -> i32 {
         std::io::Error::last_os_error().raw_os_error().unwrap_or(0)

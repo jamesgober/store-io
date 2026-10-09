@@ -57,8 +57,8 @@ impl IndexQueue {
             let cell = &self.cells[pos & self.mask];
             let seq = cell.seq.load(Ordering::Acquire);
             let diff = seq.wrapping_sub(pos) as isize;
-            if diff == 0 {
-                match self.enqueue.compare_exchange_weak(
+            match diff.cmp(&0) {
+                core::cmp::Ordering::Equal => match self.enqueue.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
                     Ordering::Relaxed,
@@ -73,12 +73,12 @@ impl IndexQueue {
                         pos = current;
                         spin();
                     }
+                },
+                core::cmp::Ordering::Less => return Err(value),
+                core::cmp::Ordering::Greater => {
+                    spin();
+                    pos = self.enqueue.load(Ordering::Relaxed);
                 }
-            } else if diff < 0 {
-                return Err(value);
-            } else {
-                spin();
-                pos = self.enqueue.load(Ordering::Relaxed);
             }
         }
     }
@@ -90,8 +90,8 @@ impl IndexQueue {
             let cell = &self.cells[pos & self.mask];
             let seq = cell.seq.load(Ordering::Acquire);
             let diff = seq.wrapping_sub(pos.wrapping_add(1)) as isize;
-            if diff == 0 {
-                match self.dequeue.compare_exchange_weak(
+            match diff.cmp(&0) {
+                core::cmp::Ordering::Equal => match self.dequeue.compare_exchange_weak(
                     pos,
                     pos.wrapping_add(1),
                     Ordering::Relaxed,
@@ -109,12 +109,12 @@ impl IndexQueue {
                         pos = current;
                         spin();
                     }
+                },
+                core::cmp::Ordering::Less => return None,
+                core::cmp::Ordering::Greater => {
+                    spin();
+                    pos = self.dequeue.load(Ordering::Relaxed);
                 }
-            } else if diff < 0 {
-                return None;
-            } else {
-                spin();
-                pos = self.dequeue.load(Ordering::Relaxed);
             }
         }
     }

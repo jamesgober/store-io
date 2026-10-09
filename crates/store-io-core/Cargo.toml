@@ -1,0 +1,27 @@
+# =============================================================================
+#  R E P S   ·   store-io-core
+# =============================================================================
+[package]
+name          = "store-io-core"
+description   = "Core types of store-io: identities, durability classes, the error model, device evidence and the pure class-decision rules."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-core"
+readme        = "README.md"
+keywords      = ["storage", "durability", "database"]
+categories    = ["filesystem", "database-implementations"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Per-stage counters and latency histograms. Off: every hook compiles away.
+observe = []
+
+[dependencies]

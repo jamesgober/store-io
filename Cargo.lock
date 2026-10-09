@@ -7,5 +7,9 @@ name = "store-io"
 version = "0.1.0"
 
 [[package]]
+name = "store-io-core"
+version = "0.1.0"
+
+[[package]]
 name = "store-io-format"
 version = "0.1.0"

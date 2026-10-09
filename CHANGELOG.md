@@ -29,6 +29,14 @@
   overlap, duplicate, alignment and id checks; the keyed fill pattern v1.
   Tests include a slot overwrite torn at every byte boundary (never accepted
   as a mixed version) and every single-bit flip (never accepted).
+- `store-io-core` crate: identities (`VolumeId`, `RegionId`, `Generation`);
+  durability classes, receipt labels and the reason / missing-evidence
+  vocabularies; the error model (`NotWritten` and `DurabilityUnknown` never
+  conflated, raw OS codes kept, no payload bytes, at most 64 bytes); errno
+  classification by stage; the device evidence model; the pure class
+  decision (unsafe and unverified rules, power-safe only on device evidence
+  or an exact-model certificate, attestation and labelled override); the
+  corrected untorn-unit rule; checked alignment helpers.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent

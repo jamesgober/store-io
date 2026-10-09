@@ -17,6 +17,15 @@ pub(crate) fn size(file: &PosixFile) -> RawResult<u64> {
     u64::try_from(st.st_size).map_err(|_| sys::errno(libc::EINVAL))
 }
 
+/// Sets the file size to exactly `len` (`ftruncate`).
+pub(crate) fn set_len(file: &PosixFile, len: u64) -> RawResult<()> {
+    if !file.is_writable() {
+        return Err(sys::errno(libc::EBADF));
+    }
+    let len = libc::off_t::try_from(len).map_err(|_| sys::errno(libc::EFBIG))?;
+    sys::ftruncate(file.raw(), len)
+}
+
 /// Grows the file to `len` bytes with `fallocate` mode 0: real blocks are
 /// allocated as unwritten extents (reading as zero, never another file's
 /// data) and the size becomes `len`. The engine converts them to written

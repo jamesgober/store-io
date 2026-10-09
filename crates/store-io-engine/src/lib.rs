@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 mod batch;
+mod directory;
 pub mod domain;
 mod exec;
 pub mod frontier;
@@ -35,6 +36,7 @@ mod store;
 mod sync;
 
 pub use batch::{AppendBatch, PageBatch};
+pub use directory::Directory;
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
 pub use scan::{ScanItem, ScanSummary};

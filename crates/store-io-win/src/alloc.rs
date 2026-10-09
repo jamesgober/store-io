@@ -31,6 +31,14 @@ pub(crate) fn allocate(file: &WinFile, len: u64) -> RawResult<()> {
     sys::set_file_info(file.handle(), FileEndOfFileInfo, &rec)
 }
 
+/// Sets the end of file to exactly `len` (allocation follows NTFS rules).
+pub(crate) fn set_len(file: &WinFile, len: u64) -> RawResult<()> {
+    let Ok(signed) = i64::try_from(len) else {
+        return Err(sys::win32(ERROR_INVALID_PARAMETER));
+    };
+    sys::set_file_info(file.handle(), FileEndOfFileInfo, &signed.to_le_bytes())
+}
+
 /// Current end of file.
 pub(crate) fn size(file: &WinFile) -> RawResult<u64> {
     sys::file_size(file.handle())

@@ -98,6 +98,15 @@ impl Platform for WinPlatform {
         alloc::allocate(file, len)
     }
 
+    fn set_len(&self, file: &WinFile, len: u64) -> RawResult<()> {
+        if !file.is_writable() {
+            return Err(sys::win32(
+                windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED,
+            ));
+        }
+        alloc::set_len(file, len)
+    }
+
     fn size(&self, file: &WinFile) -> RawResult<u64> {
         alloc::size(file)
     }

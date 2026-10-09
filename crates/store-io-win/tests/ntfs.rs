@@ -618,3 +618,33 @@ fn test_misaligned_write_fails_as_a_completion_not_a_rejection() {
     assert!(c.result.is_err(), "{:?}", c.result);
     assert_eq!(q.in_flight(), 0);
 }
+
+#[test]
+fn test_set_len_truncates_and_extends_with_zeros() {
+    let fx = fixture("set-len");
+    let f = fx.p.create_file(&fx.dir, &name("s.sio")).unwrap();
+    fx.p.allocate(&f, 2 * BLOCK as u64).unwrap();
+    let mut q = fx.p.queue(QueueConfig { depth: 4 }).unwrap();
+    assert_eq!(write_block(&mut q, &f, &fx.pool, 0, 0x5A, false), Ok(BLOCK));
+    // Shrink to a length that is not a block multiple: direct reads still
+    // transfer whole blocks and stop at the end of file.
+    fx.p.set_len(&f, 100).unwrap();
+    assert_eq!(fx.p.size(&f).unwrap(), 100);
+    let got = read_block(&mut q, &f, &fx.pool, 0).unwrap();
+    assert_eq!(got.len(), 100);
+    assert!(got.iter().all(|&b| b == 0x5A));
+    // Extend: the new bytes read as zero.
+    fx.p.set_len(&f, 10_000).unwrap();
+    assert_eq!(fx.p.size(&f).unwrap(), 10_000);
+    let got = read_block(&mut q, &f, &fx.pool, 0).unwrap();
+    assert!(got[..100].iter().all(|&b| b == 0x5A));
+    assert!(got[100..].iter().all(|&b| b == 0));
+    fx.p.flush_all(&f).unwrap();
+    let ro =
+        fx.p.open_file(&fx.dir, &name("s.sio"), FileMode::ReadOnly)
+            .unwrap();
+    assert!(
+        fx.p.set_len(&ro, 0).is_err(),
+        "read-only handles cannot resize"
+    );
+}

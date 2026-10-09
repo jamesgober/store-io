@@ -361,6 +361,15 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error (another holder reports the platform's "would block").
     fn lock_exclusive(&self, file: &Self::File) -> RawResult<Self::Lock>;
 
+    /// Sets the file's size to exactly `len` bytes, truncating or extending
+    /// with zeros. The data transfers stay block-aligned; only the size
+    /// moves. A metadata change: durable after [`Self::flush_all`].
+    ///
+    /// # Errors
+    ///
+    /// The raw error.
+    fn set_len(&self, file: &Self::File, len: u64) -> RawResult<()>;
+
     /// Allocates real blocks up to `len` bytes (file size becomes `len`).
     /// Never leaves unwritten extents' contents readable as other files' data.
     ///

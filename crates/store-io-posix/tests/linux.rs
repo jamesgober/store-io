@@ -637,3 +637,31 @@ fn test_open_dir_creates_and_refuses_symlinked_files() {
     assert_eq!(e, libc::EINVAL);
     assert_eq!(p.eintr_retries(), 0);
 }
+
+#[test]
+fn test_set_len_truncates_and_extends_with_zeros() {
+    let (t, p, dir, file, pool, mut q) = setup();
+    p.allocate(&file, 8192).unwrap();
+    assert_eq!(write(&mut q, &file, &pool, 0, 4096, 0x5A, false), Ok(4096));
+    // Shrink to a length that is not a block multiple: direct reads still
+    // transfer whole blocks and stop at the end of file.
+    p.set_len(&file, 100).unwrap();
+    assert_eq!(p.size(&file).unwrap(), 100);
+    let (r, b) = read(&mut q, &file, &pool, 0, 4096);
+    assert_eq!(r, Ok(100));
+    assert!(b.as_slice()[..100].iter().all(|&x| x == 0x5A));
+    p.set_len(&file, 10_000).unwrap();
+    assert_eq!(p.size(&file).unwrap(), 10_000);
+    let (r, b) = read(&mut q, &file, &pool, 0, 4096);
+    assert_eq!(r, Ok(4096));
+    assert!(b.as_slice()[100..].iter().all(|&x| x == 0));
+    p.flush_all(&file).unwrap();
+    let ro = p
+        .open_file(&dir, &name("data"), FileMode::ReadOnly)
+        .unwrap();
+    assert!(
+        p.set_len(&ro, 0).is_err(),
+        "read-only handles cannot resize"
+    );
+    drop(t);
+}

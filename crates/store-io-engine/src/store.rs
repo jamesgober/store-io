@@ -239,8 +239,7 @@ fn io(op: Op, raw: OsError) -> Error {
 }
 
 fn not_found_or(op: Op, raw: OsError, what: Named) -> Error {
-    // ENOENT on every platform the engine supports (errno 2, Win32 2/3).
-    if raw.code == 2 || raw.code == 3 {
+    if store_io_core::errno::is_not_found(raw) {
         Error::NotFound { what }
     } else {
         io(op, raw)
@@ -1129,7 +1128,7 @@ fn container_name() -> Result<FileName, Error> {
     })
 }
 
-fn refuse(d: &ClassDecision) -> Result<(), Error> {
+pub(crate) fn refuse(d: &ClassDecision) -> Result<(), Error> {
     match d.durable_open {
         DurableOpen::Allowed | DurableOpen::Overridden => Ok(()),
         DurableOpen::RefusedUnsafe => Err(Error::UnsafeDevice { reasons: d.reasons }),

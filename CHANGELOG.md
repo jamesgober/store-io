@@ -137,6 +137,19 @@
   so an interrupted release never leaks space. Handles, tickets and positions
   of an old generation or a released region are refused
   (`StaleGeneration`, `NotReady`); `generation()` on region handles.
+- `store-io-engine`: directory mode. `Directory::replace` swaps a whole
+  file atomically and durably (temporary file in the same directory, exact
+  length, full flush, rename over the target, directory flush); after any
+  crash the file holds exactly the old or the new bytes. A failure from the
+  rename on, or a failed write or flush of the new bytes, is
+  `DurabilityUnknown` and poisons the handle; an unsupported directory flush
+  is never success. `read` (direct I/O), `remove` (durable) and `sync`. The
+  device is probed with the first file and refused per the caller's `Trust`.
+- `store-io-platform`: `Platform::set_len` (exact file size; `ftruncate` on
+  Linux, end-of-file information on Windows).
+- `store-io-core`: `errno::is_not_found`, judged per numbering (errno,
+  Win32, NTSTATUS); the engine no longer treats errno 3 as "not found".
+- `store-io-sim`: `FaultPlan::fail_dir_sync` and `World::dir_syncs()`.
 - `store-io-engine`: space reservations and accounting. `Store::reserve`
   checks the tag's hard cap (`Store::set_cap`) and grows the container so that
   regions provisioned from the `Reservation` can never run out of space; it

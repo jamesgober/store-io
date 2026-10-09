@@ -71,6 +71,19 @@ pub fn is_no_space(raw: OsError) -> bool {
     }
 }
 
+/// Whether the code means the named file or directory does not exist.
+#[must_use]
+pub fn is_not_found(raw: OsError) -> bool {
+    match raw.source {
+        // ENOENT.
+        OsErrorSource::Errno | OsErrorSource::Sim => raw.code == 2,
+        // ERROR_FILE_NOT_FOUND = 2, ERROR_PATH_NOT_FOUND = 3.
+        OsErrorSource::Win32 => matches!(raw.code, 2 | 3),
+        // STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND.
+        OsErrorSource::NtStatus => matches!(raw.code as u32, 0xC000_0034 | 0xC000_003A),
+    }
+}
+
 /// Whether a failed read means the device could not read the range (a
 /// latent sector error, a checksum failure, a device I/O error), as opposed
 /// to a bad request or a lost handle. A scan reports such ranges as
@@ -173,6 +186,18 @@ mod tests {
         assert_eq!(classify(Stage::Setup, errno(13)), ErrorKind::Io);
         assert!(is_interrupted(errno(4)));
         assert!(!is_interrupted(win(4)));
+    }
+
+    #[test]
+    fn test_not_found_is_judged_per_numbering() {
+        assert!(is_not_found(errno(2)));
+        assert!(!is_not_found(errno(3)), "ESRCH is not ENOENT");
+        let win = |code| OsError {
+            code,
+            source: OsErrorSource::Win32,
+        };
+        assert!(is_not_found(win(2)) && is_not_found(win(3)));
+        assert!(!is_not_found(win(5)));
     }
 
     #[test]

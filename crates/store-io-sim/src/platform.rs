@@ -380,6 +380,12 @@ impl Platform for SimPlatform {
         w.allocate(file.id, len)
     }
 
+    fn set_len(&self, file: &SimFile, len: u64) -> RawResult<()> {
+        let mut w = lock(&self.world);
+        file.check(&w, true)?;
+        w.set_len(file.id, len)
+    }
+
     fn size(&self, file: &SimFile) -> RawResult<u64> {
         let w = lock(&self.world);
         file.check(&w, false)?;

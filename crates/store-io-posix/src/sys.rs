@@ -274,6 +274,13 @@ pub(crate) fn unlinkat(dirfd: RawFd, name: &CStr) -> RawResult<()> {
     check(unsafe { libc::unlinkat(dirfd, name.as_ptr(), 0) })
 }
 
+/// `ftruncate(2)`: sets the file size to `len`.
+pub(crate) fn ftruncate(fd: RawFd, len: libc::off_t) -> RawResult<()> {
+    // SAFETY: ftruncate(2) takes a descriptor and a length; it touches no
+    // user memory.
+    check(unsafe { libc::ftruncate(fd, len) })
+}
+
 /// `fallocate(2)` with the given mode.
 pub(crate) fn fallocate(
     fd: RawFd,

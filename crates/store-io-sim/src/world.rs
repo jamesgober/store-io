@@ -203,6 +203,7 @@ pub struct World {
     writes_completed: u64,
     reads_completed: u64,
     flushes_completed: u64,
+    dir_syncs: u64,
     allocated: u64,
     trace: Vec<TraceEvent>,
 }
@@ -224,6 +225,7 @@ impl World {
             writes_completed: 0,
             reads_completed: 0,
             flushes_completed: 0,
+            dir_syncs: 0,
             allocated: 0,
             trace: Vec::new(),
         }
@@ -265,6 +267,13 @@ impl World {
     #[must_use]
     pub fn writes(&self) -> u64 {
         self.writes_completed
+    }
+
+    /// Directory syncs so far, successful or not. Arm
+    /// `fail_dir_sync = Some(dir_syncs() + 1)` to fail the next one.
+    #[must_use]
+    pub fn dir_syncs(&self) -> u64 {
+        self.dir_syncs
     }
 
     /// Reads completed so far, successful or not.
@@ -336,6 +345,10 @@ impl World {
     }
 
     pub(crate) fn sync_dir(&mut self, dir: &PathBuf) -> Result<(), OsError> {
+        self.dir_syncs += 1;
+        if self.cfg.faults.fail_dir_sync == Some(self.dir_syncs) {
+            return Err(EIO);
+        }
         let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
         d.durable = d.entries.clone();
         Ok(())
@@ -372,6 +385,19 @@ impl World {
             if let Some(f) = self.files.get_mut(&file) {
                 f.visible.resize(new_len, 0);
             }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_len(&mut self, file: FileId, len: u64) -> Result<(), OsError> {
+        let cur = self.files.get(&file).ok_or(EBADF)?.visible.len() as u64;
+        if len >= cur {
+            return self.allocate(file, len);
+        }
+        let new_len = usize::try_from(len).map_err(|_| EINVAL)?;
+        self.allocated = self.allocated.saturating_sub(cur - len);
+        if let Some(f) = self.files.get_mut(&file) {
+            f.visible.truncate(new_len);
         }
         Ok(())
     }

@@ -29,6 +29,9 @@ pub struct FaultPlan {
     /// The n-th write completion transfers only half its bytes (rounded down
     /// to a logical block) and reports the short count.
     pub short_write: Option<u64>,
+    /// The n-th directory sync (1-based) fails with EIO, leaving the
+    /// directory's durable entries as they were.
+    pub fail_dir_sync: Option<u64>,
     /// The n-th read completion transfers only half its bytes (rounded down
     /// to a logical block) and reports the short count.
     pub short_read: Option<u64>,

@@ -226,6 +226,10 @@ mod platform {
             alloc::allocate(file, len)
         }
 
+        fn set_len(&self, file: &PosixFile, len: u64) -> RawResult<()> {
+            alloc::set_len(file, len)
+        }
+
         fn size(&self, file: &PosixFile) -> RawResult<u64> {
             alloc::size(file)
         }

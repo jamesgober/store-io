@@ -2,15 +2,13 @@
 //! bytes into pooled aligned buffers, writes of any length, the reservation
 //! guard, barriers, tickets, receipts and reads.
 
-use std::sync::MutexGuard;
-
 use store_io_core::align::align_up;
 use store_io_core::error::{
     ByteRange, CorruptionKind, Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError,
 };
 use store_io_platform::{IoBuf, IoOp, Platform};
 
-use crate::exec::{Lane, Next, Pumped, Source, pump, run};
+use crate::exec::{Lane, LaneGuard, Next, Pumped, Source, pump, run};
 use crate::frontier::{AppendFrontier, Reservation};
 use crate::receipt::{DurableReceipt, WriteTicket};
 use crate::store::{LiveRegion, Store, flush_data};
@@ -215,7 +213,7 @@ where
     }
 
     /// A free queue for a call on `r`.
-    pub(crate) fn lane(&self, r: &LiveRegion) -> MutexGuard<'_, Lane<P::Queue>> {
+    pub(crate) fn lane(&self, r: &LiveRegion) -> LaneGuard<'_, P::Queue> {
         self.inner.queues.get(r.id.get() as usize)
     }
 
@@ -318,8 +316,10 @@ where
     /// The domain barrier. Returns the flush it waited for: on a
     /// flush-required device every write completed before the call is durable
     /// once it returns; on a power-safe device writes were durable at
-    /// completion and no flush is issued (`u64::MAX`).
-    pub(crate) fn barrier(&self, lane: &mut Lane<P::Queue>) -> Result<u64, Error> {
+    /// completion and no flush is issued (`u64::MAX`). Only the thread that
+    /// leads the flush borrows a queue, and only for the flush itself:
+    /// followers wait holding nothing.
+    pub(crate) fn barrier(&self) -> Result<u64, Error> {
         if !self.inner.policy.flush {
             return match self.inner.domain.poisoned() {
                 Some(first) => Err(Error::Poisoned { first }),
@@ -330,7 +330,7 @@ where
         let file = &self.inner.file;
         self.inner
             .domain
-            .barrier(need, || flush_data(lane, file))
+            .barrier(need, || flush_data(&mut self.inner.queues.get(0), file))
             .inspect_err(|_| self.wake_frontiers())?;
         Ok(need)
     }

@@ -532,3 +532,35 @@ fn test_a_short_transfer_is_never_success() {
         assert!(matches!(wal.append(b"x"), Err(Error::Poisoned { .. })));
     }
 }
+
+#[test]
+fn test_many_writers_on_one_queue_share_flushes_and_never_stall() {
+    // 32 writers, one queue: followers of a flush hold no queue while they
+    // wait, and a writer needing a queue takes whichever is returned first.
+    let p = SimPlatform::new(SimConfig::volatile(25));
+    let s = create_with(
+        &p,
+        StoreOptions {
+            queues: 1,
+            ..opts()
+        },
+    );
+    let wal = s.provision_append_region("wal", 8 << 20).unwrap();
+    let handles: Vec<_> = (0..32u32)
+        .map(|t| {
+            let wal = wal.clone();
+            std::thread::spawn(move || {
+                for i in 0..20u32 {
+                    let rec = record(t * 1000 + i, 100);
+                    let (pos, receipt) = wal.append_durable(&rec).unwrap();
+                    assert!(receipt.durable_through() > pos.offset());
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    let stats = s.domain_stats();
+    assert!(stats.flushes <= 640, "{stats:?}");
+}

@@ -215,6 +215,12 @@
 
 ### Fixed
 
+- `store-io-engine`: concurrent durable writers no longer queue behind one
+  another's flushes. A barrier's followers held an I/O queue for the whole
+  flush wait, and a caller finding every queue busy blocked on one fixed
+  queue; now only the flush leader borrows a queue, for the flush alone, and
+  a caller waits for whichever queue is returned first (found by the
+  benchmark harness with 64 writers).
 - `store-io-engine`: an append or page write larger than the largest pooled
   buffer failed with `PoolExhausted`; a page read did not check the
   position's volume.

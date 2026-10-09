@@ -304,8 +304,7 @@ where
         }
         // Snapshot the completed prefix BEFORE the barrier takes its ticket.
         let through = f.completed();
-        let mut lane = s.lane(&self.state);
-        let need = s.barrier(&mut lane)?;
+        let need = s.barrier()?;
         f.publish_durable(through);
         Ok(s.receipt(&self.state, 0, through, need, true))
     }
@@ -588,8 +587,7 @@ where
             .gate
             .check()
             .map_err(|why| retired_error(why, &self.state))?;
-        let mut lane = s.lane(&self.state);
-        let need = s.barrier(&mut lane)?;
+        let need = s.barrier()?;
         Ok(s.receipt(&self.state, ticket.start, ticket.end, need, false))
     }
 

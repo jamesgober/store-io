@@ -3,24 +3,74 @@
 //! The simple and batch layers block their caller until the I/O is done. Each
 //! call borrows one queue from a small per-store set with a non-blocking
 //! `try_lock` (one atomic compare-and-swap when uncontended; a queue is held
-//! only for the duration of one call's I/O). Only when every queue is busy
-//! does a caller wait for one, which happens only when more threads than
-//! queues are inside I/O at the same moment.
+//! only for the duration of one call's I/O, never while waiting for someone
+//! else's flush). Only when every queue is busy does a caller wait, and then
+//! for whichever queue is returned first: the guard's drop wakes one waiter.
+//!
+//! The wake-up is lost-wake-free without sequentially consistent loads: a
+//! returning thread unlocks its queue (a read-modify-write of the mutex) and
+//! then reads the waiter count with a read-modify-write; a waiter increments
+//! the count and then retries every queue with `try_lock` (read-modify-writes)
+//! while holding the wake mutex. Either the waiter's retry finds the returned
+//! queue, or the returner sees the waiter and signals under the same mutex.
 
-use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
+use std::ops::{Deref, DerefMut};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use store_io_core::error::OsError;
 use store_io_platform::{CompletionBuf, IoBuf, IoOp, Queue, RawResult};
 
+use crate::sync::{AtomicU64, Ordering};
+
 /// A fixed set of queues shared by the blocking layers.
 pub(crate) struct QueueSet<Q> {
     queues: Box<[Mutex<Lane<Q>>]>,
+    waiters: AtomicU64,
+    wake: Mutex<()>,
+    returned: Condvar,
 }
 
 /// A queue and its completion buffer.
 pub(crate) struct Lane<Q> {
     pub(crate) queue: Q,
     pub(crate) done: CompletionBuf,
+}
+
+/// A borrowed queue; returning it wakes one caller waiting for a queue.
+///
+/// Fields drop in declaration order: the queue's lock is released first,
+/// then [`Notify`] wakes a waiter, which therefore always finds it free.
+pub(crate) struct LaneGuard<'a, Q> {
+    guard: MutexGuard<'a, Lane<Q>>,
+    _notify: Notify<'a, Q>,
+}
+
+/// Wakes one waiting caller, if any, when dropped.
+struct Notify<'a, Q> {
+    set: &'a QueueSet<Q>,
+}
+
+impl<Q> Drop for Notify<'_, Q> {
+    fn drop(&mut self) {
+        if self.set.waiters.fetch_add(0, Ordering::AcqRel) > 0 {
+            let _wake = self.set.wake.lock().unwrap_or_else(PoisonError::into_inner);
+            self.set.returned.notify_one();
+        }
+    }
+}
+
+impl<Q> Deref for LaneGuard<'_, Q> {
+    type Target = Lane<Q>;
+
+    fn deref(&self) -> &Lane<Q> {
+        &self.guard
+    }
+}
+
+impl<Q> DerefMut for LaneGuard<'_, Q> {
+    fn deref_mut(&mut self) -> &mut Lane<Q> {
+        &mut self.guard
+    }
 }
 
 impl<Q: Queue> QueueSet<Q> {
@@ -36,22 +86,47 @@ impl<Q: Queue> QueueSet<Q> {
                     })
                 })
                 .collect(),
+            waiters: AtomicU64::new(0),
+            wake: Mutex::new(()),
+            returned: Condvar::new(),
         }
     }
 
-    /// Borrows a free queue, waiting only if all are busy.
-    pub(crate) fn get(&self, hint: usize) -> MutexGuard<'_, Lane<Q>> {
+    fn try_any(&self, hint: usize) -> Option<MutexGuard<'_, Lane<Q>>> {
         let n = self.queues.len();
-        for i in 0..n {
-            match self.queues[(hint + i) % n].try_lock() {
-                Ok(g) => return g,
-                Err(TryLockError::Poisoned(p)) => return p.into_inner(),
-                Err(TryLockError::WouldBlock) => {}
-            }
+        (0..n).find_map(|i| match self.queues[(hint + i) % n].try_lock() {
+            Ok(g) => Some(g),
+            Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        })
+    }
+
+    /// Borrows a free queue, starting the search at `hint`; when all are
+    /// busy, waits for the first one returned.
+    pub(crate) fn get(&self, hint: usize) -> LaneGuard<'_, Q> {
+        if let Some(guard) = self.try_any(hint) {
+            return LaneGuard {
+                guard,
+                _notify: Notify { set: self },
+            };
         }
-        self.queues[hint % n]
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let _registered = self.waiters.fetch_add(1, Ordering::AcqRel);
+        let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
+        let guard = loop {
+            if let Some(guard) = self.try_any(hint) {
+                break guard;
+            }
+            wake = self
+                .returned
+                .wait(wake)
+                .unwrap_or_else(PoisonError::into_inner);
+        };
+        drop(wake);
+        let _unregistered = self.waiters.fetch_sub(1, Ordering::AcqRel);
+        LaneGuard {
+            guard,
+            _notify: Notify { set: self },
+        }
     }
 }
 

@@ -451,7 +451,8 @@ where
             Pumped::Refused(raw) => return Err(Store::<P>::refused(raw, c)),
             Pumped::Failed(raw) => return Err(s.unknown(Op::Write, raw, c)),
         }
-        let need = s.barrier(&mut lane)?;
+        drop(lane);
+        let need = s.barrier()?;
         Ok(s.receipt(state, start, end, need, false))
     }
 }

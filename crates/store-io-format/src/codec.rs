@@ -154,8 +154,14 @@ impl<'a> Writer<'a> {
     /// [`CodecError::Overflow`] if `src` does not fit.
     #[inline]
     pub fn bytes(&mut self, src: &[u8]) -> Result<(), CodecError> {
-        let end = self.pos.checked_add(src.len()).ok_or(CodecError::Overflow)?;
-        let dst = self.buf.get_mut(self.pos..end).ok_or(CodecError::Overflow)?;
+        let end = self
+            .pos
+            .checked_add(src.len())
+            .ok_or(CodecError::Overflow)?;
+        let dst = self
+            .buf
+            .get_mut(self.pos..end)
+            .ok_or(CodecError::Overflow)?;
         dst.copy_from_slice(src);
         self.pos = end;
         Ok(())
@@ -209,7 +215,10 @@ impl<'a> Writer<'a> {
     #[inline]
     pub fn zeros(&mut self, len: usize) -> Result<(), CodecError> {
         let end = self.pos.checked_add(len).ok_or(CodecError::Overflow)?;
-        let dst = self.buf.get_mut(self.pos..end).ok_or(CodecError::Overflow)?;
+        let dst = self
+            .buf
+            .get_mut(self.pos..end)
+            .ok_or(CodecError::Overflow)?;
         dst.fill(0);
         self.pos = end;
         Ok(())
@@ -246,11 +255,11 @@ mod tests {
     fn test_writer_roundtrips_through_reader() {
         let mut buf = [0u8; 23];
         let mut w = Writer::new(&mut buf);
-        w.u8(7).ok();
-        w.u16(0xBEEF).ok();
-        w.u32(0xDEAD_BEEF).ok();
-        w.u64(u64::MAX - 1).ok();
-        w.zeros(8).ok();
+        assert_eq!(w.u8(7), Ok(()));
+        assert_eq!(w.u16(0xBEEF), Ok(()));
+        assert_eq!(w.u32(0xDEAD_BEEF), Ok(()));
+        assert_eq!(w.u64(u64::MAX - 1), Ok(()));
+        assert_eq!(w.zeros(8), Ok(()));
         assert_eq!(w.position(), 23);
         assert_eq!(w.u8(1), Err(CodecError::Overflow));
         let mut r = Reader::new(&buf);

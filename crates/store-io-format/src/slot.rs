@@ -367,7 +367,9 @@ fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
     }
     let incompat = r.u32().map_err(bad)?;
     if incompat & !KNOWN_INCOMPAT != 0 {
-        return Err(SlotStatus::Incompatible { flags: incompat & !KNOWN_INCOMPAT });
+        return Err(SlotStatus::Incompatible {
+            flags: incompat & !KNOWN_INCOMPAT,
+        });
     }
     let ro_compat_flags = r.u32().map_err(bad)?;
     let compat_flags = r.u32().map_err(bad)?;
@@ -400,7 +402,10 @@ fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
     if object_id != e.object_id {
         return Err(SlotStatus::WrongObject);
     }
-    if slot_offset != e.slot_offset || slot_index != e.slot_index.as_u8() || log2 != e.log2_slot_size {
+    if slot_offset != e.slot_offset
+        || slot_index != e.slot_index.as_u8()
+        || log2 != e.log2_slot_size
+    {
         return Err(SlotStatus::Misplaced);
     }
     let room = slot.len() - header_len;
@@ -473,12 +478,18 @@ mod tests {
 
     #[test]
     fn test_validate_blank_slot_is_blank() {
-        assert_eq!(validate(&[0u8; 4096], &expect(SlotIndex::A)), SlotStatus::Blank);
+        assert_eq!(
+            validate(&[0u8; 4096], &expect(SlotIndex::A)),
+            SlotStatus::Blank
+        );
     }
 
     #[test]
     fn test_validate_wrong_length_is_bad_length() {
-        assert_eq!(validate(&[0u8; 4095], &expect(SlotIndex::A)), SlotStatus::BadLength);
+        assert_eq!(
+            validate(&[0u8; 4095], &expect(SlotIndex::A)),
+            SlotStatus::BadLength
+        );
     }
 
     #[test]
@@ -540,12 +551,18 @@ mod tests {
         let mut slot = encoded(SlotIndex::A, 1, b"x");
         slot[14..16].copy_from_slice(&2u16.to_le_bytes());
         reseal(&mut slot);
-        assert_eq!(validate(&slot, &expect(SlotIndex::A)), SlotStatus::UnsupportedVersion { major: 2 });
+        assert_eq!(
+            validate(&slot, &expect(SlotIndex::A)),
+            SlotStatus::UnsupportedVersion { major: 2 }
+        );
 
         let mut slot = encoded(SlotIndex::A, 1, b"x");
         slot[16..20].copy_from_slice(&1u32.to_le_bytes());
         reseal(&mut slot);
-        assert_eq!(validate(&slot, &expect(SlotIndex::A)), SlotStatus::Incompatible { flags: 1 });
+        assert_eq!(
+            validate(&slot, &expect(SlotIndex::A)),
+            SlotStatus::Incompatible { flags: 1 }
+        );
 
         let mut slot = encoded(SlotIndex::A, 1, b"x");
         slot[20..24].copy_from_slice(&1u32.to_le_bytes());
@@ -561,12 +578,18 @@ mod tests {
         let mut slot = encoded(SlotIndex::A, 1, b"x");
         slot[56..64].copy_from_slice(&0u64.to_le_bytes()); // generation 0
         reseal(&mut slot);
-        assert_eq!(validate(&slot, &expect(SlotIndex::A)), SlotStatus::Malformed);
+        assert_eq!(
+            validate(&slot, &expect(SlotIndex::A)),
+            SlotStatus::Malformed
+        );
 
         let mut slot = encoded(SlotIndex::A, 1, b"x");
         slot[72..76].copy_from_slice(&5000u32.to_le_bytes()); // payload past the slot
         reseal(&mut slot);
-        assert_eq!(validate(&slot, &expect(SlotIndex::A)), SlotStatus::Malformed);
+        assert_eq!(
+            validate(&slot, &expect(SlotIndex::A)),
+            SlotStatus::Malformed
+        );
     }
 
     #[test]
@@ -576,8 +599,14 @@ mod tests {
         f.generation = 0;
         assert_eq!(encode(&mut buf, &f, b""), Err(EncodeError::ZeroGeneration));
         let f = fields(SlotIndex::A, 1);
-        assert_eq!(encode(&mut buf, &f, &[0; 4000]), Err(EncodeError::PayloadTooLarge));
-        assert_eq!(encode(&mut buf[..100], &f, b""), Err(EncodeError::BufferLength));
+        assert_eq!(
+            encode(&mut buf, &f, &[0; 4000]),
+            Err(EncodeError::PayloadTooLarge)
+        );
+        assert_eq!(
+            encode(&mut buf[..100], &f, b""),
+            Err(EncodeError::BufferLength)
+        );
         let mut f = fields(SlotIndex::A, 1);
         f.log2_slot_size = 17;
         assert_eq!(encode(&mut buf, &f, b""), Err(EncodeError::SlotSize));

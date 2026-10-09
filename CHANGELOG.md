@@ -21,6 +21,14 @@
 - `dev/ROADMAP.md`: architecture phase closed (file map, scenario review,
   requirement traceability, independent critique resolved).
 - `dev/TODO.md`: Windows ownership-lock kill test.
+- `store-io-format`: bounds-checked little-endian codec; the A/B slot
+  header (encode and validate in a fixed order: blank, magic, header CRC,
+  version, flags, identity, location, payload CRC); slot-pair winner logic
+  (confirmed, unconfirmed, fork, refused, lost; generation-gap and chain-break
+  anomalies); volume, region-table and region-header payload codecs with
+  overlap, duplicate, alignment and id checks; the keyed fill pattern v1.
+  Tests include a slot overwrite torn at every byte boundary (never accepted
+  as a mixed version) and every single-bit flip (never accepted).
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent

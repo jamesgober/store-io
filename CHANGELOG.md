@@ -30,10 +30,6 @@
 - Hardware-bound measurements move to `dev/TODO.md` (recorded in the roadmap
   per the anti-deferral rule); they gate the certified 1.0, not usable 0.x
   releases.
-- `dev/ROADMAP.md`: research phase closed; build order changed so the first
-  usable release (v0.3) covers Windows and the Linux synchronous tier, with
-  io_uring, macOS, multi-device and passthrough after it and certification at
-  1.0.
 
 ### Fixed
 

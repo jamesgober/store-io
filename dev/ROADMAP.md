@@ -13,7 +13,7 @@
 
 ---
 
-## Phase 0 &mdash; Research (DONE)
+## Phase 0 &mdash; Research (IN PROGRESS)
 
 Catalogue every file-management and I/O method on every target platform, source or measure its real cost and guarantee, then choose the best mechanism for every (platform x device class x operation) cell.
 
@@ -43,13 +43,13 @@ Exit criteria:
 - [x] Every number labelled.
 - [x] Every requirement mapped to a chosen mechanism per platform and device class, with the rejected alternatives and the labelled fallback for each cell (64 fully, 28 pending a measurement, 3 design gaps carried into phase 1).
 - [x] Critic findings resolved (dispositions recorded; two overridden by measurement).
-- [x] Requirement amendments approved (37, 2026-10-09).
+- [ ] Requirement amendments approved.
 - [x] Baseline measurement plan written, and run where hardware exists (Windows dev box and WSL2). **Moved:** measurements that need bare-metal Linux, a power-loss-protected NVMe, a Mac or the power-cut rig move to [`dev/TODO.md`](./TODO.md). Reason: the maintainer wants a usable release before that hardware exists; those measurements gate the certified 1.0, not usable 0.x releases. Durability claims stay honest in the meantime because every receipt names its device class and evidence.
 - Measurement items (all bound to the hardware above): a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
 
 ---
 
-## Phase 1 &mdash; Architecture (IN PROGRESS)
+## Phase 1 &mdash; Architecture
 
 `PLANNING`, `FILEMAP` (every file, every field), public API sketch in three layers (simple, batch, engine) with the `docs/GUIDE.md` outline, on-disk header formats with versioning, error model, crate layout, instrumentation stage list, harness design.
 
@@ -60,7 +60,7 @@ Exit criteria:
 
 ---
 
-## v0.2 &mdash; Core, simulator, conformance skeleton
+## Phase 2 &mdash; Core, simulator, conformance skeleton
 
 Core types, errors and traits; the deterministic simulated backend with the full fault and crash model; the conformance crate skeleton; the harness skeleton with per-stage metrics.
 
@@ -73,53 +73,66 @@ Exit criteria:
 
 ---
 
-## v0.3 &mdash; Usable: probe, Windows, Linux synchronous tier
+## Phase 3 &mdash; Probe, Linux synchronous tier, provisioning, slots, directory operations
 
-The first release a database can build on. Probe with evidence and classes; Windows backend (IOCP, bounded flush pool, rename and directory protocol); Linux synchronous backend (`pwritev2`, O_DIRECT, `RWF_DSYNC`, fdatasync); provisioning, recycle and release; regions; durable writes and barriers with flush sharing; A/B slots; atomic replace; ownership locks; the simple and batch API layers and `docs/GUIDE.md`.
+Probe with evidence and classes; the synchronous Linux backend (`pwritev2`, O_DIRECT, fdatasync); provisioning, recycle and release; A/B slots; atomic replace; ownership locks.
 
 Exit criteria:
-- [ ] Conformance green on NTFS (dev box) and ext4 (Linux CI), plus XFS where the runner allows.
-- [ ] dm-log-writes and dm-error runs in Linux CI.
-- [ ] Barrier within 3% of the raw primitive on the dev box; no timer quantum on any path.
-- [ ] Lone-writer, concurrent-writer and caller-batch gates on the dev box; at least 20% better than fsys per comparable operation or proven at the device floor.
-- [ ] Certification items (power cuts, power-safe reference box, golden captures from real drives) tracked in [`dev/TODO.md`](./TODO.md).
+- [ ] Conformance green on ext4 and XFS (loop device and NVMe).
+- [ ] dm-log-writes, LazyFS and dm-error runs.
+- [ ] Golden probe reports.
+- [ ] Synchronous tier within its performance gate.
+- [ ] Power-cut rig commissioned, at least 500 cycles per device class.
 
 ---
 
-## v0.4 &mdash; Linux io_uring
+## Phase 4 &mdash; Linux io_uring
 
 Ring per thread, registered buffers, direct descriptors, FUA versus flush selection, io-wq tuning.
 
 Exit criteria:
-- [ ] io-wq punt gate per (filesystem, kernel) table.
-- [ ] 60 s idle: zero syscalls (from 5 s after the last punted operation).
-- [ ] Performance gates on the hardware available; power-safe and bare-metal gates tracked in `dev/TODO.md`.
+- [ ] All performance gates met on a power-safe reference box and a consumer box.
+- [ ] Zero io-wq punts for writes to ready regions.
+- [ ] 60 s idle: zero syscalls.
+- [ ] At least 500 power cuts per device.
 
 ---
 
-## v0.5 &mdash; macOS and the single-file container
+## Phase 5 &mdash; Windows
+
+IOCP backend; IoRing evaluation; bounded flush pool; rename and directory protocol.
+
+Exit criteria:
+- [ ] Conformance on NTFS.
+- [ ] Barrier within 3% of the raw primitive.
+- [ ] No timer quantum on any path (ETW).
+- [ ] At least 500 power cuts.
+
+---
+
+## Phase 6 &mdash; macOS and the single-file container
 
 F_FULLFSYNC backend; portable container format; unprivileged mode.
 
 Exit criteria:
-- [ ] Conformance on APFS (CI runner), NTFS and ext4.
+- [ ] Conformance on APFS, NTFS and ext4.
 - [ ] Container byte-identical across operating systems.
 - [ ] Zero idle wakeups.
 
 ---
 
-## v0.6 &mdash; Multi-device, NUMA, QoS
+## Phase 7 &mdash; Multi-device, NUMA, QoS
 
 Mirror writes, dependent writes, multi-device barriers, flush-sharing certification, I/O classes, auto-tuned background budget, clone and unshare, many-file mode, streaming copy, prefetch.
 
 Exit criteria:
-- [ ] At least 90% of summed per-device fio on the devices available.
+- [ ] At least 90% of summed per-device fio on 4 devices.
 - [ ] Commit-class p99 at most 2x idle p99 under background load.
 - [ ] Flush-sharing conformance per filesystem and kernel.
 
 ---
 
-## v0.7 &mdash; Raw namespace and NVMe passthrough
+## Phase 8 &mdash; Raw namespace and NVMe passthrough
 
 `uring_cmd`, IOPOLL with a second ring, privilege reporting.
 
@@ -129,9 +142,9 @@ Exit criteria:
 
 ---
 
-## 1.0 &mdash; Certification
+## Phase 9 &mdash; Certification and 1.0
 
-Everything in [`dev/TODO.md`](./TODO.md): power-cut rig (at least 500 cycles per device class, 3,000 per certified model and firmware), power-safe reference box, bare-metal Linux kernel matrix, macOS measurements; fuzz campaigns; SemVer and MSRV policy; supply-chain checks.
+At least 3,000 power cuts per (model, firmware) on reference devices; fuzz campaigns; documentation; SemVer and MSRV policy; supply-chain checks.
 
 Exit criteria:
 - [ ] Every MUST requirement green.

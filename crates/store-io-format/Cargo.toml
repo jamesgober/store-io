@@ -1,0 +1,24 @@
+# =============================================================================
+#  R E P S   ·   store-io-format
+# =============================================================================
+[package]
+name          = "store-io-format"
+description   = "On-disk formats for store-io: CRC32C, A/B slot headers and metadata codecs. Pure, allocation-free, fuzzed."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-format"
+readme        = "README.md"
+keywords      = ["storage", "crc32c", "format", "durability"]
+categories    = ["encoding", "filesystem"]
+
+[lints]
+workspace = true
+
+# No dependencies: every decoder here parses bytes that may be hostile, so the
+# crate stays small enough to audit and fuzz completely.
+[dependencies]

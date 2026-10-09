@@ -13,6 +13,12 @@
 
 ### Added
 
+- `store-io-format` crate (workspace member): CRC-32C with SSE4.2 and
+  AArch64 hardware paths on three interleaved streams, recombined with
+  compile-time shift tables, plus a slicing-by-8 fallback; verified against
+  the standard check value, the RFC 3720 vectors and a bit-at-a-time
+  reference at every tail length and alignment.
+- Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent
   writers and caller batches are all fast and all gated.

@@ -71,6 +71,40 @@ pub fn is_no_space(raw: OsError) -> bool {
     }
 }
 
+/// Whether a failed read means the device could not read the range (a
+/// latent sector error, a checksum failure, a device I/O error), as opposed
+/// to a bad request or a lost handle. A scan reports such ranges as
+/// unreadable and continues past them.
+#[must_use]
+pub fn is_media_error(raw: OsError) -> bool {
+    match raw.source {
+        // EIO = 5, ENODATA = 61, EBADMSG = 74 (checksum failures on some
+        // file systems), EUCLEAN = 117 (structure needs cleaning).
+        OsErrorSource::Errno => matches!(raw.code, 5 | 61 | 74 | 117),
+        // ERROR_CRC = 23, ERROR_SECTOR_NOT_FOUND = 27, ERROR_READ_FAULT = 30,
+        // ERROR_DATA_CHECKSUM_ERROR = 323, ERROR_DEVICE_HARDWARE_ERROR = 483,
+        // ERROR_IO_DEVICE = 1117, ERROR_FILE_CORRUPT = 1392,
+        // ERROR_DISK_CORRUPT = 1393.
+        OsErrorSource::Win32 => {
+            matches!(raw.code, 23 | 27 | 30 | 323 | 483 | 1117 | 1392 | 1393)
+        }
+        // STATUS_NONEXISTENT_SECTOR, STATUS_DATA_ERROR, STATUS_CRC_ERROR,
+        // STATUS_DEVICE_DATA_ERROR, STATUS_FILE_CORRUPT_ERROR,
+        // STATUS_IO_DEVICE_ERROR, STATUS_DATA_CHECKSUM_ERROR.
+        OsErrorSource::NtStatus => matches!(
+            raw.code as u32,
+            0xC000_0015
+                | 0xC000_003E
+                | 0xC000_003F
+                | 0xC000_009C
+                | 0xC000_0102
+                | 0xC000_0185
+                | 0xC000_A002
+        ),
+        OsErrorSource::Sim => raw.code == 5,
+    }
+}
+
 /// Whether the code means the call was interrupted before doing anything
 /// (`EINTR`). Only meaningful for calls documented to fail with `EINTR`
 /// before any I/O; callers retry those and count the retry.
@@ -139,5 +173,26 @@ mod tests {
         assert_eq!(classify(Stage::Setup, errno(13)), ErrorKind::Io);
         assert!(is_interrupted(errno(4)));
         assert!(!is_interrupted(win(4)));
+    }
+
+    #[test]
+    fn test_media_errors_are_told_apart_from_bad_requests() {
+        assert!(is_media_error(errno(5)));
+        assert!(is_media_error(errno(74)));
+        assert!(!is_media_error(errno(22)));
+        assert!(!is_media_error(errno(9)));
+        let win = |code| OsError {
+            code,
+            source: OsErrorSource::Win32,
+        };
+        assert!(is_media_error(win(23)));
+        assert!(is_media_error(win(1117)));
+        assert!(!is_media_error(win(87)));
+        let nt = |code: u32| OsError {
+            code: code as i32,
+            source: OsErrorSource::NtStatus,
+        };
+        assert!(is_media_error(nt(0xC000_009C)));
+        assert!(!is_media_error(nt(0xC000_000D)));
     }
 }

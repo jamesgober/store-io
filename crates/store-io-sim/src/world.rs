@@ -201,6 +201,7 @@ pub struct World {
     epoch: u64,
     locks: BTreeSet<FileId>,
     writes_completed: u64,
+    reads_completed: u64,
     flushes_completed: u64,
     allocated: u64,
     trace: Vec<TraceEvent>,
@@ -221,6 +222,7 @@ impl World {
             epoch: 0,
             locks: BTreeSet::new(),
             writes_completed: 0,
+            reads_completed: 0,
             flushes_completed: 0,
             allocated: 0,
             trace: Vec::new(),
@@ -251,11 +253,24 @@ impl World {
         self.flushes_completed
     }
 
+    /// The id of the file `name` in `dir`, for targeting faults such as
+    /// [`FaultPlan::bad_ranges`](crate::FaultPlan::bad_ranges).
+    #[must_use]
+    pub fn file_id(&self, dir: &PathBuf, name: &str) -> Option<FileId> {
+        self.lookup(dir, name).ok()
+    }
+
     /// Writes completed so far, successful or not. Arm
     /// `fail_write = Some(writes() + k)` to fail the k-th next one.
     #[must_use]
     pub fn writes(&self) -> u64 {
         self.writes_completed
+    }
+
+    /// Reads completed so far, successful or not.
+    #[must_use]
+    pub fn reads(&self) -> u64 {
+        self.reads_completed
     }
 
     /// Writes in the volatile cache.
@@ -490,6 +505,8 @@ impl World {
         offset: u64,
         out: &mut [u8],
     ) -> Result<usize, OsError> {
+        self.reads_completed += 1;
+        let nth = self.reads_completed;
         let f = self.files.get(&file).ok_or(EBADF)?;
         let len = out.len() as u64;
         let end = offset.checked_add(len).ok_or(EINVAL)?;
@@ -508,11 +525,15 @@ impl World {
             return Err(EIO);
         }
         let avail = f.visible.len() as u64;
-        let n = if offset >= avail {
+        let mut n = if offset >= avail {
             0
         } else {
             (avail - offset).min(len) as usize
         };
+        if self.cfg.faults.short_read == Some(nth) {
+            let lb = self.cfg.logical_block.max(1) as usize;
+            n = n / 2 / lb * lb;
+        }
         let s = offset as usize;
         out[..n].copy_from_slice(&f.visible[s..s + n]);
         self.trace.push(TraceEvent::Read {

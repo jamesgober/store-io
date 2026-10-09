@@ -121,6 +121,17 @@
   completions, never by a timer).
 - `store-io-engine`: a reservation guard poisons the device domain if an
   append's reserved range is abandoned unwritten, including by a panic.
+- `store-io-engine`: raw ordered scans (`AppendRegion::scan`,
+  `PageRegion::scan`, `ScanItem`, `ScanSummary`). Eight large direct reads in
+  flight, delivered strictly in order to a visitor that decides where valid
+  data ends. A scan never stops at bad data: a failing read is bisected to
+  whole blocks on an idle queue, unreadable ranges are reported (adjacent ones
+  merged) and skipped, and short reads report their missing bytes. Scans work
+  on read-only and poisoned stores and change nothing.
+- `store-io-core`: `errno::is_media_error` tells device read failures apart
+  from bad requests (errno, Win32 and NTSTATUS codes).
+- `store-io-sim`: `World::reads()`, `World::file_id()` and
+  `FaultPlan::short_read`.
 - `store-io-sim`: `World::writes()` for arming write faults; data transfers
   must meet direct-I/O alignment (offset and length in logical blocks, buffer
   4096-aligned) or complete with `EINVAL`, as on real devices.

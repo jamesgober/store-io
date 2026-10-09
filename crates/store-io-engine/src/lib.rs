@@ -10,6 +10,8 @@
 //!   the device report, poisoning.
 //! - [`AppendRegion`], [`PageRegion`], [`Slot`]: the data surfaces.
 //! - [`AppendBatch`], [`PageBatch`]: many writes, one barrier.
+//! - [`AppendRegion::scan`], [`PageRegion::scan`]: the raw ordered recovery
+//!   read, which never stops at bad data.
 //! - [`receipt`]: positions, write tickets and durability receipts, which
 //!   only this crate can create.
 
@@ -24,6 +26,7 @@ mod io;
 mod layout;
 pub mod receipt;
 mod region;
+mod scan;
 mod slots;
 mod store;
 mod sync;
@@ -31,4 +34,5 @@ mod sync;
 pub use batch::{AppendBatch, PageBatch};
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
+pub use scan::{ScanItem, ScanSummary};
 pub use store::{CONTAINER, Store, StoreOptions, StoreReport};

@@ -29,6 +29,9 @@ pub struct FaultPlan {
     /// The n-th write completion transfers only half its bytes (rounded down
     /// to a logical block) and reports the short count.
     pub short_write: Option<u64>,
+    /// The n-th read completion transfers only half its bytes (rounded down
+    /// to a logical block) and reports the short count.
+    pub short_read: Option<u64>,
     /// The n-th write lands `delta` bytes away from its offset (a misdirected
     /// write) and reports success.
     pub misdirect_write: Option<(u64, i64)>,

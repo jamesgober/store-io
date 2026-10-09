@@ -3,6 +3,7 @@
 //! Every handle is cheap to clone and safe to share between threads. Calls
 //! block until their I/O is done.
 
+use std::ops::ControlFlow;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, PoisonError};
 
@@ -15,6 +16,7 @@ use crate::batch::{AppendBatch, PageBatch};
 use crate::exec::Pumped;
 use crate::io::{ctx, ctx_range, not_written};
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
+use crate::scan::{ScanItem, ScanSummary};
 use crate::slots::{PairAt, plan_next, read_pair};
 use crate::store::{LiveRegion, Store, durable_slot};
 
@@ -273,6 +275,28 @@ where
         self.store.read_at(&self.state, offset, out)
     }
 
+    /// Reads the region in order from the block-aligned offset `from` to the
+    /// end of its data area, handing every piece to `visit`; return
+    /// [`ControlFlow::Break`] to stop (typically where your valid data ends).
+    ///
+    /// The scan reads with direct I/O and several large reads in flight. It
+    /// never stops at bad data: a range the device cannot read is narrowed
+    /// to whole blocks, reported as [`ScanItem::Unreadable`], and skipped.
+    /// Scans work on read-only and poisoned stores.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(Misaligned | OutOfBounds | PoolExhausted)` before any I/O;
+    /// `Io` if a read fails for a reason other than the media.
+    pub fn scan(
+        &self,
+        from: u64,
+        visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
+    ) -> Result<ScanSummary, Error> {
+        self.store
+            .scan_region(&self.state, from, self.state.data_size, visit)
+    }
+
     /// Moves the append position forward to `offset` (rounded up to a block),
     /// typically after recovery found where valid data ends. Never moves
     /// backwards, and only while no append is in flight.
@@ -487,6 +511,28 @@ where
             return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
         self.store.read_at(&self.state, pos.offset, out)
+    }
+
+    /// Reads the region in order from the block-aligned offset `from` to the
+    /// end of its data area, handing every piece to `visit`; return
+    /// [`ControlFlow::Break`] to stop (typically where your valid data ends).
+    ///
+    /// The scan reads with direct I/O and several large reads in flight. It
+    /// never stops at bad data: a range the device cannot read is narrowed
+    /// to whole blocks, reported as [`ScanItem::Unreadable`], and skipped.
+    /// Scans work on read-only and poisoned stores.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(Misaligned | OutOfBounds | PoolExhausted)` before any I/O;
+    /// `Io` if a read fails for a reason other than the media.
+    pub fn scan(
+        &self,
+        from: u64,
+        visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
+    ) -> Result<ScanSummary, Error> {
+        self.store
+            .scan_region(&self.state, from, self.state.data_size, visit)
     }
 
     /// Block size: writes must be whole blocks.

@@ -44,6 +44,11 @@
   contents; sensitive pools that wipe on return and lock their arena in RAM
   and out of core dumps where the OS allows; `wipe` with volatile writes;
   `CachePadded`.
+- `store-io-platform` crate: the completion-shaped I/O boundary. `Platform`
+  (metadata operations and queue factory) and `Queue` (`submit`, `reap`,
+  `wait`, never with a timeout); `IoOp` owns its buffer and the buffer returns
+  in the `Completion` or `Rejected`; validated single-component `FileName`;
+  a fixed-capacity `CompletionBuf` that never grows on the hot path.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent

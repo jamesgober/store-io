@@ -1,0 +1,24 @@
+# =============================================================================
+#  R E P S   ·   store-io-platform
+# =============================================================================
+[package]
+name          = "store-io-platform"
+description   = "The completion-shaped I/O boundary of store-io: the traits every platform backend and the simulator implement."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-platform"
+readme        = "README.md"
+keywords      = ["storage", "io", "durability"]
+categories    = ["filesystem"]
+
+[lints]
+workspace = true
+
+[dependencies]
+store-io-core = { path = "../store-io-core", version = "0.1.0" }
+store-io-buf  = { path = "../store-io-buf", version = "0.1.0" }

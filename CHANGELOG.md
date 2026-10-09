@@ -156,6 +156,9 @@
   not read) and store behaviour on the platform (round trip through a
   reopen, a read-only open that changes nothing, ownership, directory
   replace). It passes on the simulator, NTFS and ext4.
+- CI: a dm-error job puts the file system on a device-mapper target that
+  is switched mid-run to fail every I/O; no write may succeed after the
+  first failure, and every acknowledged record must survive healing.
 - CI: conformance and end-to-end tests on loop-mounted ext4 and XFS images
   with barriers on (`STORE_IO_TEST_DIR`).
 - `store-io-posix`: `PosixPlatform` is `Clone` (clones share the retry

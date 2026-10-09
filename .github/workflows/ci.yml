@@ -103,6 +103,52 @@ jobs:
         env:
           STORE_IO_TEST_DIR: /mnt/sio
 
+  # Fail-stop on a real kernel: the file system sits on a device-mapper
+  # target that is switched, mid-run, to fail every I/O. No write may
+  # succeed after the first failure, and every acknowledged record must
+  # survive once the device is healed (tests/dm.rs).
+  dm-error:
+    name: Fail-stop under device errors (dm-error)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the test
+        run: cargo test --test dm --no-run
+      - name: Write until the device fails, heal it, verify
+        run: |
+          set -eux
+          ACKS="$RUNNER_TEMP/acks"
+          truncate -s 2G "$RUNNER_TEMP/dm.img"
+          LOOP=$(sudo losetup --show -f "$RUNNER_TEMP/dm.img")
+          SECTORS=$(sudo blockdev --getsz "$LOOP")
+          echo "0 $SECTORS linear $LOOP 0" | sudo dmsetup create sio
+          sudo mkfs.ext4 -q /dev/mapper/sio
+          sudo mkdir -p /mnt/dm
+          sudo mount /dev/mapper/sio /mnt/dm
+          sudo chown "$(id -u):$(id -g)" /mnt/dm
+          export STORE_IO_DM_DIR=/mnt/dm STORE_IO_DM_ACKS="$ACKS"
+          cargo test --test dm -- --ignored --exact dm_phase_write --nocapture &
+          WRITER=$!
+          # Let records be acknowledged, then make every I/O fail.
+          for _ in $(seq 1 240); do
+            if [ -f "$ACKS" ] && [ "$(wc -l < "$ACKS")" -ge 200 ]; then break; fi
+            sleep 0.5
+          done
+          echo "0 $SECTORS error" | sudo dmsetup load sio
+          sudo dmsetup suspend --nolockfs --noflush sio
+          sudo dmsetup resume sio
+          wait "$WRITER"
+          # Heal the device, check the file system, remount, verify.
+          echo "0 $SECTORS linear $LOOP 0" | sudo dmsetup load sio
+          sudo dmsetup suspend --nolockfs --noflush sio
+          sudo dmsetup resume sio
+          sudo umount -l /mnt/dm || true
+          sudo e2fsck -fy /dev/mapper/sio || true
+          sudo mount /dev/mapper/sio /mnt/dm
+          cargo test --test dm -- --ignored --exact dm_phase_verify --nocapture
+
   package:
     name: Package
     runs-on: ubuntu-latest

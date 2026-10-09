@@ -77,6 +77,7 @@ unsafe_op_in_unsafe_fn = "deny"
 missing_docs           = "deny"
 unused_must_use        = "deny"
 unused_results         = "deny"
+unexpected_cfgs        = { level = "deny", check-cfg = ["cfg(loom)"] }
 
 [workspace.lints.clippy]
 unwrap_used                 = "deny"

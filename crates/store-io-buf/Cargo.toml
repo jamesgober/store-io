@@ -1,0 +1,37 @@
+# =============================================================================
+#  R E P S   ·   store-io-buf
+# =============================================================================
+[package]
+name          = "store-io-buf"
+description   = "Aligned, pooled, zero-allocation I/O buffers for store-io, with a lock-free free list and secure wipe."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-buf"
+readme        = "README.md"
+keywords      = ["io", "buffer", "pool", "direct-io", "storage"]
+categories    = ["memory-management", "filesystem"]
+
+[lints]
+workspace = true
+
+[dependencies]
+store-io-core = { path = "../store-io-core", version = "0.1.0" }
+
+# Anonymous page-aligned mappings with MADV_DONTFORK (an O_DIRECT buffer
+# shared with a forked child corrupts I/O), mlock and MADV_DONTDUMP for the
+# sensitive class.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.190", default-features = false }
+
+# VirtualAlloc / VirtualLock for arenas and the sensitive class.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_System_SystemInformation"] }
+
+# Model checker for the lock-free free list (test-only; run with --cfg loom).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

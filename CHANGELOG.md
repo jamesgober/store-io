@@ -37,6 +37,13 @@
   decision (unsafe and unverified rules, power-safe only on device evidence
   or an exact-model certificate, attestation and labelled override); the
   corrected untorn-unit rule; checked alignment helpers.
+- `store-io-buf` crate: page-aligned arena (anonymous `mmap` with
+  `MADV_DONTFORK` on Linux, `VirtualAlloc` on Windows, the global allocator
+  under Miri); power-of-two size classes with lock-free bounded MPMC free
+  lists; owned `IoBuf` that returns to its class on drop and never prints its
+  contents; sensitive pools that wipe on return and lock their arena in RAM
+  and out of core dumps where the OS allows; `wipe` with volatile writes;
+  `CachePadded`.
 - Workspace-wide package metadata and the REPS lint set as `[workspace.lints]`.
 - `dev/DIRECTIVES.md`: the simple-API rule (simple, batch and engine layers;
   `docs/GUIDE.md` tutorial) and the rule that a lone durable write, concurrent

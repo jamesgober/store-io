@@ -83,6 +83,19 @@
   - End-to-end simulator tests: receipts survive every crash subset, fsyncgate
     stays poisoned, slots never mix, power-safe barriers never flush, read-only
     opens change nothing.
+- `store-io-win` crate: the Windows backend. Unbuffered overlapped I/O
+  reaped from a per-queue I/O completion port (`GetQueuedCompletionStatusEx`,
+  waits are infinite or zero, never timed); every queue reopens its own handle
+  to a file, so any number of queues share a file and each reaps only its own
+  completions; synchronous completions skip the port. A durable write is the
+  write followed by the data flush (`NtFlushBuffersFileEx` data-sync on NTFS,
+  `FlushFileBuffers` elsewhere), never write-through alone. Rename and delete
+  by handle with POSIX semantics; an ownership lock on a sentinel byte;
+  allocation with valid-data checks; the probe reads the volume, file system,
+  storage stack and, on NVMe, the identify data, write-cache feature and
+  health log, all parsed as untrusted bytes. Dropping a queue with I/O in
+  flight cancels it and waits for every completion before any buffer is
+  released.
 - `store-io-core`: `NotWrittenCause::NotPositioned`.
 - `store-io-sim`: `World::flushes()` for arming flush faults.
 - `store-io-buf`: loom-aware spin hint in the free-list retry loops.

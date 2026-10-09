@@ -1,0 +1,49 @@
+# =============================================================================
+#  R E P S   ·   store-io-win
+# =============================================================================
+[package]
+name          = "store-io-win"
+description   = "Windows platform backend for store-io: unbuffered overlapped I/O on IOCP, NTFS data-sync flushes, rename by handle, sentinel locks and the storage-stack probe."
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+documentation = "https://docs.rs/store-io-win"
+readme        = "README.md"
+keywords      = ["storage", "windows", "iocp", "direct-io", "durability"]
+categories    = ["filesystem", "os::windows-apis"]
+
+# Documented on the one platform where its types exist.
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets        = ["x86_64-pc-windows-msvc"]
+
+[lints]
+workspace = true
+
+[dependencies]
+store-io-core     = { path = "../store-io-core", version = "0.1.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.1.0" }
+
+# Raw Win32 and ntdll bindings (CreateFileW, overlapped Read/WriteFile, IOCP,
+# NtFlushBuffersFileEx, SetFileInformationByHandle, LockFileEx, DeviceIoControl
+# and the storage IOCTL structures). No wrappers, no allocation, load-time
+# imports only from kernel32 and ntdll, which every supported Windows has.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Storage_FileSystem",
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }

@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: pre-release.</strong> The published <code>0.1</code> only reserves the crate name. The repository holds the first usable version, which ships as <code>0.3</code>: the simple and batch APIs on Windows and Linux, evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. Conformance runs on real file systems and the performance gates come before that release. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: 0.3 &mdash; first usable release.</strong> The simple and batch APIs on Windows and Linux, evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>, after power-cut certification. io_uring arrives in 0.4 and macOS in 0.5. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -96,7 +96,7 @@ let (start, receipt) = batch.commit()?;
 
 ```toml
 [dependencies]
-store-io = "0.3"   # once published; the current 0.1 reserves the name only
+store-io = "0.3"
 ```
 
 The `store-io` command-line tool (`store-io probe <dir>`, `store-io info <store>`) is behind the `cli` feature.

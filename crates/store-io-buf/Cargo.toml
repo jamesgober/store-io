@@ -20,7 +20,7 @@ categories    = ["memory-management", "filesystem"]
 workspace = true
 
 [dependencies]
-store-io-core = { path = "../store-io-core", version = "0.1.0" }
+store-io-core = { path = "../store-io-core", version = "0.3.0" }
 
 # Anonymous page-aligned mappings with MADV_DONTFORK (an O_DIRECT buffer
 # shared with a forked child corrupts I/O), mlock and MADV_DONTDUMP for the

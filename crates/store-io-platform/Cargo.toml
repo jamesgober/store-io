@@ -20,5 +20,5 @@ categories    = ["filesystem"]
 workspace = true
 
 [dependencies]
-store-io-core = { path = "../store-io-core", version = "0.1.0" }
-store-io-buf  = { path = "../store-io-buf", version = "0.1.0" }
+store-io-core = { path = "../store-io-core", version = "0.3.0" }
+store-io-buf  = { path = "../store-io-buf", version = "0.3.0" }

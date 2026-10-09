@@ -27,9 +27,9 @@ workspace = true
 # Every dependency is Linux-only: on other targets the crate is an empty shell
 # so a workspace build never fails on a foreign platform.
 [target.'cfg(target_os = "linux")'.dependencies]
-store-io-core     = { path = "../store-io-core", version = "0.1.0" }
-store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
-store-io-platform = { path = "../store-io-platform", version = "0.1.0" }
+store-io-core     = { path = "../store-io-core", version = "0.3.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.3.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.3.0" }
 
 # The Linux ABI: open flags, openat2 resolve flags, fallocate modes, OFD lock
 # commands, pwritev2/preadv2, fstatfs, uname and the ioctl entry point. The

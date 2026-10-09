@@ -78,6 +78,9 @@ jobs:
   miri:
     name: Miri (buffers)
     runs-on: ubuntu-latest
+    # rust-toolchain.toml pins stable for local work; Miri needs nightly.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@nightly

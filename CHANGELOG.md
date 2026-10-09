@@ -11,6 +11,19 @@
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-10-09
+
+The first usable release. Stores, regions, batches, slots, scans,
+recycle and release, reservations and directory mode, through a simple API
+on Windows (IOCP) and Linux (direct I/O), with durability classes decided
+from device evidence, unforgeable receipts and fail-stop poisoning. Verified
+on a deterministic simulator with crash enumeration and fault injection,
+loom and Miri, a conformance suite on NTFS, ext4 and XFS, a real-kernel
+device-error run, and a performance harness against the raw primitive and
+fsys.
+
 ### Added
 
 - `store-io-format` crate (workspace member): CRC-32C with SSE4.2 and
@@ -350,8 +363,6 @@
   carry their safety comments in dedicated helpers, and the simulator's
   crash path takes the cache with `mem::take`.
 
-### Security
-
 ---
 
 ## [0.1.0] - 2026-10-08
@@ -374,5 +385,6 @@ The project scaffold. Reserves the crate name; no public API.
   `.gitattributes`, `.github/FUNDING.yml`.
 - `docs/API.md` and `docs/release/v0.1.0.md`.
 
-[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamesgober/store-io/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/jamesgober/store-io/releases/tag/v0.1.0

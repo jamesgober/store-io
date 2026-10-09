@@ -1,0 +1,622 @@
+{
+  "schema": "store-io-harness/1",
+  "incomplete": null,
+  "run": {
+    "date": "2026-10-09T09:10:21Z",
+    "command": "page-batch",
+    "commit": "a51493bda14df48e5fe64575dfdf88192cdde941 (crates/ modified)",
+    "os": "windows",
+    "os_version": "Microsoft Windows [Version 10.0.26200.9457]",
+    "kernel": "NT build 10.0.26200.9457",
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "cpus": 32,
+    "filesystem": "Ntfs (volume C:)",
+    "dir": "C:\\Users\\james\\AppData\\Local\\Temp\\store-io-harness-102764",
+    "device": "t-force-tm8fpz004t",
+    "backend": "store-io-win (WinPlatform: overlapped I/O on IOCP, NO_BUFFERING)",
+    "secs_per_point": 5,
+    "warmup_secs": 0.5,
+    "total_secs": 92.3957433,
+    "fsys": "fsys 1.1.3 (crates.io), Handle method Sync, durability primitive fsync",
+    "raw_primitives": [
+      "WriteFile on a FILE_FLAG_NO_BUFFERING handle + NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)",
+      "ReadFile on a FILE_FLAG_NO_BUFFERING handle (one call per request)"
+    ]
+  },
+  "store": {
+    "report": "volume           0b6c99fb-ce44-1a00-637d-b42172422a01\nclass            flush-required\nlabel            evidence\ndurable open     Allowed\nmissing          storage stack layers below the filesystem\nmissing          page-cache residency of a range (Linux `cachestat`)\nflush execution  inline (leader)\nblock size       4096\ntable capacity   253 regions\nfilesystem       Ntfs\nbus              Nvme\nmodel            T-FORCE TM8FPZ004T\nmode             read-write",
+    "class": "flush-required (receipt label evidence, durable open Allowed, block size 4096 B)",
+    "override_in_effect": false,
+    "override_refusal": null,
+    "options": "StoreOptions {\n    trust: Trust {\n        certificate: None,\n        attestation: None,\n        override_refusal: false,\n    },\n    block_size: None,\n    log2_table_slot: 14,\n    max_io: 1048576,\n    buffers_per_class: 64,\n    queues: 0,\n    queue_depth: 64,\n    append_ring: 4096,\n    keyed_fill: false,\n}",
+    "evidence": "Evidence {\n    platform: Windows,\n    device: DeviceFacts {\n        model: Some(\n            \"T-FORCE TM8FPZ004T\",\n        ),\n        firmware: Some(\n            \"EIFM70.3\",\n        ),\n        bus: Nvme,\n        cache_present: Yes,\n        cache_enabled: Yes,\n        os_cache_mode: WriteBack,\n        os_flush_supported: Yes,\n        user_power_protection: No,\n        backup_failed: No,\n        fua_supported: Yes,\n        logical_block: 512,\n        physical_block: 4096,\n        optimal_write: 0,\n        max_transfer: 524288,\n        atomic: AtomicFields {\n            awupf: Some(\n                0,\n            ),\n            nsabp: false,\n            nawupf: 0,\n            nabspf: 0,\n            nabo: 0,\n        },\n        numa_node: Some(\n            0,\n        ),\n        multi_controller: false,\n    },\n    fs: FsFacts {\n        kind: Ntfs,\n        data_journal: false,\n        no_barrier: false,\n        sync_disabled: false,\n        weak_error_mode: false,\n        transformed: false,\n        cow: No,\n        direct_io: Yes,\n        full_flush: Yes,\n        dir_flush: Yes,\n        os_atomic_unit: 4096,\n        dio_mem_align: 4096,\n        dio_offset_align: 512,\n    },\n    stack: [],\n    hypervisor: None,\n    privilege: Full,\n    kernel: Some(\n        (\n            10,\n            0,\n            26200,\n        ),\n    ),\n    timings: Timings {\n        flush_idle_ns: None,\n        flush_loaded_ns: None,\n        fua_extra_ns: None,\n        flush_blocks_writes_pct: None,\n    },\n    missing: {\n        Stack,\n        PageCache,\n    },\n}"
+  },
+  "diagnostics": [
+    "NtFlushBuffersFileEx(DATA_SYNC_ONLY) on a FILE_FLAG_OVERLAPPED | NO_BUFFERING handle (the kind store-io-win flushes through) after a dirty 4 KiB write never returned STATUS_PENDING: 0 of 400 idle and 0 of 400 while a second thread wrote the same file [measured]. The latent hazard in store-io-win's flush wrapper (STATUS_PENDING counted as success, IO_STATUS_BLOCK dropped) did not trigger on this machine; that is not proof it cannot"
+  ],
+  "workloads": [
+    {
+      "key": "page-batch",
+      "title": "W4: page batch (N random 4 KiB pages, one barrier)",
+      "elapsed_secs": 91.9745858,
+      "method": [
+        "N in [1, 16, 64, 256] distinct pages chosen uniformly at random from a 256 MiB region / file for every commit; one commit = N page writes + one barrier; commits back to back on one thread.",
+        "store-io: one `PageBatch` reused for every commit: N x `write(pos, page)` then `commit()`.",
+        "raw QD1: N x WriteFile one after another, then one data flush.",
+        "raw QD-N (Windows only): the N writes issued together on an overlapped NO_BUFFERING handle (one event each), all awaited, then one data flush on that handle.",
+        "fsys: N x `Handle::write_at(path, offset, page)` then one `Handle::sync(path)`.",
+        "Every system rewrites its own ready file / region; page payloads are copied once inside the timed section by every system."
+      ],
+      "points": [
+        {
+          "system": "store-io",
+          "variant": "PageBatch: N x write + commit",
+          "params": {
+            "n": 1,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 2647.815164285014,
+            "samples": 13198,
+            "p50_us": 336.6,
+            "p90_us": 405.5,
+            "p99_us": 641.4,
+            "p999_us": 5359.5,
+            "max_us": 7582.2,
+            "mean_us": 377.66986664646157,
+            "flushes_per_op": 1,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": 1,
+            "window_s": 5.0001329,
+            "ops_total_incl_warmup": 14606,
+            "pages_per_s": 2647.815164285014
+          },
+          "verify": "passed: 1025 of 13063 written pages read back (latest write each) and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD1: N writes one at a time + one flush",
+          "params": {
+            "n": 1,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 2757.2767622563365,
+            "samples": 13756,
+            "p50_us": 325.2,
+            "p90_us": 383.4,
+            "p99_us": 538,
+            "p999_us": 5328.1,
+            "max_us": 6259.7,
+            "mean_us": 362.67668653678396,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": 1,
+            "window_s": 5.0003142,
+            "ops_total_incl_warmup": 15151,
+            "pages_per_s": 2757.2767622563365
+          },
+          "verify": "passed: 1025 of 13509 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD-N: N overlapped writes in flight + one flush",
+          "params": {
+            "n": 1,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 2776.599679637913,
+            "samples": 13855,
+            "p50_us": 322.4,
+            "p90_us": 368.6,
+            "p99_us": 592.8,
+            "p999_us": 5303.2,
+            "max_us": 12853.7,
+            "mean_us": 360.1527463009744,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": 1,
+            "window_s": 5.0001564,
+            "ops_total_incl_warmup": 15289,
+            "pages_per_s": 2776.599679637913,
+            "flush_status_pending": 0
+          },
+          "verify": "passed: 1025 of 13627 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": [
+            "NtFlushBuffersFileEx on this overlapped handle returned STATUS_PENDING 0 times in 15289 flushes"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "Handle::write_at x N + Handle::sync",
+          "params": {
+            "n": 1,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 1640.1101279173743,
+            "samples": 8189,
+            "p50_us": 573.1,
+            "p90_us": 674.8,
+            "p99_us": 920.9,
+            "p999_us": 5598.2,
+            "max_us": 6083.2,
+            "mean_us": 609.715154475516,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": 14,
+            "window_s": 5.0003311,
+            "ops_total_incl_warmup": 9018,
+            "pages_per_s": 1640.1101279173743
+          },
+          "verify": "passed: 1025 of 8437 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "PageBatch: N x write + commit",
+          "params": {
+            "n": 16,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 1996.6735212436902,
+            "samples": 9853,
+            "p50_us": 415.9,
+            "p90_us": 788.5,
+            "p99_us": 1066.1,
+            "p999_us": 1384.1,
+            "max_us": 6193.7,
+            "mean_us": 500.8330051760885,
+            "flushes_per_op": 1,
+            "write_calls_per_op": 16,
+            "write_bytes_per_op": 65536,
+            "other_calls_per_op": 1,
+            "window_s": 5.0001517,
+            "ops_total_incl_warmup": 10620,
+            "pages_per_s": 31946.776339899043
+          },
+          "verify": "passed: 1025 of 60628 written pages read back (latest write each) and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD1: N writes one at a time + one flush",
+          "params": {
+            "n": 16,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 1498.8562364319444,
+            "samples": 7425,
+            "p50_us": 603.7,
+            "p90_us": 951.7,
+            "p99_us": 1306.3,
+            "p999_us": 2302.7,
+            "max_us": 6182.4,
+            "mean_us": 667.1753939393939,
+            "flushes_per_op": null,
+            "write_calls_per_op": 16,
+            "write_bytes_per_op": 65536,
+            "other_calls_per_op": 1,
+            "window_s": 5.000067,
+            "ops_total_incl_warmup": 7922,
+            "pages_per_s": 23981.69978291111
+          },
+          "verify": "passed: 1025 of 55981 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD-N: N overlapped writes in flight + one flush",
+          "params": {
+            "n": 16,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 2555.3949995119283,
+            "samples": 12584,
+            "p50_us": 354.2,
+            "p90_us": 533.2,
+            "p99_us": 701.4,
+            "p999_us": 899.7,
+            "max_us": 78751.9,
+            "mean_us": 391.32893356643353,
+            "flushes_per_op": null,
+            "write_calls_per_op": 16,
+            "write_bytes_per_op": 65536,
+            "other_calls_per_op": 1,
+            "window_s": 5.0004738,
+            "ops_total_incl_warmup": 13859,
+            "pages_per_s": 40886.31999219085,
+            "flush_status_pending": 0
+          },
+          "verify": "passed: 1025 of 63330 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": [
+            "NtFlushBuffersFileEx on this overlapped handle returned STATUS_PENDING 0 times in 13859 flushes"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "Handle::write_at x N + Handle::sync",
+          "params": {
+            "n": 16,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 179.89098446082446,
+            "samples": 898,
+            "p50_us": 3847.8,
+            "p90_us": 5904,
+            "p99_us": 101547.8,
+            "p999_us": null,
+            "max_us": 154385.9,
+            "mean_us": 5558.922271714922,
+            "flushes_per_op": null,
+            "write_calls_per_op": 16,
+            "write_bytes_per_op": 65536,
+            "other_calls_per_op": 179,
+            "window_s": 5.0013069,
+            "ops_total_incl_warmup": 1029,
+            "pages_per_s": 2878.2557513731913
+          },
+          "verify": "passed: 1025 of 14587 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "PageBatch: N x write + commit",
+          "params": {
+            "n": 64,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 1193.7573692764367,
+            "samples": 5817,
+            "p50_us": 770.7,
+            "p90_us": 1014,
+            "p99_us": 1694.6,
+            "p999_us": 4593.1,
+            "max_us": 6666.2,
+            "mean_us": 837.691163830153,
+            "flushes_per_op": 1,
+            "write_calls_per_op": 64,
+            "write_bytes_per_op": 262144,
+            "other_calls_per_op": 1,
+            "window_s": 5.0000558,
+            "ops_total_incl_warmup": 5986,
+            "pages_per_s": 76400.47163369195
+          },
+          "verify": "passed: 1025 of 65336 written pages read back (latest write each) and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD1: N writes one at a time + one flush",
+          "params": {
+            "n": 64,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 447.2377826640034,
+            "samples": 2219,
+            "p50_us": 2024.2,
+            "p90_us": 3096.7,
+            "p99_us": 5870.9,
+            "p999_us": 15150.8,
+            "max_us": 18110.7,
+            "mean_us": 2235.9470482199185,
+            "flushes_per_op": null,
+            "write_calls_per_op": 64,
+            "write_bytes_per_op": 262144,
+            "other_calls_per_op": 1,
+            "window_s": 5.0177287,
+            "ops_total_incl_warmup": 2445,
+            "pages_per_s": 28623.21809049622
+          },
+          "verify": "passed: 1025 of 59431 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD-N: N overlapped writes in flight + one flush",
+          "params": {
+            "n": 64,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 808.0001216850246,
+            "samples": 3915,
+            "p50_us": 1227,
+            "p90_us": 1492.7,
+            "p99_us": 1917.6,
+            "p999_us": 8293.2,
+            "max_us": 20756.3,
+            "mean_us": 1237.623575989783,
+            "flushes_per_op": null,
+            "write_calls_per_op": 64,
+            "write_bytes_per_op": 262144,
+            "other_calls_per_op": 1,
+            "window_s": 5.0000726,
+            "ops_total_incl_warmup": 4314,
+            "pages_per_s": 51712.007787841576,
+            "flush_status_pending": 0
+          },
+          "verify": "passed: 1025 of 64577 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": [
+            "NtFlushBuffersFileEx on this overlapped handle returned STATUS_PENDING 0 times in 4314 flushes"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "Handle::write_at x N + Handle::sync",
+          "params": {
+            "n": 64,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 52.98305919665246,
+            "samples": 265,
+            "p50_us": 18432.9,
+            "p90_us": 20759.8,
+            "p99_us": 36443.9,
+            "p999_us": null,
+            "max_us": 63458.2,
+            "mean_us": 18873.957358490567,
+            "flushes_per_op": null,
+            "write_calls_per_op": 64,
+            "write_bytes_per_op": 262144,
+            "other_calls_per_op": 707,
+            "window_s": 5.0154813,
+            "ops_total_incl_warmup": 288,
+            "pages_per_s": 3390.9157885857576
+          },
+          "verify": "passed: 1025 of 16052 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "PageBatch: N x write + commit",
+          "params": {
+            "n": 256,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 210.90611351800652,
+            "samples": 1012,
+            "p50_us": 4328.5,
+            "p90_us": 4964.4,
+            "p99_us": 13853.2,
+            "p999_us": 24926.3,
+            "max_us": 26274.2,
+            "mean_us": 4741.446245059288,
+            "flushes_per_op": 1,
+            "write_calls_per_op": 256,
+            "write_bytes_per_op": 1048576,
+            "other_calls_per_op": 1,
+            "window_s": 5.0035883,
+            "ops_total_incl_warmup": 1051,
+            "pages_per_s": 53991.96506060967
+          },
+          "verify": "passed: 1025 of 64454 written pages read back (latest write each) and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD1: N writes one at a time + one flush",
+          "params": {
+            "n": 256,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 57.40368122126898,
+            "samples": 284,
+            "p50_us": 12268.7,
+            "p90_us": 28233.8,
+            "p99_us": 130516.6,
+            "p999_us": null,
+            "max_us": 143164.2,
+            "mean_us": 17420.485563380284,
+            "flushes_per_op": null,
+            "write_calls_per_op": 256,
+            "write_bytes_per_op": 1048576,
+            "other_calls_per_op": 1,
+            "window_s": 5.0038075,
+            "ops_total_incl_warmup": 308,
+            "pages_per_s": 14695.34239264486
+          },
+          "verify": "passed: 1025 of 45893 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "QD-N: N overlapped writes in flight + one flush",
+          "params": {
+            "n": 256,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 357.5574486110088,
+            "samples": 1735,
+            "p50_us": 2539.6,
+            "p90_us": 3916.4,
+            "p99_us": 4809.3,
+            "p999_us": 6653,
+            "max_us": 10991.5,
+            "mean_us": 2796.753371757925,
+            "flushes_per_op": null,
+            "write_calls_per_op": 256,
+            "write_bytes_per_op": 1048576,
+            "other_calls_per_op": 1,
+            "window_s": 5.0024752,
+            "ops_total_incl_warmup": 1849,
+            "pages_per_s": 91534.70684441825,
+            "flush_status_pending": 0
+          },
+          "verify": "passed: 1025 of 65496 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": [
+            "NtFlushBuffersFileEx on this overlapped handle returned STATUS_PENDING 0 times in 1849 flushes"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "Handle::write_at x N + Handle::sync",
+          "params": {
+            "n": 256,
+            "page_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 12.456032282049744,
+            "samples": 75,
+            "p50_us": 41148.3,
+            "p90_us": 76699.5,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 1294981.6,
+            "mean_us": 80282.38666666667,
+            "flushes_per_op": null,
+            "write_calls_per_op": 256,
+            "write_bytes_per_op": 1048576,
+            "other_calls_per_op": 2819,
+            "window_s": 6.0299986,
+            "ops_total_incl_warmup": 90,
+            "pages_per_s": 3188.7442642047345
+          },
+          "verify": "passed: 1025 of 19429 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "1 random 4 KiB pages + one barrier",
+          "metric": "pages/s",
+          "better": "higher",
+          "store_io": 2647.815164285014,
+          "raw": 2776.599679637913,
+          "fsys": 1640.1101279173743,
+          "store_io_vs_raw_ratio": 0.9536179031146134,
+          "store_io_vs_fsys_ratio": 1.6144130319146508,
+          "store_io_advantage_vs_raw_pct": -4.638209688538664,
+          "store_io_advantage_vs_fsys_pct": 61.44130319146508,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "1 random 4 KiB pages + one barrier",
+          "metric": "commit p99 µs",
+          "better": "lower",
+          "store_io": 641.4,
+          "raw": 592.8,
+          "fsys": 920.9,
+          "store_io_vs_raw_ratio": 1.0819838056680162,
+          "store_io_vs_fsys_ratio": 0.6964925616244978,
+          "store_io_advantage_vs_raw_pct": -8.198380566801621,
+          "store_io_advantage_vs_fsys_pct": 30.35074383755022,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "16 random 4 KiB pages + one barrier",
+          "metric": "pages/s",
+          "better": "higher",
+          "store_io": 31946.776339899043,
+          "raw": 40886.31999219085,
+          "fsys": 2878.2557513731913,
+          "store_io_vs_raw_ratio": 0.7813561197486291,
+          "store_io_vs_fsys_ratio": 11.099352906585006,
+          "store_io_advantage_vs_raw_pct": -21.864388025137092,
+          "store_io_advantage_vs_fsys_pct": 1009.9352906585005,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "16 random 4 KiB pages + one barrier",
+          "metric": "commit p99 µs",
+          "better": "lower",
+          "store_io": 1066.1,
+          "raw": 701.4,
+          "fsys": 101547.8,
+          "store_io_vs_raw_ratio": 1.5199600798403192,
+          "store_io_vs_fsys_ratio": 0.010498504152724134,
+          "store_io_advantage_vs_raw_pct": -51.99600798403192,
+          "store_io_advantage_vs_fsys_pct": 98.95014958472758,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "64 random 4 KiB pages + one barrier",
+          "metric": "pages/s",
+          "better": "higher",
+          "store_io": 76400.47163369195,
+          "raw": 51712.007787841576,
+          "fsys": 3390.9157885857576,
+          "store_io_vs_raw_ratio": 1.4774222642280597,
+          "store_io_vs_fsys_ratio": 22.530925684107345,
+          "store_io_advantage_vs_raw_pct": 47.74222642280597,
+          "store_io_advantage_vs_fsys_pct": 2153.0925684107347,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "64 random 4 KiB pages + one barrier",
+          "metric": "commit p99 µs",
+          "better": "lower",
+          "store_io": 1694.6,
+          "raw": 1917.6,
+          "fsys": 36443.9,
+          "store_io_vs_raw_ratio": 0.8837088026700042,
+          "store_io_vs_fsys_ratio": 0.04649886537939133,
+          "store_io_advantage_vs_raw_pct": 11.629119732999582,
+          "store_io_advantage_vs_fsys_pct": 95.35011346206088,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "256 random 4 KiB pages + one barrier",
+          "metric": "pages/s",
+          "better": "higher",
+          "store_io": 53991.96506060967,
+          "raw": 91534.70684441825,
+          "fsys": 3188.7442642047345,
+          "store_io_vs_raw_ratio": 0.5898523841058445,
+          "store_io_vs_fsys_ratio": 16.932046155816494,
+          "store_io_advantage_vs_raw_pct": -41.01476158941555,
+          "store_io_advantage_vs_fsys_pct": 1593.2046155816493,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        },
+        {
+          "case": "256 random 4 KiB pages + one barrier",
+          "metric": "commit p99 µs",
+          "better": "lower",
+          "store_io": 13853.2,
+          "raw": 4809.3,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 2.8805023600108126,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -188.05023600108126,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "PageBatch::commit vs raw QD-N writes + flush vs fsys write_at x N + sync"
+        }
+      ],
+      "findings": [],
+      "anomalies": []
+    }
+  ]
+}

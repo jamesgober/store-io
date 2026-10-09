@@ -25,9 +25,9 @@ targets        = ["x86_64-pc-windows-msvc"]
 workspace = true
 
 [dependencies]
-store-io-core     = { path = "../store-io-core", version = "0.1.0" }
-store-io-buf      = { path = "../store-io-buf", version = "0.1.0" }
-store-io-platform = { path = "../store-io-platform", version = "0.1.0" }
+store-io-core     = { path = "../store-io-core", version = "0.3.0" }
+store-io-buf      = { path = "../store-io-buf", version = "0.3.0" }
+store-io-platform = { path = "../store-io-platform", version = "0.3.0" }
 
 # Raw Win32 and ntdll bindings (CreateFileW, overlapped Read/WriteFile, IOCP,
 # NtFlushBuffersFileEx, SetFileInformationByHandle, LockFileEx, DeviceIoControl

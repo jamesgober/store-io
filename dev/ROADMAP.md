@@ -105,7 +105,7 @@ Exit criteria:
 
 It runs on every backend, and the simple and batch layers are rebuilt on top of it.
 
-**Linux.** The io_uring backend (`store-io-uring`):
+**Linux.** The io_uring tier, built into the Linux backend with store-io's own private io_uring binding (no third-party io_uring crate; Linux depends on `libc` only):
 - one ring per thread;
 - direct descriptors and registered buffers;
 - no kernel worker threads, ever: every ring read and write is non-blocking, and anything that would block runs on store-io's own path.
@@ -123,7 +123,7 @@ Linux also gets a bounded worker pool for the synchronous tier, and the tier (io
 - the mutation list in CI.
 
 Exit criteria:
-- [ ] `cargo vet` passes, with `io-uring` self-audited. The observer is compiled out when off and costs at most 20 ns per operation when on. Fuzz targets run a CI smoke. The mutation list runs in CI with no survivor.
+- [ ] `cargo vet` passes. The observer is compiled out when off and costs at most 20 ns per operation when on. Fuzz targets run a CI smoke. The mutation list runs in CI with no survivor.
 - [ ] No io-wq worker thread exists after any CI workload, on every kernel and filesystem tested. Non-blocking fallbacks are counted and reported per (filesystem, kernel). This replaces the io-wq punt table: punts are not allowed at all.
 - [ ] dm-log-writes replay in Linux CI: every crash state between flush marks of a store workload, checked for every receipt. This covers prefix states, plus subset enumeration for batches (moved from v0.3).
 - [ ] 60 s idle: zero syscalls, wakeups, timers and I/O. The window starts as soon as the store is idle; there is no exemption window.

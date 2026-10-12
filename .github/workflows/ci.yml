@@ -215,5 +215,5 @@ jobs:
         run: |
           for t in slot_validate pair_torn_update meta_decode table_decode; do
             mkdir -p "corpus/$t"
-            cargo fuzz run "$t" "corpus/$t" -- -max_total_time=60
+            cargo +nightly fuzz run "$t" "corpus/$t" -- -max_total_time=60
           done

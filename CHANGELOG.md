@@ -23,6 +23,11 @@
 - `store-io-engine`: a read-only open needs no write rights, and readers share the store.
   - **Before.** `open_readonly` opened the container read-write to take the exclusive ownership lock. It failed on a read-only mount, a write-protected file or a backup copy, which is where a recovery tool most needs it, and two readers excluded each other.
   - **Now.** It opens one read-only handle and takes a shared lock on it. Any number of readers can open a store at once; readers and the writer still exclude each other.
+- `store-io-posix`: a malformed `uevent` device name (one ending in `/`) gave
+  the probe an empty device name, so it looked up the wrong ext4 options file
+  and skipped its fallback to the mount source. The mount options were then
+  reported missing (a more cautious class, never a wrong one). Such a name is
+  now no answer, and the fallback runs. Found by the new probe fuzz target.
 - `store-io-engine`: a media error names the exact failing sector.
   - **Before.** Bisection stopped at the 4 KiB store block, so one bad 512-byte sector cost the caller seven readable ones. A read larger than one buffer named only the whole requested range.
   - **Now.** Scans and reads bisect down to the device's logical block (or the direct-I/O alignment, if larger) where the probe reports it, and every read names the exact unreadable range.
@@ -64,6 +69,12 @@
   - `meta_decode`: the volume record and region header round-trip;
   - `table_decode`: an accepted table drops no entry, obeys the id, name,
     alignment and overlap rules, and round-trips.
+  - `probe_linux` and `probe_windows`: the device probe's parsers (sysfs and
+    procfs text, `mountinfo`, `uevent`, NVMe pages; Windows storage
+    descriptors, protocol-specific answers, volume structures) on hostile
+    input. Both run on Linux: the Windows parsers are pure and now compile on
+    every platform, their few SDK constants pinned to `windows-sys` by
+    compile-time assertions on Windows.
 - CI: `cargo vet` (job "Security"). Audits are imported from Mozilla, Google,
   the Bytecode Alliance, Embark, ISRG and Zcash; `windows-sys` is trusted
   through its publisher; `libc` and `loom`'s test-only tree are exempted,

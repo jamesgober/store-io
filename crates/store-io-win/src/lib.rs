@@ -37,12 +37,26 @@
 
 #[cfg(windows)]
 mod alloc;
-#[cfg(windows)]
+#[cfg(any(windows, fuzzing))]
+#[cfg_attr(not(windows), allow(dead_code))]
 mod bytes;
 #[cfg(windows)]
 mod dir;
 #[cfg(windows)]
 mod file;
+/// Fuzz entry point for the probe's parsers (cargo-fuzz builds only, on any
+/// platform: the parsers are pure).
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing;
+// Off Windows, a fuzz build compiles only the probe's pure parsers.
+#[cfg(all(not(windows), fuzzing))]
+#[allow(dead_code)]
+mod probe {
+    pub(crate) mod nvme;
+    pub(crate) mod storage;
+    pub(crate) mod volume;
+}
 #[cfg(windows)]
 mod lock;
 #[cfg(windows)]

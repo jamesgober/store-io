@@ -78,4 +78,53 @@ tbl = struct.pack("<II", 3, 2) + bytes(8)
 tbl += entry(1, 1, "wal", 8 * 4096, 1 << 20)
 tbl += entry(2, 2, "pages", 8 * 4096 + 2 * 4096 + (1 << 20), 1 << 20, tag=9)
 write("table_decode", "two-entries", bytes([0]) + tbl)
+
+# probe_parsers: first byte selects the parser (see the backends' fuzzing.rs).
+mi = b"36 35 98:0 /mnt1 /mnt/parent\040dir rw,noatime master:1 - ext4 /dev/root rw,errors=continue"
+write("probe_linux", "mountinfo", bytes([0]) + mi)
+table = mi + b"\n37 36 8:1 / /data rw - xfs /dev/sda1 rw,attr2\n"
+write("probe_linux", "find-mount", bytes([1]) + table + b"\n37\n/data/store")
+write("probe_linux", "uevent", bytes([2]) + b"MAJOR=259\nMINOR=0\nDEVNAME=nvme0n1\nDEVTYPE=disk\n")
+write("probe_linux", "sysfs-values", bytes([5]) + b"1024\n")
+write("probe_linux", "dm", bytes([6]) + b"luks-root\nCRYPT-LUKS2-0123-root")
+write("probe_linux", "md", bytes([7]) + b"raid5\nresync\n0")
+write("probe_linux", "virt", bytes([10, 3]) + b"QEMU\nStandard PC\n\n6.6.87.2-microsoft-standard-WSL2\nflags : fpu hypervisor")
+# A Linux NVMe Identify Namespace page (selector 11, unpadded): 2 formats,
+# format 1 in use with 4 KiB blocks.
+ns = bytearray(4096)
+ns[25] = 1      # nlbaf (0-based count)
+ns[26] = 1      # flbas: format 1
+ns[128 + 4 * 0 + 2] = 9
+ns[128 + 4 * 1 + 2] = 12
+write("probe_linux", "nvme-id-ns", bytes([11]) + bytes(ns))
+ctrl = bytearray(4096)
+ctrl[24:24 + 12] = b"Example SSD "
+ctrl[64:72] = b"FW1.0   "
+ctrl[525] = 1
+write("probe_linux", "nvme-id-ctrl", bytes([11]) + bytes(ctrl))
+# probe_windows: first byte selects the parser; bit 7 pads to a 4 KiB page.
+wns = bytearray(4096)
+wns[24] = 0x18   # nsfeat: NSABP and NPWG fields valid
+wns[25] = 1      # nlbaf
+wns[26] = 1      # flbas: format 1
+wns[128 + 4 * 0 + 2] = 9
+wns[128 + 4 * 1 + 2] = 12
+write("probe_windows", "nvme-id-ns", bytes([1]) + bytes(wns))
+write("probe_windows", "nvme-id-ctrl", bytes([0]) + bytes(ctrl))
+# STORAGE_DEVICE_DESCRIPTOR: vendor/product/revision offsets at 12/16/20,
+# bus type at 28, strings after the fixed part.
+desc = bytearray(64)
+struct.pack_into("<IIII", desc, 12, 40, 48, 60, 0)
+struct.pack_into("<I", desc, 28, 0x11)
+desc[40:47] = b"VENDOR\x00"
+desc[48:59] = b"MODEL 1234\x00"
+desc[60:63] = b"1.0"
+write("probe_windows", "device-descriptor", bytes([3]) + bytes(desc))
+# STORAGE_PROTOCOL_DATA_DESCRIPTOR: version, size, then the 40-byte
+# protocol-specific data with the data offset and length.
+pd = bytearray(8 + 40 + 16)
+struct.pack_into("<II", pd, 8 + 16, 40, 16)
+write("probe_windows", "protocol-data", bytes([2]) + bytes(pd))
+write("probe_windows", "disk-extents", bytes([5]) + struct.pack("<IIIqq", 1, 0, 2, 0, 1 << 30))
+
 print("seeds written")

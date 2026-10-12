@@ -8,9 +8,9 @@
 //! flush. Whatever cannot be read stays `Unknown` and is listed in
 //! `Evidence::missing`. This module never decides a class.
 
-mod nvme;
-mod storage;
-mod volume;
+pub(crate) mod nvme;
+pub(crate) mod storage;
+pub(crate) mod volume;
 
 use store_io_core::class::Missing;
 use store_io_core::evidence::{Bus, Evidence, FsKind, OsCacheMode, PlatformKind, Privilege, Tri};

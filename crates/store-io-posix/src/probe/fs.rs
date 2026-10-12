@@ -220,7 +220,11 @@ pub(crate) fn uevent_devname(text: &str) -> Option<String> {
                 && n.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'/')
         })
-        .map(|n| n.rsplit('/').next().unwrap_or(n).to_owned())
+        .and_then(|n| n.rsplit('/').next())
+        // A name ending in '/' has no last component: no answer, so the
+        // caller falls back to the mount source (found by fuzzing).
+        .filter(|n| !n.is_empty())
+        .map(str::to_owned)
 }
 
 /// Last component of a path-like string.
@@ -604,6 +608,10 @@ mod tests {
         );
         assert_eq!(uevent_devname("DEVNAME=../etc\n"), None);
         assert_eq!(uevent_devname("DEVNAME=\n"), None);
+        // No last component (found by fuzzing): no answer, so the probe
+        // falls back to the mount source instead of an empty name.
+        assert_eq!(uevent_devname("DEVNAME=EJV//\n"), None);
+        assert_eq!(uevent_devname("DEVNAME=/\n"), None);
         assert_eq!(uevent_devname("MAJOR=8\n"), None);
         assert_eq!(basename("/dev/sdd"), Some("sdd"));
         assert_eq!(basename("sdd"), Some("sdd"));

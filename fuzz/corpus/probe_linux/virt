@@ -1,0 +1,6 @@
+
+QEMU
+Standard PC
+
+6.6.87.2-microsoft-standard-WSL2
+flags : fpu hypervisor

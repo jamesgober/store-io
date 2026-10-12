@@ -3,14 +3,16 @@
 //!
 //! Field offsets follow `ntddstor.h` / `winioctl.h`; each parser reads
 //! through [`Reader`] so a short or hostile buffer yields `None`.
+//!
+//! The parsers compile on every platform (for fuzzing, which runs on
+//! Linux): the few Windows constants they use are copied here, and on
+//! Windows a compile-time assertion pins each copy to `windows-sys`.
 
+#[cfg(windows)]
 use core::mem::offset_of;
 
 use store_io_core::evidence::{Bus, Hypervisor};
-use windows_sys::Win32::Storage::FileSystem::{
-    BusTypeAta, BusTypeFileBackedVirtual, BusTypeNvme, BusTypeRAID, BusTypeSas, BusTypeSata,
-    BusTypeScsi, BusTypeSpaces, BusTypeUsb, BusTypeVirtual, BusTypeiScsi,
-};
+#[cfg(windows)]
 use windows_sys::Win32::System::Ioctl::{
     NVMeDataTypeFeature, NVMeDataTypeIdentify, NVMeDataTypeLogPage, PropertyStandardQuery,
     ProtocolTypeNvme, STORAGE_PROPERTY_QUERY, STORAGE_PROTOCOL_SPECIFIC_DATA,
@@ -19,8 +21,40 @@ use windows_sys::Win32::System::Ioctl::{
 use crate::bytes::Reader;
 
 /// Size of `STORAGE_PROTOCOL_SPECIFIC_DATA`.
-const SPSD_LEN: usize = size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>();
+const SPSD_LEN: usize = 40;
+/// `STORAGE_BUS_TYPE` values (`ntddstor.h`).
+const BUS_SCSI: i32 = 0x1;
+const BUS_ATA: i32 = 0x3;
+const BUS_USB: i32 = 0x7;
+const BUS_RAID: i32 = 0x8;
+const BUS_ISCSI: i32 = 0x9;
+const BUS_SAS: i32 = 0xA;
+const BUS_SATA: i32 = 0xB;
+const BUS_VIRTUAL: i32 = 0xE;
+const BUS_FILE_BACKED_VIRTUAL: i32 = 0xF;
+const BUS_SPACES: i32 = 0x10;
+const BUS_NVME: i32 = 0x11;
+
+// The copies above, pinned to the SDK's values where the SDK is available.
+#[cfg(windows)]
+const _: () = {
+    use windows_sys::Win32::Storage::FileSystem as fs;
+    assert!(SPSD_LEN == size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>());
+    assert!(BUS_SCSI == fs::BusTypeScsi);
+    assert!(BUS_ATA == fs::BusTypeAta);
+    assert!(BUS_USB == fs::BusTypeUsb);
+    assert!(BUS_RAID == fs::BusTypeRAID);
+    assert!(BUS_ISCSI == fs::BusTypeiScsi);
+    assert!(BUS_SAS == fs::BusTypeSas);
+    assert!(BUS_SATA == fs::BusTypeSata);
+    assert!(BUS_VIRTUAL == fs::BusTypeVirtual);
+    assert!(BUS_FILE_BACKED_VIRTUAL == fs::BusTypeFileBackedVirtual);
+    assert!(BUS_SPACES == fs::BusTypeSpaces);
+    assert!(BUS_NVME == fs::BusTypeNvme);
+};
+
 /// Offset of `AdditionalParameters` (where protocol data begins) in the query.
+#[cfg(windows)]
 const QUERY_PARAMS: usize = offset_of!(STORAGE_PROPERTY_QUERY, AdditionalParameters);
 /// Offset of `ProtocolSpecificData` in `STORAGE_PROTOCOL_DATA_DESCRIPTOR`.
 const DESC_SPSD: usize = 8;
@@ -34,6 +68,7 @@ pub(crate) const NVME_LOG_HEALTH: u32 = 0x02;
 pub(crate) const NVME_FEATURE_VWC: u32 = 0x06;
 
 /// A plain `STORAGE_PROPERTY_QUERY` for `id`.
+#[cfg(windows)]
 pub(crate) fn property_query(id: i32) -> Vec<u8> {
     let mut q = vec![0u8; size_of::<STORAGE_PROPERTY_QUERY>()];
     q[..4].copy_from_slice(&id.to_le_bytes());
@@ -54,6 +89,7 @@ pub(crate) enum NvmeQuery {
 
 /// A `StorageDeviceProtocolSpecificProperty` query buffer, also used as the
 /// output buffer, with room for `data_len` bytes of protocol data.
+#[cfg(windows)]
 pub(crate) fn nvme_query(property_id: i32, q: NvmeQuery, data_len: u32) -> Vec<u8> {
     let (data_type, value, sub) = match q {
         NvmeQuery::Identify { cns, nsid } => (NVMeDataTypeIdentify, cns, nsid),
@@ -179,15 +215,11 @@ pub(crate) fn parse_disk_extents(buf: &[u8]) -> Option<(u32, u32)> {
 /// Maps a `STORAGE_BUS_TYPE` to the evidence vocabulary.
 pub(crate) fn bus_from_code(code: i32) -> Bus {
     match code {
-        c if c == BusTypeNvme => Bus::Nvme,
-        c if c == BusTypeSata || c == BusTypeAta => Bus::Sata,
-        c if c == BusTypeScsi || c == BusTypeSas || c == BusTypeiScsi || c == BusTypeRAID => {
-            Bus::Scsi
-        }
-        c if c == BusTypeUsb => Bus::Usb,
-        c if c == BusTypeVirtual || c == BusTypeFileBackedVirtual || c == BusTypeSpaces => {
-            Bus::Virtual
-        }
+        BUS_NVME => Bus::Nvme,
+        BUS_SATA | BUS_ATA => Bus::Sata,
+        BUS_SCSI | BUS_SAS | BUS_ISCSI | BUS_RAID => Bus::Scsi,
+        BUS_USB => Bus::Usb,
+        BUS_VIRTUAL | BUS_FILE_BACKED_VIRTUAL | BUS_SPACES => Bus::Virtual,
         _ => Bus::Unknown,
     }
 }
@@ -221,6 +253,7 @@ pub(crate) fn hypervisor_from(bus: Bus, model: Option<&str>) -> Option<Hyperviso
 }
 
 /// The `\\.\PhysicalDriveN` name, NUL-terminated UTF-16.
+#[cfg(windows)]
 pub(crate) fn physical_drive_name(n: u32) -> Vec<u16> {
     crate::sys::wide_str(&format!("\\\\.\\PhysicalDrive{n}"))
 }

@@ -50,6 +50,10 @@ mod alloc;
 mod dir;
 #[cfg(target_os = "linux")]
 mod file;
+/// Fuzz entry point for the probe's parsers (cargo-fuzz builds only).
+#[cfg(all(target_os = "linux", fuzzing))]
+#[doc(hidden)]
+pub mod fuzzing;
 #[cfg(target_os = "linux")]
 mod lock;
 #[cfg(target_os = "linux")]

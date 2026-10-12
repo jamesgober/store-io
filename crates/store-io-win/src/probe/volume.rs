@@ -2,13 +2,31 @@
 //! attributes and drive type.
 
 use store_io_core::evidence::{FsKind, Tri};
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
-    FILE_ATTRIBUTE_RECALL_ON_OPEN, FILE_ATTRIBUTE_SPARSE_FILE,
-};
-use windows_sys::Win32::System::WindowsProgramming::{DRIVE_RAMDISK, DRIVE_REMOTE};
 
 use crate::bytes::Reader;
+
+// Copies of the SDK constants these parsers use, so they compile on every
+// platform (for fuzzing); pinned to `windows-sys` on Windows below.
+const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x200;
+const FILE_ATTRIBUTE_COMPRESSED: u32 = 0x800;
+const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
+const FILE_ATTRIBUTE_RECALL_ON_OPEN: u32 = 0x4_0000;
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+const DRIVE_REMOTE: u32 = 4;
+const DRIVE_RAMDISK: u32 = 6;
+
+#[cfg(windows)]
+const _: () = {
+    use windows_sys::Win32::Storage::FileSystem as fs;
+    use windows_sys::Win32::System::WindowsProgramming as wp;
+    assert!(FILE_ATTRIBUTE_SPARSE_FILE == fs::FILE_ATTRIBUTE_SPARSE_FILE);
+    assert!(FILE_ATTRIBUTE_COMPRESSED == fs::FILE_ATTRIBUTE_COMPRESSED);
+    assert!(FILE_ATTRIBUTE_ENCRYPTED == fs::FILE_ATTRIBUTE_ENCRYPTED);
+    assert!(FILE_ATTRIBUTE_RECALL_ON_OPEN == fs::FILE_ATTRIBUTE_RECALL_ON_OPEN);
+    assert!(FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS == fs::FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS);
+    assert!(DRIVE_REMOTE == wp::DRIVE_REMOTE);
+    assert!(DRIVE_RAMDISK == wp::DRIVE_RAMDISK);
+};
 
 /// Maps a filesystem name from `GetVolumeInformationByHandleW`.
 pub(crate) fn fs_kind(name: &str) -> FsKind {
@@ -31,8 +49,8 @@ pub(crate) enum DriveClass {
 
 pub(crate) fn drive_class(drive_type: u32) -> DriveClass {
     match drive_type {
-        t if t == DRIVE_REMOTE => DriveClass::Network,
-        t if t == DRIVE_RAMDISK => DriveClass::Ram,
+        DRIVE_REMOTE => DriveClass::Network,
+        DRIVE_RAMDISK => DriveClass::Ram,
         _ => DriveClass::Local,
     }
 }

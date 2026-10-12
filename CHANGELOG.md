@@ -54,6 +54,16 @@
 - Tests: on NTFS, ext4 and XFS, releasing a region leaves the regions on
   either side, the slots and the table intact, before and after a reopen; on
   Windows the container keeps its length and does not become sparse.
+- Fuzz targets (`fuzz/`, cargo-fuzz) with a seed corpus of valid on-disk
+  structures, run for 60 s each in CI (job "Fuzz smoke"). Each target checks
+  a property, not only the absence of panics:
+  - `slot_validate`: validation is deterministic, and an accepted slot is
+    exactly what the encoder writes;
+  - `pair_torn_update`: after an update torn at any set of 512-byte sectors,
+    the A/B pair decides for the old or the new version, never anything else;
+  - `meta_decode`: the volume record and region header round-trip;
+  - `table_decode`: an accepted table drops no entry, obeys the id, name,
+    alignment and overlap rules, and round-trips.
 - CI: `cargo vet` (job "Security"). Audits are imported from Mozilla, Google,
   the Bytecode Alliance, Embark, ISRG and Zcash; `windows-sys` is trusted
   through its publisher; `libc` and `loom`'s test-only tree are exempted,

@@ -1,0 +1,55 @@
+# =============================================================================
+#  R E P S   ·   store-io-fuzz
+# =============================================================================
+# cargo-fuzz targets for the on-disk decoders (D-064). A separate workspace:
+# never published, never part of the library's dependency graph.
+#
+#   cargo +nightly fuzz run <target> -- -max_total_time=60
+#
+# Targets: slot_validate, pair_torn_update, meta_decode, table_decode.
+[package]
+name         = "store-io-fuzz"
+version      = "0.0.0"
+edition      = "2024"
+rust-version = "1.85"
+publish      = false
+license      = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys   = "=0.4.13"
+store-io-format = { path = "../crates/store-io-format" }
+
+# Not a member of the library workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name  = "slot_validate"
+path  = "fuzz_targets/slot_validate.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "pair_torn_update"
+path  = "fuzz_targets/pair_torn_update.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "meta_decode"
+path  = "fuzz_targets/meta_decode.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "table_decode"
+path  = "fuzz_targets/table_decode.rs"
+test  = false
+doc   = false
+bench = false

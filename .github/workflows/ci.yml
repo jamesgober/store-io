@@ -196,3 +196,24 @@ jobs:
         run: cargo deny check
       - name: Vet
         run: cargo vet --locked
+
+  fuzz:
+    name: Fuzz smoke (60 s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Run every target from its seed corpus
+        working-directory: fuzz
+        run: |
+          for t in slot_validate pair_torn_update meta_decode table_decode; do
+            mkdir -p "corpus/$t"
+            cargo fuzz run "$t" "corpus/$t" -- -max_total_time=60
+          done

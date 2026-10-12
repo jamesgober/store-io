@@ -4,6 +4,9 @@
 
 # Rust / Cargo
 /target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
 **/*.rs.bk
 
 # Benchmark and harness output

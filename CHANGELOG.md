@@ -23,6 +23,9 @@
 - `store-io-engine`: a read-only open needs no write rights, and readers share the store.
   - **Before.** `open_readonly` opened the container read-write to take the exclusive ownership lock. It failed on a read-only mount, a write-protected file or a backup copy, which is where a recovery tool most needs it, and two readers excluded each other.
   - **Now.** It opens one read-only handle and takes a shared lock on it. Any number of readers can open a store at once; readers and the writer still exclude each other.
+- `store-io-engine`: a media error names the exact failing sector.
+  - **Before.** Bisection stopped at the 4 KiB store block, so one bad 512-byte sector cost the caller seven readable ones. A read larger than one buffer named only the whole requested range.
+  - **Now.** Scans and reads bisect down to the device's logical block (or the direct-I/O alignment, if larger) where the probe reports it, and every read names the exact unreadable range.
 - `store-io-engine`: `Directory` refuses a change it could never make durable before writing anything.
   - **Before.** On a file system that cannot flush directories, `replace` wrote the temporary file and renamed it over the target, then failed on the directory flush. The target had already changed, with no durability.
   - **Now.** `Directory::open` tries a directory flush. If it is unsupported, every `replace` and `remove` returns `Unsupported(DirectoryFlush)`; if it failed otherwise, `Io(SyncDir)`. In both cases nothing is written.

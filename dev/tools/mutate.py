@@ -76,6 +76,9 @@ M = [
  ("crates/store-io-engine/src/region.rs", "            s.inner.domain.count_already_durable();", "            {}"),
  # D-092: a read-only open takes the shared lock on its read-only handle
  ("crates/store-io-engine/src/store.rs", "            platform.lock_shared(&file)", "            platform.lock_exclusive(&file)"),
+ # Sector-exact bisection, and the pipelined read names the exact range
+ ("crates/store-io-engine/src/io.rs", "        need.next_power_of_two().min(self.block())", "        self.block()"),
+ ("crates/store-io-engine/src/io.rs", "                Some((start, end)) => ctx_range(r, start, end),", "                Some(_) => c,"),
 ]
 
 def kill_stuck_tests():

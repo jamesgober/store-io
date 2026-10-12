@@ -40,7 +40,7 @@
 ## Design gaps carried into the architecture phase
 
 - [ ] Streaming copy for backup and replication (sink protocol, bounded memory).
-- [x] Finding the exact bad sector when a read fails: scans bisect a failing read down to one store block (LBA-exact where the block is larger than the logical block is still open).
+- [x] Finding the exact bad sector when a read fails: scans and reads bisect a failing read down to one logical block (sector) where the probe reports it, else one store block.
 - [ ] Keeping commit writes fast while background writes run (store-io's own pacing).
 
 ## Found while documenting (2026-10-09), not yet fixed

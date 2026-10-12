@@ -209,6 +209,19 @@ where
         self.inner.layout.block()
     }
 
+    /// The smallest read the bisection of a failed read goes down to: the
+    /// device's logical block, or the file system's direct-I/O offset
+    /// alignment if larger, where the probe reports them; the store block
+    /// where it reports neither. Always a power of two dividing the block.
+    pub(crate) fn sector(&self) -> u64 {
+        let ev = &self.inner.report.evidence;
+        let need = u64::from(ev.device.logical_block.max(ev.fs.dio_offset_align));
+        if need == 0 {
+            return self.block();
+        }
+        need.next_power_of_two().min(self.block())
+    }
+
     /// The largest single write: the pool's largest buffer in whole blocks.
     pub(crate) fn chunk(&self) -> usize {
         let block = self.block() as usize;
@@ -492,7 +505,7 @@ where
         c: ErrorContext,
     ) -> Result<usize, Error> {
         let mut copied = 0usize;
-        let mut unreadable = false;
+        let mut unreadable = None;
         let summary = self.scan_region(r, offset, offset + len, |item| match item {
             ScanItem::Data { offset: at, bytes } => {
                 let start = (at - offset) as usize;
@@ -503,15 +516,20 @@ where
                 }
                 ControlFlow::Continue(())
             }
-            ScanItem::Unreadable { .. } => {
-                unreadable = true;
+            ScanItem::Unreadable { start, end } => {
+                unreadable = Some((start, end));
                 ControlFlow::Break(())
             }
         })?;
-        if unreadable || summary.unreadable > 0 {
+        if unreadable.is_some() || summary.unreadable > 0 {
+            // Name the exact range, as a single read does.
+            let ctx = match unreadable {
+                Some((start, end)) => ctx_range(r, start, end),
+                None => c,
+            };
             return Err(Error::Corruption {
                 kind: CorruptionKind::MediaError,
-                ctx: c,
+                ctx,
             });
         }
         Ok(copied)

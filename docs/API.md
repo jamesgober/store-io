@@ -181,7 +181,7 @@ None of these can be constructed outside store-io.
 | `ScanItem` | Meaning |
 |---|---|
 | `Data { offset, bytes }` | Bytes read at region offset `offset`. |
-| `Unreadable { start, end }` | The device could not read these whole blocks; the scan continues after them. |
+| `Unreadable { start, end }` | The device could not read these whole sectors (the device's logical blocks where the probe knows them, else store blocks); the scan continues after them. |
 
 `visit` returns `ControlFlow::Continue(())` or `ControlFlow::Break(())`. `ScanSummary` reports `end` (one past the last byte delivered), `unreadable` (bytes reported unreadable) and `stopped`. Scans use direct I/O with eight large reads in flight, and work on read-only and poisoned stores.
 

@@ -163,7 +163,7 @@ store-io never decides what you keep after a crash; it gives you the bytes and g
 let store = Store::open_readonly("data/orders")?;
 ```
 
-**Scan to find where your valid data ends.** A scan hands you every byte of a region in order, keeping several large direct reads in flight. It never stops at bad data: a range the device cannot read is narrowed down to whole blocks, reported as `Unreadable`, and skipped.
+**Scan to find where your valid data ends.** A scan hands you every byte of a region in order, keeping several large direct reads in flight. It never stops at bad data: a range the device cannot read is narrowed down to the failing sectors (512 bytes on most drives, even inside a 4 KiB store block), reported as `Unreadable`, and skipped. Every other byte is still delivered. A plain `read` that hits a bad sector fails with `Corruption(MediaError)` naming the same exact range.
 
 ```rust
 use std::ops::ControlFlow;

@@ -9,10 +9,11 @@
     unused_must_use
 )]
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use store_io_core::error::{CorruptionKind, Error, Op};
-use store_io_engine::{CONTAINER, Store, StoreOptions};
+use store_io_engine::{CONTAINER, ScanItem, Store, StoreOptions};
 use store_io_sim::{FaultPlan, SimConfig, SimPlatform};
 
 const DIR: &str = "/db";
@@ -95,4 +96,80 @@ fn test_a_media_error_names_the_exact_unreadable_block() {
     p.with_world(|w| *w.faults_mut() = FaultPlan::default());
     pages.read(pages.pos(0).unwrap(), &mut out).unwrap();
     assert_eq!(out[6 * BLOCK as usize + 12], 7);
+}
+
+/// On a 512-byte-sector device, the bisection goes below the 4 KiB store
+/// block to the one failing sector: a single read, a read larger than one
+/// buffer and a scan all name exactly that sector, and a scan delivers every
+/// other byte. Before 0.4 the whole 4 KiB block was reported.
+#[test]
+fn test_a_media_error_names_the_exact_sector_below_the_store_block() {
+    let mut cfg = SimConfig::volatile(72);
+    cfg.logical_block = 512;
+    let p = SimPlatform::new(cfg);
+    let s = Store::create(p.clone(), Path::new(DIR), opts()).unwrap();
+    let pages = s.provision_page_region("pages", 4 << 20).unwrap();
+    let mut data = vec![0u8; 4 << 20];
+    data[..12].copy_from_slice(b"READ-ERR-TST");
+    for (i, b) in data.iter_mut().enumerate().skip(12) {
+        *b = (i % 249) as u8;
+    }
+    pages.write_durable(pages.pos(0).unwrap(), &data).unwrap();
+    let (file, base) = p.with_world(|w| {
+        let media = w.media_of(&PathBuf::from(DIR), CONTAINER).unwrap();
+        let at = media
+            .windows(12)
+            .position(|x| x == b"READ-ERR-TST")
+            .unwrap() as u64;
+        (w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap(), at)
+    });
+    // The third sector of block 5, and a sector deep in the region.
+    let bad = 5 * BLOCK + 1024;
+    let deep = (3 << 20) + 512;
+    p.with_world(|w| {
+        *w.faults_mut() = FaultPlan {
+            bad_ranges: vec![
+                (file, base + bad, base + bad + 512),
+                (file, base + deep, base + deep + 512),
+            ],
+            ..FaultPlan::default()
+        };
+    });
+    let named = |r: Result<usize, Error>| {
+        let Err(Error::Corruption { kind, ctx }) = r else {
+            panic!("expected Corruption, got {r:?}");
+        };
+        assert_eq!(kind, CorruptionKind::MediaError);
+        let range = ctx.range.unwrap();
+        (range.start, range.end)
+    };
+    let mut small = vec![0u8; 16 * BLOCK as usize];
+    assert_eq!(
+        named(pages.read(pages.pos(0).unwrap(), &mut small)),
+        (bad, bad + 512)
+    );
+    // Larger than one pooled buffer: the pipelined path.
+    let mut big = vec![0u8; 2 << 20];
+    assert_eq!(
+        named(pages.read(pages.pos(2 << 20).unwrap(), &mut big)),
+        (deep, deep + 512)
+    );
+    let mut unreadable = Vec::new();
+    let mut delivered = 0u64;
+    let summary = pages
+        .scan(0, |item| {
+            match item {
+                ScanItem::Data { offset, bytes } => {
+                    let at = offset as usize;
+                    assert!(bytes == &data[at..at + bytes.len()], "wrong bytes at {at}");
+                    delivered += bytes.len() as u64;
+                }
+                ScanItem::Unreadable { start, end } => unreadable.push((start, end)),
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert_eq!(unreadable, vec![(bad, bad + 512), (deep, deep + 512)]);
+    assert_eq!(summary.unreadable, 1024);
+    assert_eq!(delivered, (4 << 20) - 1024);
 }

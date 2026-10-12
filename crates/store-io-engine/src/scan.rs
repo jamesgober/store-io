@@ -6,8 +6,10 @@
 //! and delivers them strictly in order.
 //!
 //! A scan never stops at bad data. A read the device cannot complete is
-//! bisected down to single blocks; every block that still fails is reported
-//! as [`ScanItem::Unreadable`] (adjacent ones merged), and the scan carries on
+//! bisected down to single sectors (the device's logical block where the
+//! probe knows it and direct I/O allows reads that small; else the store
+//! block); every sector that still fails is reported as
+//! [`ScanItem::Unreadable`] (adjacent ones merged), and the scan carries on
 //! after it. Only the caller decides where valid data ends, by returning
 //! [`ControlFlow::Break`] from its visitor.
 
@@ -34,7 +36,8 @@ pub enum ScanItem<'a> {
         /// The bytes, exactly as the device returned them.
         bytes: &'a [u8],
     },
-    /// The device could not read `[start, end)` (whole blocks). The scan
+    /// The device could not read `[start, end)` (whole sectors: the
+    /// device's logical blocks where known, else store blocks). The scan
     /// continues after it; the range is not "end of data".
     Unreadable {
         /// First unreadable byte.
@@ -275,7 +278,8 @@ where
     }
 
     /// Reads `[start, start + len)` again in halves on an idle lane until each
-    /// failing piece is one block, delivering in order. Returns the buffer.
+    /// failing piece is one sector ([`Store::sector`]), delivering in order.
+    /// Returns the buffer.
     #[allow(clippy::too_many_arguments)]
     fn bisect<F>(
         &self,
@@ -293,7 +297,7 @@ where
         if out.sum.stopped {
             return Ok(buf);
         }
-        let block = self.block();
+        let sector = self.sector();
         // `len ≤ chunk ≤ capacity`.
         let _fits = buf.set_len(len as usize);
         let done = run(
@@ -325,11 +329,11 @@ where
                 Ok(buf)
             }
             Err(raw) if is_media_error(raw) => {
-                if len <= block {
+                if len <= sector {
                     out.unreadable(start, start + len);
                     return Ok(buf);
                 }
-                let half = (len / block).div_ceil(2) * block;
+                let half = (len / sector).div_ceil(2) * sector;
                 let buf = self.bisect(lane, r, start, half, buf, out, c)?;
                 self.bisect(lane, r, start + half, len - half, buf, out, c)
             }

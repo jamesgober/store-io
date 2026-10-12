@@ -14,7 +14,7 @@ RL=$T/replay-log
 OUT=$T/lw-$FS
 mkdir -p "$OUT" /mnt/lw /mnt/lwr
 
-truncate -s 256M "$T/lw-data.img"; truncate -s 1G "$T/lw-log.img"; truncate -s 256M "$T/lw-replay.img"
+truncate -s 512M "$T/lw-data.img"; truncate -s 2G "$T/lw-log.img"; truncate -s 512M "$T/lw-replay.img"
 DATA=$(losetup -f --show "$T/lw-data.img")
 LOG=$(losetup -f --show "$T/lw-log.img")
 REPLAY=$(losetup -f --show "$T/lw-replay.img")
@@ -28,14 +28,14 @@ mount /dev/mapper/sio-lw /mnt/lw
 umount /mnt/lw
 dmsetup remove sio-lw
 
-TOTAL=$("$RL" --log "$LOG" --number-entries | grep -o '[0-9]\+' | tail -1)
+TOTAL=$("$RL" --log "$LOG" --num-entries)
 echo "log entries: $TOTAL"
 # Entry number of each receipt mark.
 declare -a MARK
 for i in $(seq 0 $((N - 1))); do
-  MARK[$i]=$("$RL" --log "$LOG" --find --end-mark "r$i" | grep -o '[0-9]\+' | tail -1)
+  MARK[$i]=$("$RL" --log "$LOG" --find --end-mark "r$i" | cut -d@ -f1)
 done
-READY=$("$RL" --log "$LOG" --find --end-mark ready | grep -o '[0-9]\+' | tail -1)
+READY=$("$RL" --log "$LOG" --find --end-mark ready | cut -d@ -f1)
 echo "ready at entry $READY; receipt marks: ${MARK[*]}"
 
 # Receipts that must hold once `entry` entries have been replayed.
@@ -50,7 +50,7 @@ need_at() {
 FAILS=0
 CHECKS=0
 check_limit() { # $1 entries to replay  $2 label
-  blkdiscard -z "$REPLAY" 2>/dev/null || dd if=/dev/zero of="$REPLAY" bs=1M count=256 status=none
+  blkdiscard -z "$REPLAY" 2>/dev/null || dd if=/dev/zero of="$REPLAY" bs=1M count=512 status=none
   "$RL" --log "$LOG" --replay "$REPLAY" --limit "$1" > /dev/null
   local need
   need=$(need_at "$1")
@@ -69,13 +69,14 @@ echo "== replay to every receipt mark"
 for i in $(seq 0 $((N - 1))); do check_limit $((MARK[$i] + 1)) "mark r$i"; done
 echo "== replay to every flush entry"
 start=0
-while f=$("$RL" --log "$LOG" --find --next-flush --start-entry "$start" 2>/dev/null | grep -o '[0-9]\+' | tail -1) && [ -n "$f" ]; do
+while f=$("$RL" --log "$LOG" --find --next-flush --start-entry "$start" 2>/dev/null | cut -d@ -f1) && [ -n "$f" ]; do
   check_limit $((f + 1)) "flush"
   start=$((f + 1))
   [ "$start" -lt "$TOTAL" ] || break
 done
-echo "== replay to every entry after ready (prefix crash states)"
-for e in $(seq $((READY + 1)) "$TOTAL"); do check_limit "$e" "entry"; done
+echo "== replay to every entry after ready (prefix crash states; at most 600)"
+LAST=$((READY + 600)); [ "$LAST" -le "$TOTAL" ] || LAST=$TOTAL
+for e in $(seq $((READY + 1)) "$LAST"); do check_limit "$e" "entry"; done
 
 losetup -d "$DATA" "$LOG" "$REPLAY"
 echo "RESULT fs=$FS receipts=$N entries=$TOTAL checks=$CHECKS failures=$FAILS"

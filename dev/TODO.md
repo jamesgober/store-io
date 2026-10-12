@@ -33,6 +33,12 @@
 - [ ] **Error-derive crate** (our own `thiserror`): a small macro that writes `Display` and `Error` impls for error enums. store-io hand-writes these impls for now.
 - [ ] **Secure-wipe crate** (our own `zeroize`): wipe secret bytes so the compiler cannot skip the wipe (volatile writes + a compiler fence). store-io carries a small internal version for now.
 
+## Found in review (2026-10-12), not yet fixed
+
+- [ ] `errno::is_media_error` matches Linux errno numbers only (61, 74 and 117 mean other things on macOS). Harmless while the posix backend is Linux-only; make it per-OS like `is_unsupported` before the macOS backend (v0.5).
+- [ ] A region found unavailable (for example cut off by a short container) has no handle, so it can never be released, and while a truncated one exists the store refuses all growth. The store stays safe but cannot provision again. An explicit, logged repair operation needs a design and James's approval.
+- [ ] The `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` reasons are tested only through their error mapping, never by damaging a real store.
+
 ## Supply chain
 
 - [ ] Own `cargo vet` audit of `libc` (a delta from the newest version an imported audit set covers). Until then it is exempted in `supply-chain/config.toml`; `windows-sys` is trusted through its publisher, and only `loom`'s test-only tree is exempted besides.
@@ -49,7 +55,7 @@
 - [ ] Linux probe: NVMe over fabrics transports are reported as a local NVMe bus.
 - [ ] Windows probe: Identify Namespace always asks for namespace 1.
 - [ ] Defined but never produced: `Reason::KnownBug`, `Error::Fenced`, the `Filter` and `VirtualDisk` stack layers, and `DurableReceipt::untorn()` (always false until untorn writes are certified).
-- [ ] Open is lenient where it could be strict: a non-zero volume `features` value reports `Corruption` instead of `Unsupported`; the volume record's reserved bytes are not checked; a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently.
+- [ ] Open is lenient where it could be strict: a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently. (Fixed 2026-10-12: a non-zero volume `features` value or a longer record is refused as `Unsupported`, and the volume record's reserved bytes must be zero.)
 - [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
 - [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
 - [ ] A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).

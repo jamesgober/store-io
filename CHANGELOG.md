@@ -42,6 +42,25 @@
   - **Now.** A slot is unreadable only on a media error, a short read or a
     read past the end of the file. Any other failure fails the open with
     `Io` and its code.
+- `store-io-engine`: **opening a store could report a healthy store as
+  corrupt.** A transient read error (not a media error) while looking for the
+  volume record made open skip that location; on a store that had only been
+  created, the second copy is still blank, so open returned
+  `Corruption(HeaderCrc)`. A caller that recreates a store on corruption
+  would have destroyed it. Such an error now fails the open with `Io`.
+- `store-io-engine`: when open finds no valid copy of a metadata pair (the
+  volume record, the region table) and a read met a media error, it reports
+  `Corruption(MediaError)`, not `Corruption(HeaderCrc)`: the error may be
+  transient, and "corrupt" invites a caller to recreate the store. This
+  covers the search's probe reads and the full slot reads.
+- `store-io-engine`: a volume record from a newer format (a payload longer
+  than 48 bytes, or a non-zero `features` field) is refused with
+  `Unsupported(FormatVersion)` instead of being reported as corruption or
+  accepted and rewritten without its extra bytes.
+- `store-io-engine`: the bisection of a failed read halves in whole blocks
+  while a piece spans several, so every read of a block or more stays
+  block-aligned. Before, an odd number of blocks could be split mid-block,
+  which a device with large sectors refuses, aborting the scan.
 - `store-io-engine`: splitting a failed read below the store block now
   happens only where the probe reported the direct-I/O alignment. A device
   that refuses smaller reads (for example dm-crypt with 4 KiB sectors over a
@@ -111,6 +130,26 @@
     input. Both run on Linux: the Windows parsers are pure and now compile on
     every platform, their few SDK constants pinned to `windows-sys` by
     compile-time assertions on Windows.
+- Tests: the mutation check now treats any build failure as an invalid
+  mutation. Eight listed mutations had never compiled (a `deny(warnings)`
+  lint) and were being counted as caught, and three no longer matched the
+  code. All are rewritten so they build. Two then survived, exposing real
+  test gaps, now closed: a batch append that fails mid-record must leave no
+  partial bytes, and reservations, space reports and provisioning must take
+  their locks in one order (a concurrency test with a deadline). The list
+  has 67 mutations, all caught.
+- `store-io-sim`: `FaultPlan::read_only_media` also refuses creating files
+  and directories, renames and unlinks. A targeted `fail_read` takes
+  precedence over a bad range. New `World::misaligned_reads`.
+- `store-io-format`: the volume record's trailing reserved bytes must be zero
+  (every version so far wrote zeros there), so no future field can be read
+  and then dropped on rewrite.
+- `store-io-platform`: at most one lock (exclusive or shared) per handle,
+  documented.
+- Conformance: the shared-lock check releases readers one at a time and
+  requires the owner to stay excluded while any remains.
+- CI: the fuzz job uses a fixed nightly and keeps crash inputs as an
+  artifact; the mutation check also runs on pull requests.
 - CI: `cargo vet` (job "Security"). Audits are imported from Mozilla, Google,
   the Bytecode Alliance, Embark, ISRG and Zcash; `windows-sys` is trusted
   through its publisher; `libc` and `loom`'s test-only tree are exempted,

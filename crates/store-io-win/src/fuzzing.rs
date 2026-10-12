@@ -54,12 +54,18 @@ pub fn run(data: &[u8]) {
         }
         2 => {
             if let Some(p) = protocol_data(b) {
+                // Exactly the slice the descriptor declares: the offset and
+                // length fields of the protocol-specific data at byte 8.
+                let r = Reader::new(b);
+                let off = r.u32(8 + 16).map(|v| v as usize);
+                let len = r.u32(8 + 20).map(|v| v as usize);
                 let start = p.as_ptr() as usize - b.as_ptr() as usize;
-                assert!(
-                    start + p.len() <= b.len(),
-                    "protocol data outside the buffer"
+                assert_eq!(
+                    (Some(start), Some(p.len())),
+                    (off.map(|o| 8 + o), len),
+                    "protocol data not as declared"
                 );
-                assert!(!p.is_empty(), "empty protocol data");
+                assert!(!p.is_empty(), "empty protocol data accepted");
             }
             let _ = protocol_dword0(b);
         }
@@ -81,8 +87,14 @@ pub fn run(data: &[u8]) {
             let _ = parse_storage_info(b);
         }
         5 => {
-            if let Some((count, _disk)) = parse_disk_extents(b) {
-                assert!(count > 0, "zero extents reported as an answer");
+            if let Some((count, disk)) = parse_disk_extents(b) {
+                let r = Reader::new(b);
+                assert_eq!(
+                    (Some(count), Some(disk)),
+                    (r.u32(0), r.u32(8)),
+                    "extents misread"
+                );
+                assert!(count > 0, "zero extents accepted as an answer");
             }
         }
         6 => {

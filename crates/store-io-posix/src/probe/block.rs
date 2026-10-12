@@ -655,7 +655,12 @@ pub(crate) fn parse_id_ns(b: &[u8]) -> Option<IdNs> {
     let index = usize::from(flbas & 0xF) | (usize::from((flbas >> 5) & 0x3) << 4);
     let lba_bytes = if index <= nlbaf && index < 64 {
         let lbads = b[128 + 4 * index + 2];
-        if lbads < 32 { 1u32 << lbads } else { 0 }
+        // NVMe LBA sizes are 2^9 (512 B) and up; anything else is unknown.
+        if (9..32).contains(&lbads) {
+            1u32 << lbads
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -943,6 +948,16 @@ mod tests {
         b[26] = 0;
         b[128 + 2] = 63;
         assert_eq!(parse_id_ns(&b).map(|n| n.lba_bytes), Some(0));
+        // NVMe LBA sizes start at 512 B: a smaller LBADS is unknown, not a
+        // tiny block (it agrees with the Windows parser).
+        for lbads in [0, 1, 8] {
+            b[128 + 2] = lbads;
+            assert_eq!(
+                parse_id_ns(&b).map(|n| n.lba_bytes),
+                Some(0),
+                "lbads {lbads}"
+            );
+        }
         assert!(parse_id_ns(&b[..100]).is_none());
         assert!(parse_smart(&[0x10; NVME_SMART_LEN]).is_some_and(|cw| cw & 0x10 != 0));
         assert!(parse_smart(&[0; 511]).is_none());

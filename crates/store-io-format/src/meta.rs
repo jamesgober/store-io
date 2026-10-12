@@ -101,14 +101,20 @@ impl VolumeMeta {
         let log2_block_size = r.u8()?;
         let log2_table_slot_size = r.u8()?;
         let device_index = r.u16()?;
-        if r.u32()? != 0 {
-            return Err(MetaError::Field("reserved"));
-        }
+        let reserved_word = r.u32()?;
         let owner_generation = r.u64()?;
         let table_offset = r.u64()?;
         let created_unix_s = r.u64()?;
         let features = r.u64()?;
-        let _reserved = r.bytes(8)?;
+        let reserved_tail = r.bytes(8)?;
+        // Features first: a newer record that also reuses a reserved field or
+        // widens a range is still recognised as newer, not as damage.
+        if features != 0 {
+            return Err(MetaError::Field("features"));
+        }
+        if reserved_word != 0 || reserved_tail.iter().any(|&b| b != 0) {
+            return Err(MetaError::Field("reserved"));
+        }
         if !(12..=16).contains(&log2_block_size) {
             return Err(MetaError::Field("log2_block_size"));
         }
@@ -117,9 +123,6 @@ impl VolumeMeta {
         }
         if table_offset % (1u64 << log2_block_size) != 0 {
             return Err(MetaError::Unaligned);
-        }
-        if features != 0 {
-            return Err(MetaError::Field("features"));
         }
         Ok(Self {
             log2_block_size,
@@ -587,6 +590,32 @@ mod tests {
             Err(MetaError::Field("log2_block_size"))
         );
         assert_eq!(VolumeMeta::decode(&buf[..10]), Err(MetaError::Length));
+        // Every reserved byte must be zero: a value this version would
+        // otherwise accept and then drop on rewrite (found by review).
+        assert_eq!(v.encode(&mut buf), Ok(VOLUME_META_LEN));
+        for at in [4, 7, 40, 47] {
+            let mut b = buf;
+            b[at] = 1;
+            assert_eq!(
+                VolumeMeta::decode(&b),
+                Err(MetaError::Field("reserved")),
+                "byte {at}"
+            );
+        }
+        // A feature bit is reported first, whatever else a newer record
+        // changed, so open can refuse it as a newer format.
+        let mut newer = v;
+        newer.features = 1;
+        assert_eq!(newer.encode(&mut buf), Ok(VOLUME_META_LEN));
+        for at in [4, 40] {
+            let mut b = buf;
+            b[at] = 1;
+            assert_eq!(
+                VolumeMeta::decode(&b),
+                Err(MetaError::Field("features")),
+                "byte {at}"
+            );
+        }
     }
 
     #[test]

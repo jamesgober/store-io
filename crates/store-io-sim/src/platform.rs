@@ -287,6 +287,7 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
             } else if !aligned(w, offset, &buf) {
+                w.count_misaligned_read();
                 Err(EINVAL)
             } else {
                 w.complete_read(file, offset, buf.as_mut_slice())

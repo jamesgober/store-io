@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 TIMEOUT = int(os.environ.get("MUTATE_TIMEOUT", "600"))
 
 M = [
- ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = 0;"),
+ ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
  ("crates/store-io-engine/src/io.rs", "                self.offset += buf.len() as u64;", "                self.offset += buf.len() as u64 + 4096;"),
  ("crates/store-io-engine/src/io.rs", "        dst[n..padded].fill(0);", "        let _ = &dst[n..padded];"),
  ("crates/store-io-engine/src/batch.rs", "            last.as_mut_capacity()[l..padded].fill(0);", "            let _ = l;"),
@@ -29,23 +29,23 @@ M = [
  ("crates/store-io-engine/src/batch.rs", "            .any(|w| w[0].0 + w[0].1.len() as u64 > w[1].0);", "            .any(|w| w[0].0 + w[0].1.len() as u64 > w[1].0 + 4096);"),
  ("crates/store-io-engine/src/exec.rs", "                (Ok(n), Some(buf)) if n == buf.len() => src.recycle(buf),", "                (Ok(_), Some(buf)) => src.recycle(buf),"),
  ("crates/store-io-engine/src/io.rs", "        if self.r.take().is_some() {\n            self.store.inner.domain.poison(", "        if self.r.take().is_some() && false {\n            self.store.inner.domain.poison("),
- ("crates/store-io-engine/src/batch.rs", "                    self.truncate(at);\n", ""),
- ("crates/store-io-engine/src/scan.rs", "                if len <= block {", "                if len <= block || true {"),
+ ("crates/store-io-engine/src/batch.rs", "                    self.truncate(at);\n", "                    if false { self.truncate(at); }\n"),
+ ("crates/store-io-engine/src/scan.rs", "                if len <= sector {", "                if len <= sector || true {"),
  ("crates/store-io-engine/src/scan.rs", "            Some((_, e)) if *e == start => *e = end,", "            Some((_, e)) if *e == start && false => *e = end,"),
  ("crates/store-io-engine/src/scan.rs", "                if ring[idx].as_ref().is_none_or(|p| p.done.is_none()) {", "                if ring[idx].is_none() {"),
  ("crates/store-io-engine/src/scan.rs", "                            out.unreadable(start + n as u64, start + len as u64);", ""),
  ("crates/store-io-engine/src/scan.rs", "        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() {", "        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() && false {"),
- ("crates/store-io-engine/src/scan.rs", "                let half = (len / block).div_ceil(2) * block;", "                let half = len - block;"),
- ("crates/store-io-engine/src/gate.rs", "            LIVE => Ok(Pass { gate: self }),", "            _ => Ok(Pass { gate: self }),"),
+ ("crates/store-io-engine/src/scan.rs", "                let half = (len / unit).div_ceil(2) * unit;", "                let half = len - unit;"),
+ ("crates/store-io-engine/src/gate.rs", "            LIVE => Ok(Pass { gate: self }),", "            s if s == LIVE || s != LIVE => Ok(Pass { gate: self }),"),
  ("crates/store-io-engine/src/gate.rs", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 {", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 && false {"),
  ("crates/store-io-engine/src/lifecycle.rs", "            .retain(|x| x.id != r.id);", "            .retain(|_| true);"),
  ("crates/store-io-engine/src/lifecycle.rs", "        entry.state = RegionState::Released;", ""),
  ("crates/store-io-engine/src/store.rs", "            .checked_add(reserved_after)", "            .checked_add(0 * reserved_after)"),
  ("crates/store-io-engine/src/space.rs", "        t.cap.is_none_or(|cap| {", "        true || t.cap.is_none_or(|cap| {"),
- ("crates/store-io-engine/src/store.rs", "            r.consume(extent)?;", "            let _ = r;"),
+ ("crates/store-io-engine/src/store.rs", "            r.consume(extent)?;", "            if false { r.consume(extent)?; }"),
  ("crates/store-io-engine/src/space.rs", "            a.add(e, block);", "            let _ = (e, block, &mut a);"),
  ("crates/store-io-engine/src/space.rs", "        lock_acct(&self.store.inner.acct).unreserve(self.tag, self.bytes);", ""),
- ("crates/store-io-engine/src/space.rs", "        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        drop(meta); let mut meta = lock_meta(&inner.meta);\n        if !acct.fits(tag, bytes) {"),
+ ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(&inner.meta);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(&inner.meta);\n        if !acct.fits(tag, bytes) {"),
  ("crates/store-io-engine/src/directory.rs", "        self.platform\n            .sync_dir(&self.dir)\n            .map_err(|raw| self.poison(Op::SyncDir, Some(raw)))\n    }\n\n    /// Writes", "        let _ = self.platform.sync_dir(&self.dir);\n        Ok(())\n    }\n\n    /// Writes"),
  ("crates/store-io-engine/src/directory.rs", "            .set_len(file, len)", "            .set_len(file, len.div_ceil(4096) * 4096)"),
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::FlushAll, Some(raw)))", "            .or(Ok(()))"),
@@ -54,8 +54,8 @@ M = [
  ("crates/store-io-engine/src/store.rs", "        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {", "        if false {"),
  ("crates/store-io-engine/src/store.rs", "            let zeros = (2 * block).saturating_sub(at).min(len) as usize;", "            let zeros = if at < 2 * block { len as usize } else { 0 };"),
  ("crates/store-io-engine/src/lifecycle.rs", ".release_range(&inner.file, r.data_offset, r.data_size, how)", ".release_range(&inner.file, r.data_offset - 2 * inner.layout.block(), r.data_size + 2 * inner.layout.block(), how)"),
- ("crates/store-io-engine/src/store.rs", "        if holds != Some(false) {", "        if false {"),
- ("crates/store-io-engine/src/store.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", ""),
+ ("crates/store-io-engine/src/store.rs", "        if holds != Some(false) {", "        if holds != Some(false) && false {"),
+ ("crates/store-io-engine/src/store.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", "                Err(Error::NoSpace { .. }) if align && from.is_some() && false => align = false,\n"),
  # v0.3.1 (D-068..D-072)
  ("crates/store-io-engine/src/store.rs", "        if holds != Some(false) {", "        if holds == Some(true) {"),
  ("crates/store-io-engine/src/slots.rs", "            Some((i, _)) if i == w.index => w.payload,", "            Some((i, _)) if i == w.index && false => w.payload,"),
@@ -68,7 +68,7 @@ M = [
  ("crates/store-io-engine/src/store.rs", "            read_only,\n            unavailable,\n        };", "            read_only,\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
  # Read errors are classified and media errors name the exact range
  ("crates/store-io-engine/src/io.rs", "                    if !store_io_core::errno::is_media_error(raw) {", "                    if false {"),
- ("crates/store-io-engine/src/io.rs", "                    let (bad_start, bad_end) = self.first_unreadable(r, start, end)?;", "                    let (bad_start, bad_end) = (start, end);"),
+ ("crates/store-io-engine/src/io.rs", "self.first_unreadable(r, start, end).unwrap_or((start, end));", "self.first_unreadable(r, start, end).map(|_| (start, end)).unwrap_or((start, end));"),
  # Directory: refuse before any write without directory flushes; fail-stop on set_len
  ("crates/store-io-engine/src/directory.rs", "        let dir_flush = platform.sync_dir(&dir).err();", "        let dir_flush = None;"),
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::Allocate, Some(raw)))?;", "            .map_err(|raw| io(Op::Allocate, raw))?;"),
@@ -77,13 +77,24 @@ M = [
  # D-092: a read-only open takes the shared lock on its read-only handle
  ("crates/store-io-engine/src/store.rs", "            platform.lock_shared(&file)", "            platform.lock_exclusive(&file)"),
  # Sector-exact bisection, and the pipelined read names the exact range
- ("crates/store-io-engine/src/io.rs", "        need.next_power_of_two().min(self.block())", "        self.block()"),
+ ("crates/store-io-engine/src/io.rs", "        need.next_power_of_two().min(self.block())", "        need.min(0).max(self.block())"),
  ("crates/store-io-engine/src/io.rs", "                Some((start, end)) => ctx_range(r, start, end),", "                Some(_) => c,"),
  # Review fixes: growth never resurrects a truncated region; sector gate; slot read classification; bisect backstop
  ("crates/store-io-engine/src/space.rs", ".find(|u| matches!(u.reason, crate::store::Unavailable::ContainerShort { .. }))", ".find(|_| false)"),
- ("crates/store-io-engine/src/io.rs", "        if ev.missing.contains(Missing::DioAlignment) || ev.fs.dio_offset_align == 0 {", "        if false {"),
- ("crates/store-io-engine/src/slots.rs", "    let unreadable = |raw: OsError| is_media_error(raw) || is_end_of_file(raw);", "    let unreadable = |_raw: OsError| true;"),
+ ("crates/store-io-engine/src/io.rs", "        if ev.missing.contains(Missing::DioAlignment) || ev.fs.dio_offset_align == 0 {", "        if (ev.missing.contains(Missing::DioAlignment) || ev.fs.dio_offset_align == 0) && false {"),
+ ("crates/store-io-engine/src/slots.rs", "    is_media_error(raw) || is_end_of_file(raw)\n", "    is_media_error(raw) || is_end_of_file(raw) || true\n"),
  ("crates/store-io-engine/src/scan.rs", "            Err(_) if len < self.block() => {", "            Err(_) if false => {"),
+ # Second review: block-aligned halving; volume search keeps real errors; buffer released before the rescan
+ ("crates/store-io-engine/src/scan.rs", "let unit = if len > block { block } else { sector };", "let unit = if len > block && false { block } else { sector };"),
+ ("crates/store-io-engine/src/store.rs", "                Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),", "                Err(raw) if !crate::slots::unreadable(raw) && false => return Err(io(raw)),"),
+ ("crates/store-io-engine/src/io.rs", ".unwrap_or((start, end));", "?;"),
+ # Final review: read_one classification on its own; volume search reports media errors
+ ("crates/store-io-engine/src/slots.rs", "        Err(raw) if !unreadable(raw) => return Err(fail(raw)),", "        Err(raw) if !unreadable(raw) && false => return Err(fail(raw)),"),
+ ("crates/store-io-engine/src/store.rs", "                    media_error |= store_io_core::errno::is_media_error(raw);", "                    media_error |= store_io_core::errno::is_media_error(raw) && false;"),
+ ("crates/store-io-engine/src/store.rs", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN {", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN && false {"),
+ ("crates/store-io-engine/src/store.rs", "store_io_format::meta::MetaError::Field(\"features\") => newer,", "store_io_format::meta::MetaError::Field(\"features\") if false => newer,"),
+ ("crates/store-io-engine/src/store.rs", "            media_error |= pair.media_error;", "            media_error |= pair.media_error && false;"),
+ ("crates/store-io-engine/src/store.rs", "        Winner::Lost if p.media_error => Err(Error::Corruption {", "        Winner::Lost if p.media_error && false => Err(Error::Corruption {"),
 ]
 
 def kill_stuck_tests():
@@ -116,7 +127,10 @@ def main():
                                    cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
                 out = r.stdout + r.stderr
                 killed = r.returncode != 0
-                why = "compile error" if "error[" in out else ("tests failed" if killed else "SURVIVED")
+                # Any build failure (an `error[...]` or a lint denied by
+                # `deny(warnings)`) means the mutation never ran: invalid.
+                build_failed = "error[" in out or "could not compile" in out
+                why = "compile error" if build_failed else ("tests failed" if killed else "SURVIVED")
             except subprocess.TimeoutExpired:
                 # A hang is a caught mutation; clear the stuck test binaries.
                 kill_stuck_tests()

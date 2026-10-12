@@ -37,7 +37,8 @@ pub struct FaultPlan {
     pub dir_sync_unsupported: bool,
     /// The n-th `set_len` (1-based) fails with EIO.
     pub fail_set_len: Option<u64>,
-    /// Every read-write open fails with EROFS, as on a read-only mount;
+    /// The media is read-only, as on a read-only mount: read-write opens,
+    /// creating files or directories, renames and unlinks fail with EROFS;
     /// read-only opens still work.
     pub read_only_media: bool,
     /// The n-th read completion transfers only half its bytes (rounded down

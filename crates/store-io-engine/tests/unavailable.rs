@@ -261,3 +261,200 @@ fn test_every_reason_maps_to_a_corruption_kind() {
         assert!(!r.to_string().is_empty());
     }
 }
+
+/// Writes one 4 KiB block of `data` at `at` of the container, durably.
+fn put(p: &SimPlatform, at: u64, data: &[u8]) {
+    let dir = p.open_dir(Path::new(DIR), false).unwrap();
+    let file = p
+        .open_file(
+            &dir,
+            &FileName::new(CONTAINER).unwrap(),
+            FileMode::ReadWrite,
+        )
+        .unwrap();
+    let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 4096, 2)).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    let mut buf = pool.take(4096).unwrap();
+    buf.as_mut_slice().copy_from_slice(data);
+    q.submit(
+        IoOp::Write {
+            file: &file,
+            offset: at,
+            buf,
+            dsync: false,
+        },
+        1,
+    )
+    .unwrap();
+    let mut out = CompletionBuf::with_capacity(2);
+    q.wait(1, &mut out).unwrap();
+    assert_eq!(out.drain().next().unwrap().result, Ok(4096));
+    p.flush_all(&file).unwrap();
+}
+
+/// A media error where the volume record lives, on a store just created
+/// (its second copy still blank), is reported as a media error: never as
+/// `HeaderCrc` corruption, which would invite a caller to recreate the store
+/// over its data (found by review).
+#[test]
+fn test_a_media_error_at_the_volume_record_is_reported_as_one() {
+    let p = SimPlatform::new(SimConfig::volatile(64));
+    drop(Store::create(p.clone(), Path::new(DIR), opts()).unwrap());
+    let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 0, BLOCK)]);
+    for read_only in [true, false] {
+        let r = if read_only {
+            Store::open_readonly(p.clone(), Path::new(DIR), opts())
+        } else {
+            Store::open(p.clone(), Path::new(DIR), opts())
+        };
+        assert!(
+            matches!(
+                r,
+                Err(Error::Corruption {
+                    kind: CorruptionKind::MediaError,
+                    ..
+                })
+            ),
+            "read_only={read_only}: {:?}",
+            r.err()
+        );
+    }
+}
+
+/// A volume record from a newer format (a longer record, or a feature bit
+/// this version does not know) is refused as unsupported, never read as
+/// corruption and never rewritten (found by review).
+#[test]
+fn test_a_newer_volume_record_is_refused_as_unsupported() {
+    use store_io_core::error::Capability;
+    use store_io_format::meta::VolumeMeta;
+    use store_io_format::slot::{Expect, SlotFields, SlotIndex, SlotStatus, encode, validate};
+    for newer in ["features", "longer", "features-and-reserved"] {
+        let p = SimPlatform::new(SimConfig::volatile(65));
+        drop(Store::create(p.clone(), Path::new(DIR), opts()).unwrap());
+        // Slot A holds the volume record as created; write a newer
+        // generation into the blank slot B.
+        let a = media(&p)[..BLOCK as usize].to_vec();
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&a[32..48]);
+        let SlotStatus::Valid(info) = validate(
+            &a,
+            &Expect {
+                volume_uuid: uuid,
+                object_id: 0,
+                slot_offset: 0,
+                slot_index: SlotIndex::A,
+                log2_slot_size: 12,
+            },
+        ) else {
+            panic!("slot A is not a valid volume record");
+        };
+        let mut vm = VolumeMeta::decode(info.payload(&a)).unwrap();
+        let mut payload = vec![0u8; 48];
+        if newer.starts_with("features") {
+            vm.features = 1;
+        }
+        let _n = vm.encode(&mut payload).unwrap();
+        if newer == "features-and-reserved" {
+            // A newer format may also reuse a reserved field: still newer.
+            // Byte 4 is the reserved word the decoder checked first before.
+            payload[4] = 1;
+            payload[40] = 1;
+        }
+        if newer == "longer" {
+            payload.extend_from_slice(&[0u8; 8]);
+        }
+        let mut b = vec![0u8; BLOCK as usize];
+        let _crc = encode(
+            &mut b,
+            &SlotFields {
+                volume_uuid: uuid,
+                object_id: 0,
+                generation: info.generation + 1,
+                owner_generation: info.owner_generation,
+                slot_offset: BLOCK,
+                slot_index: SlotIndex::B,
+                log2_slot_size: 12,
+                prev_header_crc32c: info.header_crc32c,
+            },
+            &payload,
+        )
+        .unwrap();
+        put(&p, BLOCK, &b);
+        let before = media(&p);
+        for read_only in [true, false] {
+            let r = if read_only {
+                Store::open_readonly(p.clone(), Path::new(DIR), opts())
+            } else {
+                Store::open(p.clone(), Path::new(DIR), opts())
+            };
+            assert!(
+                matches!(
+                    r,
+                    Err(Error::Unsupported {
+                        what: Capability::FormatVersion
+                    })
+                ),
+                "{newer}, read_only={read_only}: {:?}",
+                r.err()
+            );
+        }
+        assert!(
+            media(&p) == before,
+            "{newer}: the refused store was modified"
+        );
+    }
+}
+
+/// With 16 KiB blocks, a media error inside the volume record's first slot
+/// where none of the search's 4 KiB probes reads (bytes 12-16 KiB) is also
+/// reported as a media error rather than `HeaderCrc`: the pair read counts
+/// it (found by review: only the probes were counted).
+#[test]
+fn test_a_media_error_inside_the_volume_slot_is_reported_as_one() {
+    let p = SimPlatform::new(SimConfig::volatile(66));
+    let big = StoreOptions {
+        block_size: Some(16384),
+        ..opts()
+    };
+    drop(Store::create(p.clone(), Path::new(DIR), big.clone()).unwrap());
+    let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 12288, 16384)]);
+    let r = Store::open_readonly(p.clone(), Path::new(DIR), big);
+    assert!(
+        matches!(
+            r,
+            Err(Error::Corruption {
+                kind: CorruptionKind::MediaError,
+                ..
+            })
+        ),
+        "{:?}",
+        r.err()
+    );
+}
+
+/// A media error in the region table's first slot, on a store just created
+/// (its second slot still blank), is reported as a media error, not
+/// `HeaderCrc` corruption (found by review).
+#[test]
+fn test_a_media_error_in_the_region_table_is_reported_as_one() {
+    let p = SimPlatform::new(SimConfig::volatile(67));
+    drop(Store::create(p.clone(), Path::new(DIR), opts()).unwrap());
+    // Default layout: the volume pair at 0 and B, the table pair from 2B.
+    let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 2 * BLOCK, 3 * BLOCK)]);
+    let r = Store::open_readonly(p.clone(), Path::new(DIR), opts());
+    assert!(
+        matches!(
+            r,
+            Err(Error::Corruption {
+                kind: CorruptionKind::MediaError,
+                ..
+            })
+        ),
+        "{:?}",
+        r.err()
+    );
+}

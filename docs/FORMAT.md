@@ -243,9 +243,9 @@ The volume record is the payload of the pair at offsets `0` and `B`, with slot s
 | 16 | 8 | u64 | `table_offset` | Offset of region-table slot A; always `2B` |
 | 24 | 8 | u64 | `created_unix_s` | Creation time, seconds since the Unix epoch; informative only |
 | 32 | 8 | u64 | `features` | must be `0` (no feature is defined) |
-| 40 | 8 | &mdash; | reserved | `0` |
+| 40 | 8 | &mdash; | reserved | must be `0` |
 
-Decoding fails (`Length`) if the payload is shorter than 48 bytes; bytes beyond 48 are ignored. Field checks, in order: the reserved `u32` at 4 is zero, `log2_block_size` is 12&ndash;16, `log2_table_slot_size` is between `log2_block_size` and 16, `table_offset` is a multiple of B, `features` is zero. At open, a record whose `log2_block_size` differs from the slot size it was found at is skipped, and a `table_offset` other than `2B` fails the open (section 10).
+Decoding fails (`Length`) if the payload is shorter than 48 bytes; the codec ignores bytes beyond 48, and open refuses them (below). Field checks, in order: `features` is zero (checked first, so a newer record is recognised as newer), the reserved `u32` at 4 and the reserved bytes at `[40, 48)` are zero, `log2_block_size` is 12&ndash;16, `log2_table_slot_size` is between `log2_block_size` and 16, `table_offset` is a multiple of B. At open, a payload longer than 48 bytes or a non-zero `features` is a newer format: the open is refused with `Unsupported(FormatVersion)` and nothing is written. At open, a record whose `log2_block_size` differs from the slot size it was found at is skipped, and a `table_offset` other than `2B` fails the open (section 10).
 
 `owner_generation` is forensic: every slot written records the writer's owner generation, so a reader can tell which open wrote what. It is not a fence; the ownership lock is.
 

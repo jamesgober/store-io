@@ -200,3 +200,47 @@ fn test_read_only_stores_report_space_but_cannot_reserve() {
     assert!(ro.space().regions > 0);
     assert!(matches!(ro.reserve(MIB, 0), Err(Error::NotWritten { .. })));
 }
+
+/// Reservations, space reports and provisioning take the metadata and
+/// accounting locks in one order, so running them together never deadlocks
+/// (found by mutation: nothing exercised the order). A deadlock fails the
+/// test at the deadline instead of hanging the suite.
+#[test]
+fn test_concurrent_reserve_space_and_provision_never_deadlock() {
+    let p = SimPlatform::new(SimConfig::power_safe(41));
+    let s = create(&p);
+    let (done, rx) = std::sync::mpsc::channel();
+    let start = Arc::new(std::sync::Barrier::new(4));
+    let mut workers = Vec::new();
+    for t in 0..4u32 {
+        let s = s.clone();
+        let done = done.clone();
+        let start = Arc::clone(&start);
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            for i in 0..300u32 {
+                match t % 3 {
+                    0 => drop(s.reserve(4096, t)),
+                    1 => drop(s.space()),
+                    _ => {
+                        if i % 30 == 0 {
+                            let name = format!("r{t}-{i}");
+                            drop(s.provision_page_region(&name, 64 << 10));
+                        } else {
+                            drop(s.space());
+                        }
+                    }
+                }
+            }
+            done.send(()).unwrap();
+        }));
+    }
+    drop(done);
+    for _ in 0..4 {
+        rx.recv_timeout(std::time::Duration::from_secs(60))
+            .expect("a worker deadlocked on the store's locks");
+    }
+    for w in workers {
+        w.join().unwrap();
+    }
+}

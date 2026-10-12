@@ -526,6 +526,7 @@ where
                 store_io_format::slot::SlotStatus::Blank,
             ),
             payload: None,
+            media_error: false,
         };
         let mut q = queues.get(0);
         let next_v = plan_next(&empty, &vbuf, 1)?;
@@ -1091,6 +1092,7 @@ where
                 store_io_format::slot::SlotStatus::Blank,
             ),
             payload: None,
+            media_error: false,
         };
         let next = plan_next(&blank, &rbuf, inner.owner_generation)?;
         let header = {
@@ -1444,6 +1446,13 @@ fn winner_payload(p: &PairRead) -> Result<Vec<u8>, Error> {
             kind: store_io_core::error::CorruptionKind::Fork,
             ctx: ErrorContext::default(),
         }),
+        // No version left, and a slot was lost to a media error: report that
+        // (it may be transient) rather than corruption, which would invite a
+        // caller to recreate the store over its data.
+        Winner::Lost if p.media_error => Err(Error::Corruption {
+            kind: store_io_core::error::CorruptionKind::MediaError,
+            ctx: ErrorContext::default(),
+        }),
         Winner::Empty | Winner::Lost => Err(Error::Corruption {
             kind: store_io_core::error::CorruptionKind::HeaderCrc,
             ctx: ErrorContext::default(),
@@ -1543,6 +1552,7 @@ fn find_volume<Q: Queue>(
 ) -> Result<(VolumeId, Layout, VolumeMeta, PairRead), Error> {
     // Read the first slot header at the smallest size to learn the volume id;
     // either copy may be damaged, so try both locations per size.
+    let mut media_error = false;
     for log2 in crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK {
         let size = 1u64 << log2;
         for probe_at in [0, size] {
@@ -1550,6 +1560,15 @@ fn find_volume<Q: Queue>(
                 cause: NotWrittenCause::PoolExhausted,
                 ctx: ErrorContext::default(),
             })?;
+            // Only an unreadable location (a media error, a short read, the
+            // end of the file) moves on to the next candidate. Any other
+            // failure is returned: treating it as "no volume here" would
+            // report a healthy store as corrupt (found by review).
+            let io = |raw| Error::Io {
+                op: Op::Read,
+                raw,
+                ctx: ErrorContext::default(),
+            };
             let done = match run(
                 q,
                 IoOp::Read {
@@ -1559,10 +1578,25 @@ fn find_volume<Q: Queue>(
                 },
             ) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err((_, Some(raw))) => return Err(io(raw)),
+                Err((_, None)) => {
+                    return Err(Error::NotWritten {
+                        cause: NotWrittenCause::QueueFull,
+                        ctx: ErrorContext::default(),
+                    });
+                }
             };
+            match done.result {
+                Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),
+                Ok(4096) => {}
+                Err(raw) => {
+                    media_error |= store_io_core::errno::is_media_error(raw);
+                    continue;
+                }
+                Ok(_) => continue,
+            }
             let Some(b) = done.buf else { continue };
-            if done.result.ok() != Some(4096) || b.as_slice()[..8] != store_io_format::slot::MAGIC {
+            if b.as_slice()[..8] != store_io_format::slot::MAGIC {
                 continue;
             }
             let mut uuid = [0u8; 16];
@@ -1576,12 +1610,25 @@ fn find_volume<Q: Queue>(
             };
             let at = pair_volume(VolumeId::from_bytes(uuid), &layout0);
             let pair = read_pair(q, file, pool, &at)?;
+            media_error |= pair.media_error;
             let bytes = match winner_payload(&pair) {
                 Ok(b) => b,
                 Err(Error::Unsupported { what }) => return Err(Error::Unsupported { what }),
                 Err(_) => continue,
             };
-            let vm = VolumeMeta::decode(&bytes).map_err(|_| corrupt())?;
+            // A longer record, or a feature this version does not know, is a
+            // newer format: refused as unsupported (and never rewritten),
+            // not reported as corruption.
+            let newer = Error::Unsupported {
+                what: store_io_core::error::Capability::FormatVersion,
+            };
+            if bytes.len() > store_io_format::meta::VOLUME_META_LEN {
+                return Err(newer);
+            }
+            let vm = VolumeMeta::decode(&bytes).map_err(|e| match e {
+                store_io_format::meta::MetaError::Field("features") => newer,
+                _ => corrupt(),
+            })?;
             if vm.log2_block_size != log2 {
                 continue;
             }
@@ -1595,8 +1642,17 @@ fn find_volume<Q: Queue>(
             return Ok((VolumeId::from_bytes(uuid), layout, vm, pair));
         }
     }
+    // No volume record found. If a read failed on the media on the way (a
+    // probe or a slot of a candidate pair), that is the answer: it may be
+    // transient, and "corrupt" would invite a caller to recreate the store
+    // over its data. A media error at a candidate that was never the record
+    // also ends here; erring toward "do not recreate" is deliberate.
     Err(Error::Corruption {
-        kind: store_io_core::error::CorruptionKind::HeaderCrc,
+        kind: if media_error {
+            store_io_core::error::CorruptionKind::MediaError
+        } else {
+            store_io_core::error::CorruptionKind::HeaderCrc
+        },
         ctx: ErrorContext::default(),
     })
 }

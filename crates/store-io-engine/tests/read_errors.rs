@@ -188,6 +188,7 @@ fn test_a_device_refusing_small_reads_never_aborts_the_bisection() {
         let s = Store::create(p, Path::new(DIR), opts()).unwrap();
         s.report().evidence.clone()
     };
+    let mut misaligned = Vec::new();
     for reported in [false, true] {
         let mut ev = model.clone();
         ev.device.logical_block = 512;
@@ -233,7 +234,26 @@ fn test_a_device_refusing_small_reads_never_aborts_the_bisection() {
             .unwrap();
         assert_eq!(bad, vec![(5 * BLOCK, 6 * BLOCK)], "reported={reported}");
         assert_eq!(summary.end, pages.len(), "the scan stopped early");
+        // An odd number of blocks (3) with the bad sector in the last: the
+        // halves must stay block-aligned, or the device refuses them.
+        let mut three = vec![0u8; 3 * BLOCK as usize];
+        let r = pages.read(pages.pos(3 * BLOCK).unwrap(), &mut three);
+        let Err(Error::Corruption { kind, ctx }) = r else {
+            panic!("reported={reported}: 3 blocks: expected Corruption, got {r:?}");
+        };
+        assert_eq!(kind, CorruptionKind::MediaError);
+        let range = ctx.range.unwrap();
+        assert_eq!((range.start, range.end), (5 * BLOCK, 6 * BLOCK), "3 blocks");
+        misaligned.push(p.with_world(|w| w.misaligned_reads()));
     }
+    // Without a reported alignment the bisection never reads below the store
+    // block; with a wrong one it tries, the device refuses, and the
+    // backstop absorbs it.
+    assert_eq!(
+        misaligned[0], 0,
+        "split below the block without a reported alignment"
+    );
+    assert!(misaligned[1] > 0, "the backstop was never exercised");
 }
 
 /// A read error that is not a media error (here EINVAL), at any read an open
@@ -244,42 +264,51 @@ fn test_a_device_refusing_small_reads_never_aborts_the_bisection() {
 fn test_a_non_media_error_during_open_never_marks_a_region_damaged() {
     let p = SimPlatform::new(SimConfig::volatile(75));
     drop(setup(&p));
-    let before = p.with_world(|w| w.reads());
-    drop(Store::open(p.clone(), Path::new(DIR), opts()).unwrap());
-    let reads = p.with_world(|w| w.reads()) - before;
-    assert!(reads > 4, "the open made only {reads} reads");
-    let mut failed = 0;
-    for k in 1..=reads {
-        let next = p.with_world(|w| w.reads()) + k;
-        p.with_world(|w| {
-            *w.faults_mut() = FaultPlan {
-                fail_read: Some((next, 22)),
-                ..FaultPlan::default()
-            };
-        });
-        match Store::open(p.clone(), Path::new(DIR), opts()) {
-            Ok(s) => {
-                assert!(
-                    s.unavailable_regions().is_empty(),
-                    "read {k} marked a region damaged"
-                );
-                s.page_region("pages").unwrap();
+    // Read-only opens first, on the store as created: they write nothing, so
+    // the volume record's second copy stays blank and a failed read of the
+    // first cannot be rescued by it. Then writable opens.
+    for read_only in [true, false] {
+        let open = || {
+            if read_only {
+                Store::open_readonly(p.clone(), Path::new(DIR), opts())
+            } else {
+                Store::open(p.clone(), Path::new(DIR), opts())
             }
-            Err(Error::Io { raw, .. }) => {
-                assert_eq!(raw.code, 22, "read {k}");
-                failed += 1;
+        };
+        let before = p.with_world(|w| w.reads());
+        drop(open().unwrap());
+        let reads = p.with_world(|w| w.reads()) - before;
+        assert!(reads > 4, "the open made only {reads} reads");
+        let mut failed = 0;
+        for k in 1..=reads {
+            let next = p.with_world(|w| w.reads()) + k;
+            p.with_world(|w| {
+                *w.faults_mut() = FaultPlan {
+                    fail_read: Some((next, 22)),
+                    ..FaultPlan::default()
+                };
+            });
+            match open() {
+                Ok(s) => {
+                    assert!(
+                        s.unavailable_regions().is_empty(),
+                        "read_only={read_only}: read {k} marked a region damaged"
+                    );
+                    s.page_region("pages").unwrap();
+                }
+                Err(Error::Io { raw, .. }) => {
+                    assert_eq!(raw.code, 22, "read_only={read_only}: read {k}");
+                    failed += 1;
+                }
+                Err(e) => panic!("read_only={read_only}: read {k}: {e:?}"),
             }
-            // The volume search skips unreadable candidates, so a failure
-            // there can only end as "no volume found".
-            Err(Error::Corruption {
-                kind: CorruptionKind::HeaderCrc,
-                ctx,
-            }) if ctx.region.is_none() => failed += 1,
-            Err(e) => panic!("read {k}: {e:?}"),
+            p.with_world(|w| *w.faults_mut() = FaultPlan::default());
         }
-        p.with_world(|w| *w.faults_mut() = FaultPlan::default());
+        assert!(
+            failed > 0,
+            "read_only={read_only}: no read failure surfaced"
+        );
     }
-    assert!(failed > 0, "no read failure surfaced");
 }
 
 /// A media error that does not repeat when the range is read again is still
@@ -293,6 +322,79 @@ fn test_a_media_error_that_does_not_repeat_is_still_reported() {
     p.with_world(|w| {
         *w.faults_mut() = FaultPlan {
             fail_read: Some((next, 5)),
+            ..FaultPlan::default()
+        };
+    });
+    let mut out = vec![0u8; 4 * BLOCK as usize];
+    let r = pages.read(pages.pos(0).unwrap(), &mut out);
+    let Err(Error::Corruption { kind, ctx }) = r else {
+        panic!("expected Corruption, got {r:?}");
+    };
+    assert_eq!(kind, CorruptionKind::MediaError);
+    let range = ctx.range.unwrap();
+    assert_eq!((range.start, range.end), (0, 4 * BLOCK));
+}
+
+/// With the smallest buffer pool the store allows, a media error in a read
+/// of one largest buffer is still named exactly (the failed read's buffer is
+/// returned before the rescan takes its own).
+#[test]
+fn test_a_one_buffer_pool_still_names_the_exact_unreadable_block() {
+    let p = SimPlatform::new(SimConfig::volatile(77));
+    let s = Store::create(
+        p.clone(),
+        Path::new(DIR),
+        StoreOptions {
+            buffers_per_class: 1,
+            ..opts()
+        },
+    )
+    .unwrap();
+    // One largest buffer (1 MiB): the size class the rescan takes from too.
+    let pages = s.provision_page_region("pages", 2 << 20).unwrap();
+    let mut data = vec![7u8; 1 << 20];
+    data[..12].copy_from_slice(b"READ-ERR-TST");
+    pages.write_durable(pages.pos(0).unwrap(), &data).unwrap();
+    let (file, base) = p.with_world(|w| {
+        let media = w.media_of(&PathBuf::from(DIR), CONTAINER).unwrap();
+        let at = media
+            .windows(12)
+            .position(|x| x == b"READ-ERR-TST")
+            .unwrap() as u64;
+        (w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap(), at)
+    });
+    p.with_world(|w| {
+        *w.faults_mut() = FaultPlan {
+            bad_ranges: vec![(file, base + 3 * BLOCK, base + 4 * BLOCK)],
+            ..FaultPlan::default()
+        };
+    });
+    let mut out = vec![0u8; 1 << 20];
+    let r = pages.read(pages.pos(0).unwrap(), &mut out);
+    let Err(Error::Corruption { kind, ctx }) = r else {
+        panic!("expected Corruption, got {r:?}");
+    };
+    assert_eq!(kind, CorruptionKind::MediaError);
+    let range = ctx.range.unwrap();
+    assert_eq!((range.start, range.end), (3 * BLOCK, 4 * BLOCK));
+}
+
+/// When the rescan that locates a media error fails itself (here with a
+/// non-media error on its first read), the media error is still reported,
+/// over the whole read: it is never replaced by the rescan's failure
+/// (found by review).
+#[test]
+fn test_a_failed_rescan_still_reports_the_media_error() {
+    let p = SimPlatform::new(SimConfig::volatile(78));
+    let (s, file, base) = setup(&p);
+    let pages = s.page_region("pages").unwrap();
+    let next = p.with_world(|w| w.reads()) + 1;
+    p.with_world(|w| {
+        *w.faults_mut() = FaultPlan {
+            bad_ranges: vec![(file, base + 2 * BLOCK, base + 3 * BLOCK)],
+            // The read hits the bad range (read `next`); the rescan's first
+            // read fails with EINVAL.
+            fail_read: Some((next + 1, 22)),
             ..FaultPlan::default()
         };
     });

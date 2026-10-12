@@ -40,14 +40,14 @@ pub fn run(data: &[u8]) {
     match which % 12 {
         0 => {
             if let Some(e) = parse_mountinfo_line(t) {
-                assert!(!e.fstype.contains(' '), "fstype holds a separator");
                 assert_eq!(parse_mountinfo_line(t), Some(e), "not deterministic");
             }
             assert!(unescape(t).len() <= t.len(), "unescaping grew the string");
         }
         1 => {
-            // A mountinfo table, then a lookup by id or device and path.
-            let [table, id, path] = fields::<3>(t);
+            // The id, the path, then a mountinfo table of any number of
+            // lines (the last field takes the rest).
+            let [id, path, table] = fields::<3>(t);
             let mnt_id = id.trim().parse::<u64>().ok();
             let dev = rest
                 .first()
@@ -112,7 +112,8 @@ pub fn run(data: &[u8]) {
         }
         10 => {
             let [vendor, product, hv, release, cpuinfo] = fields::<5>(t);
-            let flags = rest.first().copied().unwrap_or(0);
+            // Device-presence flags come from the selector, not the text.
+            let flags = which / 12;
             let _ = classify(&VirtInputs {
                 sys_vendor: opt(vendor),
                 product_name: opt(product),
@@ -140,8 +141,9 @@ pub fn run(data: &[u8]) {
             }
             if let Some(ns) = parse_id_ns(&page) {
                 assert!(
-                    ns.lba_bytes == 0 || ns.lba_bytes.is_power_of_two(),
-                    "LBA size not a power of two"
+                    ns.lba_bytes == 0 || (ns.lba_bytes.is_power_of_two() && ns.lba_bytes >= 512),
+                    "impossible LBA size {}",
+                    ns.lba_bytes
                 );
             }
             let _ = parse_smart(&page);

@@ -14,6 +14,15 @@ on:
       - "crates/store-io-core/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "crates/store-io-engine/**"
+      - "crates/store-io-sim/**"
+      - "crates/store-io-format/**"
+      - "crates/store-io-core/**"
+      - "dev/tools/mutate.py"
+      - ".github/workflows/mutation.yml"
   workflow_dispatch:
 
 env:

@@ -66,7 +66,7 @@ for log2 in (9, 10, 11, 12):
 # as the encoders write them.
 vol = struct.pack("<BBHIQQQQ", 12, 14, 0, 0, 7, 3 * 4096, 1_700_000_000, 0) + bytes(8)
 write("meta_decode", "volume", vol[:48])
-region = struct.pack("<IBBBBQQ", 5, 2, 1, 0, 0, 3 * 4096, 1 << 20) + bytes(16) + bytes(4)
+region = struct.pack("<IBBBBQQ", 5, 2, 1, 0, 0, 3 * 4096, 1 << 20) + bytes(16) + bytes(8)
 write("meta_decode", "region", region[:48])
 
 # table_decode: first byte selects the block (4 KiB); two ready entries.
@@ -80,15 +80,16 @@ tbl += entry(2, 2, "pages", 8 * 4096 + 2 * 4096 + (1 << 20), 1 << 20, tag=9)
 write("table_decode", "two-entries", bytes([0]) + tbl)
 
 # probe_parsers: first byte selects the parser (see the backends' fuzzing.rs).
-mi = b"36 35 98:0 /mnt1 /mnt/parent\040dir rw,noatime master:1 - ext4 /dev/root rw,errors=continue"
+mi = b"36 35 98:0 /mnt1 /mnt/parent\\040dir rw,noatime master:1 - ext4 /dev/root rw,errors=continue"
 write("probe_linux", "mountinfo", bytes([0]) + mi)
 table = mi + b"\n37 36 8:1 / /data rw - xfs /dev/sda1 rw,attr2\n"
-write("probe_linux", "find-mount", bytes([1]) + table + b"\n37\n/data/store")
+write("probe_linux", "find-mount", bytes([1]) + b"37\n/data/store\n" + table)
 write("probe_linux", "uevent", bytes([2]) + b"MAJOR=259\nMINOR=0\nDEVNAME=nvme0n1\nDEVTYPE=disk\n")
 write("probe_linux", "sysfs-values", bytes([5]) + b"1024\n")
 write("probe_linux", "dm", bytes([6]) + b"luks-root\nCRYPT-LUKS2-0123-root")
 write("probe_linux", "md", bytes([7]) + b"raid5\nresync\n0")
-write("probe_linux", "virt", bytes([10, 3]) + b"QEMU\nStandard PC\n\n6.6.87.2-microsoft-standard-WSL2\nflags : fpu hypervisor")
+# Selector 46: parser 46 % 12 = 10, both device-presence flags (46 // 12 = 3).
+write("probe_linux", "virt", bytes([46]) + b"QEMU\nStandard PC\n\n6.6.87.2-microsoft-standard-WSL2\nflags : fpu hypervisor")
 # A Linux NVMe Identify Namespace page (selector 11, unpadded): 2 formats,
 # format 1 in use with 4 KiB blocks.
 ns = bytearray(4096)

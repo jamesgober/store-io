@@ -209,6 +209,7 @@ pub struct World {
     locks: BTreeMap<FileId, Option<u32>>,
     writes_completed: u64,
     reads_completed: u64,
+    misaligned_reads: u64,
     flushes_completed: u64,
     dir_syncs: u64,
     set_lens: u64,
@@ -232,6 +233,7 @@ impl World {
             locks: BTreeMap::new(),
             writes_completed: 0,
             reads_completed: 0,
+            misaligned_reads: 0,
             flushes_completed: 0,
             dir_syncs: 0,
             set_lens: 0,
@@ -291,10 +293,21 @@ impl World {
         self.dir_syncs
     }
 
-    /// Reads completed so far, successful or not.
+    /// Reads completed so far, successful or not (misaligned ones excepted:
+    /// see [`Self::misaligned_reads`]).
     #[must_use]
     pub fn reads(&self) -> u64 {
         self.reads_completed
+    }
+
+    /// Reads refused with EINVAL for breaking the device's alignment.
+    #[must_use]
+    pub fn misaligned_reads(&self) -> u64 {
+        self.misaligned_reads
+    }
+
+    pub(crate) fn count_misaligned_read(&mut self) {
+        self.misaligned_reads += 1;
     }
 
     /// Writes in the volatile cache.
@@ -323,11 +336,17 @@ impl World {
         if !create {
             return Err(ENOENT);
         }
+        if self.cfg.faults.read_only_media {
+            return Err(EROFS);
+        }
         let _created = self.dirs.insert(path, DirState::default());
         Ok(())
     }
 
     pub(crate) fn create_file(&mut self, dir: &PathBuf, name: &str) -> Result<FileId, OsError> {
+        if self.cfg.faults.read_only_media {
+            return Err(EROFS);
+        }
         let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
         if d.entries.contains_key(name) {
             return Err(EEXIST);
@@ -348,6 +367,9 @@ impl World {
     }
 
     pub(crate) fn rename(&mut self, dir: &PathBuf, from: &str, to: &str) -> Result<(), OsError> {
+        if self.cfg.faults.read_only_media {
+            return Err(EROFS);
+        }
         let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
         let id = d.entries.remove(from).ok_or(ENOENT)?;
         let _replaced = d.entries.insert(to.to_owned(), id);
@@ -355,6 +377,9 @@ impl World {
     }
 
     pub(crate) fn unlink(&mut self, dir: &PathBuf, name: &str) -> Result<(), OsError> {
+        if self.cfg.faults.read_only_media {
+            return Err(EROFS);
+        }
         let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
         d.entries.remove(name).map(|_| ()).ok_or(ENOENT)
     }
@@ -572,6 +597,21 @@ impl World {
         let f = self.files.get(&file).ok_or(EBADF)?;
         let len = out.len() as u64;
         let end = offset.checked_add(len).ok_or(EINVAL)?;
+        // A targeted fault ("the n-th read fails with this code") wins over
+        // a persistent bad range: it is the more specific instruction.
+        if let Some((at, code)) = self.cfg.faults.fail_read {
+            if at == nth {
+                self.trace.push(TraceEvent::Read {
+                    file,
+                    offset,
+                    err: code,
+                });
+                return Err(OsError {
+                    code,
+                    source: OsErrorSource::Sim,
+                });
+            }
+        }
         let bad = self
             .cfg
             .faults
@@ -585,19 +625,6 @@ impl World {
                 err: EIO.code,
             });
             return Err(EIO);
-        }
-        if let Some((at, code)) = self.cfg.faults.fail_read {
-            if at == nth {
-                self.trace.push(TraceEvent::Read {
-                    file,
-                    offset,
-                    err: code,
-                });
-                return Err(OsError {
-                    code,
-                    source: OsErrorSource::Sim,
-                });
-            }
         }
         let avail = f.visible.len() as u64;
         let mut n = if offset >= avail {

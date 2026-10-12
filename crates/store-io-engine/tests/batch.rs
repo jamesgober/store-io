@@ -268,10 +268,20 @@ fn test_batch_pool_exhaustion_leaves_the_batch_unchanged() {
         })
     ));
     assert_eq!(batch.bytes(), model.len() as u64);
+    // A record added after the failure lands exactly where its offset says:
+    // nothing of the failed record is left in the batch (found by mutation:
+    // without the undo, its partial bytes preceded this record).
+    let tail = b"after-exhaustion";
+    let tail_at = batch.append(tail).unwrap();
+    assert_eq!(tail_at, model.len() as u64);
+    model.extend_from_slice(tail);
     let (pos, _r) = batch.commit().unwrap();
     let mut out = vec![0u8; model.len()];
     wal.read(pos.offset(), &mut out).unwrap();
-    assert!(out == model);
+    assert!(
+        out == model,
+        "the committed batch holds bytes of the failed record"
+    );
     // The buffers came back: the batch is usable again.
     batch.append(b"again").unwrap();
     batch.commit().unwrap();

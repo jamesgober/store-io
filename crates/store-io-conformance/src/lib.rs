@@ -594,7 +594,13 @@ fn shared_lock<P: Platform>(c: &Ctx<'_, P>) -> Check {
         c.p.lock_exclusive(&f).is_err(),
         "the owner's lock was taken while readers held theirs"
     );
-    drop((s1, s2));
+    // Releasing one reader leaves the other: the owner is still excluded.
+    drop(s1);
+    check!(
+        c.p.lock_exclusive(&f).is_err(),
+        "the owner's lock was taken while one reader still held its lock"
+    );
+    drop(s2);
     let owner = ok(
         c.p.lock_exclusive(&f),
         "the owner's lock after the readers left",

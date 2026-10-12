@@ -1,5 +1,4 @@
-36 35 98:0 /mnt1 /mnt/parent dir rw,noatime master:1 - ext4 /dev/root rw,errors=continue
-37 36 8:1 / /data rw - xfs /dev/sda1 rw,attr2
-
-37
+37
 /data/store
+36 35 98:0 /mnt1 /mnt/parent\040dir rw,noatime master:1 - ext4 /dev/root rw,errors=continue
+37 36 8:1 / /data rw - xfs /dev/sda1 rw,attr2

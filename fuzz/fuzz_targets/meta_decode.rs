@@ -2,8 +2,8 @@
 //! the region header record.
 //!
 //! Properties, beyond never panicking: whatever a decoder accepts encodes
-//! back, and decoding that encoding gives the same value (decode, encode and
-//! decode agree), so a record store-io rewrites keeps every field it read.
+//! back to exactly the bytes it read (no field or reserved byte is accepted
+//! and then dropped), and decoding that encoding gives the same value.
 
 #![no_main]
 
@@ -16,6 +16,7 @@ fuzz_target!(|data: &[u8]| {
         let n = v
             .encode(&mut out)
             .expect("an accepted volume record encodes");
+        assert_eq!(&out[..n], &data[..n], "volume record not canonical");
         assert_eq!(
             VolumeMeta::decode(&out[..n]),
             Ok(v),
@@ -27,6 +28,7 @@ fuzz_target!(|data: &[u8]| {
         let n = r
             .encode(&mut out)
             .expect("an accepted region header encodes");
+        assert_eq!(&out[..n], &data[..n], "region header not canonical");
         assert_eq!(
             RegionMeta::decode(&out[..n]),
             Ok(r),

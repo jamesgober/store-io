@@ -43,6 +43,9 @@ impl PairAt {
 pub(crate) struct PairRead {
     pub(crate) report: PairReport,
     pub(crate) payload: Option<Vec<u8>>,
+    /// A slot could not be read because of a media error (not a short read
+    /// or the end of the file): the pair may be intact on the media.
+    pub(crate) media_error: bool,
 }
 
 impl PairRead {
@@ -63,7 +66,11 @@ impl PairRead {
             Some((i, _)) if Some(i) == previous_winner => self.payload.clone(),
             _ => None,
         };
-        PairRead { report, payload }
+        PairRead {
+            report,
+            payload,
+            media_error: false,
+        }
     }
 }
 
@@ -83,14 +90,23 @@ fn pool_err(ctx: ErrorContext) -> Error {
     }
 }
 
-/// Reads one slot; any read failure becomes [`SlotStatus::ReadError`].
+/// Whether a failed metadata read means the bytes cannot be read (a media
+/// error, or a read past the end of the file), as opposed to a failure that
+/// says nothing about them (a bad handle, an exhausted resource), which is
+/// returned to the caller with its code and never mistaken for damage.
+pub(crate) fn unreadable(raw: OsError) -> bool {
+    is_media_error(raw) || is_end_of_file(raw)
+}
+
+/// Reads one slot. A media error, a short read or end of file makes it
+/// [`SlotStatus::ReadError`]; any other read failure is returned as `Io`.
 fn read_one<Q: Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,
     pool: &BufPool,
     at: &PairAt,
     i: SlotIndex,
-) -> Result<(SlotStatus, Option<Vec<u8>>), Error> {
+) -> Result<(SlotStatus, Option<Vec<u8>>, bool), Error> {
     let buf = pool
         .take(at.size())
         .map_err(|_| pool_err(ErrorContext::default()))?;
@@ -105,24 +121,23 @@ fn read_one<Q: Queue>(
     })?;
     // A media error, a short read or a read past the end of the file leaves
     // the slot unreadable, which the pair decision weighs. Any other failure
-    // (a bad handle, an exhausted resource) says nothing about the slot: it
-    // is returned with its code, never mistaken for damage.
-    let unreadable = |raw: OsError| is_media_error(raw) || is_end_of_file(raw);
+    // is returned with its code (see [`unreadable`]).
     let fail = |raw| Error::Io {
         op: Op::Read,
         raw,
         ctx: ErrorContext::default(),
     };
+    let media = matches!(done.result, Err(raw) if is_media_error(raw));
     let Some(buf) = done.buf else {
         return match done.result {
             Err(raw) if !unreadable(raw) => Err(fail(raw)),
-            _ => Ok((SlotStatus::ReadError, None)),
+            _ => Ok((SlotStatus::ReadError, None, media)),
         };
     };
     match done.result {
         Ok(n) if n == at.size() => {}
         Err(raw) if !unreadable(raw) => return Err(fail(raw)),
-        _ => return Ok((SlotStatus::ReadError, None)),
+        _ => return Ok((SlotStatus::ReadError, None, media)),
     }
     let expect = Expect {
         volume_uuid: at.volume,
@@ -136,7 +151,7 @@ fn read_one<Q: Queue>(
         SlotStatus::Valid(info) => Some(info.payload(buf.as_slice()).to_vec()),
         _ => None,
     };
-    Ok((status, payload))
+    Ok((status, payload, false))
 }
 
 /// Reads and decides a pair. Never writes.
@@ -146,15 +161,19 @@ pub(crate) fn read_pair<Q: Queue>(
     pool: &BufPool,
     at: &PairAt,
 ) -> Result<PairRead, Error> {
-    let (a, pa) = read_one(q, file, pool, at, SlotIndex::A)?;
-    let (b, pb) = read_one(q, file, pool, at, SlotIndex::B)?;
+    let (a, pa, ma) = read_one(q, file, pool, at, SlotIndex::A)?;
+    let (b, pb, mb) = read_one(q, file, pool, at, SlotIndex::B)?;
     let report = decide(a, b);
     let payload = match report.winner_info() {
         Some((SlotIndex::A, _)) => pa,
         Some((SlotIndex::B, _)) => pb,
         None => None,
     };
-    Ok(PairRead { report, payload })
+    Ok(PairRead {
+        report,
+        payload,
+        media_error: ma || mb,
+    })
 }
 
 /// What to write into the next slot of a pair.

@@ -333,7 +333,12 @@ where
                     out.unreadable(start, start + len);
                     return Ok(buf);
                 }
-                let half = (len / sector).div_ceil(2) * sector;
+                // Whole blocks while the piece spans several, so every read
+                // of a block or more stays block-aligned; sectors only
+                // inside one block.
+                let block = self.block();
+                let unit = if len > block { block } else { sector };
+                let half = (len / unit).div_ceil(2) * unit;
                 let buf = self.bisect(lane, r, start, half, buf, out, c)?;
                 self.bisect(lane, r, start + half, len - half, buf, out, c)
             }

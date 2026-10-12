@@ -13,6 +13,51 @@
 
 ---
 
+## [0.3.1] - 2026-10-12
+
+A patch release for five defects found in 0.3.0 while recording its design
+changes. Two could lose acknowledged data and one could hang a store. Upgrade
+from 0.3.0; the on-disk format and the public API are unchanged.
+
+### Fixed
+
+- `store-io-engine`: **`Store::create` could truncate a real store.**
+  - **The defect.** `create` reused an existing `store.sio` as an unfinished create, emptying it, when three conditions held:
+    - the file was unlocked;
+    - it was no larger than 256 KiB;
+    - its volume record could not be found.
+  - **How data could be lost.** The volume record could also be missing for a store that:
+    - hit a transient read error;
+    - had both volume copies damaged;
+    - was written by a newer format;
+    - was opened while the buffer pool was empty.
+  - Small stores holding slots and small regions fit in 256 KiB, so a caller that answered a failed `open` with `create` could lose every acknowledged byte.
+  - **The fix.** `create` now reuses the file only after reading every block in full and finding no slot header whose header CRC verifies. A store, damaged or not, is never touched (`AlreadyExists`). A create that crashed before its metadata was durable is still taken over.
+- `store-io-engine`: **release and recycle could lose acknowledged writes, and a slot could read back its previous version after a commit.**
+  - **The defect.** After writing a metadata slot durably, store-io read the pair back from the device. That read could fail (for example with an empty buffer pool) or see the new copy unreadable. It was then reported as "not written", or the older copy was kept as current:
+    - a failed release or recycle left the region open for writes although the release or recycle was already durable;
+    - a slot's `read()` could return the version before a commit that had just returned its receipt.
+  - **The fix.** The new state of the pair is now derived from the exact bytes written, validated in memory. Nothing is read back after a durable metadata write.
+- `store-io-engine`: **slot commits and barriers could deadlock.**
+  - **The defect.** A slot commit, header rewrite, table update or provisioning step kept its I/O queue while waiting for a flush. The thread leading that flush borrowed a queue from the same set, so with every queue held this way the store hung until `Store::poison()`.
+  - **The fix.** The flush leader now uses a queue of its own, which no other thread uses, so it never waits for one.
+- `store-io-engine`: **a provisioning fill write that failed after submission did not poison the store.**
+  - **The defect.** A short write returned `DurabilityUnknown`, and an I/O error returned `Io`, while the store went on accepting writes.
+  - **The fix.** Both now poison the store (fail-stop) and return `DurabilityUnknown`. Running out of space is still `NoSpace` and poisons nothing.
+- `store-io-engine`: **`AppendRegion::resume_at` on a read-only store could overstate durability.**
+  - **The defect.** It moved `durable_through()` with no open-time device flush behind it.
+  - **The fix.** It is now refused there with `NotWritten(ReadOnly)`; appends are refused on read-only stores anyway.
+- `docs/FORMAT.md` said a file of at most 256 KiB "cannot hold region data". It can, and the create rule above no longer relies on that.
+
+### Changed
+
+- `store-io-engine`: every store opens one more platform queue than
+  `StoreOptions::queues`, used only by the thread leading a device flush.
+- `store-io-engine`: one device read fewer per metadata commit (slot commit,
+  header rewrite, table update, provisioning, writable open).
+
+---
+
 ## [0.3.0] - 2026-10-09
 
 The first usable release. Stores, regions, batches, slots, scans,
@@ -385,6 +430,7 @@ The project scaffold. Reserves the crate name; no public API.
   `.gitattributes`, `.github/FUNDING.yml`.
 - `docs/API.md` and `docs/release/v0.1.0.md`.
 
-[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/jamesgober/store-io/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jamesgober/store-io/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/jamesgober/store-io/releases/tag/v0.1.0

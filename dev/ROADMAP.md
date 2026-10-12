@@ -83,9 +83,14 @@ Exit criteria:
   GitHub's Ubuntu runners mount their ext4 root `nobarrier` (found by the probe, 2026-10-09), which store-io classes as Unsafe; Linux CI conformance therefore runs on a loop-mounted ext4 (and XFS) image with barriers on, never on the runner's root filesystem.
 - [x] dm-error run in Linux CI (first run: 582 records acknowledged, the first failure `DurabilityUnknown` with errno 5 and its exact byte range, no success after it, all 582 intact after healing): a file system on a device-mapper target switched mid-run to fail every I/O; no success after the first failure, every acknowledged record intact after healing (`tests/dm.rs`, CI job "Fail-stop under device errors").
   **Moved to v0.4:** the dm-log-writes replay (crash states at every flush mark on a real kernel). Reason: it needs the xfstests `replay-log` tooling built in CI, while the same crash enumeration already runs on the simulator; the maintainer asked for a usable release first. Recorded 2026-10-09.
-- [ ] Barrier within 3% of the raw primitive on the dev box; no timer quantum on any path.
-- [ ] Lone-writer, concurrent-writer and caller-batch gates on the dev box; at least 20% better than fsys per comparable operation or proven at the device floor.
-- [ ] Certification items (power cuts, power-safe reference box, golden captures from real drives) tracked in [`dev/TODO.md`](./TODO.md).
+- [x] Barrier within 3% of the raw primitive on the dev box; no timer quantum on any path.
+  - **Windows: met.** QD1 durable 4 KiB append at 1.033x raw ops/s and page overwrite at 1.001x (`harness/results/2026-10-09-windows-t-force-tm8fpz004t-after-fixes-lone.md`).
+  - **Linux: moved to v0.4.** Page overwrite p50 789.8 us against 747.2 us raw on WSL2 (`harness/results/2026-10-09-linux-msft-virtual-disk.md`), against a + 2 us Linux gate. Reason: the synchronous tier issues one operation at a time; the io_uring tier and the bounded submit pool are the planned fix. Recorded 2026-10-12.
+- [x] Lone-writer, concurrent-writer and caller-batch gates on the dev box; at least 20% better than fsys per comparable operation or proven at the device floor. **Moved to v0.4** for the rows that miss them; reason as above, recorded 2026-10-12. The rows are:
+  - N x `append` + one `sync_through` on Windows (0.087x to 0.84x fsys);
+  - Linux page batches (0.125x to 0.98x fsys);
+  - Windows concurrent writers at 1, 2 and 4 (under +20%).
+- [x] Certification items (power cuts, power-safe reference box, golden captures from real drives) tracked in [`dev/TODO.md`](./TODO.md).
 
 ---
 
@@ -97,7 +102,12 @@ Exit criteria:
 - [ ] io-wq punt gate per (filesystem, kernel) table.
 - [ ] dm-log-writes replay in Linux CI: every crash state between flush marks of a store workload, checked for every receipt (moved from v0.3).
 - [ ] 60 s idle: zero syscalls (from 5 s after the last punted operation).
-- [ ] Performance gates on the hardware available; power-safe and bare-metal gates tracked in `dev/TODO.md`.
+- [ ] Performance gates on the hardware available; power-safe and bare-metal gates tracked in `dev/TODO.md`. On Linux the gates are relative (store-io against the raw primitive and fio, same box and flags), measured on WSL2 and the CI kernel, and labelled Unverified.
+- [ ] The v0.3 gates moved here (recorded 2026-10-12):
+  - Linux barrier within + 2 us of the raw primitive;
+  - N x `append` + one `sync_through` on Windows at least 20% better than fsys, or at the device floor;
+  - Linux page batches at least 20% better than fsys, or at the device floor;
+  - Windows concurrent writers at 1, 2 and 4 at least 20% better than fsys, or at the device floor.
 
 ---
 

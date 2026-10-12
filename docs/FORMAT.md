@@ -482,6 +482,17 @@ A create that crashed leaves only blank blocks or torn headers, so it passes thi
 
 The only write is the volume record's next generation (owner generation + 1), an A/B update. A crash leaves the old or the new owner generation.
 
+### Which regions an open uses
+
+The region table decides which regions exist. A ready table entry is used only if both of these hold:
+
+- the container is long enough to hold it;
+- its header pair has a valid winner whose record names the same region id and kind, in the Ready state, with a valid generation.
+
+Any other entry is reported as unavailable, with the reason, in `Store::unavailable_regions()` and the store report. A lookup of its name returns `Corruption` naming the region, never `NotFound`. The name stays reserved.
+
+A header that no ready table entry names is never used: an interrupted release can leave one in released space, and the next provisioning there blanks it.
+
 ### Provision
 
 1. Choose the placement (section 11) and grow the file if needed.

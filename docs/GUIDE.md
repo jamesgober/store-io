@@ -245,10 +245,10 @@ Every error carries the operation, the region and byte range where known, and th
 | `DurabilityUnknown` | A write or flush failed after submission; the bytes may or may not be durable. The device's barrier domain is now poisoned. | Stop writing. Drop the store, reopen, and recover with a scan. |
 | `Poisoned` | An earlier failure poisoned the domain; nothing will be written. Reads still work. | Same as above. |
 | `NoSpace { tag }` | A reservation or provisioning ran out of space or quota. Nothing was written or poisoned. | Free space, raise the cap, or release regions. |
-| `Corruption` | store-io's own metadata or the media is damaged. | Recover from a replica or backup; scan what remains. |
+| `Corruption` | store-io's own metadata or the media is damaged. A region lookup returns it, naming the region, when the region exists but open could not use it (`store.unavailable_regions()` says why). | Recover from a replica or backup; scan what remains. Never treat it as "no data yet". |
 | `UnsafeDevice`, `Unverified` | The device was refused at open. | Use another device, or attest or override (section 8). |
 | `Locked` | Another process holds the store. | Wait for it, or stop it. |
-| `NotFound`, `AlreadyExists` | A store, region or slot lookup. | Create, or open. |
+| `NotFound`, `AlreadyExists` | A store, region or slot lookup. `NotFound` means the name does not exist in the store at all. | Create, or open. |
 | `Unsupported` | The platform cannot do this. | See the platform notes. |
 | `Io` | A setup or metadata call failed; durable data is unaffected. | Check the raw code. |
 

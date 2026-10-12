@@ -16,7 +16,8 @@ use store_io_core::class::{DurabilityClass, ReceiptLabel};
 use store_io_core::decide::{ClassDecision, DurableOpen, Trust, decide};
 use store_io_core::errno::{Stage, classify};
 use store_io_core::error::{
-    Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op, OsError, ReserveTag,
+    CorruptionKind, Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op, OsError,
+    ReserveTag,
 };
 use store_io_core::evidence::Evidence;
 use store_io_core::id::{Generation, RegionId, VolumeId};
@@ -92,6 +93,74 @@ pub(crate) struct Policy {
     pub(crate) flush: bool,
 }
 
+/// Why a region the region table names could not be opened (D-090).
+///
+/// Such a region is never used as ready and its name stays reserved; a lookup
+/// returns [`Error::Corruption`] naming the region, never `NotFound`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unavailable {
+    /// The container is shorter than the region's extent.
+    ContainerShort {
+        /// Bytes the container must hold for this region.
+        needed: u64,
+        /// Bytes it holds.
+        actual: u64,
+    },
+    /// Neither copy of the region's header is valid.
+    HeaderUnreadable,
+    /// The header passes its checksum but holds impossible values.
+    HeaderInvalid,
+    /// The header belongs to another region or another kind of region.
+    HeaderMismatch,
+    /// The header says the region was released while the table says ready.
+    HeaderReleased,
+}
+
+impl Unavailable {
+    /// The corruption kind a lookup of such a region reports.
+    #[must_use]
+    pub fn corruption_kind(&self) -> CorruptionKind {
+        match self {
+            Self::ContainerShort { .. } => CorruptionKind::Truncated,
+            Self::HeaderUnreadable => CorruptionKind::HeaderCrc,
+            Self::HeaderInvalid | Self::HeaderMismatch | Self::HeaderReleased => {
+                CorruptionKind::Metadata
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ContainerShort { needed, actual } => write!(
+                f,
+                "the container holds {actual} bytes but the region needs {needed}"
+            ),
+            Self::HeaderUnreadable => f.write_str("neither copy of its header is valid"),
+            Self::HeaderInvalid => f.write_str("its header holds impossible values"),
+            Self::HeaderMismatch => f.write_str("its header belongs to another region or kind"),
+            Self::HeaderReleased => {
+                f.write_str("its header says released while the table says ready")
+            }
+        }
+    }
+}
+
+/// A region the region table names that could not be opened (D-090).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableRegion {
+    /// The region's name.
+    pub name: String,
+    /// The region's id.
+    pub id: RegionId,
+    /// The region's kind.
+    pub kind: RegionKind,
+    /// Why it could not be opened.
+    pub reason: Unavailable,
+}
+
 /// What the store learned about its device, and what it decided.
 #[derive(Debug, Clone)]
 pub struct StoreReport {
@@ -109,6 +178,9 @@ pub struct StoreReport {
     pub owner_generation: u64,
     /// Whether the store was opened read-only.
     pub read_only: bool,
+    /// Regions the region table names that could not be opened, with the
+    /// reason (D-090). Empty for a healthy store.
+    pub unavailable: Vec<UnavailableRegion>,
 }
 
 impl core::fmt::Display for StoreReport {
@@ -137,6 +209,16 @@ impl core::fmt::Display for StoreReport {
         writeln!(f, "bus              {:?}", self.evidence.device.bus)?;
         if let Some(m) = &self.evidence.device.model {
             writeln!(f, "model            {m}")?;
+        }
+        for u in &self.unavailable {
+            writeln!(
+                f,
+                "unavailable      region {:?} (id {}, {:?}): {}",
+                u.name,
+                u.id.get(),
+                u.kind,
+                u.reason
+            )?;
         }
         write!(
             f,
@@ -471,6 +553,7 @@ where
             volume,
             owner_generation: 1,
             read_only: false,
+            unavailable: Vec::new(),
         };
         let meta = Meta {
             volume: vmeta,
@@ -577,31 +660,52 @@ where
         let next_region_id = table.next_region_id;
         let entries: Vec<TableEntry> = table.iter().collect();
         let mut regions = Vec::new();
+        // A region that fails any check below is reported, with the reason,
+        // and never used as ready (D-090).
+        let mut unavailable = Vec::new();
         for e in entries.iter().filter(|e| e.state == RegionState::Ready) {
+            let mut skip = |reason| {
+                unavailable.push(UnavailableRegion {
+                    name: e.name.as_str().to_owned(),
+                    id: RegionId::from_raw(e.region_id),
+                    kind: e.kind,
+                    reason,
+                });
+            };
             let end = layout
                 .extent(e.data_size)
                 .and_then(|l| e.offset.checked_add(l))
                 .ok_or_else(corrupt)?;
             if end > container_len {
-                // The table names space the container does not hold: never
-                // presented as ready.
+                // The table names space the container does not hold.
+                skip(Unavailable::ContainerShort {
+                    needed: end,
+                    actual: container_len,
+                });
                 continue;
             }
             let at = pair_region(volume, &layout, e);
             let header = read_pair(&mut q, &file, &pool, &at)?;
-            let Some(bytes) = header.payload.clone() else {
+            let (Some(bytes), Some((_, info))) =
+                (header.payload.clone(), header.report.winner_info())
+            else {
+                skip(Unavailable::HeaderUnreadable);
                 continue;
             };
             let Ok(rm) = RegionMeta::decode(&bytes) else {
+                skip(Unavailable::HeaderInvalid);
                 continue;
             };
-            if rm.region_id != e.region_id || rm.state != RegionState::Ready || rm.kind != e.kind {
+            if rm.region_id != e.region_id || rm.kind != e.kind {
+                skip(Unavailable::HeaderMismatch);
                 continue;
             }
-            let Some((_, info)) = header.report.winner_info() else {
+            if rm.state != RegionState::Ready {
+                skip(Unavailable::HeaderReleased);
                 continue;
-            };
+            }
             let Some(generation) = Generation::from_raw(info.generation) else {
+                skip(Unavailable::HeaderInvalid);
                 continue;
             };
             let frontier = (e.kind == RegionKind::Append).then(|| {
@@ -671,6 +775,7 @@ where
             volume,
             owner_generation,
             read_only,
+            unavailable,
         };
         Ok(Self::assemble(
             platform,
@@ -797,10 +902,38 @@ where
             cause: NotWrittenCause::InvalidName,
             ctx: ErrorContext::default(),
         })?;
-        self.regions_snapshot()
+        if let Some(r) = self
+            .regions_snapshot()
             .into_iter()
             .find(|r| r.name == name && r.kind == kind)
-            .ok_or(Error::NotFound { what })
+        {
+            return Ok(r);
+        }
+        // A region the table names but open could not use is corrupt, not
+        // missing: a caller must never mistake it for a fresh start (D-090).
+        match self
+            .inner
+            .report
+            .unavailable
+            .iter()
+            .find(|u| u.name == name.as_str() && u.kind == kind)
+        {
+            Some(u) => Err(Error::Corruption {
+                kind: u.reason.corruption_kind(),
+                ctx: ErrorContext {
+                    region: Some(u.id),
+                    range: None,
+                },
+            }),
+            None => Err(Error::NotFound { what }),
+        }
+    }
+
+    /// Regions the region table names that open could not use, with the
+    /// reason (D-090). Empty for a healthy store. Their names stay reserved.
+    #[must_use]
+    pub fn unavailable_regions(&self) -> Vec<UnavailableRegion> {
+        self.inner.report.unavailable.clone()
     }
 
     /// Provisions a region of `data_size` bytes (rounded up to the block size)

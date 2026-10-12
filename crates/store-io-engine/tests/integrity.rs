@@ -124,10 +124,16 @@ fn test_a_region_skipped_at_open_keeps_its_name() {
     let data = media(&p).windows(4096).position(|w| w == marker).unwrap() as u64;
     overwrite(&p, data - 2 * BLOCK, &[0u8; 2 * BLOCK as usize]);
     let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
+    // Reported, with the reason, and never mistaken for a missing name
+    // (D-090): the blank header blocks hold no valid copy.
     assert!(matches!(
         s.append_region("wal"),
-        Err(Error::NotFound { .. })
+        Err(Error::Corruption {
+            kind: store_io_core::error::CorruptionKind::HeaderCrc,
+            ..
+        })
     ));
+    assert_eq!(s.unavailable_regions().len(), 1);
     // The table still names it: the name cannot be reused, so the table
     // stays decodable and the store keeps opening.
     assert!(matches!(

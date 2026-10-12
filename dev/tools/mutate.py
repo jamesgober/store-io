@@ -5,7 +5,8 @@ Each entry is (file, pattern, replacement): a plausible bug at a flush,
 barrier, poison, directory-sync, generation-bump or accounting site. For each
 one the pattern is replaced (it must occur exactly once), the engine and
 simulator tests run, and the source is restored. A mutation the tests do not
-kill is a survivor; any survivor fails the run.
+kill is a survivor, and one that does not compile is invalid; either fails
+the run.
 
 Usage: python3 dev/tools/mutate.py [index ...]
 """
@@ -62,6 +63,9 @@ M = [
  ("crates/store-io-engine/src/io.rs", "                Some(mut lane) => flush_data(&mut lane, file),", "                Some(_lane) => flush_data(&mut self.inner.queues.get(0), file),"),
  ("crates/store-io-engine/src/store.rs", "                    inner.domain.poison(FirstCause {\n                        op: Some(Op::Write),\n                        raw,\n                    });\n                    self.wake_frontiers();", "                    self.wake_frontiers();"),
  ("crates/store-io-engine/src/region.rs", "        if self.store.inner.read_only {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,", "        if self.store.inner.read_only && false {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,"),
+ # D-090: unavailable regions are reported and never NotFound
+ ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
+ ("crates/store-io-engine/src/store.rs", "            read_only,\n            unavailable,\n        };", "            read_only,\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
 ]
 
 def kill_stuck_tests():
@@ -75,7 +79,7 @@ def kill_stuck_tests():
 
 def main():
     only = [int(a) for a in sys.argv[1:]]
-    survived, missing = [], []
+    survived, missing, invalid = [], [], []
     for i, (f, a, b) in enumerate(M):
         if only and i not in only:
             continue
@@ -100,13 +104,16 @@ def main():
                 kill_stuck_tests()
                 killed, why = True, "tests hung (caught)"
             print(f"[{i}] {f}: {why}", flush=True)
-            if not killed:
+            if why == "compile error":
+                # A mutation that does not compile tests nothing.
+                invalid.append(i)
+            elif not killed:
                 survived.append(i)
         finally:
             with open(p, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(src)
-    print("survived:", survived, "missing:", missing, flush=True)
-    sys.exit(1 if survived or missing else 0)
+    print("survived:", survived, "missing:", missing, "invalid:", invalid, flush=True)
+    sys.exit(1 if survived or missing or invalid else 0)
 
 
 if __name__ == "__main__":

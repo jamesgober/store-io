@@ -225,6 +225,8 @@ pub enum CorruptionKind {
     Metadata,
     /// Both copies of a small object hold the same generation with different bytes.
     Fork,
+    /// The container is shorter than its own metadata says it is.
+    Truncated,
 }
 
 /// A capability the platform, filesystem or device does not offer.

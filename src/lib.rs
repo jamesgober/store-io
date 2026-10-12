@@ -99,7 +99,7 @@ pub use store_io_core::evidence::Evidence;
 pub use store_io_core::id::{Generation, RegionId, VolumeId};
 pub use store_io_engine::{
     CONTAINER, DomainStats, DurableReceipt, RegionKind, RegionPos, ScanItem, ScanSummary,
-    SpaceReport, StoreOptions, StoreReport, TagSpace, WriteTicket,
+    SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable, UnavailableRegion, WriteTicket,
 };
 
 /// The operating system's native backend.

@@ -36,12 +36,13 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | `Store::open(path) -> Result<Store>` | Opens an existing store for writing with default options. Takes the ownership lock, flushes whatever a dead owner left in the device cache, and verifies every region against its header. |
 | `Store::open_with(path, StoreOptions) -> Result<Store>` | As `open`, with explicit options. |
 | `Store::open_readonly(path) -> Result<Store>` | Opens for reading and recovery: all I/O through a handle without write rights; nothing on disk changes. Takes the ownership lock, so no writer runs meanwhile. |
-| `store.append_region(name)` / `page_region(name)` / `slot(name)` | Looks up an existing region or slot. Never creates one. |
+| `store.append_region(name)` / `page_region(name)` / `slot(name)` | Looks up an existing region or slot. Never creates one. A name the region table holds but open could not use returns `Corruption` naming the region (`Truncated`, `HeaderCrc` or `Metadata`), never `NotFound`. |
+| `store.unavailable_regions() -> Vec<UnavailableRegion>` | Regions the region table names that open could not use, each with its name, id, kind and reason (`Unavailable`): the container is too short, neither header copy is valid, the header holds impossible values, belongs to another region, or says released. Empty for a healthy store. Their names stay reserved. |
 | `store.provision_append_region(name, bytes)` | Creates an append region with at least `bytes` of data area, writing and verifying every block first. |
 | `store.provision_page_region(name, bytes)` | Creates a page region likewise. |
 | `store.provision_slot(name)` | Creates a small-object slot. |
 | `store.regions() -> Vec<(String, RegionKind)>` | Names and kinds of the ready regions. |
-| `store.report() -> &StoreReport` | The evidence, class decision, block size, table capacity, volume id and owner generation. `Display` prints a readable report. |
+| `store.report() -> &StoreReport` | The evidence, class decision, block size, table capacity, volume id, owner generation and unavailable regions. `Display` prints a readable report. |
 | `store.space() -> SpaceReport` | See [Space](#9-space). |
 | `store.reserve(bytes, tag)`, `set_cap(tag, cap)`, `extent_of(bytes)` | See [Space](#9-space). |
 | `store.domain_stats() -> DomainStats` | Flushes issued, barriers that joined another's flush, barriers that led one. |
@@ -222,11 +223,11 @@ None of these can be constructed outside store-io.
 | `DurabilityUnknown { op, raw, ctx }` | Failed after submission; the domain is now poisoned. |
 | `Poisoned { first }` | An earlier failure poisoned the domain. |
 | `NoSpace { tag, ctx }` | A reservation or provisioning ran out of space or quota; nothing poisoned. |
-| `Corruption { kind, ctx }` | `MediaError`, `HeaderCrc`, `IdentityMismatch`, `Metadata`, `Fork`. |
+| `Corruption { kind, ctx }` | `MediaError`, `HeaderCrc`, `IdentityMismatch`, `Metadata`, `Fork`, `Truncated` (the container is shorter than its metadata says). |
 | `UnsafeDevice { reasons }`, `Unverified { missing, reasons }` | The device was refused. |
 | `Unsupported { what }` | A capability the platform lacks. |
 | `Fenced { stale }`, `Locked` | Ownership: a newer owner exists; another process holds the store. |
-| `NotFound { what }`, `AlreadyExists { what }` | Store, region or slot lookups. |
+| `NotFound { what }`, `AlreadyExists { what }` | Store, region or slot lookups. `NotFound` means no such name exists in the store at all. |
 | `Io { op, raw, ctx }` | A setup or metadata failure; durable data unaffected. |
 
 `ErrorContext` names the region and byte range where known; `OsError` keeps the raw errno, Win32 or NTSTATUS code. `Error` is at most 64 bytes.

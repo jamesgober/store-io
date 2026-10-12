@@ -11,12 +11,23 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `store-io-engine`: open no longer drops a region silently when it cannot use it.
+  - **Which regions.** A ready table entry whose container is too short, whose header has no valid copy, or whose header holds impossible values, names another region or kind, or says released.
+  - **Before.** Such a region was skipped, and a lookup of its name returned `NotFound`, the same answer as for a name that never existed. A caller could take that for a fresh start while the data was still on disk.
+  - **Now.** Such regions are reported with the reason, and a lookup returns `Corruption` naming the region.
+
 ### Added
 
+- `store-io-engine`: `Store::unavailable_regions()`, `UnavailableRegion` and
+  `Unavailable`; `StoreReport::unavailable` (also in its `Display`).
+- `store-io-core`: `CorruptionKind::Truncated` (the container is shorter than
+  its metadata says).
 - CI: a mutation check (`dev/tools/mutate.py`, workflow "Mutation"). Every
   listed mutation of a flush, barrier, poison, directory-sync or accounting
-  site must be killed by the engine and simulator tests; any survivor fails
-  the run.
+  site must be killed by the engine and simulator tests; a survivor, or a
+  mutation that does not compile, fails the run.
 
 ### Changed
 

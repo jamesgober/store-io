@@ -51,6 +51,9 @@ pub struct DomainStats {
     pub joined: u64,
     /// Barriers that issued the flush themselves.
     pub led: u64,
+    /// Receipts returned without a barrier because the target was already
+    /// durable (SIO-TYP-02: a barrier is never a silent no-op).
+    pub already_durable: u64,
 }
 
 /// A flush domain.
@@ -61,6 +64,7 @@ pub struct Domain {
     leader: AtomicBool,
     joined: AtomicU64,
     led: AtomicU64,
+    already_durable: AtomicU64,
     poison: OnceLock<FirstCause>,
     wait: Mutex<()>,
     wake: Condvar,
@@ -82,6 +86,7 @@ impl Domain {
             leader: AtomicBool::new(false),
             joined: AtomicU64::new(0),
             led: AtomicU64::new(0),
+            already_durable: AtomicU64::new(0),
             poison: OnceLock::new(),
             wait: Mutex::new(()),
             wake: Condvar::new(),
@@ -108,7 +113,15 @@ impl Domain {
             flushes: self.issued.load(Ordering::Acquire),
             joined: self.joined.load(Ordering::Relaxed),
             led: self.led.load(Ordering::Relaxed),
+            already_durable: self.already_durable.load(Ordering::Relaxed),
         }
+    }
+
+    /// Counts a receipt returned without a barrier because its target was
+    /// already durable.
+    #[inline]
+    pub fn count_already_durable(&self) {
+        let _previous = self.already_durable.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The ticket a barrier needs, to be taken **after** every write it must
@@ -254,7 +267,8 @@ mod tests {
             DomainStats {
                 flushes: 1,
                 joined: 1,
-                led: 1
+                led: 1,
+                already_durable: 0
             }
         );
     }

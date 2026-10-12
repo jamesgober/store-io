@@ -38,7 +38,50 @@ wildcards = "deny"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
-allow = []
+# An allowlist: any crate not named here fails `cargo deny check`. A new
+# dependency is a decision entry first (D-064), then a line here.
+allow = [
+    # Runtime: the only crates store-io links into a program.
+    { crate = "libc", reason = "Linux and macOS system calls (posix backend, buf arenas)" },
+    { crate = "windows-sys", reason = "Windows system calls (win backend, buf arenas)" },
+    { crate = "windows-link", reason = "windows-sys import linking" },
+    # Test only: loom and its tree, built only under `cfg(loom)` in CI.
+    { crate = "loom", reason = "model checking of buf and engine (cfg(loom) only)" },
+    { crate = "generator", reason = "loom" },
+    { crate = "cc", reason = "loom (generator build script)" },
+    { crate = "find-msvc-tools", reason = "loom (cc)" },
+    { crate = "shlex", reason = "loom (cc)" },
+    { crate = "rustversion", reason = "loom (generator)" },
+    { crate = "windows-result", reason = "loom (generator)" },
+    { crate = "cfg-if", reason = "loom" },
+    { crate = "log", reason = "loom (generator)" },
+    { crate = "scoped-tls", reason = "loom" },
+    { crate = "tracing", reason = "loom" },
+    { crate = "tracing-core", reason = "loom" },
+    { crate = "tracing-log", reason = "loom" },
+    { crate = "tracing-subscriber", reason = "loom" },
+    { crate = "pin-project-lite", reason = "loom (tracing)" },
+    { crate = "once_cell", reason = "loom (tracing)" },
+    { crate = "lazy_static", reason = "loom (tracing)" },
+    { crate = "matchers", reason = "loom (tracing-subscriber)" },
+    { crate = "regex-automata", reason = "loom (tracing-subscriber)" },
+    { crate = "regex-syntax", reason = "loom (tracing-subscriber)" },
+    { crate = "nu-ansi-term", reason = "loom (tracing-subscriber)" },
+    { crate = "sharded-slab", reason = "loom (tracing-subscriber)" },
+    { crate = "smallvec", reason = "loom (tracing-subscriber)" },
+    { crate = "thread_local", reason = "loom (tracing-subscriber)" },
+    # The workspace's own crates.
+    { crate = "store-io", reason = "this workspace" },
+    { crate = "store-io-buf", reason = "this workspace" },
+    { crate = "store-io-conformance", reason = "this workspace" },
+    { crate = "store-io-core", reason = "this workspace" },
+    { crate = "store-io-engine", reason = "this workspace" },
+    { crate = "store-io-format", reason = "this workspace" },
+    { crate = "store-io-platform", reason = "this workspace" },
+    { crate = "store-io-posix", reason = "this workspace" },
+    { crate = "store-io-sim", reason = "this workspace" },
+    { crate = "store-io-win", reason = "this workspace" },
+]
 deny = []
 skip = []
 skip-tree = []

@@ -37,6 +37,17 @@
 - `store-io-sim`: `FaultPlan::dir_sync_unsupported` (every directory flush
   fails as unsupported) and `FaultPlan::fail_set_len` (the n-th `set_len`
   fails).
+- `store-io-engine`: `DomainStats::already_durable`, which counts the receipts
+  `AppendRegion::sync_through` returned without a barrier because the ticket
+  was already durable (SIO-TYP-02: a barrier is never a silent no-op).
+  `DomainStats` gains a field, so code that builds one with a struct literal
+  must add it.
+- Tests: on NTFS, ext4 and XFS, releasing a region leaves the regions on
+  either side, the slots and the table intact, before and after a reopen; on
+  Windows the container keeps its length and does not become sparse.
+- CI: `deny.toml` is now a crate allowlist. Any crate not listed (today
+  `libc`, `windows-sys` and `windows-link` at run time, and `loom`'s tree for
+  model checking) fails `cargo deny check`.
 - `store-io-core`: `errno::is_unsupported`, which tells "the object cannot do
   this" from "it failed while doing it".
 - CI: a mutation check (`dev/tools/mutate.py`, workflow "Mutation"). Every

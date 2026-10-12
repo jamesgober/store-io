@@ -177,3 +177,76 @@ fn test_directory_replace_on_the_real_file_system() {
     assert!(matches!(dir.read("CURRENT"), Err(Error::NotFound { .. })));
     assert!(dir.class().is_some());
 }
+
+/// Releasing a region on the real file system gives its space back without
+/// touching anything else: the regions on either side, the slots and the
+/// table read back exactly, before and after a reopen, and a region
+/// provisioned into the freed space works. On Windows the release trims in
+/// place, so the container keeps its length and never becomes sparse (a
+/// sparse file may allocate on overwrite, which would cost the store its
+/// class).
+#[test]
+fn test_releasing_a_region_leaves_its_neighbours_and_the_metadata_intact() {
+    let t = TempDir::new("release");
+    let (opts, _overridden) = options_for(t.path());
+    let path = t.path().join("columns");
+    let store = Store::create(&path, opts.clone()).unwrap();
+    let fill =
+        |tag: u8, len: usize| -> Vec<u8> { (0..len).map(|i| tag ^ (i % 253) as u8).collect() };
+    let size = 1u64 << 20;
+    let names = ["left", "middle", "right"];
+    for (i, name) in names.iter().enumerate() {
+        let r = store.provision_page_region(name, size).unwrap();
+        r.write_durable(r.pos(0).unwrap(), &fill(i as u8 + 1, size as usize))
+            .unwrap();
+    }
+    let manifest = store.provision_slot("manifest").unwrap();
+    manifest.commit(b"left,middle,right").unwrap();
+    let container = path.join(store_io::CONTAINER);
+    let len_before = std::fs::metadata(&container).unwrap().len();
+
+    store.page_region("middle").unwrap().release().unwrap();
+
+    let check = |s: &Store| {
+        for (i, name) in names.iter().enumerate().filter(|(_, n)| **n != "middle") {
+            let r = s.page_region(name).unwrap();
+            let mut back = vec![0u8; size as usize];
+            r.read(r.pos(0).unwrap(), &mut back).unwrap();
+            assert!(back == fill(i as u8 + 1, size as usize), "{name} changed");
+        }
+        assert!(matches!(
+            s.page_region("middle"),
+            Err(Error::NotFound { .. })
+        ));
+        assert_eq!(
+            s.slot("manifest").unwrap().read().unwrap(),
+            b"left,middle,right"
+        );
+        assert!(s.unavailable_regions().is_empty());
+    };
+    check(&store);
+    assert_eq!(std::fs::metadata(&container).unwrap().len(), len_before);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_SPARSE_FILE: u32 = 0x200;
+        let attrs = std::fs::metadata(&container).unwrap().file_attributes();
+        assert_eq!(
+            attrs & FILE_ATTRIBUTE_SPARSE_FILE,
+            0,
+            "the container became sparse"
+        );
+    }
+    drop((manifest, store));
+
+    let store = Store::open_with(&path, opts).unwrap();
+    check(&store);
+    // The freed space is reused and reads back what was written.
+    let again = store.provision_page_region("again", size).unwrap();
+    let data = fill(9, size as usize);
+    again.write_durable(again.pos(0).unwrap(), &data).unwrap();
+    let mut back = vec![0u8; size as usize];
+    again.read(again.pos(0).unwrap(), &mut back).unwrap();
+    assert!(back == data, "the reused space did not read back");
+    check(&store);
+}

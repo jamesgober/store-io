@@ -357,3 +357,34 @@ fn test_read_only_open_modifies_nothing_and_cannot_write() {
     let after = p.with_world(|w| w.visible(1).map(<[u8]>::to_vec));
     assert_eq!(before, after, "a read-only open changed the container");
 }
+
+/// SIO-TYP-02: a barrier is never a silent no-op. A ticket already covered
+/// by an earlier barrier gets a receipt for the real frontier without a new
+/// flush, and the shortcut is counted.
+#[test]
+fn test_an_already_durable_ticket_is_counted_and_reports_the_real_frontier() {
+    let p = SimPlatform::new(SimConfig::volatile(12));
+    let s = create(&p);
+    let wal = s.provision_append_region("wal", 1 << 20).unwrap();
+    let first = wal.append(&record(0, 512)).unwrap();
+    let second = wal.append(&record(1, 512)).unwrap();
+    let covering = wal.sync_through(&second).unwrap();
+    let before = s.domain_stats();
+    let r = wal.sync_through(&first).unwrap();
+    let after = s.domain_stats();
+    assert_eq!(after.already_durable - before.already_durable, 1);
+    assert_eq!(
+        after.flushes, before.flushes,
+        "a covered ticket flushed again"
+    );
+    assert!(r.covers(&first) && r.covers(&second));
+    assert_eq!(r.durable_through(), covering.durable_through());
+    // The bytes are on media: nothing is lost by a power cut.
+    drop((wal, s));
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    let s = reopen(&p);
+    let wal = s.append_region("wal").unwrap();
+    let mut out = vec![0u8; 512];
+    wal.read(second.pos().offset(), &mut out).unwrap();
+    assert_eq!(out, record(1, 512));
+}

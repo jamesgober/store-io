@@ -45,7 +45,7 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | `store.report() -> &StoreReport` | The evidence, class decision, block size, table capacity, volume id, owner generation and unavailable regions. `Display` prints a readable report. |
 | `store.space() -> SpaceReport` | See [Space](#9-space). |
 | `store.reserve(bytes, tag)`, `set_cap(tag, cap)`, `extent_of(bytes)` | See [Space](#9-space). |
-| `store.domain_stats() -> DomainStats` | Flushes issued, barriers that joined another's flush, barriers that led one. |
+| `store.domain_stats() -> DomainStats` | Flushes issued, barriers that joined another's flush, barriers that led one, and receipts returned without a barrier because the target was already durable (`already_durable`). |
 | `store.poison()` | Poisons the device's barrier domain on purpose: every later write and barrier fails. |
 | `store.volume() -> VolumeId` | The store's identity. |
 

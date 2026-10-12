@@ -1,16 +1,16 @@
 //! One-off diagnostics run before the workloads.
 //!
-//! Windows: store-io-win issues its data flush,
-//! `NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)`, on the per-queue
-//! handles it opens with `FILE_FLAG_OVERLAPPED`
-//! (`crates/store-io-win/src/queue.rs`, `entry_for` / `FlushData`), treats
-//! any non-negative NTSTATUS as completion, and lets the `IO_STATUS_BLOCK`
-//! go out of scope on return (`crates/store-io-win/src/sys.rs`,
-//! `flush_data_sync_only`). On an asynchronous file object the I/O manager
-//! may return `STATUS_PENDING` (0x103, non-negative) and complete the flush
-//! later. This diagnostic issues the same call on the same kind of handle,
+//! Windows: `NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)` on a
+//! handle opened with `FILE_FLAG_OVERLAPPED` may return `STATUS_PENDING`
+//! (0x103, non-negative) and complete the flush later. store-io-win
+//! therefore never flushes through its overlapped queue handles: every flush
+//! goes through each file's separate synchronous handle
+//! (`crates/store-io-win/src/file.rs`, `flush_data`), and
+//! `crates/store-io-win/src/sys.rs` (`flush_data_sync_only`) treats
+//! `STATUS_PENDING` as a failure and leaks the `IO_STATUS_BLOCK` the kernel
+//! may still write. This diagnostic issues the call on an overlapped handle,
 //! once idle and once while another thread writes the same file, and counts
-//! how often it pends on this machine.
+//! how often it pends on this machine: the evidence for that design.
 
 use crate::workloads::Ctx;
 
@@ -63,10 +63,10 @@ pub fn run(ctx: &Ctx) -> Vec<String> {
     let _ = crate::workloads::remove(&path);
     match r {
         Ok((0, 0)) => vec![format!(
-            "NtFlushBuffersFileEx(DATA_SYNC_ONLY) on a FILE_FLAG_OVERLAPPED | NO_BUFFERING handle (the kind store-io-win flushes through) after a dirty 4 KiB write never returned STATUS_PENDING: 0 of {FLUSHES} idle and 0 of {FLUSHES} while a second thread wrote the same file [measured]. The latent hazard in store-io-win's flush wrapper (STATUS_PENDING counted as success, IO_STATUS_BLOCK dropped) did not trigger on this machine; that is not proof it cannot"
+            "NtFlushBuffersFileEx(DATA_SYNC_ONLY) on a FILE_FLAG_OVERLAPPED | NO_BUFFERING handle after a dirty 4 KiB write never returned STATUS_PENDING: 0 of {FLUSHES} idle and 0 of {FLUSHES} while a second thread wrote the same file [measured]. That is not proof it cannot; store-io-win flushes only through synchronous handles and treats STATUS_PENDING as a failure either way"
         )],
         Ok((a, b)) => vec![format!(
-            "BUG TRIGGERED: NtFlushBuffersFileEx(DATA_SYNC_ONLY) on a FILE_FLAG_OVERLAPPED handle returned STATUS_PENDING {a} of {FLUSHES} times idle and {b} of {FLUSHES} times under concurrent writes [measured]. store-io-win's wrapper treats that as a completed flush (a receipt before durability) and drops the IO_STATUS_BLOCK while the kernel may still write it"
+            "NtFlushBuffersFileEx(DATA_SYNC_ONLY) on a FILE_FLAG_OVERLAPPED handle returned STATUS_PENDING {a} of {FLUSHES} times idle and {b} of {FLUSHES} times under concurrent writes [measured]. This is why store-io-win flushes only through synchronous handles and treats STATUS_PENDING as a failure"
         )],
         Err(e) => vec![format!("flush-pending diagnostic could not run: {e}")],
     }

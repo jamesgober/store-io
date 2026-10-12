@@ -291,6 +291,7 @@ where
         }
         let durable = f.durable();
         if durable >= ticket.end {
+            s.inner.domain.count_already_durable();
             return Ok(s.receipt(&self.state, 0, durable, 0, true));
         }
         let domain = &s.inner.domain;

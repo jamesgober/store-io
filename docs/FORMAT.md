@@ -399,7 +399,7 @@ This is how store-io opens a container. An independent reader that follows it re
 
    If no candidate succeeds, the open fails with `Corruption(HeaderCrc)`.
 2. **Read the region table** from the pair at `2B` and `2B + T` (slot size T, object 1), and decode and validate it (section 7).
-3. **Read each Ready entry's header** from its pair at `offset` and `offset + B`. The region is presented only if all of these hold; otherwise it is silently left out, while its table entry, and so its space, stays:
+3. **Read each Ready entry's header** from its pair at `offset` and `offset + B`. The region is presented only if all of these hold; otherwise it is reported as unavailable with its reason (see "Which regions an open uses"), and its table entry, its name and its space stay:
    - its extent ends within the file;
    - the pair has a Confirmed or Unconfirmed winner, and its payload decodes as a region header;
    - the header's `region_id` and `kind` match the entry, and its state is Ready.

@@ -427,10 +427,31 @@ where
                 },
                 None => not_written(NotWrittenCause::QueueFull, c),
             })?;
-            let n = completed.result.map_err(|_raw| Error::Corruption {
-                kind: CorruptionKind::MediaError,
-                ctx: c,
-            })?;
+            let n = match completed.result {
+                Ok(n) => n,
+                Err(raw) => {
+                    let start = offset + done as u64;
+                    let end = start + piece;
+                    // A failed read is a media error only when the device
+                    // says so; anything else keeps its raw code (accuracy).
+                    if !store_io_core::errno::is_media_error(raw) {
+                        return Err(Error::Io {
+                            op: Op::Read,
+                            raw,
+                            ctx: ctx_range(r, start, end),
+                        });
+                    }
+                    // Name the exact unreadable range, found by the scan's
+                    // bisection, not just the whole read. The queue is
+                    // returned first: the scan borrows its own.
+                    drop(lane);
+                    let (bad_start, bad_end) = self.first_unreadable(r, start, end)?;
+                    return Err(Error::Corruption {
+                        kind: CorruptionKind::MediaError,
+                        ctx: ctx_range(r, bad_start, bad_end),
+                    });
+                }
+            };
             let Some(buf) = completed.buf else {
                 return Ok(done.min(out.len()));
             };
@@ -442,6 +463,21 @@ where
             }
         }
         Ok(done)
+    }
+
+    /// The first unreadable range in `[start, end)` of `r`, found by the
+    /// scan's bisection; the whole range if the device reads it all now (a
+    /// transient failure is still reported, never hidden).
+    fn first_unreadable(&self, r: &LiveRegion, start: u64, end: u64) -> Result<(u64, u64), Error> {
+        let mut first = None;
+        let _summary = self.scan_region(r, start, end, |item| match item {
+            ScanItem::Unreadable { start, end } => {
+                first = Some((start, end));
+                ControlFlow::Break(())
+            }
+            ScanItem::Data { .. } => ControlFlow::Continue(()),
+        })?;
+        Ok(first.unwrap_or((start, end)))
     }
 
     /// A read larger than one pooled buffer: the scan's pipeline (several

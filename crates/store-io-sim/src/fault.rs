@@ -35,6 +35,9 @@ pub struct FaultPlan {
     /// The n-th read completion transfers only half its bytes (rounded down
     /// to a logical block) and reports the short count.
     pub short_read: Option<u64>,
+    /// The n-th read completion fails with this raw code (for example 22,
+    /// EINVAL, or 12, ENOMEM: not a media error).
+    pub fail_read: Option<(u64, i32)>,
     /// The n-th write lands `delta` bytes away from its offset (a misdirected
     /// write) and reports success.
     pub misdirect_write: Option<(u64, i64)>,

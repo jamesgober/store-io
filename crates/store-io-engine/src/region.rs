@@ -335,7 +335,9 @@ where
     /// # Errors
     ///
     /// `NotWritten` for a misaligned or out-of-range read;
-    /// `Corruption(MediaError)` if the device reports an unreadable range.
+    /// `Corruption(MediaError)` if the device reports an unreadable range,
+    /// with the exact range in the error's context; `Io` with the raw code
+    /// for any other failure.
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
         let _pass = self.pass()?;
         self.store.read_at(&self.state, offset, out)
@@ -626,7 +628,8 @@ where
     /// # Errors
     ///
     /// `NotWritten` for a foreign, stale or out-of-range position;
-    /// `Corruption(MediaError)` for an unreadable range.
+    /// `Corruption(MediaError)` for an unreadable range, with the exact range
+    /// in the error's context; `Io` with the raw code for any other failure.
     pub fn read(&self, pos: RegionPos, out: &mut [u8]) -> Result<usize, Error> {
         let c = ctx(&self.state);
         if pos.volume != self.store.inner.volume || pos.region != self.state.id {

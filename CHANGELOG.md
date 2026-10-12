@@ -17,6 +17,9 @@
   - **Which regions.** A ready table entry whose container is too short, whose header has no valid copy, or whose header holds impossible values, names another region or kind, or says released.
   - **Before.** Such a region was skipped, and a lookup of its name returned `NotFound`, the same answer as for a name that never existed. A caller could take that for a fresh start while the data was still on disk.
   - **Now.** Such regions are reported with the reason, and a lookup returns `Corruption` naming the region.
+- `store-io-engine`: a failed region read is reported accurately.
+  - **Before.** Every failure was reported as `Corruption(MediaError)` and the raw code was dropped, so an invalid argument, an exhausted resource or a bad handle looked like a failing disk.
+  - **Now.** A media error names the exact unreadable range, found by the scan's bisection. Any other failure is `Io` with its raw code and the byte range.
 
 ### Added
 
@@ -24,6 +27,8 @@
   `Unavailable`; `StoreReport::unavailable` (also in its `Display`).
 - `store-io-core`: `CorruptionKind::Truncated` (the container is shorter than
   its metadata says).
+- `store-io-sim`: `FaultPlan::fail_read`, which fails the n-th read with a
+  chosen raw code.
 - CI: a mutation check (`dev/tools/mutate.py`, workflow "Mutation"). Every
   listed mutation of a flush, barrier, poison, directory-sync or accounting
   site must be killed by the engine and simulator tests; a survivor, or a

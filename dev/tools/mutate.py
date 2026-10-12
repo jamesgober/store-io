@@ -66,6 +66,9 @@ M = [
  # D-090: unavailable regions are reported and never NotFound
  ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
  ("crates/store-io-engine/src/store.rs", "            read_only,\n            unavailable,\n        };", "            read_only,\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
+ # Read errors are classified and media errors name the exact range
+ ("crates/store-io-engine/src/io.rs", "                    if !store_io_core::errno::is_media_error(raw) {", "                    if false {"),
+ ("crates/store-io-engine/src/io.rs", "                    let (bad_start, bad_end) = self.first_unreadable(r, start, end)?;", "                    let (bad_start, bad_end) = (start, end);"),
 ]
 
 def kill_stuck_tests():

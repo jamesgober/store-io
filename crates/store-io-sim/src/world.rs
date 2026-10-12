@@ -550,6 +550,19 @@ impl World {
             });
             return Err(EIO);
         }
+        if let Some((at, code)) = self.cfg.faults.fail_read {
+            if at == nth {
+                self.trace.push(TraceEvent::Read {
+                    file,
+                    offset,
+                    err: code,
+                });
+                return Err(OsError {
+                    code,
+                    source: OsErrorSource::Sim,
+                });
+            }
+        }
         let avail = f.visible.len() as u64;
         let mut n = if offset >= avail {
             0

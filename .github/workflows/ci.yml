@@ -215,5 +215,6 @@ jobs:
         run: |
           for t in slot_validate pair_torn_update meta_decode table_decode; do
             mkdir -p "corpus/$t"
-            cargo +nightly fuzz run "$t" "corpus/$t" -- -max_total_time=60
+            # The prebuilt cargo-fuzz is a musl binary and defaults to its own target.
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$t" "corpus/$t" -- -max_total_time=60
           done

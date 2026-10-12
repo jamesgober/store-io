@@ -62,7 +62,9 @@ check_limit() { # $1 entries to replay  $2 label
   CHECKS=$((CHECKS + 1))
   if ! "$BIN" check /mnt/lwr "$need" > "$OUT/check.txt"; then FAILS=$((FAILS + 1)); fi
   echo "entries=$1 ($2): $(cat "$OUT/check.txt")"
-  umount /mnt/lwr
+  # A device just mounted can be held briefly by udev probing: retry, then lazy.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do umount /mnt/lwr 2>/dev/null && break; sleep 0.3; done
+  if mountpoint -q /mnt/lwr; then umount -l /mnt/lwr; fi
 }
 
 echo "== replay to every receipt mark"

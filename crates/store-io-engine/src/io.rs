@@ -3,6 +3,7 @@
 //! guard, barriers, tickets, receipts and reads.
 
 use store_io_core::align::align_up;
+use store_io_core::class::Missing;
 use store_io_core::error::{
     ByteRange, CorruptionKind, Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError,
 };
@@ -210,15 +211,17 @@ where
     }
 
     /// The smallest read the bisection of a failed read goes down to: the
-    /// device's logical block, or the file system's direct-I/O offset
-    /// alignment if larger, where the probe reports them; the store block
-    /// where it reports neither. Always a power of two dividing the block.
+    /// file system's direct-I/O offset alignment (or the device's logical
+    /// block, if larger), but only where the probe reported that alignment.
+    /// Without it the store block: a layered device (dm-crypt with 4 KiB
+    /// sectors over a 512e disk, a kernel without `STATX_DIOALIGN`) may refuse
+    /// smaller direct reads. Always a power of two dividing the block.
     pub(crate) fn sector(&self) -> u64 {
         let ev = &self.inner.report.evidence;
-        let need = u64::from(ev.device.logical_block.max(ev.fs.dio_offset_align));
-        if need == 0 {
+        if ev.missing.contains(Missing::DioAlignment) || ev.fs.dio_offset_align == 0 {
             return self.block();
         }
+        let need = u64::from(ev.device.logical_block.max(ev.fs.dio_offset_align));
         need.next_power_of_two().min(self.block())
     }
 
@@ -455,10 +458,15 @@ where
                         });
                     }
                     // Name the exact unreadable range, found by the scan's
-                    // bisection, not just the whole read. The queue is
-                    // returned first: the scan borrows its own.
+                    // bisection, not just the whole read. The queue and the
+                    // failed read's buffer are returned first: the scan takes
+                    // its own. If the rescan itself fails (a short pool, a
+                    // full queue), the media error stands for the whole
+                    // piece rather than being replaced by that failure.
+                    drop(completed);
                     drop(lane);
-                    let (bad_start, bad_end) = self.first_unreadable(r, start, end)?;
+                    let (bad_start, bad_end) =
+                        self.first_unreadable(r, start, end).unwrap_or((start, end));
                     return Err(Error::Corruption {
                         kind: CorruptionKind::MediaError,
                         ctx: ctx_range(r, bad_start, bad_end),
@@ -578,6 +586,7 @@ mod tests {
         let s = Store::create(p, Path::new("/db"), opts).unwrap();
         let wal = s.provision_append_region("wal", 1 << 20).unwrap();
         let ticket = wal.append(b"needs a flush").unwrap();
+        let before = s.domain_stats();
         let held = s.inner.queues.get(0);
         let (tx, rx) = std::sync::mpsc::channel();
         let waiter = std::thread::spawn(move || {
@@ -592,5 +601,9 @@ mod tests {
             Ok(true),
             "the flush leader waited for the shared queue the test holds"
         );
+        // The barrier really led a flush (not a shortcut that needs none).
+        let after = s.domain_stats();
+        assert_eq!(after.led - before.led, 1, "no flush was led");
+        assert!(after.flushes > before.flushes, "no flush was issued");
     }
 }

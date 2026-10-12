@@ -7,7 +7,8 @@
 //! into one aligned buffer and writes it as one device I/O.
 
 use store_io_buf::BufPool;
-use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op};
+use store_io_core::errno::{is_end_of_file, is_media_error};
+use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
 use store_io_format::pair::{PairReport, decide};
 use store_io_format::slot::{Expect, SlotFields, SlotIndex, SlotStatus, encode, validate};
 use store_io_platform::{IoOp, Queue};
@@ -102,11 +103,25 @@ fn read_one<Q: Queue>(
         },
         None => pool_err(ErrorContext::default()),
     })?;
+    // A media error, a short read or a read past the end of the file leaves
+    // the slot unreadable, which the pair decision weighs. Any other failure
+    // (a bad handle, an exhausted resource) says nothing about the slot: it
+    // is returned with its code, never mistaken for damage.
+    let unreadable = |raw: OsError| is_media_error(raw) || is_end_of_file(raw);
+    let fail = |raw| Error::Io {
+        op: Op::Read,
+        raw,
+        ctx: ErrorContext::default(),
+    };
     let Some(buf) = done.buf else {
-        return Ok((SlotStatus::ReadError, None));
+        return match done.result {
+            Err(raw) if !unreadable(raw) => Err(fail(raw)),
+            _ => Ok((SlotStatus::ReadError, None)),
+        };
     };
     match done.result {
         Ok(n) if n == at.size() => {}
+        Err(raw) if !unreadable(raw) => return Err(fail(raw)),
         _ => return Ok((SlotStatus::ReadError, None)),
     }
     let expect = Expect {

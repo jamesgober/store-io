@@ -134,18 +134,48 @@ pub fn is_media_error(raw: OsError) -> bool {
 /// Whether the code means the object does not support the operation at all
 /// (for example a directory flush on a file system that cannot do one), as
 /// opposed to a failure while doing it.
+///
+/// Only meaningful for the result of a flush or sync call: `EINVAL` is also
+/// what a misaligned or malformed request returns, so no other call may use
+/// this to treat an error as "unsupported, skip". Errno numbers differ
+/// between operating systems, so each is matched against its own.
 #[must_use]
 pub fn is_unsupported(raw: OsError) -> bool {
     match raw.source {
-        // EINVAL = 22 (fsync on an object without synchronisation), ENOSYS =
-        // 38, EOPNOTSUPP / ENOTSUP = 95 (Linux); ENOTSUP = 45, EOPNOTSUPP =
-        // 102 (macOS).
-        OsErrorSource::Errno => matches!(raw.code, 22 | 38 | 95 | 45 | 102),
+        OsErrorSource::Errno => errno_unsupported(raw.code),
         // ERROR_INVALID_FUNCTION = 1, ERROR_NOT_SUPPORTED = 50.
         OsErrorSource::Win32 => matches!(raw.code, 1 | 50),
         // STATUS_INVALID_DEVICE_REQUEST, STATUS_NOT_SUPPORTED.
         OsErrorSource::NtStatus => matches!(raw.code as u32, 0xC000_0010 | 0xC000_00BB),
         OsErrorSource::Sim => raw.code == 95,
+    }
+}
+
+/// Linux: EINVAL = 22 (fsync on an object without synchronisation), ENOSYS =
+/// 38, EOPNOTSUPP / ENOTSUP = 95.
+#[cfg(not(target_vendor = "apple"))]
+fn errno_unsupported(code: i32) -> bool {
+    matches!(code, 22 | 38 | 95)
+}
+
+/// macOS: EINVAL = 22, ENOTSUP = 45, ENOSYS = 78, EOPNOTSUPP = 102.
+#[cfg(target_vendor = "apple")]
+fn errno_unsupported(code: i32) -> bool {
+    matches!(code, 22 | 45 | 78 | 102)
+}
+
+/// Whether a read failed because it started at or past the end of the file:
+/// Windows reports `ERROR_HANDLE_EOF` / `STATUS_END_OF_FILE`, where POSIX
+/// returns a short (zero-byte) read instead. Not a media error and not a
+/// device fault: the bytes simply do not exist.
+#[must_use]
+pub fn is_end_of_file(raw: OsError) -> bool {
+    match raw.source {
+        // ERROR_HANDLE_EOF = 38.
+        OsErrorSource::Win32 => raw.code == 38,
+        // STATUS_END_OF_FILE.
+        OsErrorSource::NtStatus => raw.code as u32 == 0xC000_0011,
+        OsErrorSource::Errno | OsErrorSource::Sim => false,
     }
 }
 
@@ -241,6 +271,57 @@ mod tests {
         };
         assert!(is_not_found(win(2)) && is_not_found(win(3)));
         assert!(!is_not_found(win(5)));
+    }
+
+    #[test]
+    fn test_unsupported_is_judged_per_operating_system() {
+        let errno = |code| OsError {
+            code,
+            source: OsErrorSource::Errno,
+        };
+        assert!(is_unsupported(errno(22)));
+        assert!(
+            !is_unsupported(errno(5)),
+            "EIO is a failure, not unsupported"
+        );
+        assert!(
+            !is_unsupported(errno(28)),
+            "ENOSPC is a failure, not unsupported"
+        );
+        if cfg!(target_vendor = "apple") {
+            assert!(is_unsupported(errno(45)) && is_unsupported(errno(78)));
+            assert!(!is_unsupported(errno(38)), "ENOTSOCK on macOS");
+        } else {
+            assert!(is_unsupported(errno(38)) && is_unsupported(errno(95)));
+            assert!(!is_unsupported(errno(45)), "EL2NSYNC on Linux");
+            assert!(!is_unsupported(errno(102)), "ENETRESET on Linux");
+        }
+        let win = |code| OsError {
+            code,
+            source: OsErrorSource::Win32,
+        };
+        assert!(is_unsupported(win(1)) && is_unsupported(win(50)));
+        assert!(!is_unsupported(win(5)));
+    }
+
+    #[test]
+    fn test_end_of_file_is_only_the_windows_eof_codes() {
+        assert!(is_end_of_file(OsError {
+            code: 38,
+            source: OsErrorSource::Win32
+        }));
+        assert!(is_end_of_file(OsError {
+            code: 0xC000_0011_u32 as i32,
+            source: OsErrorSource::NtStatus
+        }));
+        assert!(!is_end_of_file(OsError {
+            code: 38,
+            source: OsErrorSource::Errno
+        }));
+        assert!(!is_end_of_file(OsError {
+            code: 23,
+            source: OsErrorSource::Win32
+        }));
     }
 
     #[test]

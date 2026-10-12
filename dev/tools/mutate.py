@@ -79,6 +79,11 @@ M = [
  # Sector-exact bisection, and the pipelined read names the exact range
  ("crates/store-io-engine/src/io.rs", "        need.next_power_of_two().min(self.block())", "        self.block()"),
  ("crates/store-io-engine/src/io.rs", "                Some((start, end)) => ctx_range(r, start, end),", "                Some(_) => c,"),
+ # Review fixes: growth never resurrects a truncated region; sector gate; slot read classification; bisect backstop
+ ("crates/store-io-engine/src/space.rs", ".find(|u| matches!(u.reason, crate::store::Unavailable::ContainerShort { .. }))", ".find(|_| false)"),
+ ("crates/store-io-engine/src/io.rs", "        if ev.missing.contains(Missing::DioAlignment) || ev.fs.dio_offset_align == 0 {", "        if false {"),
+ ("crates/store-io-engine/src/slots.rs", "    let unreadable = |raw: OsError| is_media_error(raw) || is_end_of_file(raw);", "    let unreadable = |_raw: OsError| true;"),
+ ("crates/store-io-engine/src/scan.rs", "            Err(_) if len < self.block() => {", "            Err(_) if false => {"),
 ]
 
 def kill_stuck_tests():

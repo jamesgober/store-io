@@ -184,6 +184,60 @@ fn test_a_region_cut_off_by_a_truncated_container_is_reported_as_truncated() {
     assert_eq!(&buf[..15], b"A-RECORD-000001");
 }
 
+/// A truncated region is never brought back by growing the container over
+/// it: growth would zero-fill its missing tail, and the next open would find
+/// it whole, its lost records read as zeros (found by review). Provisioning
+/// and reserving are refused while it exists, and it stays reported.
+#[test]
+fn test_growth_never_resurrects_a_truncated_region() {
+    let p = SimPlatform::new(SimConfig::volatile(63));
+    let s = Store::create(p.clone(), Path::new(DIR), opts()).unwrap();
+    let b = s.provision_append_region("b", 1 << 20).unwrap();
+    b.append_durable(&record("B-RECORD-000001")).unwrap();
+    drop((b, s));
+    let len = media(&p).len() as u64;
+    {
+        let dir = p.open_dir(Path::new(DIR), false).unwrap();
+        let file = p
+            .open_file(
+                &dir,
+                &FileName::new(CONTAINER).unwrap(),
+                FileMode::ReadWrite,
+            )
+            .unwrap();
+        p.set_len(&file, len - 16 * BLOCK).unwrap();
+        p.flush_all(&file).unwrap();
+    }
+    let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
+    let truncated = |r: Result<(), Error>| {
+        matches!(
+            r,
+            Err(Error::Corruption {
+                kind: CorruptionKind::Truncated,
+                ..
+            })
+        )
+    };
+    assert!(truncated(s.provision_append_region("c", 1 << 20).map(drop)));
+    assert!(truncated(s.provision_page_region("d", 64 << 10).map(drop)));
+    assert!(truncated(s.reserve(1 << 20, 1).map(drop)));
+    assert_eq!(
+        media(&p).len() as u64,
+        len - 16 * BLOCK,
+        "the container grew"
+    );
+    drop(s);
+    let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
+    assert!(matches!(
+        s.append_region("b"),
+        Err(Error::Corruption {
+            kind: CorruptionKind::Truncated,
+            ..
+        })
+    ));
+    assert_eq!(s.unavailable_regions().len(), 1);
+}
+
 #[test]
 fn test_every_reason_maps_to_a_corruption_kind() {
     assert_eq!(

@@ -173,3 +173,135 @@ fn test_a_media_error_names_the_exact_sector_below_the_store_block() {
     assert_eq!(summary.unreadable, 1024);
     assert_eq!(delivered, (4 << 20) - 1024);
 }
+
+/// A device that refuses direct reads smaller than 4 KiB (dm-crypt with 4 KiB
+/// sectors over a 512e disk) while the probe sees 512-byte blocks. Without a
+/// reported direct-I/O alignment the bisection stops at the store block; with
+/// a wrong one, a refused sub-block read is reported unreadable instead of
+/// aborting the scan. Either way the scan names the bad block and goes on
+/// (found by review).
+#[test]
+fn test_a_device_refusing_small_reads_never_aborts_the_bisection() {
+    use store_io_core::class::Missing;
+    let model = {
+        let p = SimPlatform::new(SimConfig::volatile(73));
+        let s = Store::create(p, Path::new(DIR), opts()).unwrap();
+        s.report().evidence.clone()
+    };
+    for reported in [false, true] {
+        let mut ev = model.clone();
+        ev.device.logical_block = 512;
+        ev.device.physical_block = 512;
+        if reported {
+            ev.fs.dio_offset_align = 512;
+        } else {
+            ev.fs.dio_offset_align = 0;
+            ev.missing.insert(Missing::DioAlignment);
+        }
+        // The simulated device itself takes only 4 KiB-aligned transfers.
+        let mut cfg = SimConfig::volatile(74);
+        cfg.evidence = Some(ev);
+        let p = SimPlatform::new(cfg);
+        let (s, file, base) = setup(&p);
+        let pages = s.page_region("pages").unwrap();
+        p.with_world(|w| {
+            *w.faults_mut() = FaultPlan {
+                bad_ranges: vec![(file, base + 5 * BLOCK + 1024, base + 5 * BLOCK + 1536)],
+                ..FaultPlan::default()
+            };
+        });
+        let mut out = vec![0u8; 16 * BLOCK as usize];
+        let r = pages.read(pages.pos(0).unwrap(), &mut out);
+        let Err(Error::Corruption { kind, ctx }) = r else {
+            panic!("reported={reported}: expected Corruption, got {r:?}");
+        };
+        assert_eq!(kind, CorruptionKind::MediaError);
+        let range = ctx.range.unwrap();
+        assert_eq!(
+            (range.start, range.end),
+            (5 * BLOCK, 6 * BLOCK),
+            "reported={reported}"
+        );
+        let mut bad = Vec::new();
+        let summary = pages
+            .scan(0, |item| {
+                if let ScanItem::Unreadable { start, end } = item {
+                    bad.push((start, end));
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!(bad, vec![(5 * BLOCK, 6 * BLOCK)], "reported={reported}");
+        assert_eq!(summary.end, pages.len(), "the scan stopped early");
+    }
+}
+
+/// A read error that is not a media error (here EINVAL), at any read an open
+/// makes, either fails the open with that code or leaves the store whole:
+/// it never marks a healthy region unavailable or corrupt for the session.
+/// Before 0.4 any failed header read counted as damage (found by review).
+#[test]
+fn test_a_non_media_error_during_open_never_marks_a_region_damaged() {
+    let p = SimPlatform::new(SimConfig::volatile(75));
+    drop(setup(&p));
+    let before = p.with_world(|w| w.reads());
+    drop(Store::open(p.clone(), Path::new(DIR), opts()).unwrap());
+    let reads = p.with_world(|w| w.reads()) - before;
+    assert!(reads > 4, "the open made only {reads} reads");
+    let mut failed = 0;
+    for k in 1..=reads {
+        let next = p.with_world(|w| w.reads()) + k;
+        p.with_world(|w| {
+            *w.faults_mut() = FaultPlan {
+                fail_read: Some((next, 22)),
+                ..FaultPlan::default()
+            };
+        });
+        match Store::open(p.clone(), Path::new(DIR), opts()) {
+            Ok(s) => {
+                assert!(
+                    s.unavailable_regions().is_empty(),
+                    "read {k} marked a region damaged"
+                );
+                s.page_region("pages").unwrap();
+            }
+            Err(Error::Io { raw, .. }) => {
+                assert_eq!(raw.code, 22, "read {k}");
+                failed += 1;
+            }
+            // The volume search skips unreadable candidates, so a failure
+            // there can only end as "no volume found".
+            Err(Error::Corruption {
+                kind: CorruptionKind::HeaderCrc,
+                ctx,
+            }) if ctx.region.is_none() => failed += 1,
+            Err(e) => panic!("read {k}: {e:?}"),
+        }
+        p.with_world(|w| *w.faults_mut() = FaultPlan::default());
+    }
+    assert!(failed > 0, "no read failure surfaced");
+}
+
+/// A media error that does not repeat when the range is read again is still
+/// reported (the whole read's range), never hidden as success.
+#[test]
+fn test_a_media_error_that_does_not_repeat_is_still_reported() {
+    let p = SimPlatform::new(SimConfig::volatile(76));
+    let (s, _file, _base) = setup(&p);
+    let pages = s.page_region("pages").unwrap();
+    let next = p.with_world(|w| w.reads()) + 1;
+    p.with_world(|w| {
+        *w.faults_mut() = FaultPlan {
+            fail_read: Some((next, 5)),
+            ..FaultPlan::default()
+        };
+    });
+    let mut out = vec![0u8; 4 * BLOCK as usize];
+    let r = pages.read(pages.pos(0).unwrap(), &mut out);
+    let Err(Error::Corruption { kind, ctx }) = r else {
+        panic!("expected Corruption, got {r:?}");
+    };
+    assert_eq!(kind, CorruptionKind::MediaError);
+    let range = ctx.range.unwrap();
+    assert_eq!((range.start, range.end), (0, 4 * BLOCK));
+}

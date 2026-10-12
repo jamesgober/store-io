@@ -56,15 +56,23 @@ pub struct DomainStats {
     pub already_durable: u64,
 }
 
+/// Observability counters, on a cache line of their own: incrementing them
+/// must not evict the line every barrier reads (`issued`, `done`, `leader`).
+#[derive(Debug)]
+#[repr(align(128))]
+struct Counters {
+    joined: AtomicU64,
+    led: AtomicU64,
+    already_durable: AtomicU64,
+}
+
 /// A flush domain.
 #[derive(Debug)]
 pub struct Domain {
     issued: AtomicU64,
     done: AtomicU64,
     leader: AtomicBool,
-    joined: AtomicU64,
-    led: AtomicU64,
-    already_durable: AtomicU64,
+    counters: Counters,
     poison: OnceLock<FirstCause>,
     wait: Mutex<()>,
     wake: Condvar,
@@ -84,9 +92,11 @@ impl Domain {
             issued: AtomicU64::new(0),
             done: AtomicU64::new(0),
             leader: AtomicBool::new(false),
-            joined: AtomicU64::new(0),
-            led: AtomicU64::new(0),
-            already_durable: AtomicU64::new(0),
+            counters: Counters {
+                joined: AtomicU64::new(0),
+                led: AtomicU64::new(0),
+                already_durable: AtomicU64::new(0),
+            },
             poison: OnceLock::new(),
             wait: Mutex::new(()),
             wake: Condvar::new(),
@@ -111,9 +121,9 @@ impl Domain {
     pub fn stats(&self) -> DomainStats {
         DomainStats {
             flushes: self.issued.load(Ordering::Acquire),
-            joined: self.joined.load(Ordering::Relaxed),
-            led: self.led.load(Ordering::Relaxed),
-            already_durable: self.already_durable.load(Ordering::Relaxed),
+            joined: self.counters.joined.load(Ordering::Relaxed),
+            led: self.counters.led.load(Ordering::Relaxed),
+            already_durable: self.counters.already_durable.load(Ordering::Relaxed),
         }
     }
 
@@ -121,7 +131,10 @@ impl Domain {
     /// already durable.
     #[inline]
     pub fn count_already_durable(&self) {
-        let _previous = self.already_durable.fetch_add(1, Ordering::Relaxed);
+        let _previous = self
+            .counters
+            .already_durable
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// The ticket a barrier needs, to be taken **after** every write it must
@@ -151,7 +164,7 @@ impl Domain {
         loop {
             if self.done.load(Ordering::SeqCst) >= need {
                 if !led_flush {
-                    let _count = self.joined.fetch_add(1, Ordering::Relaxed);
+                    let _count = self.counters.joined.fetch_add(1, Ordering::Relaxed);
                 }
                 return Ok(());
             }
@@ -173,7 +186,7 @@ impl Domain {
                 // is), so k = issued + 1 >= need.
                 let k = self.issued.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
                 led_flush = true;
-                let _count = self.led.fetch_add(1, Ordering::Relaxed);
+                let _count = self.counters.led.fetch_add(1, Ordering::Relaxed);
                 let outcome = flush();
                 match outcome {
                     Ok(()) => {

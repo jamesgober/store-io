@@ -337,6 +337,14 @@ where
                 let buf = self.bisect(lane, r, start, half, buf, out, c)?;
                 self.bisect(lane, r, start + half, len - half, buf, out, c)
             }
+            // Below the store block the device refused the smaller read
+            // (alignment) rather than failing on the media: this piece lies
+            // in a block that failed with a media error, so it is reported
+            // unreadable and the scan goes on.
+            Err(_) if len < self.block() => {
+                out.unreadable(start, start + len);
+                Ok(buf)
+            }
             Err(raw) => Err(read_error(raw, c)),
         }
     }

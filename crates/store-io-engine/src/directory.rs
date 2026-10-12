@@ -83,6 +83,9 @@ impl<P: Platform> core::fmt::Debug for Directory<P> {
 impl<P: Platform> Directory<P> {
     /// Opens the directory at `path`, creating it (and syncing its parent)
     /// when `create` is true. `trust` is applied when the device is probed.
+    /// It also tries a directory flush: if that fails, the handle still
+    /// reads, but every `replace`, `remove` and `sync` is refused before any
+    /// write, since no change could be made durable.
     ///
     /// # Errors
     ///
@@ -176,12 +179,14 @@ impl<P: Platform> Directory<P> {
     ///
     /// # Errors
     ///
+    /// `Unsupported(DirectoryFlush)` or `Io(SyncDir)` when the directory
+    /// cannot be flushed (found at open; nothing is written).
     /// `NotWritten`, `UnsafeDevice`, `Unverified`, `NoSpace` or `Io` before
     /// anything reached the device (the target is untouched).
-    /// `DurabilityUnknown` if a write or flush of the new bytes failed (the
-    /// target is untouched) or anything from the rename on failed (the
-    /// directory may name either version); the handle is then poisoned and
-    /// later changes fail with `Poisoned`.
+    /// `DurabilityUnknown` if a write, the length update or the flush of the
+    /// new bytes failed (the target is untouched) or anything from the rename
+    /// on failed (the directory may name either version); the handle is then
+    /// poisoned and later changes fail with `Poisoned`.
     pub fn replace(&self, name: &str, data: &[u8]) -> Result<(), Error> {
         self.writable()?;
         let target = name_of(name)?;
@@ -334,8 +339,10 @@ impl<P: Platform> Directory<P> {
     ///
     /// # Errors
     ///
-    /// `NotFound` (nothing changed); `DurabilityUnknown` if the unlink or the
-    /// directory flush failed (the handle is poisoned); `Poisoned`.
+    /// `Unsupported(DirectoryFlush)` or `Io(SyncDir)` when the directory
+    /// cannot be flushed (nothing changed); `NotFound` (nothing changed);
+    /// `DurabilityUnknown` if the unlink or the directory flush failed (the
+    /// handle is poisoned); `Poisoned`.
     pub fn remove(&self, name: &str) -> Result<(), Error> {
         self.writable()?;
         let target = name_of(name)?;
@@ -357,7 +364,9 @@ impl<P: Platform> Directory<P> {
     ///
     /// # Errors
     ///
-    /// `DurabilityUnknown` (the handle is poisoned); `Poisoned`.
+    /// `Unsupported(DirectoryFlush)` or `Io(SyncDir)` when the directory
+    /// cannot be flushed; `DurabilityUnknown` (the handle is poisoned);
+    /// `Poisoned`.
     pub fn sync(&self) -> Result<(), Error> {
         self.writable()?;
         self.platform

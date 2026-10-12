@@ -23,6 +23,42 @@
 - `store-io-engine`: a read-only open needs no write rights, and readers share the store.
   - **Before.** `open_readonly` opened the container read-write to take the exclusive ownership lock. It failed on a read-only mount, a write-protected file or a backup copy, which is where a recovery tool most needs it, and two readers excluded each other.
   - **Now.** It opens one read-only handle and takes a shared lock on it. Any number of readers can open a store at once; readers and the writer still exclude each other.
+- `store-io-engine`: **growing the container could bring a truncated region
+  back as healthy.**
+  - **Before.** A region cut off by a short container was reported at open,
+    but provisioning or reserving afterwards grew the container over its
+    missing tail, zero-filled. The next open found the region whole and
+    ready, its lost bytes read as zeros; an append region silently ended
+    early.
+  - **Now.** While such a region exists, growth is refused with
+    `Corruption(Truncated)` naming it, and it stays reported.
+- `store-io-engine`: **a transient read error at open could roll back
+  committed metadata.**
+  - **Before.** Any failed slot read (a bad handle, an exhausted resource,
+    an invalid request) counted as an unreadable slot. On the region table,
+    one such error made the open choose the older table copy, so a region
+    provisioned since then was missing (`NotFound`) with no error. On a
+    region header, a healthy region was marked unavailable for the session.
+  - **Now.** A slot is unreadable only on a media error, a short read or a
+    read past the end of the file. Any other failure fails the open with
+    `Io` and its code.
+- `store-io-engine`: splitting a failed read below the store block now
+  happens only where the probe reported the direct-I/O alignment. A device
+  that refuses smaller reads (for example dm-crypt with 4 KiB sectors over a
+  512e disk, on a kernel without `STATX_DIOALIGN`) made the scan abort with
+  `Io(EINVAL)`; a refused sub-block read is now reported unreadable and the
+  scan continues.
+- `store-io-engine`: when the rescan that locates a media error fails (a
+  short buffer pool, a full queue), the media error is still reported over
+  the whole read, not replaced by that failure. The failed read's buffer is
+  released before the rescan.
+- `store-io-engine`: the flush domain's statistics counters sit on a cache
+  line of their own, so counting no longer evicts the line every barrier
+  reads.
+- `store-io-core`: `errno::is_unsupported` matches each operating system's
+  own errno numbers (Linux and macOS number them differently) and is
+  documented as valid for flush and sync results only. New
+  `errno::is_end_of_file`.
 - `store-io-posix`: a malformed `uevent` device name (one ending in `/`) gave
   the probe an empty device name, so it looked up the wrong ext4 options file
   and skipped its fallback to the mount source. The mount options were then

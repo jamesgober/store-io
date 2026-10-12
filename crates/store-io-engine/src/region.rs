@@ -350,7 +350,9 @@ where
     ///
     /// The scan reads with direct I/O and several large reads in flight. It
     /// never stops at bad data: a range the device cannot read is narrowed
-    /// to whole blocks, reported as [`ScanItem::Unreadable`], and skipped.
+    /// to whole sectors (the device's logical blocks where the probe
+    /// reported the direct-I/O alignment, else store blocks), reported as
+    /// [`ScanItem::Unreadable`], and skipped.
     /// Scans work on read-only and poisoned stores.
     ///
     /// # Errors
@@ -649,7 +651,9 @@ where
     ///
     /// The scan reads with direct I/O and several large reads in flight. It
     /// never stops at bad data: a range the device cannot read is narrowed
-    /// to whole blocks, reported as [`ScanItem::Unreadable`], and skipped.
+    /// to whole sectors (the device's logical blocks where the probe
+    /// reported the direct-I/O alignment, else store blocks), reported as
+    /// [`ScanItem::Unreadable`], and skipped.
     /// Scans work on read-only and poisoned stores.
     ///
     /// # Errors

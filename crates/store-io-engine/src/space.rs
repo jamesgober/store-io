@@ -333,11 +333,30 @@ where
     }
 
     /// Grows the container to at least `target` bytes.
+    ///
+    /// Refused with `Corruption(Truncated)` while a region the open found cut
+    /// off by a short container exists: growth would zero-fill that region's
+    /// missing tail, and the next open would find it whole and ready, its
+    /// lost bytes read as zeros (an append region would silently end early).
     pub(crate) fn grow_to(&self, meta: &mut Meta, target: u64, tag: u32) -> Result<(), Error> {
         if target <= meta.container_len {
             return Ok(());
         }
         let inner = &self.inner;
+        if let Some(cut) = inner
+            .report
+            .unavailable
+            .iter()
+            .find(|u| matches!(u.reason, crate::store::Unavailable::ContainerShort { .. }))
+        {
+            return Err(Error::Corruption {
+                kind: store_io_core::error::CorruptionKind::Truncated,
+                ctx: ErrorContext {
+                    region: Some(cut.id),
+                    ..ErrorContext::default()
+                },
+            });
+        }
         inner
             .platform
             .allocate(&inner.file, target)

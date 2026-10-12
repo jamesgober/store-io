@@ -33,6 +33,10 @@
 - [ ] **Error-derive crate** (our own `thiserror`): a small macro that writes `Display` and `Error` impls for error enums. store-io hand-writes these impls for now.
 - [ ] **Secure-wipe crate** (our own `zeroize`): wipe secret bytes so the compiler cannot skip the wipe (volatile writes + a compiler fence). store-io carries a small internal version for now.
 
+## Supply chain
+
+- [ ] Own `cargo vet` audit of `libc` (a delta from the newest version an imported audit set covers). Until then it is exempted in `supply-chain/config.toml`; `windows-sys` is trusted through its publisher, and only `loom`'s test-only tree is exempted besides.
+
 ## Design gaps carried into the architecture phase
 
 - [ ] Streaming copy for backup and replication (sink protocol, bounded memory).

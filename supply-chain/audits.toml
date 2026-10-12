@@ -1,0 +1,10 @@
+
+# cargo-vet audits file
+
+[audits]
+
+[[trusted.windows-sys]]
+criteria = "safe-to-deploy"
+user-id = 64539 # Kenny Kerr (kennykerr)
+start = "2021-11-15"
+end = "2027-10-12"

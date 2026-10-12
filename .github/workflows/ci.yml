@@ -180,7 +180,7 @@ jobs:
         run: cargo package --workspace --locked
 
   security:
-    name: Security (audit + deny)
+    name: Security (audit + deny + vet)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -189,8 +189,10 @@ jobs:
       - name: Install cargo-audit and cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit,cargo-deny
+          tool: cargo-audit,cargo-deny,cargo-vet
       - name: Audit
         run: cargo audit
       - name: Deny
         run: cargo deny check
+      - name: Vet
+        run: cargo vet --locked

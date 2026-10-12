@@ -45,6 +45,10 @@
 - Tests: on NTFS, ext4 and XFS, releasing a region leaves the regions on
   either side, the slots and the table intact, before and after a reopen; on
   Windows the container keeps its length and does not become sparse.
+- CI: `cargo vet` (job "Security"). Audits are imported from Mozilla, Google,
+  the Bytecode Alliance, Embark, ISRG and Zcash; `windows-sys` is trusted
+  through its publisher; `libc` and `loom`'s test-only tree are exempted,
+  each listed in `supply-chain/config.toml`.
 - CI: `deny.toml` is now a crate allowlist. Any crate not listed (today
   `libc`, `windows-sys` and `windows-link` at run time, and `loom`'s tree for
   model checking) fails `cargo deny check`.

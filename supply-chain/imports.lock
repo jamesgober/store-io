@@ -1,0 +1,152 @@
+
+# cargo-vet imports lock
+
+[[publisher.windows-sys]]
+version = "0.61.2"
+when = "2025-10-06"
+user-id = 64539
+user-login = "kennykerr"
+user-name = "Kenny Kerr"
+
+[[audits.bytecode-alliance.audits.matchers]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+
+[[audits.bytecode-alliance.audits.matchers]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.2.0"
+notes = "Some unsafe code, but not more than before. Nothing awry."
+
+[[audits.bytecode-alliance.audits.nu-ansi-term]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.46.0"
+notes = "one use of unsafe to call windows specific api to get console handle."
+
+[[audits.bytecode-alliance.audits.nu-ansi-term]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.46.0 -> 0.50.1"
+notes = "Lots of stylistic/rust-related changes, plus new features, but nothing out of the ordrinary."
+
+[[audits.bytecode-alliance.audits.nu-ansi-term]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.50.1 -> 0.50.3"
+notes = "CI changes, Rust changes, nothing out of the ordinary."
+
+[[audits.bytecode-alliance.audits.sharded-slab]]
+who = "Pat Hickey <phickey@fastly.com>"
+criteria = "safe-to-deploy"
+version = "0.1.4"
+notes = "I always really enjoy reading eliza's code, she left perfect comments at every use of unsafe."
+
+[[audits.bytecode-alliance.audits.shlex]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "1.1.0"
+notes = "Only minor `unsafe` code blocks which look valid and otherwise does what it says on the tin."
+
+[[audits.bytecode-alliance.audits.tracing-core]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.33 -> 0.1.34"
+notes = "Mostly just an update with Rust stylistic conventions changing. Nothing awry."
+
+[[audits.bytecode-alliance.audits.tracing-log]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "0.1.3"
+notes = """
+This is a standard adapter between the `log` ecosystem and the `tracing`
+ecosystem. There's one `unsafe` block in this crate and it's well-scoped.
+"""
+
+[[audits.bytecode-alliance.audits.tracing-log]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.3 -> 0.2.0"
+notes = "Nothing out of the ordinary, a typical major version update and nothing awry."
+
+[[audits.embark-studios.audits.valuable]]
+who = "Johan Andersson <opensource@embark-studios.com>"
+criteria = "safe-to-deploy"
+version = "0.1.0"
+notes = "No unsafe usage or ambient capabilities, sane build script"
+
+[audits.google.audits]
+
+[audits.isrg.audits]
+
+[[audits.mozilla.audits.sharded-slab]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.1.4 -> 0.1.7"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.shlex]]
+who = "Max Inden <mail@max-inden.de>"
+criteria = "safe-to-deploy"
+delta = "1.1.0 -> 1.3.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.shlex]]
+who = "Emilio Cobos Álvarez <emilio@crisal.io>"
+criteria = "safe-to-deploy"
+delta = "1.3.0 -> 2.0.1"
+notes = """
+Mostly removes some deprecated and unsound APIs.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-core]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+version = "0.1.30"
+notes = """
+Most unsafe code is in implementing non-std sync primitives. Unsafe impls are
+logically correct and justified in comments, and unsafe code is sound and
+justified in comments.
+"""
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-core]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+delta = "0.1.30 -> 0.1.33"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.tracing-core]]
+who = "Alex Franchuk <afranchuk@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.34 -> 0.1.36"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.windows-link]]
+who = "Mark Hammond <mhammond@skippinet.com.au>"
+criteria = "safe-to-deploy"
+version = "0.1.1"
+notes = "A microsoft crate allowing unsafe calls to windows apis."
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.windows-link]]
+who = "Erich Gubler <erichdongubler@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "0.1.1 -> 0.2.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/supply-chain/audits.toml"
+
+[[audits.zcash.audits.valuable]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.1.0 -> 0.1.1"
+notes = "Build script changes are for linting."
+aggregated-from = "https://raw.githubusercontent.com/zcash/zcash/master/qa/supply-chain/audits.toml"
+
+[[audits.zcash.audits.windows-link]]
+who = "Jack Grigg <jack@electriccoin.co>"
+criteria = "safe-to-deploy"
+delta = "0.2.0 -> 0.2.1"
+notes = "No code changes at all."
+aggregated-from = "https://raw.githubusercontent.com/zcash/librustzcash/main/supply-chain/audits.toml"

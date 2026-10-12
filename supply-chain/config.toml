@@ -1,0 +1,138 @@
+
+# cargo-vet config file
+
+[cargo-vet]
+version = "0.10"
+
+[imports.bytecode-alliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+
+[imports.embark-studios]
+url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/main/audits.toml"
+
+[imports.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+
+[imports.isrg]
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
+
+[imports.mozilla]
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+
+[imports.zcash]
+url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+
+[policy.store-io]
+audit-as-crates-io = false
+
+[policy.store-io-buf]
+audit-as-crates-io = false
+
+[policy.store-io-conformance]
+audit-as-crates-io = false
+
+[policy.store-io-core]
+audit-as-crates-io = false
+
+[policy.store-io-engine]
+audit-as-crates-io = false
+
+[policy.store-io-format]
+audit-as-crates-io = false
+
+[policy.store-io-platform]
+audit-as-crates-io = false
+
+[policy.store-io-posix]
+audit-as-crates-io = false
+
+[policy.store-io-sim]
+audit-as-crates-io = false
+
+[policy.store-io-win]
+audit-as-crates-io = false
+
+[[exemptions.aho-corasick]]
+version = "1.1.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.cc]]
+version = "1.6.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.cfg-if]]
+version = "1.0.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.find-msvc-tools]]
+version = "0.1.14"
+criteria = "safe-to-deploy"
+
+[[exemptions.generator]]
+version = "0.8.10"
+criteria = "safe-to-deploy"
+
+[[exemptions.lazy_static]]
+version = "1.5.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.libc]]
+version = "0.2.190"
+criteria = "safe-to-deploy"
+notes = "Runtime dependency. 0.2.190 was published by the rust-lang CI (no person to trust) and no imported audit set covers it; an own delta audit from the newest imported version is a 1.0 item (dev/TODO.md)."
+
+[[exemptions.log]]
+version = "0.4.34"
+criteria = "safe-to-deploy"
+
+[[exemptions.loom]]
+version = "0.7.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.memchr]]
+version = "2.8.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.once_cell]]
+version = "1.21.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.pin-project-lite]]
+version = "0.2.17"
+criteria = "safe-to-deploy"
+
+[[exemptions.regex-automata]]
+version = "0.4.18"
+criteria = "safe-to-deploy"
+
+[[exemptions.regex-syntax]]
+version = "0.8.11"
+criteria = "safe-to-deploy"
+
+[[exemptions.rustversion]]
+version = "1.0.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.scoped-tls]]
+version = "1.0.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.smallvec]]
+version = "1.16.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.thread_local]]
+version = "1.1.10"
+criteria = "safe-to-deploy"
+
+[[exemptions.tracing]]
+version = "0.1.44"
+criteria = "safe-to-deploy"
+
+[[exemptions.tracing-subscriber]]
+version = "0.3.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.windows-result]]
+version = "0.4.1"
+criteria = "safe-to-deploy"

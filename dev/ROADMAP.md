@@ -94,14 +94,41 @@ Exit criteria:
 
 ---
 
-## v0.4 &mdash; Linux io_uring
+## v0.4 &mdash; Linux io_uring and the engine layer
 
-Ring per thread, registered buffers, direct descriptors, FUA versus flush selection, io-wq tuning.
+**The engine layer.** A per-thread `Submitter` with:
+- owned buffers;
+- `append`, `write`, `read`, `barrier`, `barrier_all`;
+- `submit`, `reap` and `wait` with no timeout;
+- `oldest_outstanding`;
+- completions carrying the caller's tag.
+
+It runs on every backend, and the simple and batch layers are rebuilt on top of it.
+
+**Linux.** The io_uring backend (`store-io-uring`):
+- one ring per thread;
+- direct descriptors and registered buffers;
+- no kernel worker threads, ever: every ring read and write is non-blocking, and anything that would block runs on store-io's own path.
+
+Linux also gets a bounded worker pool for the synchronous tier, and the tier (io_uring or synchronous) is chosen at run time and reported.
+
+**Windows.** The `Submitter` on IOCP. IoRing was evaluated and not adopted: no gain over IOCP, and its flush blocks the submitter.
+
+**Engine-layer flushes** run on one parked flush thread per store.
+
+**Also carried from v0.3:**
+- `cargo vet`;
+- per-stage instrumentation;
+- fuzz targets;
+- the mutation list in CI.
 
 Exit criteria:
-- [ ] io-wq punt gate per (filesystem, kernel) table.
-- [ ] dm-log-writes replay in Linux CI: every crash state between flush marks of a store workload, checked for every receipt (moved from v0.3).
-- [ ] 60 s idle: zero syscalls (from 5 s after the last punted operation).
+- [ ] `cargo vet` passes, with `io-uring` self-audited. The observer is compiled out when off and costs at most 20 ns per operation when on. Fuzz targets run a CI smoke. The mutation list runs in CI with no survivor.
+- [ ] No io-wq worker thread exists after any CI workload, on every kernel and filesystem tested. Non-blocking fallbacks are counted and reported per (filesystem, kernel). This replaces the io-wq punt table: punts are not allowed at all.
+- [ ] dm-log-writes replay in Linux CI: every crash state between flush marks of a store workload, checked for every receipt. This covers prefix states, plus subset enumeration for batches (moved from v0.3).
+- [ ] 60 s idle: zero syscalls, wakeups, timers and I/O. The window starts as soon as the store is idle; there is no exemption window.
+- [ ] Conformance green on the io_uring tier and the synchronous tier (Linux, ext4 and XFS), and on IOCP (Windows), including the `Submitter` scenarios.
+- [ ] CI kernel matrix: conformance on 5.15.3, 6.1 and 6.6 kernels in a VM job, alongside the runner's kernel.
 - [ ] Performance gates on the hardware available; power-safe and bare-metal gates tracked in `dev/TODO.md`. On Linux the gates are relative (store-io against the raw primitive and fio, same box and flags), measured on WSL2 and the CI kernel, and labelled Unverified.
 - [ ] The v0.3 gates moved here (recorded 2026-10-12):
   - Linux barrier within + 2 us of the raw primitive;

@@ -11,6 +11,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- CI: a mutation check (`dev/tools/mutate.py`, workflow "Mutation"). Every
+  listed mutation of a flush, barrier, poison, directory-sync or accounting
+  site must be killed by the engine and simulator tests; any survivor fails
+  the run.
+
+### Changed
+
+- `dev/ROADMAP.md`: the v0.4 section describes the approved scope (the engine
+  layer, the io_uring backend with no kernel worker threads, the synchronous
+  tier's worker pool, runtime tier selection, IoRing evaluated and not
+  adopted) and its exit criteria.
+
 ---
 
 ## [0.3.1] - 2026-10-12

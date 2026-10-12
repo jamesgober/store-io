@@ -1,0 +1,14 @@
+[package]
+name = "sio-logwrites"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# v0.4 research (brief E11): a store workload whose receipts are marked in a
+# dm-log-writes log, and a checker run on each replayed crash state. Not
+# library code; Linux only.
+
+[workspace]
+
+[dependencies]
+store-io = { path = "../.." }

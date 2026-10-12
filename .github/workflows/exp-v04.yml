@@ -1,0 +1,43 @@
+# v0.4 research experiments (not part of CI): the CI kernel's io_uring
+# behaviour and the dm-log-writes replay of a store workload. Runs only on
+# branches under exp/, never on main.
+name: exp-v04
+
+on:
+  push:
+    branches: ["exp/**"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  uring:
+    name: io_uring on the CI kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get install -y -qq xfsprogs
+      - run: cargo build --release --manifest-path exp/v04-uring/Cargo.toml
+      - run: sudo -E bash exp/v04-uring/run-ci.sh probe e4 e8 e1 e2 e3 e6 e9
+
+  logwrites:
+    name: dm-log-writes replay (${{ matrix.fs }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [ext4, xfs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get install -y -qq xfsprogs
+      - name: Build replay-log from xfstests
+        run: |
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/kdave/xfstests "$RUNNER_TEMP/xfstests"
+          git -C "$RUNNER_TEMP/xfstests" sparse-checkout set src/log-writes
+          git -C "$RUNNER_TEMP/xfstests" log -1 --format='xfstests %H %cs'
+          gcc -O2 -o "$RUNNER_TEMP/replay-log" "$RUNNER_TEMP"/xfstests/src/log-writes/*.c
+      - run: cargo build --release --manifest-path exp/logwrites/Cargo.toml
+      - run: sudo -E bash exp/logwrites/run.sh ${{ matrix.fs }} 32

@@ -1,0 +1,20 @@
+[package]
+name = "v04-uring"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# v0.4 research experiments (brief .dev/PROMPTS/v0.4-brief.md section 6):
+# E1 ring flags and wake cost, E2 lone durable write, E3 flush hop, E5 batches,
+# E6 registered buffers and files, E7 sequential bandwidth, E8 idle, E9 CQ
+# overflow, E13 dead owner vs lock. Not library code; Linux only.
+
+[workspace]
+
+[dependencies]
+io-uring = "=0.7.15"
+libc = "=0.2.190"
+
+[profile.release]
+opt-level = 3
+debug = 1

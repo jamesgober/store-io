@@ -365,3 +365,46 @@ where
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use super::lock_acct;
+    use crate::store::{Store, StoreOptions};
+
+    /// The lock order is metadata, then accounting, everywhere. Checked
+    /// deterministically: with the accounting lock held here, a `reserve`
+    /// on another thread must take the metadata lock first and then wait.
+    /// In the reverse order it would wait on accounting holding nothing,
+    /// and a thread taking them in the documented order could deadlock with
+    /// it (the timing-based test alone missed this on a CI runner).
+    #[test]
+    fn test_reserve_takes_the_metadata_lock_before_the_accounting_lock() {
+        let p = SimPlatform::new(SimConfig::power_safe(42));
+        let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        let acct = lock_acct(&s.inner.acct);
+        let worker = {
+            let s = s.clone();
+            std::thread::spawn(move || drop(s.reserve(4096, 1)))
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut meta_taken = false;
+        while Instant::now() < deadline {
+            if s.inner.meta.try_lock().is_err() {
+                meta_taken = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(acct);
+        worker.join().unwrap();
+        assert!(
+            meta_taken,
+            "reserve waited for the accounting lock without holding the metadata lock"
+        );
+    }
+}

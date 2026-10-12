@@ -44,6 +44,37 @@ pub(crate) struct PairRead {
     pub(crate) payload: Option<Vec<u8>>,
 }
 
+impl PairRead {
+    /// The pair after `w` was written durably over one of its slots, with no
+    /// device read: the written slot has the status of the exact bytes
+    /// written, the other slot keeps its previous status, and the decision is
+    /// made again (D-069). A read-back would prove nothing about media (it
+    /// can be served from the device cache) and could only fail or mislead.
+    pub(crate) fn after(&self, w: Written) -> PairRead {
+        let (a, b) = match w.index {
+            SlotIndex::A => (w.status, self.report.b),
+            SlotIndex::B => (self.report.a, w.status),
+        };
+        let report = decide(a, b);
+        let previous_winner = self.report.winner_info().map(|(i, _)| i);
+        let payload = match report.winner_info() {
+            Some((i, _)) if i == w.index => w.payload,
+            Some((i, _)) if Some(i) == previous_winner => self.payload.clone(),
+            _ => None,
+        };
+        PairRead { report, payload }
+    }
+}
+
+/// One slot as written: its index, the status the validator gives the exact
+/// bytes written, and the payload those bytes carry.
+#[derive(Debug, Clone)]
+pub(crate) struct Written {
+    pub(crate) index: SlotIndex,
+    pub(crate) status: SlotStatus,
+    pub(crate) payload: Option<Vec<u8>>,
+}
+
 fn pool_err(ctx: ErrorContext) -> Error {
     Error::NotWritten {
         cause: NotWrittenCause::PoolExhausted,
@@ -120,12 +151,16 @@ pub(crate) struct NextSlot<'a> {
     pub(crate) payload: &'a [u8],
 }
 
-/// Writes one complete slot as one device I/O. Returns the new header CRC.
+/// Writes one complete slot as one device I/O. Returns what was written:
+/// the bytes are validated in memory before submission, with the same
+/// validator a read uses, so the caller knows the new pair state without
+/// reading the device back (D-069).
 ///
 /// # Errors
 ///
-/// `NotWritten` if nothing reached the device; `DurabilityUnknown` (the
-/// caller poisons) for a failed or short write.
+/// `NotWritten` if nothing reached the device; `Corruption(Metadata)` before
+/// any I/O if the encoded bytes do not validate (an encoder defect);
+/// `DurabilityUnknown` (the caller poisons) for a failed or short write.
 pub(crate) fn write_slot<Q: Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,
@@ -133,7 +168,7 @@ pub(crate) fn write_slot<Q: Queue>(
     at: &PairAt,
     next: &NextSlot<'_>,
     dsync: bool,
-) -> Result<u32, Error> {
+) -> Result<Written, Error> {
     let ctx = ErrorContext::default();
     let mut buf = pool.take(at.size()).map_err(|_| pool_err(ctx))?;
     let fields = SlotFields {
@@ -151,6 +186,31 @@ pub(crate) fn write_slot<Q: Queue>(
         ctx,
     })?;
     let offset = at.offset(next.index);
+    let expect = Expect {
+        volume_uuid: at.volume,
+        object_id: at.object,
+        slot_offset: offset,
+        slot_index: next.index,
+        log2_slot_size: at.log2,
+    };
+    let status = validate(buf.as_slice(), &expect);
+    let SlotStatus::Valid(info) = status else {
+        return Err(Error::Corruption {
+            kind: store_io_core::error::CorruptionKind::Metadata,
+            ctx,
+        });
+    };
+    if info.header_crc32c != crc {
+        return Err(Error::Corruption {
+            kind: store_io_core::error::CorruptionKind::Metadata,
+            ctx,
+        });
+    }
+    let written = Written {
+        index: next.index,
+        status,
+        payload: Some(info.payload(buf.as_slice()).to_vec()),
+    };
     let done = run(
         q,
         IoOp::Write {
@@ -169,7 +229,7 @@ pub(crate) fn write_slot<Q: Queue>(
         ctx,
     })?;
     match done.result {
-        Ok(n) if n == at.size() => Ok(crc),
+        Ok(n) if n == at.size() => Ok(written),
         Ok(_) => Err(Error::DurabilityUnknown {
             op: Op::Write,
             raw: None,

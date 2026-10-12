@@ -20,7 +20,7 @@ use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::scan::{ScanItem, ScanSummary};
-use crate::slots::{PairAt, plan_next, read_pair};
+use crate::slots::{PairAt, plan_next};
 use crate::store::{LiveRegion, Store, durable_slot};
 
 /// Region lookups and provisioning.
@@ -368,10 +368,21 @@ where
     /// typically after recovery found where valid data ends. Never moves
     /// backwards, and only while no append is in flight.
     ///
+    /// Everything before the new position counts as durable: a writable open
+    /// flushed the device before reading anything, so whatever recovery found
+    /// is on media. A read-only open flushes nothing, so there `resume_at` is
+    /// refused (D-072); appends are refused there anyway.
+    ///
     /// # Errors
     ///
-    /// `NotWritten(TooManyInFlight | OutOfBounds)`.
+    /// `NotWritten(ReadOnly | TooManyInFlight | OutOfBounds)`.
     pub fn resume_at(&self, offset: u64) -> Result<u64, Error> {
+        if self.store.inner.read_only {
+            return Err(Error::NotWritten {
+                cause: NotWrittenCause::ReadOnly,
+                ctx: ctx(&self.state),
+            });
+        }
         let _pass = self.pass()?;
         let at = self
             .frontier()?
@@ -789,17 +800,18 @@ where
         let generation = next.generation;
         let at = self.at();
         let mut lane = s.lane(&self.state);
-        durable_slot::<P>(
+        let written = durable_slot::<P>(
             &mut lane,
             &s.inner.file,
             &s.inner.pool,
             &at,
+            &header,
             &next,
             &s.inner.policy,
             &s.inner.domain,
         )
         .inspect_err(|_| s.wake_frontiers())?;
-        *header = read_pair(&mut lane, &s.inner.file, &s.inner.pool, &at)?;
+        *header = written;
         // A slot has no tickets: its receipt covers the commit alone.
         let mut receipt = s.receipt(&self.state, 0, data.len() as u64, 0, false);
         if let Some(g) = store_io_core::id::Generation::from_raw(generation) {

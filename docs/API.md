@@ -78,7 +78,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `batch() -> AppendBatch` | A batch of appends; see [Batches](#4-batches). |
 | `read(offset, &mut [u8]) -> Result<usize>` | Reads raw bytes at a block-aligned offset (any length). |
 | `scan(from, visit) -> Result<ScanSummary>` | Reads the region in order; see [Scans](#8-scans). |
-| `resume_at(offset) -> Result<u64>` | After a reopen, positions the next append at `offset` rounded up to a block. Appends are refused (`NotPositioned`) until called. Never moves backwards. |
+| `resume_at(offset) -> Result<u64>` | After a reopen, positions the next append at `offset` rounded up to a block. Appends are refused (`NotPositioned`) until called. Never moves backwards. Refused on a read-only store (`NotWritten(ReadOnly)`), which flushes nothing at open. |
 | `recycle() -> Result<AppendRegion>` | Starts the next generation with its append position at 0; returns its handle. |
 | `release(self) -> Result<()>` | Gives the region's space back. |
 | `generation() -> Generation` | The generation this handle writes. |

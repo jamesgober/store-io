@@ -347,8 +347,11 @@ where
     /// A container left by a create that never finished (a crash before its
     /// metadata was durable) is taken over by the next create; anything else
     /// is a store and stays untouched (`AlreadyExists`). Abandoned means: no
-    /// one holds its lock, it is no longer than the largest metadata area, so
-    /// it cannot hold region data, and no volume record can be found in it.
+    /// one holds its lock, it is no longer than the largest metadata area,
+    /// and every block of it was read in full without finding a single slot
+    /// header whose header CRC verifies (D-068). A read error, an empty pool
+    /// or any verified header (a damaged store, or one of a newer format)
+    /// proves nothing, so the container is left untouched.
     fn reclaim_abandoned(
         platform: &P,
         dir: &P::Dir,
@@ -374,11 +377,12 @@ where
             opts,
         )?;
         let queues = make_queues(platform, opts)?;
-        let found = {
+        let len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
+        let holds = {
             let mut q = queues.get(0);
-            find_volume(&mut q, &file, &boot_pool)
+            holds_slot_header(&mut q, &file, &boot_pool, len)
         };
-        if found.is_ok() {
+        if holds != Some(false) {
             return Err(exists());
         }
         platform.set_len(&file, 0).map_err(|e| io(Op::Create, e))?;
@@ -445,9 +449,9 @@ where
         };
         let mut q = queues.get(0);
         let next_v = plan_next(&empty, &vbuf, 1)?;
-        let _crc = write_slot(&mut q, file, &pool, &vat, &next_v, false)?;
+        let volume_slot = write_slot(&mut q, file, &pool, &vat, &next_v, false)?;
         let next_t = plan_next(&empty, &tbuf[..tlen], 1)?;
-        let _crc = write_slot(&mut q, file, &pool, &tat, &next_t, false)?;
+        let table_slot = write_slot(&mut q, file, &pool, &tat, &next_t, false)?;
         drop(q);
         platform
             .flush_all(file)
@@ -456,11 +460,9 @@ where
                 raw: Some(e),
                 ctx: ErrorContext::default(),
             })?;
-        // Re-read what was written so the in-memory state matches the disk.
-        let mut q = queues.get(0);
-        let volume_pair = read_pair(&mut q, file, &pool, &vat)?;
-        let table_pair = read_pair(&mut q, file, &pool, &tat)?;
-        drop(q);
+        // The in-memory state is what was written, not a read-back (D-069).
+        let volume_pair = empty.after(volume_slot);
+        let table_pair = empty.after(table_slot);
         let report = StoreReport {
             evidence,
             decision,
@@ -648,8 +650,16 @@ where
             let mut q = queues.get(0);
             let next = plan_next(&meta.volume_pair, &vbuf, og)?;
             let domain = Domain::new();
-            durable_slot::<P>(&mut q, &file, &pool, &vat, &next, &policy, &domain)?;
-            meta.volume_pair = read_pair(&mut q, &file, &pool, &vat)?;
+            meta.volume_pair = durable_slot::<P>(
+                &mut q,
+                &file,
+                &pool,
+                &vat,
+                &meta.volume_pair,
+                &next,
+                &policy,
+                &domain,
+            )?;
             meta.volume = vm;
             og
         };
@@ -956,7 +966,7 @@ where
             payload: None,
         };
         let next = plan_next(&blank, &rbuf, inner.owner_generation)?;
-        {
+        let header = {
             // `durable_slot` poisons exactly when durability became unknown;
             // an error before submission leaves the store usable.
             let mut q = inner.queues.get(id as usize);
@@ -965,12 +975,13 @@ where
                 &inner.file,
                 &inner.pool,
                 &at,
+                &blank,
                 &next,
                 &inner.policy,
                 &inner.domain,
             )
-            .inspect_err(|_| self.wake_frontiers())?;
-        }
+            .inspect_err(|_| self.wake_frontiers())?
+        };
         // 5. Table flip adding the entry (replacing a reused released entry).
         let mut entries = meta.entries.clone();
         match reuse {
@@ -985,10 +996,6 @@ where
             r.consume(extent)?;
         }
         lock_acct(&inner.acct).add(&entry, block);
-        let header = {
-            let mut q = inner.queues.get(id as usize);
-            read_pair(&mut q, &inner.file, &inner.pool, &at)?
-        };
         let state = Arc::new(LiveRegion {
             id: RegionId::from_raw(id),
             name: rname,
@@ -1067,16 +1074,27 @@ where
                     |r| space_err(Op::Write, r, 0),
                 )
             })?;
+            // A fill write that failed after submission stops the store
+            // (fail-stop, D-071); only running out of space is reported as
+            // `NoSpace` without poisoning: the region never became Ready.
             match done.result {
                 Ok(n) if n as u64 == len => {}
-                Ok(_) => {
+                Err(raw) if store_io_core::errno::is_no_space(raw) => {
+                    return Err(space_err(Op::Write, raw, 0));
+                }
+                result => {
+                    let raw = result.err();
+                    inner.domain.poison(FirstCause {
+                        op: Some(Op::Write),
+                        raw,
+                    });
+                    self.wake_frontiers();
                     return Err(Error::DurabilityUnknown {
                         op: Op::Write,
-                        raw: None,
+                        raw,
                         ctx: ErrorContext::default(),
                     });
                 }
-                Err(raw) => return Err(space_err(Op::Write, raw, 0)),
             }
             at += len;
         }
@@ -1135,36 +1153,43 @@ where
         let next = plan_next(&meta.table_pair, &tbuf[..len], inner.owner_generation)?;
         let mut q = inner.queues.get(1);
         // `durable_slot` poisons exactly when durability became unknown.
-        durable_slot::<P>(
+        meta.table_pair = durable_slot::<P>(
             &mut q,
             &inner.file,
             &inner.pool,
             &tat,
+            &meta.table_pair,
             &next,
             &inner.policy,
             &inner.domain,
         )
         .inspect_err(|_| self.wake_frontiers())?;
-        meta.table_pair = read_pair(&mut q, &inner.file, &inner.pool, &tat)?;
         Ok(())
     }
 }
 
 /// Writes one slot durably according to the store's policy: a `dsync` write
 /// on power-safe devices; a plain write plus a domain barrier otherwise.
+/// Returns the pair's new state, derived from `prev` and the bytes written;
+/// the device is never read back (D-069), so once the write is durable no
+/// later step can fail or report the old version as current.
+// The pair (location, previous state), the slot to write and the store's I/O
+// context are all needed and none derives from another.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn durable_slot<P: Platform>(
     q: &mut Lane<P::Queue>,
     file: &P::File,
     pool: &BufPool,
     at: &PairAt,
+    prev: &PairRead,
     next: &NextSlot<'_>,
     policy: &Policy,
     domain: &Domain,
-) -> Result<(), Error> {
+) -> Result<PairRead, Error> {
     if let Some(first) = domain.poisoned() {
         return Err(Error::Poisoned { first });
     }
-    let _crc = write_slot(q, file, pool, at, next, policy.dsync).inspect_err(|e| {
+    let written = write_slot(q, file, pool, at, next, policy.dsync).inspect_err(|e| {
         if matches!(e, Error::DurabilityUnknown { .. }) {
             domain.poison(FirstCause {
                 op: Some(Op::Write),
@@ -1176,7 +1201,7 @@ pub(crate) fn durable_slot<P: Platform>(
         let need = domain.ticket();
         domain.barrier(need, || flush_data(q, file))?;
     }
-    Ok(())
+    Ok(prev.after(written))
 }
 
 /// One device flush through a queue. A flush refused without an OS error
@@ -1256,7 +1281,9 @@ fn make_queues<P: Platform>(
     for _ in 0..n {
         qs.push(platform.queue(cfg).map_err(|e| io(Op::Open, e))?);
     }
-    Ok(QueueSet::new(qs, cfg.depth as usize))
+    // One more queue, used only by the flush leader (D-070).
+    let flush = platform.queue(cfg).map_err(|e| io(Op::Open, e))?;
+    Ok(QueueSet::with_flush_lane(qs, flush, cfg.depth as usize))
 }
 
 pub(crate) fn space_err(op: Op, raw: OsError, tag: u32) -> Error {
@@ -1330,6 +1357,58 @@ pub(crate) fn pair_region(volume: VolumeId, l: &Layout, e: &TableEntry) -> PairA
 }
 
 /// Finds the volume record by trying every legal block size.
+/// Whether some 4 KiB block of the first `len` bytes starts with a slot
+/// header whose header CRC verifies (any status past the header-CRC check:
+/// valid, foreign, misplaced, unsupported version, and so on). `None` when a
+/// block could not be read in full: nothing is proven then (D-068). Slot
+/// headers sit at block starts and blocks are at least 4 KiB, so every header
+/// starts on a 4 KiB boundary.
+fn holds_slot_header<Q: Queue>(
+    q: &mut Lane<Q>,
+    file: &Q::File,
+    pool: &BufPool,
+    len: u64,
+) -> Option<bool> {
+    use store_io_format::slot::{Expect, SlotIndex, SlotStatus, validate};
+    const SCAN: u64 = 4096;
+    let mut at = 0u64;
+    while at < len {
+        let want = SCAN.min(len - at) as usize;
+        let buf = pool.take(SCAN as usize).ok()?;
+        let done = run(
+            q,
+            IoOp::Read {
+                file,
+                offset: at,
+                buf,
+            },
+        )
+        .ok()?;
+        let mut b = done.buf?;
+        if done.result.ok()? != want {
+            return None;
+        }
+        b.as_mut_slice()[want..].fill(0);
+        let expect = Expect {
+            volume_uuid: [0; 16],
+            object_id: 0,
+            slot_offset: at,
+            slot_index: SlotIndex::A,
+            log2_slot_size: 12,
+        };
+        match validate(b.as_slice(), &expect) {
+            SlotStatus::Blank
+            | SlotStatus::BadMagic
+            | SlotStatus::BadHeaderCrc
+            | SlotStatus::BadLength
+            | SlotStatus::ReadError => {}
+            _ => return Some(true),
+        }
+        at += SCAN;
+    }
+    Some(false)
+}
+
 fn find_volume<Q: Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,

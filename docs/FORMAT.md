@@ -467,10 +467,16 @@ A crash before step 2 completes leaves the current version untouched in its slot
 2. Probe the device; refuse it unless trusted.
 3. Grow the file to `2B + 2T`.
 4. Write volume slot A (generation 1) and table slot A (generation 1, empty table).
-5. Full flush; re-read both pairs.
+5. Full flush. The in-memory state of both pairs is what was written; nothing is read back.
 6. Flush the directory.
 
-A failure in steps 2&ndash;5 removes the file again. A *crash* before step 6 completes may leave no file, or a file whose volume slots are blank or incomplete. Such a file does not open, but the next `create` takes it over: when `store.sio` already exists, `create` reuses it only if no one holds its lock, it is no longer than the largest metadata area (`4 × 64 KiB`, so it cannot hold region data), and no volume record can be found in it; it is then truncated and created afresh. Any other existing file is a store, and `create` fails with `AlreadyExists` without touching it.
+A failure in steps 2&ndash;5 removes the file again. A *crash* before step 6 completes may leave no file, or a file whose volume slots are blank or incomplete. Such a file does not open, but the next `create` takes it over. When `store.sio` already exists, `create` reuses it only if all of these hold:
+
+- no one holds its lock;
+- it is no longer than the largest metadata area (`4 × 64 KiB`);
+- every 4 KiB block of it reads back in full, and no block starts with a slot header whose header CRC verifies (whatever the header's version, volume or object).
+
+A create that crashed leaves only blank blocks or torn headers, so it passes this test, and the file is then truncated and created afresh. Anything else is treated as a store, and `create` fails with `AlreadyExists` without touching it. That includes a file that could not be read in full, a damaged store, and a store written by a newer format. Even a small file can hold a real store: with 4 KiB blocks the metadata area is about 40 KiB, and slots and small regions fit in the rest.
 
 ### Writable open
 
@@ -479,7 +485,7 @@ The only write is the volume record's next generation (owner generation + 1), an
 ### Provision
 
 1. Choose the placement (section 11) and grow the file if needed.
-2. Fill the whole extent with direct writes: the two header blocks with zeros, the data area with zeros or the keyed pattern. This blanks any older header at that place.
+2. Fill the whole extent with direct writes: the two header blocks with zeros, the data area with zeros or the keyed pattern. This blanks any older header at that place. A fill write that fails or transfers fewer bytes after it was submitted poisons the store (`DurabilityUnknown`); running out of space is `NoSpace` and poisons nothing.
 3. Full flush (data and the new file length).
 4. Verify the extent. The region is refused (`NotWritten(NotReady)`) if the platform reports any part of it unwritten or shared, any of its pages in the operating system's page cache, or (Windows) any part of it above the valid data length. A fact the platform cannot read does not refuse the region.
 5. Write header slot A, generation 1, state Ready, durably.

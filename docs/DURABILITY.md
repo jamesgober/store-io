@@ -221,6 +221,7 @@ The domain is poisoned by:
 | A device flush that fails (the leader gets the failure) | `DurabilityUnknown` |
 | A data or metadata write that fails, or transfers fewer bytes than asked, after it was submitted | `DurabilityUnknown` |
 | An append's reserved range abandoned unwritten (an error, or a panic while the reservation is held) | `DurabilityUnknown`, or the original error |
+| A provisioning fill write that fails, or transfers fewer bytes than asked, after it was submitted (running out of space is `NoSpace` instead and poisons nothing) | `DurabilityUnknown` |
 | A full flush that fails while provisioning | `DurabilityUnknown` |
 | A metadata write (region header, region table, slot) that fails after it was submitted, or whose flush fails | `DurabilityUnknown` |
 | `Store::poison()`, for a caller's watchdog that decided the device is hung | &mdash; |

@@ -28,7 +28,7 @@ use crate::frontier::AppendFrontier;
 use crate::gate::{Gate, Retire, Retired};
 use crate::io::{ctx, not_written};
 use crate::layout::region_object;
-use crate::slots::{PairAt, plan_next, read_pair};
+use crate::slots::{PairAt, plan_next};
 use crate::store::{LiveRegion, Store, durable_slot, lock_meta};
 
 /// The error for an operation on a retired region.
@@ -84,17 +84,18 @@ where
         let next = plan_next(&header, &payload, inner.owner_generation)?;
         let at = self.header_at(r);
         let mut lane = self.lane(r);
-        durable_slot::<P>(
+        let written = durable_slot::<P>(
             &mut lane,
             &inner.file,
             &inner.pool,
             &at,
+            &header,
             &next,
             &inner.policy,
             &inner.domain,
         )
         .inspect_err(|_| self.wake_frontiers())?;
-        *header = read_pair(&mut lane, &inner.file, &inner.pool, &at)?;
+        *header = written;
         Generation::from_raw(next.generation).ok_or_else(|| metadata(c))
     }
 

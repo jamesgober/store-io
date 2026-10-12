@@ -22,9 +22,16 @@ use store_io_platform::{CompletionBuf, IoBuf, IoOp, Queue, RawResult};
 
 use crate::sync::{AtomicU64, Ordering};
 
-/// A fixed set of queues shared by the blocking layers.
+/// A fixed set of queues shared by the blocking layers, plus an optional
+/// flush lane.
+///
+/// The flush lane (D-070) is used only by the thread holding a flush
+/// domain's leadership. Leadership is exclusive, so the lane is never
+/// contended, and a leader never waits for one of the shared queues, which
+/// followers may be holding while they wait for that very leader.
 pub(crate) struct QueueSet<Q> {
     queues: Box<[Mutex<Lane<Q>>]>,
+    flush: Option<Mutex<Lane<Q>>>,
     waiters: AtomicU64,
     wake: Mutex<()>,
     returned: Condvar,
@@ -74,22 +81,38 @@ impl<Q> DerefMut for LaneGuard<'_, Q> {
 }
 
 impl<Q: Queue> QueueSet<Q> {
-    /// Wraps already-created queues.
+    /// Wraps already-created queues; no flush lane.
     pub(crate) fn new(queues: Vec<Q>, depth: usize) -> Self {
+        Self::build(queues, None, depth)
+    }
+
+    /// Wraps already-created queues and a dedicated flush lane.
+    pub(crate) fn with_flush_lane(queues: Vec<Q>, flush: Q, depth: usize) -> Self {
+        Self::build(queues, Some(flush), depth)
+    }
+
+    fn build(queues: Vec<Q>, flush: Option<Q>, depth: usize) -> Self {
+        let lane = |queue| {
+            Mutex::new(Lane {
+                queue,
+                done: CompletionBuf::with_capacity(depth.max(1)),
+            })
+        };
         Self {
-            queues: queues
-                .into_iter()
-                .map(|queue| {
-                    Mutex::new(Lane {
-                        queue,
-                        done: CompletionBuf::with_capacity(depth.max(1)),
-                    })
-                })
-                .collect(),
+            queues: queues.into_iter().map(lane).collect(),
+            flush: flush.map(lane),
             waiters: AtomicU64::new(0),
             wake: Mutex::new(()),
             returned: Condvar::new(),
         }
+    }
+
+    /// The flush lane, for the thread holding flush leadership only; `None`
+    /// when the set has none.
+    pub(crate) fn flush_lane(&self) -> Option<MutexGuard<'_, Lane<Q>>> {
+        self.flush
+            .as_ref()
+            .map(|m| m.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     fn try_any(&self, hint: usize) -> Option<MutexGuard<'_, Lane<Q>>> {

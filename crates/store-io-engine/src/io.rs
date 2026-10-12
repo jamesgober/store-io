@@ -320,8 +320,9 @@ where
     /// flush-required device every write completed before the call is durable
     /// once it returns; on a power-safe device writes were durable at
     /// completion and no flush is issued (`u64::MAX`). Only the thread that
-    /// leads the flush borrows a queue, and only for the flush itself:
-    /// followers wait holding nothing.
+    /// leads the flush uses a queue: the store's flush lane, which no one
+    /// else uses, so a leader never waits for a queue that a follower holds
+    /// (D-070). Followers wait holding nothing.
     pub(crate) fn barrier(&self) -> Result<u64, Error> {
         if !self.inner.policy.flush {
             return match self.inner.domain.poisoned() {
@@ -333,7 +334,10 @@ where
         let file = &self.inner.file;
         self.inner
             .domain
-            .barrier(need, || flush_data(&mut self.inner.queues.get(0), file))
+            .barrier(need, || match self.inner.queues.flush_lane() {
+                Some(mut lane) => flush_data(&mut lane, file),
+                None => flush_data(&mut self.inner.queues.get(0), file),
+            })
             .inspect_err(|_| self.wake_frontiers())?;
         Ok(need)
     }

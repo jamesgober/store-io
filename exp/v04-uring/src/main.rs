@@ -511,6 +511,7 @@ fn qd1(cfg: &str, path: &str, n: usize, mode: &str) {
     let mut r = ring(cfg, 64);
     let mut s = Stats::new(n);
     let blocks = QD1_FILE / BS as u64;
+    let (mut nowait_eagain, mut nowait_short) = (0u64, 0u64);
     let cpu0 = cpu_us();
     let t0 = Instant::now();
     for i in 0..n as u64 {
@@ -528,6 +529,28 @@ fn qd1(cfg: &str, path: &str, n: usize, mode: &str) {
                 if mode == "t3-fdatasync" {
                     // SAFETY: valid fd.
                     assert_eq!(unsafe { libc::fdatasync(fd) }, 0);
+                }
+            }
+            "ring-nowait" | "ring-nowait-dsync" => {
+                // E14: never let io-wq run a write. RWF_NOWAIT makes a write
+                // that would block fail with EAGAIN before any I/O; it is then
+                // issued synchronously on this thread (the store's own path).
+                let dsync = mode == "ring-nowait-dsync";
+                let fl = libc::RWF_NOWAIT | if dsync { libc::RWF_DSYNC } else { 0 };
+                let w = opcode::Write::new(types::Fd(fd), m.at(0), BS as u32).offset(off).rw_flags(fl);
+                push(&mut r, &w.build().user_data(1));
+                let (_, res) = wait_one(&mut r);
+                if res == -libc::EAGAIN {
+                    nowait_eagain += 1;
+                    let iov = libc::iovec { iov_base: m.at(0).cast(), iov_len: BS };
+                    let sfl = if dsync { libc::RWF_DSYNC } else { 0 };
+                    // SAFETY: valid fd and iovec.
+                    let w = unsafe { libc::pwritev2(fd, &iov, 1, off as i64, sfl) };
+                    assert_eq!(w, BS as isize, "fallback pwritev2 {}", errno());
+                } else if res >= 0 && res != BS as i32 {
+                    nowait_short += 1;
+                } else {
+                    assert_eq!(res, BS as i32, "nowait write cqe");
                 }
             }
             _ => {
@@ -558,7 +581,7 @@ fn qd1(cfg: &str, path: &str, n: usize, mode: &str) {
     let secs = t0.elapsed().as_secs_f64();
     let cpu = (cpu_us() - cpu0) / n as f64;
     println!(
-        "qd1 cfg={cfg} mode={mode} ops_s={:.1} cpu_us_op={cpu:.2} iowq_threads={} cached_pages={} {}",
+        "qd1 cfg={cfg} mode={mode} ops_s={:.1} cpu_us_op={cpu:.2} nowait_eagain={nowait_eagain} nowait_short={nowait_short} iowq_threads={} cached_pages={} {}",
         n as f64 / secs,
         iowq_threads(),
         cached_pages(fd, QD1_FILE),

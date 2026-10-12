@@ -52,8 +52,8 @@ sec_e4() {
   for fs in ext4 xfs; do
     for o in relatime lazytime; do
       mount_fs $fs $o
-      for m in ring-plain ring-dsync ring-fsyncop; do
-        n=$([ $m = ring-plain ] && echo 5000 || echo 2000)
+      for m in ring-plain ring-dsync ring-fsyncop ring-nowait ring-nowait-dsync; do
+            n=$(case $m in ring-plain|ring-nowait) echo 5000;; *) echo 2000;; esac)
         traced "io_uring:io_uring_queue_async_work jbd2:jbd2_start_commit xfs:xfs_log_force" qd1 defer+tf /mnt/e4/e4.dat $n $m
       done
     done

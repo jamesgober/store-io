@@ -74,6 +74,8 @@ M = [
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::Allocate, Some(raw)))?;", "            .map_err(|raw| io(Op::Allocate, raw))?;"),
  # TYP-02: an already-durable receipt is counted
  ("crates/store-io-engine/src/region.rs", "            s.inner.domain.count_already_durable();", "            {}"),
+ # D-092: a read-only open takes the shared lock on its read-only handle
+ ("crates/store-io-engine/src/store.rs", "            platform.lock_shared(&file)", "            platform.lock_exclusive(&file)"),
 ]
 
 def kill_stuck_tests():

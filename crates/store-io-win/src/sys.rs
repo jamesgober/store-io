@@ -529,26 +529,24 @@ fn sentinel_overlapped(ev: &Handle) -> OVERLAPPED {
     ov
 }
 
-/// `LockFileEx(EXCLUSIVE | FAIL_IMMEDIATELY)` on the sentinel byte.
+/// `LockFileEx(EXCLUSIVE | FAIL_IMMEDIATELY)` on the sentinel byte, or
+/// `LockFileEx(FAIL_IMMEDIATELY)` (shared) when `shared`.
 ///
 /// # Errors
 ///
-/// The Win32 error (`ERROR_LOCK_VIOLATION` when another handle holds it).
-pub fn lock_sentinel(h: &Handle) -> RawResult<()> {
+/// The Win32 error (`ERROR_LOCK_VIOLATION` when a conflicting handle holds
+/// it).
+pub fn lock_sentinel(h: &Handle, shared: bool) -> RawResult<()> {
     let ev = event()?;
     let mut ov = sentinel_overlapped(&ev);
+    let flags = if shared {
+        LOCKFILE_FAIL_IMMEDIATELY
+    } else {
+        LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+    };
     // SAFETY: `ov` carries the offset and a private event and outlives the
     // operation, including the untimed wait on a pending result.
-    let ok = unsafe {
-        LockFileEx(
-            h.raw(),
-            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-            0,
-            1,
-            0,
-            &mut ov,
-        )
-    };
+    let ok = unsafe { LockFileEx(h.raw(), flags, 0, 1, 0, &mut ov) };
     if ok != FALSE {
         return Ok(());
     }

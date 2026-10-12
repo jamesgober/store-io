@@ -6,6 +6,8 @@
 //! owned by the process and any `close()` of any descriptor for the inode
 //! releases it, so it is never used here. Kernels before 3.15 (no OFD locks)
 //! fall back to `flock(LOCK_EX|LOCK_NB)`, which has the same ownership.
+//! A read-only open takes the shared form (`F_RDLCK`, or `LOCK_SH`), which
+//! readers hold together and which excludes the writer's exclusive lock.
 //!
 //! The lock handle holds a `dup` of the file's descriptor, which shares the
 //! description; dropping the handle unlocks through the dup and closes it.
@@ -31,20 +33,27 @@ pub struct PosixLock {
 }
 
 impl PosixLock {
-    /// Takes an exclusive write lock over the whole file on the file's own
-    /// open file description. Another holder gives the kernel's "would
-    /// block" (`EAGAIN`, `EACCES` or `EWOULDBLOCK`); a read-only handle gives
-    /// `EBADF`, because a write lock needs a descriptor open for writing.
-    pub(crate) fn acquire(file: &PosixFile) -> RawResult<Self> {
+    /// Takes a lock over the whole file on the file's own open file
+    /// description: an exclusive write lock, or with `shared` a read lock
+    /// that other readers may also hold. A conflicting holder gives the
+    /// kernel's "would block" (`EAGAIN`, `EACCES` or `EWOULDBLOCK`). An
+    /// exclusive lock on a read-only handle gives `EBADF`, because a write
+    /// lock needs a descriptor open for writing; a read lock works on one.
+    pub(crate) fn acquire(file: &PosixFile, shared: bool) -> RawResult<Self> {
         let fd = sys::dup_cloexec(file.raw())?;
         let raw = fd.as_raw_fd();
-        match sys::ofd_setlk(raw, libc::F_WRLCK) {
+        let (ofd, flock) = if shared {
+            (libc::F_RDLCK, libc::LOCK_SH)
+        } else {
+            (libc::F_WRLCK, libc::LOCK_EX)
+        };
+        match sys::ofd_setlk(raw, ofd) {
             Ok(()) => Ok(Self {
                 fd,
                 kind: Kind::Ofd,
             }),
             Err(e) if e.code == libc::EINVAL => {
-                sys::flock(raw, libc::LOCK_EX | libc::LOCK_NB)?;
+                sys::flock(raw, flock | libc::LOCK_NB)?;
                 Ok(Self {
                     fd,
                     kind: Kind::Flock,

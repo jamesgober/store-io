@@ -91,7 +91,11 @@ impl Platform for WinPlatform {
     }
 
     fn lock_exclusive(&self, file: &WinFile) -> RawResult<WinLock> {
-        WinLock::take(file)
+        WinLock::take(file, false)
+    }
+
+    fn lock_shared(&self, file: &WinFile) -> RawResult<WinLock> {
+        WinLock::take(file, true)
     }
 
     fn allocate(&self, file: &WinFile, len: u64) -> RawResult<()> {

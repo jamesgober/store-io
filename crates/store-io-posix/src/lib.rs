@@ -222,7 +222,11 @@ mod platform {
         }
 
         fn lock_exclusive(&self, file: &PosixFile) -> RawResult<PosixLock> {
-            PosixLock::acquire(file)
+            PosixLock::acquire(file, false)
+        }
+
+        fn lock_shared(&self, file: &PosixFile) -> RawResult<PosixLock> {
+            PosixLock::acquire(file, true)
         }
 
         fn allocate(&self, file: &PosixFile, len: u64) -> RawResult<()> {

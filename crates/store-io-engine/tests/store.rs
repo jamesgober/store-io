@@ -358,6 +358,46 @@ fn test_read_only_open_modifies_nothing_and_cannot_write() {
     assert_eq!(before, after, "a read-only open changed the container");
 }
 
+/// D-092: a read-only open needs no write rights, so it works on read-only
+/// media; readers share the store, and readers and the writer exclude each
+/// other. Before 0.4 a read-only open opened the container read-write to
+/// take the exclusive lock.
+#[test]
+fn test_read_only_opens_need_no_write_rights_and_share_the_store() {
+    let p = SimPlatform::new(SimConfig::volatile(13));
+    let s = create(&p);
+    let wal = s.provision_append_region("wal", 1 << 20).unwrap();
+    wal.append_durable(&record(1, 1000)).unwrap();
+    // The writer excludes readers.
+    assert!(matches!(
+        Store::open_readonly(p.clone(), Path::new(DIR), opts()),
+        Err(Error::Locked)
+    ));
+    drop((wal, s));
+
+    p.with_world(|w| w.faults_mut().read_only_media = true);
+    let a = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+    let b = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+    for s in [&a, &b] {
+        let mut out = vec![0u8; 1000];
+        s.append_region("wal").unwrap().read(0, &mut out).unwrap();
+        assert_eq!(out, record(1, 1000));
+    }
+    p.with_world(|w| w.faults_mut().read_only_media = false);
+    // Readers exclude the writer until the last one closes.
+    assert!(matches!(
+        Store::open(p.clone(), Path::new(DIR), opts()),
+        Err(Error::Locked)
+    ));
+    drop(a);
+    assert!(matches!(
+        Store::open(p.clone(), Path::new(DIR), opts()),
+        Err(Error::Locked)
+    ));
+    drop(b);
+    drop(Store::open(p.clone(), Path::new(DIR), opts()).unwrap());
+}
+
 /// SIO-TYP-02: a barrier is never a silent no-op. A ticket already covered
 /// by an earlier barrier gets a receipt for the real frontier without a new
 /// flush, and the shortcut is counted.

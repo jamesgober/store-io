@@ -250,3 +250,43 @@ fn test_releasing_a_region_leaves_its_neighbours_and_the_metadata_intact() {
     assert!(back == data, "the reused space did not read back");
     check(&store);
 }
+
+/// D-092: a read-only open works on a container the process may not write
+/// (a read-only file, as on a read-only mount or a backup copy), and two
+/// readers open it at once.
+#[test]
+fn test_a_write_protected_store_opens_read_only_for_two_readers() {
+    let t = TempDir::new("ro");
+    let (opts, _overridden) = options_for(t.path());
+    let path = t.path().join("backup");
+    let store = Store::create(&path, opts).unwrap();
+    let wal = store.provision_append_region("wal", 1 << 20).unwrap();
+    let (pos, _) = wal.append_durable(b"kept in the backup").unwrap();
+    drop((wal, store));
+
+    let container = path.join(store_io::CONTAINER);
+    let set_read_only = |on: bool| {
+        let mut perms = std::fs::metadata(&container).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(on);
+        std::fs::set_permissions(&container, perms).unwrap();
+    };
+    set_read_only(true);
+    let first = Store::open_readonly(&path);
+    let second = Store::open_readonly(&path);
+    // Writable opens need write rights (unless the tests run as root).
+    let writable = Store::open(&path);
+    set_read_only(false);
+    let (first, second) = (first.unwrap(), second.unwrap());
+    for s in [&first, &second] {
+        let mut out = vec![0u8; 18];
+        s.append_region("wal")
+            .unwrap()
+            .read(pos.offset(), &mut out)
+            .unwrap();
+        assert_eq!(out, b"kept in the backup");
+    }
+    if cfg!(windows) {
+        assert!(writable.is_err(), "a writable open of a read-only file");
+    }
+}

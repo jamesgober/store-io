@@ -180,6 +180,10 @@ where
                 ownership_lock,
             ),
             (
+                "readers share the lock on read-only handles and exclude the owner",
+                shared_lock,
+            ),
+            (
                 "a fully written range is allocated, unshared and uncached",
                 written_range_state,
             ),
@@ -576,6 +580,31 @@ fn ownership_lock<P: Platform>(c: &Ctx<'_, P>) -> Check {
     drop(held);
     drop(f);
     ok(c.p.lock_exclusive(&other), "lock after release").map(|_| ())
+}
+
+fn shared_lock<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    let dir = c.dir()?;
+    let f = c.file(&dir, "s", BLOCK as u64)?;
+    let reader = |what: &str| ok(c.p.open_file(&dir, &name("s")?, FileMode::ReadOnly), what);
+    let r1 = reader("first read-only open")?;
+    let r2 = reader("second read-only open")?;
+    let s1 = ok(c.p.lock_shared(&r1), "shared lock on a read-only handle")?;
+    let s2 = ok(c.p.lock_shared(&r2), "a second shared holder")?;
+    check!(
+        c.p.lock_exclusive(&f).is_err(),
+        "the owner's lock was taken while readers held theirs"
+    );
+    drop((s1, s2));
+    let owner = ok(
+        c.p.lock_exclusive(&f),
+        "the owner's lock after the readers left",
+    )?;
+    check!(
+        c.p.lock_shared(&r1).is_err(),
+        "a reader's lock was taken while the owner held its lock"
+    );
+    drop(owner);
+    ok(c.p.lock_shared(&r1), "a shared lock after the owner left").map(|_| ())
 }
 
 fn written_range_state<P: Platform>(c: &Ctx<'_, P>) -> Check {

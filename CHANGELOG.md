@@ -20,6 +20,9 @@
 - `store-io-engine`: a failed region read is reported accurately.
   - **Before.** Every failure was reported as `Corruption(MediaError)` and the raw code was dropped, so an invalid argument, an exhausted resource or a bad handle looked like a failing disk.
   - **Now.** A media error names the exact unreadable range, found by the scan's bisection. Any other failure is `Io` with its raw code and the byte range.
+- `store-io-engine`: a read-only open needs no write rights, and readers share the store.
+  - **Before.** `open_readonly` opened the container read-write to take the exclusive ownership lock. It failed on a read-only mount, a write-protected file or a backup copy, which is where a recovery tool most needs it, and two readers excluded each other.
+  - **Now.** It opens one read-only handle and takes a shared lock on it. Any number of readers can open a store at once; readers and the writer still exclude each other.
 - `store-io-engine`: `Directory` refuses a change it could never make durable before writing anything.
   - **Before.** On a file system that cannot flush directories, `replace` wrote the temporary file and renamed it over the target, then failed on the directory flush. The target had already changed, with no durability.
   - **Now.** `Directory::open` tries a directory flush. If it is unsupported, every `replace` and `remove` returns `Unsupported(DirectoryFlush)`; if it failed otherwise, `Io(SyncDir)`. In both cases nothing is written.
@@ -34,6 +37,9 @@
   its metadata says).
 - `store-io-sim`: `FaultPlan::fail_read`, which fails the n-th read with a
   chosen raw code.
+- `store-io-platform`: `Platform::lock_shared`, the reader form of the ownership lock, implemented by every backend. Outside implementers of `Platform` must add it.
+- `store-io-conformance`: a check that readers share the lock on read-only handles and exclude the owner.
+- `store-io-sim`: `FaultPlan::read_only_media` (every read-write open fails with EROFS) and `World::faults`. The simulator's exclusive lock now refuses a read-only handle with EBADF, as Linux does.
 - `store-io-sim`: `FaultPlan::dir_sync_unsupported` (every directory flush
   fails as unsupported) and `FaultPlan::fail_set_len` (the n-th `set_len`
   fails).

@@ -4,6 +4,8 @@
 //! `LockFileEx` is mandatory: locking data bytes would block the backend's
 //! own second handle (the queue's) and any reader. The sentinel lies beyond
 //! every possible data byte, so it conflicts with nothing but another owner.
+//! A read-only open takes the shared form (no `LOCKFILE_EXCLUSIVE_LOCK`) on
+//! the same byte: readers hold it together, and it excludes the writer.
 
 use std::sync::Arc;
 
@@ -21,8 +23,10 @@ pub struct WinLock {
 }
 
 impl WinLock {
-    pub(crate) fn take(file: &WinFile) -> RawResult<Self> {
-        sys::lock_sentinel(file.handle())?;
+    /// Takes the sentinel lock: exclusive, or with `shared` the reader form
+    /// that other readers may also hold. Either works on a read-only handle.
+    pub(crate) fn take(file: &WinFile, shared: bool) -> RawResult<Self> {
+        sys::lock_sentinel(file.handle(), shared)?;
         Ok(Self {
             file: Arc::clone(&file.inner),
         })

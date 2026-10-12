@@ -22,7 +22,7 @@
 //! The world is `Clone`, so a crash-state enumerator can branch it once per
 //! crash state.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use store_io_core::error::{OsError, OsErrorSource};
@@ -59,6 +59,11 @@ pub const EWOULDBLOCK: OsError = OsError {
 /// Simulated EBADF (handle invalidated by a crash, or read-only).
 pub const EBADF: OsError = OsError {
     code: 9,
+    source: OsErrorSource::Sim,
+};
+/// Simulated EROFS (a read-write open on read-only media).
+pub const EROFS: OsError = OsError {
+    code: 30,
     source: OsErrorSource::Sim,
 };
 /// Simulated EINVAL.
@@ -199,7 +204,9 @@ pub struct World {
     cache: Vec<CachedWrite>,
     completion_seq: u64,
     epoch: u64,
-    locks: BTreeSet<FileId>,
+    /// Lock holders per file: `None` is an exclusive holder, `Some(n)` is
+    /// `n` shared holders.
+    locks: BTreeMap<FileId, Option<u32>>,
     writes_completed: u64,
     reads_completed: u64,
     flushes_completed: u64,
@@ -222,7 +229,7 @@ impl World {
             cache: Vec::new(),
             completion_seq: 0,
             epoch: 0,
-            locks: BTreeSet::new(),
+            locks: BTreeMap::new(),
             writes_completed: 0,
             reads_completed: 0,
             flushes_completed: 0,
@@ -237,6 +244,12 @@ impl World {
     #[must_use]
     pub fn config(&self) -> &SimConfig {
         &self.cfg
+    }
+
+    /// The fault plan in force.
+    #[must_use]
+    pub fn faults(&self) -> &FaultPlan {
+        &self.cfg.faults
     }
 
     /// Mutable fault plan (to arm faults mid-run).
@@ -364,16 +377,27 @@ impl World {
 
     // ----- locks -------------------------------------------------------------
 
-    pub(crate) fn lock(&mut self, file: FileId) -> Result<(), OsError> {
-        if self.locks.insert(file) {
-            Ok(())
-        } else {
-            Err(EWOULDBLOCK)
+    pub(crate) fn lock(&mut self, file: FileId, shared: bool) -> Result<(), OsError> {
+        match (self.locks.get_mut(&file), shared) {
+            (None, _) => {
+                let _none = self.locks.insert(file, shared.then_some(1));
+                Ok(())
+            }
+            (Some(Some(n)), true) => {
+                *n += 1;
+                Ok(())
+            }
+            (Some(_), _) => Err(EWOULDBLOCK),
         }
     }
 
     pub(crate) fn unlock(&mut self, file: FileId) {
-        let _released = self.locks.remove(&file);
+        match self.locks.get_mut(&file) {
+            Some(Some(n)) if *n > 1 => *n -= 1,
+            _ => {
+                let _released = self.locks.remove(&file);
+            }
+        }
     }
 
     // ----- space and metadata ------------------------------------------------

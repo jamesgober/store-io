@@ -361,6 +361,16 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error (another holder reports the platform's "would block").
     fn lock_exclusive(&self, file: &Self::File) -> RawResult<Self::Lock>;
 
+    /// Takes the shared (reader) ownership lock on an open file, which may
+    /// be read-only. Shared holders coexist; a shared holder and an exclusive
+    /// holder exclude each other.
+    ///
+    /// # Errors
+    ///
+    /// The raw error (an exclusive holder reports the platform's "would
+    /// block").
+    fn lock_shared(&self, file: &Self::File) -> RawResult<Self::Lock>;
+
     /// Sets the file's size to exactly `len` bytes, truncating or extending
     /// with zeros. The data transfers stay block-aligned; only the size
     /// moves. A metadata change: durable after [`Self::flush_all`].

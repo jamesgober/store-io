@@ -265,7 +265,6 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) _dir: P::Dir,
     pub(crate) file: P::File,
     pub(crate) _lock: P::Lock,
-    pub(crate) _lock_file: Option<P::File>,
     pub(crate) volume: VolumeId,
     pub(crate) layout: Layout,
     pub(crate) policy: Policy,
@@ -402,7 +401,6 @@ where
                     dir,
                     file,
                     lock,
-                    None,
                     volume,
                     layout,
                     policy,
@@ -601,24 +599,23 @@ where
             .open_dir(path, false)
             .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
         let name = container_name()?;
-        // The lock needs write access; read-only stores keep a separate
-        // handle for it and do all I/O through a read-only handle.
-        let lock_file = platform
-            .open_file(&dir, &name, FileMode::ReadWrite)
-            .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
-        let lock = platform
-            .lock_exclusive(&lock_file)
-            .map_err(|_| Error::Locked)?;
-        let (file, lock_file) = if read_only {
-            (
-                platform
-                    .open_file(&dir, &name, FileMode::ReadOnly)
-                    .map_err(|e| io(Op::Open, e))?,
-                Some(lock_file),
-            )
+        // A read-only open needs no write rights (a read-only mount, a
+        // backup copy): one read-only handle and the shared lock, which
+        // other readers may hold too and which excludes the writer (D-092).
+        let mode = if read_only {
+            FileMode::ReadOnly
         } else {
-            (lock_file, None)
+            FileMode::ReadWrite
         };
+        let file = platform
+            .open_file(&dir, &name, mode)
+            .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
+        let lock = if read_only {
+            platform.lock_shared(&file)
+        } else {
+            platform.lock_exclusive(&file)
+        }
+        .map_err(|_| Error::Locked)?;
         let evidence = platform.probe(&dir, &file).map_err(|e| io(Op::Probe, e))?;
         let decision = decide(&evidence, &opts.trust);
         if !read_only {
@@ -782,7 +779,6 @@ where
             dir,
             file,
             lock,
-            lock_file,
             volume,
             layout,
             policy,
@@ -803,7 +799,6 @@ where
         dir: P::Dir,
         file: P::File,
         lock: P::Lock,
-        lock_file: Option<P::File>,
         volume: VolumeId,
         layout: Layout,
         policy: Policy,
@@ -823,7 +818,6 @@ where
                 _dir: dir,
                 file,
                 _lock: lock,
-                _lock_file: lock_file,
                 volume,
                 layout,
                 policy,

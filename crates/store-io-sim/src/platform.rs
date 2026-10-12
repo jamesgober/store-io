@@ -338,6 +338,9 @@ impl Platform for SimPlatform {
     fn open_file(&self, dir: &SimDir, name: &FileName, mode: FileMode) -> RawResult<SimFile> {
         let w = lock(&self.world);
         let id = w.lookup(&dir.path, name.as_str())?;
+        if mode == FileMode::ReadWrite && w.faults().read_only_media {
+            return Err(crate::world::EROFS);
+        }
         Ok(SimFile {
             id,
             epoch: w.epoch(),
@@ -364,9 +367,21 @@ impl Platform for SimPlatform {
     }
 
     fn lock_exclusive(&self, file: &SimFile) -> RawResult<SimLock> {
+        // As on Linux, a write lock needs a handle open for writing.
+        let mut w = lock(&self.world);
+        file.check(&w, true)?;
+        w.lock(file.id, false)?;
+        Ok(SimLock {
+            world: Arc::clone(&self.world),
+            file: file.id,
+            epoch: w.epoch(),
+        })
+    }
+
+    fn lock_shared(&self, file: &SimFile) -> RawResult<SimLock> {
         let mut w = lock(&self.world);
         file.check(&w, false)?;
-        w.lock(file.id)?;
+        w.lock(file.id, true)?;
         Ok(SimLock {
             world: Arc::clone(&self.world),
             file: file.id,

@@ -69,6 +69,9 @@ M = [
  # Read errors are classified and media errors name the exact range
  ("crates/store-io-engine/src/io.rs", "                    if !store_io_core::errno::is_media_error(raw) {", "                    if false {"),
  ("crates/store-io-engine/src/io.rs", "                    let (bad_start, bad_end) = self.first_unreadable(r, start, end)?;", "                    let (bad_start, bad_end) = (start, end);"),
+ # Directory: refuse before any write without directory flushes; fail-stop on set_len
+ ("crates/store-io-engine/src/directory.rs", "        let dir_flush = platform.sync_dir(&dir).err();", "        let dir_flush = None;"),
+ ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::Allocate, Some(raw)))?;", "            .map_err(|raw| io(Op::Allocate, raw))?;"),
 ]
 
 def kill_stuck_tests():

@@ -148,7 +148,7 @@ A batch holds at most what the buffer pool can lend (`buffers_per_class × max_i
 
 | Item | Description |
 |---|---|
-| `Directory::open(path, create) -> Result<Directory>` | Opens (or creates) a directory with default trust. |
+| `Directory::open(path, create) -> Result<Directory>` | Opens (or creates) a directory with default trust, and tries a directory flush. If that fails, `replace` and `remove` are refused before any write (`Unsupported(DirectoryFlush)` or `Io(SyncDir)`); `read` still works. |
 | `Directory::open_with(path, create, Trust)` | With explicit trust inputs. |
 | `replace(name, &[u8]) -> Result<()>` | Temporary file, exact length, flush, rename over the target, directory flush. The file holds the old or the new bytes after any crash. |
 | `read(name) -> Result<Vec<u8>>` | Reads a whole file with direct I/O. |

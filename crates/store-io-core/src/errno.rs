@@ -131,6 +131,24 @@ pub fn is_media_error(raw: OsError) -> bool {
     }
 }
 
+/// Whether the code means the object does not support the operation at all
+/// (for example a directory flush on a file system that cannot do one), as
+/// opposed to a failure while doing it.
+#[must_use]
+pub fn is_unsupported(raw: OsError) -> bool {
+    match raw.source {
+        // EINVAL = 22 (fsync on an object without synchronisation), ENOSYS =
+        // 38, EOPNOTSUPP / ENOTSUP = 95 (Linux); ENOTSUP = 45, EOPNOTSUPP =
+        // 102 (macOS).
+        OsErrorSource::Errno => matches!(raw.code, 22 | 38 | 95 | 45 | 102),
+        // ERROR_INVALID_FUNCTION = 1, ERROR_NOT_SUPPORTED = 50.
+        OsErrorSource::Win32 => matches!(raw.code, 1 | 50),
+        // STATUS_INVALID_DEVICE_REQUEST, STATUS_NOT_SUPPORTED.
+        OsErrorSource::NtStatus => matches!(raw.code as u32, 0xC000_0010 | 0xC000_00BB),
+        OsErrorSource::Sim => raw.code == 95,
+    }
+}
+
 /// Whether the code means the call was interrupted before doing anything
 /// (`EINTR`). Only meaningful for calls documented to fail with `EINTR`
 /// before any I/O; callers retry those and count the retry.

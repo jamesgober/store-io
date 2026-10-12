@@ -20,6 +20,11 @@
 - `store-io-engine`: a failed region read is reported accurately.
   - **Before.** Every failure was reported as `Corruption(MediaError)` and the raw code was dropped, so an invalid argument, an exhausted resource or a bad handle looked like a failing disk.
   - **Now.** A media error names the exact unreadable range, found by the scan's bisection. Any other failure is `Io` with its raw code and the byte range.
+- `store-io-engine`: `Directory` refuses a change it could never make durable before writing anything.
+  - **Before.** On a file system that cannot flush directories, `replace` wrote the temporary file and renamed it over the target, then failed on the directory flush. The target had already changed, with no durability.
+  - **Now.** `Directory::open` tries a directory flush. If it is unsupported, every `replace` and `remove` returns `Unsupported(DirectoryFlush)`; if it failed otherwise, `Io(SyncDir)`. In both cases nothing is written.
+- `store-io-engine`: a failed `set_len` during a `Directory` replace is fail-stop. It returns `DurabilityUnknown` and poisons the handle, as a failed write does; before, the handle stayed usable. The target keeps its old contents.
+- `store-io-engine`: the test that a flush leader never waits for a shared queue is now deterministic. It holds the only queue and requires the flush to finish anyway; the old test depended on timing and could pass without the flush lane.
 
 ### Added
 
@@ -29,6 +34,11 @@
   its metadata says).
 - `store-io-sim`: `FaultPlan::fail_read`, which fails the n-th read with a
   chosen raw code.
+- `store-io-sim`: `FaultPlan::dir_sync_unsupported` (every directory flush
+  fails as unsupported) and `FaultPlan::fail_set_len` (the n-th `set_len`
+  fails).
+- `store-io-core`: `errno::is_unsupported`, which tells "the object cannot do
+  this" from "it failed while doing it".
 - CI: a mutation check (`dev/tools/mutate.py`, workflow "Mutation"). Every
   listed mutation of a flush, barrier, poison, directory-sync or accounting
   site must be killed by the engine and simulator tests; a survivor, or a

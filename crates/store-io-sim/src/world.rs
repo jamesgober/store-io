@@ -204,6 +204,7 @@ pub struct World {
     reads_completed: u64,
     flushes_completed: u64,
     dir_syncs: u64,
+    set_lens: u64,
     allocated: u64,
     trace: Vec<TraceEvent>,
 }
@@ -226,6 +227,7 @@ impl World {
             reads_completed: 0,
             flushes_completed: 0,
             dir_syncs: 0,
+            set_lens: 0,
             allocated: 0,
             trace: Vec::new(),
         }
@@ -346,6 +348,12 @@ impl World {
 
     pub(crate) fn sync_dir(&mut self, dir: &PathBuf) -> Result<(), OsError> {
         self.dir_syncs += 1;
+        if self.cfg.faults.dir_sync_unsupported {
+            return Err(OsError {
+                code: 95,
+                source: OsErrorSource::Sim,
+            });
+        }
         if self.cfg.faults.fail_dir_sync == Some(self.dir_syncs) {
             return Err(EIO);
         }
@@ -390,6 +398,10 @@ impl World {
     }
 
     pub(crate) fn set_len(&mut self, file: FileId, len: u64) -> Result<(), OsError> {
+        self.set_lens += 1;
+        if self.cfg.faults.fail_set_len == Some(self.set_lens) {
+            return Err(EIO);
+        }
         let cur = self.files.get(&file).ok_or(EBADF)?.visible.len() as u64;
         if len >= cur {
             return self.allocate(file, len);

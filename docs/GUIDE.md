@@ -149,7 +149,7 @@ meta.replace("CURRENT", b"MANIFEST-000042")?;
 let current = meta.read("CURRENT")?;
 ```
 
-`replace` writes a temporary file in the same directory, sets its exact length, flushes it, renames it over the target and flushes the directory. It reports success only after all of that. If anything fails from the rename on, the directory may name either version, so the call returns `DurabilityUnknown` and the handle refuses further changes. An unsupported directory flush is an error, never a success.
+`replace` writes a temporary file in the same directory, sets its exact length, flushes it, renames it over the target and flushes the directory. It reports success only after all of that. If anything fails from the rename on, the directory may name either version, so the call returns `DurabilityUnknown` and the handle refuses further changes. `open` tries a directory flush first: if the directory cannot be flushed, every `replace` and `remove` is refused (`Unsupported(DirectoryFlush)`, or `Io` for another failure) before anything is written, since the change could never be made durable. A failed length update after the writes poisons the handle, as a failed write does.
 
 ---
 

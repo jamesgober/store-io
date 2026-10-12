@@ -545,4 +545,34 @@ mod tests {
         assert!(s.inner.domain.poisoned().is_some());
         assert!(wal.append(b"x").is_err());
     }
+
+    #[test]
+    fn test_a_flush_leader_never_waits_for_a_shared_queue() {
+        // D-070, deterministically: the store's only shared queue is held
+        // (as a slot commit following a flush holds it), and a barrier that
+        // must lead a flush still completes, through the flush lane. Without
+        // the flush lane the leader waits for that queue forever.
+        let p = SimPlatform::new(SimConfig::volatile(2));
+        let opts = StoreOptions {
+            queues: 1,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p, Path::new("/db"), opts).unwrap();
+        let wal = s.provision_append_region("wal", 1 << 20).unwrap();
+        let ticket = wal.append(b"needs a flush").unwrap();
+        let held = s.inner.queues.get(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let r = wal.sync_through(&ticket);
+            tx.send(r.is_ok()).unwrap();
+        });
+        let finished = rx.recv_timeout(std::time::Duration::from_secs(30));
+        drop(held);
+        waiter.join().unwrap();
+        assert_eq!(
+            finished,
+            Ok(true),
+            "the flush leader waited for the shared queue the test holds"
+        );
+    }
 }

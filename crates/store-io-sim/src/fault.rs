@@ -32,6 +32,11 @@ pub struct FaultPlan {
     /// The n-th directory sync (1-based) fails with EIO, leaving the
     /// directory's durable entries as they were.
     pub fail_dir_sync: Option<u64>,
+    /// Every directory sync fails as unsupported (EOPNOTSUPP), as on a file
+    /// system that cannot flush directories.
+    pub dir_sync_unsupported: bool,
+    /// The n-th `set_len` (1-based) fails with EIO.
+    pub fail_set_len: Option<u64>,
     /// The n-th read completion transfers only half its bytes (rounded down
     /// to a logical block) and reports the short count.
     pub short_read: Option<u64>,

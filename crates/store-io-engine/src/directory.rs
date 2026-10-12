@@ -66,6 +66,9 @@ pub struct Directory<P: Platform> {
     queue: QueueSet<P::Queue>,
     /// Serialises replaces and removes (one temporary name per target).
     change: Mutex<()>,
+    /// The directory flush probed at open failed: every change is refused
+    /// before any write, since its rename could never be made durable.
+    dir_flush: Option<OsError>,
 }
 
 impl<P: Platform> core::fmt::Debug for Directory<P> {
@@ -97,6 +100,9 @@ impl<P: Platform> Directory<P> {
             .map_err(|raw| io(Op::Open, raw))?;
         let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, CHUNK, 4))
             .map_err(|_| not_written(NotWrittenCause::PoolExhausted, ErrorContext::default()))?;
+        // Every change depends on a directory flush; learn now, before any
+        // write, whether this directory can do one.
+        let dir_flush = platform.sync_dir(&dir).err();
         Ok(Self {
             platform,
             dir,
@@ -106,6 +112,7 @@ impl<P: Platform> Directory<P> {
             pool,
             queue: QueueSet::new(vec![queue], 8),
             change: Mutex::new(()),
+            dir_flush,
         })
     }
 
@@ -151,9 +158,15 @@ impl<P: Platform> Directory<P> {
     }
 
     fn writable(&self) -> Result<(), Error> {
-        match self.poisoned.get() {
-            Some(first) => Err(Error::Poisoned { first: *first }),
+        if let Some(first) = self.poisoned.get() {
+            return Err(Error::Poisoned { first: *first });
+        }
+        match self.dir_flush {
             None => Ok(()),
+            Some(raw) if store_io_core::errno::is_unsupported(raw) => Err(Error::Unsupported {
+                what: store_io_core::error::Capability::DirectoryFlush,
+            }),
+            Some(raw) => Err(io(Op::SyncDir, raw)),
         }
     }
 
@@ -239,9 +252,11 @@ impl<P: Platform> Directory<P> {
             }
         }
         drop(lane);
+        // Fail-stop: a metadata update the device refused after the writes
+        // poisons the handle, as a failed write does.
         self.platform
             .set_len(file, len)
-            .map_err(|raw| io(Op::Allocate, raw))?;
+            .map_err(|raw| self.poison(Op::Allocate, Some(raw)))?;
         self.platform
             .flush_all(file)
             .map_err(|raw| self.poison(Op::FlushAll, Some(raw)))

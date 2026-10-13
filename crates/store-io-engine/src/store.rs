@@ -255,6 +255,10 @@ pub(crate) struct LiveRegion {
 }
 
 pub(crate) struct Inner<P: Platform> {
+    /// Declared first, so the queues drop first (fields drop in declaration
+    /// order): a queue whose operations run on worker threads waits for them
+    /// in its drop, and none may land after the ownership lock is released.
+    pub(crate) queues: QueueSet<P::Queue>,
     pub(crate) platform: P,
     /// The store directory, held open for directory syncs.
     pub(crate) _dir: P::Dir,
@@ -265,7 +269,6 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) policy: Policy,
     pub(crate) domain: Domain,
     pub(crate) pool: BufPool,
-    pub(crate) queues: QueueSet<P::Queue>,
     pub(crate) meta: Mutex<Meta>,
     pub(crate) regions: Mutex<Vec<Arc<LiveRegion>>>,
     pub(crate) report: StoreReport,
@@ -570,6 +573,7 @@ pub(crate) fn make_queues<P: Platform>(
     };
     let cfg = QueueConfig {
         depth: opts.queue_depth.max(1),
+        ..QueueConfig::default()
     };
     let mut qs = Vec::with_capacity(n);
     for _ in 0..n {

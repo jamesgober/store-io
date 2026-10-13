@@ -99,7 +99,10 @@ impl<P: Platform> Directory<P> {
             }
         })?;
         let queue = platform
-            .queue(QueueConfig { depth: 8 })
+            .queue(QueueConfig {
+                depth: 8,
+                ..QueueConfig::default()
+            })
             .map_err(|raw| io(Op::Open, raw))?;
         let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, CHUNK, 4))
             .map_err(|_| not_written(NotWrittenCause::PoolExhausted, ErrorContext::default()))?;

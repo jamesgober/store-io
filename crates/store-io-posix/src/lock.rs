@@ -11,6 +11,8 @@
 //!
 //! The lock handle holds a `dup` of the file's descriptor, which shares the
 //! description; dropping the handle unlocks through the dup and closes it.
+//! The unlock is explicit, so it does not wait for operations still queued
+//! on the submit pool: drop (or drain) a parallel queue before the lock.
 
 use std::os::fd::{AsRawFd, OwnedFd};
 

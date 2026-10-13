@@ -3,6 +3,7 @@
 
 use core::ffi::c_int;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::sync::Arc;
 
 use store_io_platform::{FileMode, FileName, RawResult};
 
@@ -18,9 +19,14 @@ use crate::sys;
 /// path component, so `O_NOFOLLOW` checks every component there is. A name
 /// that resolves to anything but a regular file or a block device is refused
 /// with `EINVAL` after the open, before any use.
+///
+/// The descriptor is shared with the submit pool's jobs (D-096): a job holds
+/// a clone, so the descriptor stays open, and its number cannot be reused,
+/// until the job's system call has returned, even if the file is dropped
+/// first.
 #[derive(Debug)]
 pub struct PosixFile {
-    fd: OwnedFd,
+    fd: Arc<OwnedFd>,
     writable: bool,
     block_device: bool,
 }
@@ -57,7 +63,7 @@ impl PosixFile {
             _ => return Err(sys::errno(libc::EINVAL)),
         };
         Ok(Self {
-            fd,
+            fd: Arc::new(fd),
             writable,
             block_device,
         })
@@ -79,6 +85,12 @@ impl PosixFile {
     #[inline]
     pub(crate) fn raw(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+
+    /// The descriptor, shared with a pooled job (one atomic increment).
+    #[inline]
+    pub(crate) fn share_fd(&self) -> Arc<OwnedFd> {
+        Arc::clone(&self.fd)
     }
 }
 

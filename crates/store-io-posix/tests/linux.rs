@@ -267,7 +267,12 @@ fn test_misaligned_direct_write_is_judged_by_the_kernel_not_rejected() {
 fn test_queue_full_rejects_and_returns_the_buffer() {
     let (_t, p, _dir, file, pool, _q) = setup();
     p.allocate(&file, 1 << 16).unwrap();
-    let mut q = p.queue(QueueConfig { depth: 2 }).unwrap();
+    let mut q = p
+        .queue(QueueConfig {
+            depth: 2,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     for i in 0..2u64 {
         let b = pool.take(4096).unwrap();
         q.submit(

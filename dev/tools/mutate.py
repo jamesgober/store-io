@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Mutation check for store-io's durability call sites (Directives section 4.7, D-086).
 
-Each entry is (file, pattern, replacement): a plausible bug at a flush,
-barrier, poison, directory-sync, generation-bump or accounting site. For each
-one the pattern is replaced (it must occur exactly once), the engine and
-simulator tests run, and the source is restored. A mutation the tests do not
-kill is a survivor, and one that does not compile is invalid; either fails
-the run.
+Each entry is (file, pattern, replacement[, packages]): a plausible bug at a
+flush, barrier, poison, directory-sync, generation-bump, accounting or
+buffer-ownership site. For each one the pattern is replaced (it must occur
+exactly once), the tests of `packages` run (default: the engine and the
+simulator), and the source is restored. A mutation the tests do not kill is a
+survivor, and one that does not compile is invalid; either fails the run.
+Entries whose packages are Linux-only are skipped on other systems, and
+reported as skipped.
 
 Usage: python3 dev/tools/mutate.py [index ...]
 """
@@ -17,6 +19,11 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TIMEOUT = int(os.environ.get("MUTATE_TIMEOUT", "600"))
+
+ENGINE = ["-p", "store-io-engine", "-p", "store-io-sim"]
+# The Linux backend's own tests (its submit pool included); Linux only.
+POSIX = ["-p", "store-io-posix"]
+LINUX_ONLY = {"store-io-posix"}
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -101,6 +108,14 @@ M = [
  ("crates/store-io-engine/src/exec.rs", "        mark.store(v.wrapping_add(1), Ordering::Relaxed);", "        mark.store(v, Ordering::Relaxed);"),
  ("crates/store-io-engine/src/stats.rs", "            if mark % 2 == 0 || entry.0 != mark {", "            if mark % 2 == 0 {"),
  ("crates/store-io-engine/src/exec.rs", "        self.0.store(v.wrapping_add(2), Ordering::Relaxed);", "        self.0.store(v, Ordering::Relaxed);"),
+ # D-096: a pooled queue's drop waits for its jobs; its depth bounds the pool
+ ("crates/store-io-posix/src/queue.rs", "                p.inbox.settle(p.in_flight);", "                if false { p.inbox.settle(p.in_flight); }", POSIX),
+ ("crates/store-io-posix/src/queue.rs", "        if self.in_flight() >= self.depth {", "        if self.ready.len() >= self.depth {", POSIX),
+ # Starting the pool leaves the caller's signal mask as it was, and the
+ # workers open the signals the kernel forces on a faulting thread
+ ("crates/store-io-posix/src/sys.rs", "        if let Some(old) = &self.old {", "        if let Some(old) = &self.old.filter(|_| false) {", POSIX),
+ ("crates/store-io-posix/src/sys.rs", "    for sig in FAULT_SIGNALS {\n        // SAFETY: sigaddset", "    for sig in FAULT_SIGNALS.iter().copied().filter(|_| false) {\n        // SAFETY: sigaddset", POSIX),
+ ("crates/store-io-posix/src/sys.rs", "        if unsafe { libc::sigfillset(set.as_mut_ptr()) } != 0 {", "        if unsafe { libc::sigfillset(set.as_mut_ptr()) } != 0 || true {", POSIX),
 ]
 
 def kill_stuck_tests():
@@ -115,7 +130,10 @@ def kill_stuck_tests():
 def main():
     only = [int(a) for a in sys.argv[1:]]
     survived, missing, invalid = [], [], []
-    for i, (f, a, b) in enumerate(M):
+    skipped = []
+    for i, entry in enumerate(M):
+        f, a, b = entry[:3]
+        pkgs = list(entry[3]) if len(entry) > 3 else ENGINE
         if only and i not in only:
             continue
         p = os.path.join(ROOT, *f.split("/"))
@@ -124,6 +142,11 @@ def main():
         if src.count(a) != 1:
             print(f"[{i}] PATTERN NOT FOUND ({src.count(a)}) in {f}: {a[:50]!r}", flush=True)
             missing.append(i)
+            continue
+        # After the pattern check, so a stale entry is reported everywhere.
+        if not sys.platform.startswith("linux") and any(k in LINUX_ONLY for k in pkgs):
+            print(f"[{i}] {f}: skipped (Linux only)", flush=True)
+            skipped.append(i)
             continue
         with open(p, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(src.replace(a, b))
@@ -134,7 +157,6 @@ def main():
                 # once after clearing stuck test binaries (on Windows a binary
                 # still locked by the previous run can fail a good build); a
                 # second failure means the mutation never ran: invalid.
-                pkgs = ["-p", "store-io-engine", "-p", "store-io-sim"]
                 for attempt in range(2):
                     built = subprocess.run(["cargo", "test", "-q", "--no-run"] + pkgs,
                                        cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
@@ -165,7 +187,8 @@ def main():
         finally:
             with open(p, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(src)
-    print("survived:", survived, "missing:", missing, "invalid:", invalid, flush=True)
+    print("survived:", survived, "missing:", missing, "invalid:", invalid,
+          "skipped:", skipped, flush=True)
     sys.exit(1 if survived or missing or invalid else 0)
 
 

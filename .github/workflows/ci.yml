@@ -57,7 +57,8 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
 
   # Exhaustive interleaving checks of the lock-free code: the buffer pool's
-  # free lists, the append frontier, the flush domain and the region gate.
+  # free lists, the append frontier, the flush domain and the region gate;
+  # and of the Linux submit pool's job queue and inbox handoffs.
   loom:
     name: Loom (model checking)
     runs-on: ubuntu-latest
@@ -71,7 +72,7 @@ jobs:
         with:
           key: loom
       - name: Loom models
-        run: cargo test -p store-io-buf -p store-io-engine --lib --release loom
+        run: cargo test -p store-io-buf -p store-io-engine -p store-io-posix --lib --release loom
 
   # Undefined-behaviour checks of the unsafe buffer code (arena, pool,
   # lock-free queue, secure wipe) under Miri.

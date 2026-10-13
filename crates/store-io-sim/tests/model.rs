@@ -294,7 +294,12 @@ fn test_out_of_space_on_allocate() {
 #[test]
 fn test_misaligned_direct_io_completes_with_einval_and_touches_nothing() {
     let (p, _dir, file, pool) = setup(SimConfig::volatile(40));
-    let mut q = p.queue(QueueConfig { depth: 8 }).unwrap();
+    let mut q = p
+        .queue(QueueConfig {
+            depth: 8,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     let before = media(&p);
     let writes_before = p.with_world(|w| w.writes());
     // Misaligned offset, then misaligned length.
@@ -334,7 +339,12 @@ fn test_misaligned_direct_io_completes_with_einval_and_touches_nothing() {
 #[test]
 fn test_a_read_past_the_end_of_the_file_transfers_nothing() {
     let (p, _dir, file, pool) = setup(SimConfig::volatile(41));
-    let mut q = p.queue(QueueConfig { depth: 2 }).unwrap();
+    let mut q = p
+        .queue(QueueConfig {
+            depth: 2,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     let end = p.size(&file).unwrap();
     q.submit(
         IoOp::Read {

@@ -120,7 +120,12 @@ fn test_create_exclusive_allocate_write_read_flush_rename_sync() {
     assert!(ev.fs.dio_offset_align > 0 && BLOCK as u32 % ev.fs.dio_offset_align == 0);
     assert!(ev.fs.dio_mem_align <= BLOCK as u32);
 
-    let mut q = fx.p.queue(QueueConfig { depth: 16 }).unwrap();
+    let mut q =
+        fx.p.queue(QueueConfig {
+            depth: 16,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     for i in 0..8u64 {
         assert_eq!(
             write_block(&mut q, &f, &fx.pool, i * BLOCK as u64, i as u8 + 1, false),
@@ -169,7 +174,12 @@ fn test_many_in_flight_complete_in_any_order_and_dsync_is_durable_at_completion(
     let fx = fixture("inflight");
     let f = fx.p.create_file(&fx.dir, &name("c.sio")).unwrap();
     fx.p.allocate(&f, 64 * BLOCK as u64).unwrap();
-    let mut q = fx.p.queue(QueueConfig { depth: 32 }).unwrap();
+    let mut q =
+        fx.p.queue(QueueConfig {
+            depth: 32,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     for i in 0..32u64 {
         let mut buf = fx.pool.take(BLOCK).unwrap();
         buf.as_mut_slice().fill(i as u8);
@@ -218,7 +228,12 @@ fn test_queue_full_rejects_with_buffer_and_no_raw_error() {
     let fx = fixture("full");
     let f = fx.p.create_file(&fx.dir, &name("d.sio")).unwrap();
     fx.p.allocate(&f, 4 * BLOCK as u64).unwrap();
-    let mut q = fx.p.queue(QueueConfig { depth: 1 }).unwrap();
+    let mut q =
+        fx.p.queue(QueueConfig {
+            depth: 1,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     q.submit(
         IoOp::Write {
             file: &f,
@@ -540,7 +555,12 @@ fn test_dropping_a_queue_with_operations_in_flight_returns_every_buffer() {
     fx.p.allocate(&f, 64 * BLOCK as u64).unwrap();
     let total: usize = fx.pool.occupancy().iter().map(|c| c.1).sum();
     {
-        let mut q = fx.p.queue(QueueConfig { depth: 16 }).unwrap();
+        let mut q =
+            fx.p.queue(QueueConfig {
+                depth: 16,
+                ..QueueConfig::default()
+            })
+            .unwrap();
         for i in 0..16u64 {
             let buf = fx.pool.take(BLOCK).unwrap();
             q.submit(
@@ -624,7 +644,12 @@ fn test_set_len_truncates_and_extends_with_zeros() {
     let fx = fixture("set-len");
     let f = fx.p.create_file(&fx.dir, &name("s.sio")).unwrap();
     fx.p.allocate(&f, 2 * BLOCK as u64).unwrap();
-    let mut q = fx.p.queue(QueueConfig { depth: 4 }).unwrap();
+    let mut q =
+        fx.p.queue(QueueConfig {
+            depth: 4,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     assert_eq!(write_block(&mut q, &f, &fx.pool, 0, 0x5A, false), Ok(BLOCK));
     // Shrink to a length that is not a block multiple: direct reads still
     // transfer whole blocks and stop at the end of file.

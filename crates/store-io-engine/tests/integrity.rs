@@ -48,7 +48,12 @@ fn overwrite(p: &SimPlatform, offset: u64, bytes: &[u8]) {
         )
         .unwrap();
     let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 1 << 16, 4)).unwrap();
-    let mut q = p.queue(QueueConfig { depth: 4 }).unwrap();
+    let mut q = p
+        .queue(QueueConfig {
+            depth: 4,
+            ..QueueConfig::default()
+        })
+        .unwrap();
     let mut buf = pool.take(bytes.len()).unwrap();
     buf.as_mut_slice().copy_from_slice(bytes);
     q.submit(

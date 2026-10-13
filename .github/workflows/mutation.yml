@@ -1,6 +1,7 @@
 # Mutation check (Directives section 4.7, D-086): every listed mutation of a
-# flush, barrier, poison, directory-sync or accounting site must be killed by
-# the engine and simulator tests. Runs when that code or the list changes,
+# flush, barrier, poison, directory-sync, accounting or buffer-ownership site
+# must be killed by the engine and simulator tests (the Linux backend's own
+# tests for its entries). Runs when that code or the list changes,
 # and on demand.
 name: Mutation
 
@@ -12,6 +13,8 @@ on:
       - "crates/store-io-sim/**"
       - "crates/store-io-format/**"
       - "crates/store-io-core/**"
+      - "crates/store-io-platform/**"
+      - "crates/store-io-posix/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
   pull_request:
@@ -21,6 +24,8 @@ on:
       - "crates/store-io-sim/**"
       - "crates/store-io-format/**"
       - "crates/store-io-core/**"
+      - "crates/store-io-platform/**"
+      - "crates/store-io-posix/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
   workflow_dispatch:
@@ -38,6 +43,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the tests once
-        run: cargo test -q -p store-io-engine -p store-io-sim --no-run
+        run: cargo test -q -p store-io-engine -p store-io-sim -p store-io-posix --no-run
       - name: Every mutation is killed
         run: python3 dev/tools/mutate.py

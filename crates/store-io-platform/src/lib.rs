@@ -148,11 +148,26 @@ pub struct RangeState {
 pub struct QueueConfig {
     /// Maximum operations in flight.
     pub depth: u32,
+    /// A hint that the caller submits several independent operations before
+    /// it waits. A backend that would otherwise run them one by one inside
+    /// `submit` (the Linux synchronous tier) may then run them concurrently
+    /// on worker threads; backends that are already asynchronous ignore it.
+    /// `false` (the default) keeps every operation on the calling thread.
+    pub parallel: bool,
+    /// Worker threads for the backend's shared pool, used only if this queue
+    /// is the one that starts it (0 = the backend's default; a backend may
+    /// cap it). A pool already running is never resized; the backend reports
+    /// its size.
+    pub pool_threads: u32,
 }
 
 impl Default for QueueConfig {
     fn default() -> Self {
-        Self { depth: 64 }
+        Self {
+            depth: 64,
+            parallel: false,
+            pool_threads: 0,
+        }
     }
 }
 
@@ -278,8 +293,9 @@ pub trait Queue {
     /// many were added.
     fn reap(&mut self, out: &mut CompletionBuf) -> usize;
 
-    /// Blocks until at least `min` completions are in `out` (or `out` is
-    /// full); returns how many were added. Never times out.
+    /// Blocks until at least `min` completions have been added to `out`, or
+    /// `out` is full, or nothing is left in flight; returns how many were
+    /// added. Never times out, and never waits for more than is in flight.
     ///
     /// # Errors
     ///
@@ -288,6 +304,13 @@ pub trait Queue {
 
     /// Operations submitted and not yet reaped.
     fn in_flight(&self) -> usize;
+
+    /// Worker threads that run this queue's operations concurrently, when
+    /// the backend runs them on a pool ([`QueueConfig::parallel`]); `None`
+    /// when they run inside `submit` or in the kernel.
+    fn workers(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A platform backend.

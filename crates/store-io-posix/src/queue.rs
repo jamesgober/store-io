@@ -1,22 +1,40 @@
-//! The synchronous queue (tier T3): each operation is one system call made
-//! inside `submit`, and its completion is pushed into a fixed ready ring.
+//! The synchronous queue (tier T3). Inline, each operation is one system
+//! call made inside `submit`, and its completion is pushed into a fixed ready
+//! ring. Pooled (`QueueConfig::parallel`, D-096), `submit` hands the
+//! operation to the platform's submit pool and its completion arrives in the
+//! queue's inbox.
 
 use core::ffi::c_int;
+use std::os::fd::AsRawFd;
+use std::sync::Arc;
 
 use store_io_platform::{
     Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected,
 };
 
 use crate::file::PosixFile;
+use crate::pool::{Inbox, Job, SubmitPool};
 use crate::sys;
 
 /// A per-thread synchronous queue.
 ///
-/// `submit` performs the system call inline (`pwritev2`, `preadv2` or
-/// `fdatasync`) and stores the completion in a ring allocated once, sized by
-/// [`QueueConfig::depth`]. When the ring is full, `submit` refuses the
-/// operation and returns its buffer. `reap` drains the ring; `wait` does the
-/// same, since nothing ever completes later.
+/// **Inline** (the default): `submit` performs the system call (`pwritev2`,
+/// `preadv2` or `fdatasync`) and stores the completion in a ring allocated
+/// once, sized by [`QueueConfig::depth`]; `reap` drains the ring, and `wait`
+/// does the same, since nothing ever completes later. Zero thread hops.
+///
+/// **Pooled** ([`QueueConfig::parallel`]): `submit` makes the same checks,
+/// then queues the operation on the platform's submit pool and returns; the
+/// operations run concurrently on the pool's workers and complete in any
+/// order, and `wait` blocks, untimed, until enough of them have completed. A
+/// `FlushData` covers only writes that completed before it was submitted, as
+/// on every asynchronous backend. Dropping a pooled queue waits for every
+/// operation still in flight, so none lands after the drop (drop it before
+/// the file's ownership lock), and every buffer is back in its pool when the
+/// drop returns. [`Queue::workers`] reports the pool's size.
+///
+/// In both modes at most `depth` operations are submitted and not yet
+/// reaped; beyond that `submit` refuses the operation and returns its buffer.
 ///
 /// A write asked for durability at completion uses `RWF_DSYNC`, except on a
 /// raw block device, where the synchronous `RWF_DSYNC` path issues both a
@@ -55,26 +73,63 @@ use crate::sys;
 pub struct PosixQueue {
     ready: Vec<Completion>,
     depth: usize,
+    pooled: Option<Pooled>,
+}
+
+/// The pooled mode's state.
+struct Pooled {
+    pool: Arc<SubmitPool>,
+    inbox: Arc<Inbox>,
+    /// Submitted and not yet reaped (some may be posted in the inbox).
+    in_flight: usize,
+}
+
+impl core::fmt::Debug for Pooled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Pooled")
+            .field("pool", &self.pool)
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PosixQueue {
-    /// Creates a queue whose ready ring holds `cfg.depth` completions.
+    /// Creates an inline queue whose ready ring holds `cfg.depth`
+    /// completions. [`QueueConfig::parallel`] is not looked at: a pooled
+    /// queue comes from [`store_io_platform::Platform::queue`], which owns
+    /// the pool.
     #[must_use]
     pub fn new(cfg: QueueConfig) -> Self {
-        let depth = usize::try_from(cfg.depth).unwrap_or(usize::MAX).max(1);
+        let depth = depth_of(cfg);
         Self {
             ready: Vec::with_capacity(depth),
             depth,
+            pooled: None,
         }
     }
 
-    /// Ring capacity.
+    /// A pooled queue on `pool`, reserving room for its depth there.
+    pub(crate) fn pooled(cfg: QueueConfig, pool: Arc<SubmitPool>) -> Self {
+        let depth = depth_of(cfg);
+        pool.reserve(depth);
+        Self {
+            ready: Vec::new(),
+            depth,
+            pooled: Some(Pooled {
+                pool,
+                inbox: Arc::new(Inbox::new(depth)),
+                in_flight: 0,
+            }),
+        }
+    }
+
+    /// Ring capacity: the most operations submitted and not yet reaped.
     #[must_use]
     pub fn depth(&self) -> usize {
         self.depth
     }
 
-    fn drain_into(&mut self, out: &mut CompletionBuf) -> usize {
+    fn drain_ready(&mut self, out: &mut CompletionBuf) -> usize {
         let n = out.room().min(self.ready.len());
         let mut added = 0;
         for c in self.ready.drain(..n) {
@@ -87,111 +142,204 @@ impl PosixQueue {
     }
 }
 
-fn write_inline(
-    file: &PosixFile,
-    offset: libc::off_t,
-    buf: &IoBuf,
-    dsync: bool,
-) -> RawResult<usize> {
-    let bdev = file.is_block_device();
-    let flags: c_int = if dsync && !bdev { libc::RWF_DSYNC } else { 0 };
-    let n = sys::pwritev2(file.raw(), buf.as_ptr(), buf.len(), offset, flags)?;
-    if dsync && bdev && n == buf.len() {
-        sys::fdatasync(file.raw())?;
-    }
-    Ok(n)
+fn depth_of(cfg: QueueConfig) -> usize {
+    usize::try_from(cfg.depth).unwrap_or(usize::MAX).max(1)
 }
 
-fn read_inline(file: &PosixFile, offset: libc::off_t, buf: &mut IoBuf) -> RawResult<usize> {
-    let len = buf.len();
-    sys::preadv2(file.raw(), buf.as_mut_ptr(), len, offset, 0)
+/// A checked operation, ready to perform: on a borrowed descriptor inline
+/// (`RawFd`), on a shared one in the pool (`Arc<OwnedFd>`).
+pub(crate) enum Work<F> {
+    Write {
+        fd: F,
+        bdev: bool,
+        offset: libc::off_t,
+        buf: IoBuf,
+        dsync: bool,
+    },
+    Read {
+        fd: F,
+        offset: libc::off_t,
+        buf: IoBuf,
+    },
+    Flush {
+        fd: F,
+    },
+}
+
+impl<F: AsRawFd> Work<F> {
+    /// Performs the operation: one system call, or two for a durable write
+    /// to a raw block device. Returns the buffer and the raw outcome; the
+    /// descriptor is dropped before this returns.
+    pub(crate) fn perform(self) -> (Option<IoBuf>, RawResult<usize>) {
+        match self {
+            Self::Write {
+                fd,
+                bdev,
+                offset,
+                buf,
+                dsync,
+            } => {
+                let raw = fd.as_raw_fd();
+                let flags: c_int = if dsync && !bdev { libc::RWF_DSYNC } else { 0 };
+                let mut result = sys::pwritev2(raw, buf.as_ptr(), buf.len(), offset, flags);
+                if dsync && bdev && result == Ok(buf.len()) {
+                    result = sys::fdatasync(raw).map(|()| buf.len());
+                }
+                drop(fd);
+                (Some(buf), result)
+            }
+            Self::Read {
+                fd,
+                offset,
+                mut buf,
+            } => {
+                let len = buf.len();
+                let result = sys::preadv2(fd.as_raw_fd(), buf.as_mut_ptr(), len, offset, 0);
+                drop(fd);
+                (Some(buf), result)
+            }
+            Self::Flush { fd } => {
+                let result = sys::fdatasync(fd.as_raw_fd()).map(|()| 0);
+                drop(fd);
+                (None, result)
+            }
+        }
+    }
+}
+
+fn refuse(buf: Option<IoBuf>, code: c_int) -> Rejected {
+    Rejected {
+        buf,
+        raw: Some(sys::errno(code)),
+    }
+}
+
+/// The checks every mode makes before any I/O: a write or flush needs a
+/// writable handle, and the offset must fit `off_t`. `fd` picks how the
+/// descriptor travels with the work.
+fn check<F>(op: IoOp<'_, PosixFile>, fd: impl Fn(&PosixFile) -> F) -> Result<Work<F>, Rejected> {
+    match op {
+        IoOp::Write {
+            file,
+            offset,
+            buf,
+            dsync,
+        } => {
+            if !file.is_writable() {
+                return Err(refuse(Some(buf), libc::EBADF));
+            }
+            let Ok(offset) = libc::off_t::try_from(offset) else {
+                return Err(refuse(Some(buf), libc::EINVAL));
+            };
+            Ok(Work::Write {
+                fd: fd(file),
+                bdev: file.is_block_device(),
+                offset,
+                buf,
+                dsync,
+            })
+        }
+        IoOp::Read { file, offset, buf } => {
+            let Ok(offset) = libc::off_t::try_from(offset) else {
+                return Err(refuse(Some(buf), libc::EINVAL));
+            };
+            Ok(Work::Read {
+                fd: fd(file),
+                offset,
+                buf,
+            })
+        }
+        IoOp::FlushData { file } => {
+            if !file.is_writable() {
+                return Err(refuse(None, libc::EBADF));
+            }
+            Ok(Work::Flush { fd: fd(file) })
+        }
+    }
 }
 
 impl Queue for PosixQueue {
     type File = PosixFile;
 
     fn submit(&mut self, op: IoOp<'_, PosixFile>, tag: u64) -> Result<(), Rejected> {
-        if self.ready.len() >= self.depth {
+        if self.in_flight() >= self.depth {
             let buf = match op {
                 IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),
                 IoOp::FlushData { .. } => None,
             };
             return Err(Rejected { buf, raw: None });
         }
-        let completion = match op {
-            IoOp::Write {
-                file,
-                offset,
-                buf,
-                dsync,
-            } => {
-                if !file.is_writable() {
-                    return Err(Rejected {
-                        buf: Some(buf),
-                        raw: Some(sys::errno(libc::EBADF)),
-                    });
-                }
-                let Ok(off) = libc::off_t::try_from(offset) else {
-                    return Err(Rejected {
-                        buf: Some(buf),
-                        raw: Some(sys::errno(libc::EINVAL)),
-                    });
-                };
-                let result = write_inline(file, off, &buf, dsync);
-                Completion {
-                    tag,
-                    buf: Some(buf),
-                    result,
-                }
+        match &mut self.pooled {
+            None => {
+                let (buf, result) = check(op, PosixFile::raw)?.perform();
+                // Capacity is `depth` and the length is below it, so this
+                // never grows.
+                self.ready.push(Completion { tag, buf, result });
             }
-            IoOp::Read {
-                file,
-                offset,
-                mut buf,
-            } => {
-                let Ok(off) = libc::off_t::try_from(offset) else {
-                    return Err(Rejected {
-                        buf: Some(buf),
-                        raw: Some(sys::errno(libc::EINVAL)),
-                    });
-                };
-                let result = read_inline(file, off, &mut buf);
-                Completion {
+            Some(p) => {
+                let work = check(op, PosixFile::share_fd)?;
+                p.in_flight += 1;
+                p.pool.push(Job {
+                    work,
                     tag,
-                    buf: Some(buf),
-                    result,
-                }
+                    inbox: Arc::clone(&p.inbox),
+                });
             }
-            IoOp::FlushData { file } => {
-                if !file.is_writable() {
-                    return Err(Rejected {
-                        buf: None,
-                        raw: Some(sys::errno(libc::EBADF)),
-                    });
-                }
-                let result = sys::fdatasync(file.raw()).map(|()| 0);
-                Completion {
-                    tag,
-                    buf: None,
-                    result,
-                }
-            }
-        };
-        // Capacity is `depth` and the length is below it, so this never grows.
-        self.ready.push(completion);
+        }
         Ok(())
     }
 
     fn reap(&mut self, out: &mut CompletionBuf) -> usize {
-        self.drain_into(out)
+        match &mut self.pooled {
+            None => self.drain_ready(out),
+            Some(p) => {
+                let n = p.inbox.reap(out);
+                p.in_flight -= n;
+                n
+            }
+        }
     }
 
-    fn wait(&mut self, _min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
-        // Everything completed inside `submit`; there is nothing to wait for.
-        Ok(self.drain_into(out))
+    fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
+        match &mut self.pooled {
+            // Everything completed inside `submit`; nothing to wait for.
+            None => Ok(self.drain_ready(out)),
+            Some(p) => {
+                // Never wait for more than is in flight or fits in `out`:
+                // the same rule as the asynchronous backends, so a wait
+                // always ends.
+                let target = min.min(p.in_flight).min(out.room());
+                let n = if target == 0 {
+                    p.inbox.reap(out)
+                } else {
+                    p.inbox.wait(target, out)
+                };
+                p.in_flight -= n;
+                Ok(n)
+            }
+        }
     }
 
     fn in_flight(&self) -> usize {
-        self.ready.len()
+        self.ready.len() + self.pooled.as_ref().map_or(0, |p| p.in_flight)
+    }
+
+    fn workers(&self) -> Option<usize> {
+        self.pooled.as_ref().map(|p| p.pool.threads())
+    }
+}
+
+impl Drop for PosixQueue {
+    /// A pooled queue dropped with operations in flight waits, untimed, for
+    /// each completion: when the drop returns, none of its operations can
+    /// still land on the device (the ownership lock may be released next),
+    /// and every buffer is back in its pool.
+    fn drop(&mut self) {
+        if let Some(p) = &self.pooled {
+            if p.in_flight > 0 {
+                p.inbox.settle(p.in_flight);
+            }
+            p.pool.release(self.depth);
+        }
     }
 }

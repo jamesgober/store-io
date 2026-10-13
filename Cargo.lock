@@ -231,6 +231,7 @@ name = "store-io-posix"
 version = "0.3.1"
 dependencies = [
  "libc",
+ "loom",
  "store-io-buf",
  "store-io-core",
  "store-io-platform",

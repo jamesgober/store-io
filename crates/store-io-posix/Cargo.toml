@@ -36,3 +36,8 @@ store-io-platform = { path = "../store-io-platform", version = "0.3.1" }
 # structures libc does not expose (statx with its direct-I/O and atomic-write
 # fields, FIEMAP, cachestat, the NVMe admin command) are declared in sys.rs.
 libc = { version = "0.2.190", default-features = false }
+
+# Model checker, compiled only with RUSTFLAGS="--cfg loom" (never in a normal
+# build), for the submit pool's job queue and inbox handoffs.
+[target.'cfg(all(loom, target_os = "linux"))'.dependencies]
+loom = "0.7"

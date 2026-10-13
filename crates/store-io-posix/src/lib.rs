@@ -26,6 +26,9 @@
 //!   requested, except on raw block devices, where the synchronous
 //!   `RWF_DSYNC` path issues both a FUA write and a cache flush; there a plain
 //!   write is followed by one `fdatasync`;
+//! - runs the operations of a parallel queue (`QueueConfig::parallel`) on a
+//!   bounded pool of worker threads, started on first use and parked untimed
+//!   while idle (D-051, D-096); every other queue stays inline;
 //! - gathers `Evidence` from statfs, statx, `/proc/self/mountinfo`, the ext4
 //!   effective options, inode flags, the sysfs block tree, NVMe Identify (when
 //!   the device node can be opened) and the DMI tables. Every sysfs, procfs
@@ -57,9 +60,13 @@ pub mod fuzzing;
 #[cfg(target_os = "linux")]
 mod lock;
 #[cfg(target_os = "linux")]
+mod pool;
+#[cfg(target_os = "linux")]
 mod probe;
 #[cfg(target_os = "linux")]
 mod queue;
+#[cfg(target_os = "linux")]
+mod sync;
 #[cfg(target_os = "linux")]
 mod sys;
 
@@ -76,7 +83,7 @@ pub use queue::PosixQueue;
 mod platform {
     use core::sync::atomic::{AtomicU64, Ordering};
     use std::path::Path;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, PoisonError};
 
     use store_io_platform::{
         Evidence, FileMode, FileName, Platform, QueueConfig, RangeState, RawResult, ReleaseHow,
@@ -86,6 +93,7 @@ mod platform {
     use crate::dir::PosixDir;
     use crate::file::PosixFile;
     use crate::lock::PosixLock;
+    use crate::pool::{SubmitPool, default_threads};
     use crate::probe;
     use crate::queue::PosixQueue;
     use crate::sys;
@@ -115,12 +123,17 @@ mod platform {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
-    /// Clones are handles to the same platform: they share the retry counters.
+    /// Clones are handles to the same platform: they share the retry counters
+    /// and the submit pool.
     #[derive(Debug, Clone)]
     pub struct PosixPlatform {
         openat2: bool,
         eintr_retries: Arc<AtomicU64>,
         eagain_retries: Arc<AtomicU64>,
+        /// The submit pool, started by the first parallel queue (D-096).
+        /// Parallel queues hold it too: its workers stop once the last
+        /// reference, platform or queue, is gone.
+        pool: Arc<Mutex<Option<Arc<SubmitPool>>>>,
     }
 
     impl Default for PosixPlatform {
@@ -137,7 +150,37 @@ mod platform {
                 openat2: sys::openat2_supported(),
                 eintr_retries: Arc::new(AtomicU64::new(0)),
                 eagain_retries: Arc::new(AtomicU64::new(0)),
+                pool: Arc::new(Mutex::new(None)),
             }
+        }
+
+        /// Worker threads in the submit pool, or `None` before the first
+        /// parallel queue starts it. Its size is fixed by that first queue
+        /// (`QueueConfig::pool_threads`, at most 256; else one per CPU up to
+        /// 32).
+        #[must_use]
+        pub fn pool_threads(&self) -> Option<usize> {
+            self.pool
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|p| p.threads())
+        }
+
+        /// The submit pool, started with `threads` workers (0 = the default)
+        /// if it is not running yet. A running pool is never resized.
+        fn submit_pool(&self, threads: u32) -> RawResult<Arc<SubmitPool>> {
+            let mut slot = self.pool.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(p) = slot.as_ref() {
+                return Ok(Arc::clone(p));
+            }
+            let n = match usize::try_from(threads) {
+                Ok(0) | Err(_) => default_threads(),
+                Ok(n) => n,
+            };
+            let p = Arc::new(SubmitPool::start(n)?);
+            *slot = Some(Arc::clone(&p));
+            Ok(p)
         }
 
         /// Whether confined opens use `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)`
@@ -272,7 +315,11 @@ mod platform {
         }
 
         fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {
-            Ok(PosixQueue::new(cfg))
+            if cfg.parallel {
+                Ok(PosixQueue::pooled(cfg, self.submit_pool(cfg.pool_threads)?))
+            } else {
+                Ok(PosixQueue::new(cfg))
+            }
         }
     }
 }

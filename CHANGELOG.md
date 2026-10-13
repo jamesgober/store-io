@@ -133,6 +133,45 @@
   test advances it). Outside implementers of `Platform` must add it.
 - `store-io-engine`: `Store::poisoned()` reports the failure that poisoned
   the store, if any.
+- `store-io-platform`: `QueueConfig::parallel`, a hint that the caller
+  submits several independent operations before it waits, and
+  `QueueConfig::pool_threads`, the size of a backend's shared worker pool if
+  that queue starts it (D-096); `Queue::workers` (default `None`). Code that
+  builds a `QueueConfig` with a struct literal must add the fields
+  (`..QueueConfig::default()`).
+- `store-io-posix`: the submit pool (D-051, D-096). A parallel queue runs its
+  operations concurrently on worker threads shared by every store on the
+  platform: started by the first parallel queue (default one per CPU, at most
+  32; never more than 256), parked with no timer while idle, and stopped when
+  the platform and its last queue are gone. Nothing is allocated per
+  operation. Operations complete in any order; a pooled queue never waits for
+  more than is in flight. Its drop waits for every operation still running:
+  when it returns none can land later and every buffer is back in its pool.
+  Each job holds the file's descriptor (`PosixFile` now keeps it in an
+  `Arc`), so the descriptor stays open, and its number unused, until the
+  job's system call returns. Workers block every signal except those the
+  kernel forces on the thread that caused them (faults, traps, seccomp's
+  `SIGSYS`), so a process's handlers for any other signal never run on
+  them. No signal the calling thread blocked is ever unblocked, even
+  briefly, and its mask is restored exactly after the spawn. A worker panic
+  aborts the process rather than leave a queue waiting forever. Do not use a
+  pooled queue in a child after `fork()`. `PosixPlatform::pool_threads` and
+  `Queue::workers` report the size. Queues without the hint are unchanged:
+  every operation stays on the calling thread.
+- `store-io-platform`: `Queue::wait` states that it never waits for more than
+  is in flight (every backend already behaved so).
+- `store-io-engine`: a store's queues are dropped before its file and
+  ownership lock, so no queued operation can outlive the lock.
+- Conformance: a parallel queue completes every operation once with its
+  buffer, makes durable writes and flushes, refuses when full, and returns
+  every buffer when dropped with operations in flight (on every backend).
+- Tests: a mutation-list entry may name the packages whose tests must kill
+  it; entries for Linux-only packages run in the Linux CI and are reported as
+  skipped elsewhere. Five entries guard the pooled queue's drop and depth,
+  the workers' signal mask (blocked, with the fault signals open) and the
+  restored caller's mask. The list has 76 mutations, all caught.
+- Tests: loom models the submit pool's job queue and inbox handoffs, with
+  stray wakeups, and the smallest (one-worker) pool.
 - Harness: `observe-cost` measures what the observer adds per durable write.
 - `store-io-engine`: `DomainStats::already_durable`, which counts the receipts
   `AppendRegion::sync_through` returned without a barrier because the ticket
@@ -165,7 +204,7 @@
   test gaps, now closed: a batch append that fails mid-record must leave no
   partial bytes, and reservations, space reports and provisioning must take
   their locks in one order (a concurrency test with a deadline). The list
-  has 67 mutations, all caught.
+  then had 67 mutations, all caught.
 - `store-io-sim`: `FaultPlan::read_only_media` also refuses creating files
   and directories, renames and unlinks. A targeted `fail_read` takes
   precedence over a bad range. New `World::misaligned_reads`.

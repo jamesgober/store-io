@@ -354,6 +354,110 @@ pub(crate) fn monotonic_coarse_ms() -> u64 {
         .saturating_add(ts.tv_nsec as u64 / 1_000_000)
 }
 
+/// Signals the kernel forces on the thread that caused them, whatever its
+/// mask: faults, a breakpoint trap, and a seccomp trap (`SIGSYS`). Blocked,
+/// such a signal kills the process without running its handler, so the
+/// library's threads keep them open: a stack overflow still reports, and a
+/// sandbox that emulates trapped system calls in a `SIGSYS` handler still
+/// works on a worker.
+const FAULT_SIGNALS: [c_int; 6] = [
+    libc::SIGSEGV,
+    libc::SIGBUS,
+    libc::SIGFPE,
+    libc::SIGILL,
+    libc::SIGTRAP,
+    libc::SIGSYS,
+];
+
+/// Every signal the C library lets an application block, except
+/// [`FAULT_SIGNALS`], blocked on the calling thread until dropped, when the
+/// previous mask is restored exactly. It only ever adds to the caller's mask,
+/// never opens a signal the caller blocked. A thread created meanwhile
+/// inherits that mask before any of its own code runs, so a process's
+/// handlers for any other signal never run on it; the forced signals stay as
+/// the caller had them until the library thread opens them itself
+/// ([`unblock_fault_signals`]). Not `Send`: the saved mask belongs to the
+/// thread that made it.
+pub(crate) struct SignalsBlocked {
+    /// The mask to restore; `None` if blocking failed (nothing changed).
+    old: Option<libc::sigset_t>,
+    _thread_bound: core::marker::PhantomData<*const ()>,
+}
+
+impl SignalsBlocked {
+    pub(crate) fn new() -> Self {
+        let mut set = MaybeUninit::<libc::sigset_t>::zeroed();
+        let mut old = MaybeUninit::<libc::sigset_t>::zeroed();
+        let none = Self {
+            old: None,
+            _thread_bound: core::marker::PhantomData,
+        };
+        // SAFETY: sigfillset(3) initialises the set through the pointer,
+        // which is valid and exclusively borrowed for the call.
+        if unsafe { libc::sigfillset(set.as_mut_ptr()) } != 0 {
+            return none;
+        }
+        // Not blocked by this guard: the spawn itself and the new thread's
+        // start-up stay as able to take a forced signal as the caller was.
+        for sig in FAULT_SIGNALS {
+            // SAFETY: sigdelset(3) updates the set initialised above through
+            // the pointer, valid and exclusively borrowed for the call; the
+            // signal number is a valid constant.
+            if unsafe { libc::sigdelset(set.as_mut_ptr(), sig) } != 0 {
+                return none;
+            }
+        }
+        // SAFETY: pthread_sigmask(3) reads the set initialised above and
+        // writes the previous mask through `old`, valid and exclusively
+        // borrowed for the call.
+        let rc = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, set.as_ptr(), old.as_mut_ptr()) };
+        if rc != 0 {
+            return none;
+        }
+        // SAFETY: the successful pthread_sigmask call above filled `old`.
+        let old = unsafe { old.assume_init() };
+        Self {
+            old: Some(old),
+            ..none
+        }
+    }
+}
+
+impl Drop for SignalsBlocked {
+    fn drop(&mut self) {
+        if let Some(old) = &self.old {
+            // SAFETY: pthread_sigmask(3) reads the saved mask and, with a
+            // null old-set pointer, writes nothing.
+            let _status =
+                unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, old, core::ptr::null_mut()) };
+        }
+    }
+}
+
+/// Opens [`FAULT_SIGNALS`] on the calling thread, whatever mask it inherited
+/// (a caller may have blocked one): the first thing a library thread does.
+/// Failure leaves the mask as it was (it cannot fail for a valid set).
+pub(crate) fn unblock_fault_signals() {
+    let mut set = MaybeUninit::<libc::sigset_t>::zeroed();
+    // SAFETY: sigemptyset(3) initialises the set through the pointer, which
+    // is valid and exclusively borrowed for the call.
+    if unsafe { libc::sigemptyset(set.as_mut_ptr()) } != 0 {
+        return;
+    }
+    for sig in FAULT_SIGNALS {
+        // SAFETY: sigaddset(3) updates the set initialised above through the
+        // pointer, valid and exclusively borrowed for the call; the signal
+        // number is a valid constant.
+        if unsafe { libc::sigaddset(set.as_mut_ptr(), sig) } != 0 {
+            return;
+        }
+    }
+    // SAFETY: pthread_sigmask(3) reads the set initialised above and, with a
+    // null old-set pointer, writes nothing.
+    let _status =
+        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, set.as_ptr(), core::ptr::null_mut()) };
+}
+
 /// `flock(2)`.
 pub(crate) fn flock(fd: RawFd, operation: c_int) -> RawResult<()> {
     // SAFETY: flock(2) takes a descriptor and an operation.

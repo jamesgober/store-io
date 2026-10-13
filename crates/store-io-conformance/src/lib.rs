@@ -123,6 +123,8 @@ fn name(s: &str) -> Result<FileName, String> {
     FileName::new(s).map_err(|_| format!("invalid name {s:?}"))
 }
 
+mod parallel;
+
 fn pattern(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
         .map(|i| seed.wrapping_mul(31).wrapping_add((i * 7 + (i >> 9)) as u8))
@@ -166,6 +168,22 @@ where
             (
                 "a full queue refuses with the buffer and no OS error",
                 queue_full,
+            ),
+            (
+                "a parallel queue completes every operation once, with its buffer",
+                parallel::many_in_flight,
+            ),
+            (
+                "a parallel queue makes durable writes and flushes",
+                parallel::durable_and_flushes,
+            ),
+            (
+                "a full parallel queue refuses with the buffer and no OS error",
+                parallel::queue_full,
+            ),
+            (
+                "a parallel queue dropped with operations in flight returns every buffer",
+                parallel::drop_in_flight,
             ),
             (
                 "a read-only handle reads and never writes",
@@ -247,7 +265,13 @@ impl<P: Platform> Ctx<'_, P> {
     }
 
     fn queue(&self, depth: u32) -> Result<P::Queue, String> {
-        ok(self.p.queue(QueueConfig { depth }), "queue")
+        ok(
+            self.p.queue(QueueConfig {
+                depth,
+                ..QueueConfig::default()
+            }),
+            "queue",
+        )
     }
 
     fn buf(&self, bytes: &[u8]) -> Result<IoBuf, String> {
@@ -358,9 +382,14 @@ fn sizes<P: Platform>(c: &Ctx<'_, P>) -> Check {
 }
 
 fn many_in_flight<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    many_in_flight_on(c, c.queue(16)?)
+}
+
+/// Sixteen writes of mixed sizes in flight on `q` (depth at least 16), each
+/// completing once with its buffer, then read back.
+fn many_in_flight_on<P: Platform>(c: &Ctx<'_, P>, mut q: P::Queue) -> Check {
     let dir = c.dir()?;
     let f = c.file(&dir, "m", 1 << 20)?;
-    let mut q = c.queue(16)?;
     let mut expect = Vec::new();
     let mut at = 0u64;
     for i in 0..16u8 {
@@ -413,9 +442,12 @@ fn many_in_flight<P: Platform>(c: &Ctx<'_, P>) -> Check {
 }
 
 fn durable_and_flushes<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    durable_and_flushes_on(c, c.queue(4)?)
+}
+
+fn durable_and_flushes_on<P: Platform>(c: &Ctx<'_, P>, mut q: P::Queue) -> Check {
     let dir = c.dir()?;
     let f = c.file(&dir, "d", 4 * BLOCK as u64)?;
-    let mut q = c.queue(4)?;
     let r = write_one(&mut q, &f, 0, c.buf(&pattern(1, BLOCK))?, true)?;
     check!(r == Ok(BLOCK), "durable write: {r:?}");
     q.submit(IoOp::FlushData { file: &f }, 7)
@@ -431,9 +463,13 @@ fn durable_and_flushes<P: Platform>(c: &Ctx<'_, P>) -> Check {
 }
 
 fn queue_full<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    queue_full_on(c, c.queue(2)?)
+}
+
+/// `q` has depth 2.
+fn queue_full_on<P: Platform>(c: &Ctx<'_, P>, mut q: P::Queue) -> Check {
     let dir = c.dir()?;
     let f = c.file(&dir, "q", 4 * BLOCK as u64)?;
-    let mut q = c.queue(2)?;
     for i in 0..2u64 {
         let buf = c.buf(&pattern(2, BLOCK))?;
         q.submit(

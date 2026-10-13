@@ -53,6 +53,12 @@ pub struct StoreOptions {
     pub queues: usize,
     /// Operations in flight per queue.
     pub queue_depth: u32,
+    /// Worker threads for the platform's submit pool, which runs the
+    /// independent operations of a page batch or a large read concurrently
+    /// on the Linux synchronous tier (D-051, D-096); 0 = one per CPU, at most
+    /// 32. The pool is shared by every store on the platform and sized by the
+    /// first store that uses it (at most 256); other backends ignore this.
+    pub t3_pool_threads: u32,
     /// Append-frontier ring size in blocks (bounds how far concurrent appends
     /// may run ahead of the oldest incomplete one).
     pub append_ring: usize,
@@ -71,6 +77,7 @@ impl Default for StoreOptions {
             buffers_per_class: 64,
             queues: 0,
             queue_depth: 64,
+            t3_pool_threads: 0,
             append_ring: 4096,
             keyed_fill: false,
         }
@@ -397,6 +404,18 @@ where
     #[must_use]
     pub fn domain_stats(&self) -> crate::domain::DomainStats {
         self.inner.domain.stats()
+    }
+
+    /// Worker threads in the submit pool that runs this store's page batches
+    /// and large reads concurrently, once this store's first such call has
+    /// started its parallel queues (the pool may have been started earlier by
+    /// another store on the same platform, and stays `None` if they could
+    /// not be started);
+    /// `None` before that, or on a backend that needs no pool (IOCP, the
+    /// simulator).
+    #[must_use]
+    pub fn submit_pool_threads(&self) -> Option<usize> {
+        self.inner.queues.parallel_workers()
     }
 
     pub(crate) fn regions_snapshot(&self) -> Vec<Arc<LiveRegion>> {

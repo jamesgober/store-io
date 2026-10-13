@@ -15,28 +15,48 @@
 //! queue, or the returner sees the waiter and signals under the same mutex.
 
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use store_io_core::observe::{Counter, Observer};
 
 use store_io_core::error::OsError;
 use store_io_platform::{CompletionBuf, IoBuf, IoOp, Queue, RawResult};
 
-use crate::sync::{AtomicU64, Ordering};
+use crate::sync::{AtomicBool, AtomicU64, Ordering};
 
 /// A fixed set of queues shared by the blocking layers, plus an optional
-/// flush lane.
+/// flush lane and, created on first use, as many parallel lanes.
 ///
 /// The flush lane (D-070) is used only by the thread holding a flush
 /// domain's leadership. Leadership is exclusive, so the lane is never
 /// contended, and a leader never waits for one of the shared queues, which
 /// followers may be holding while they wait for that very leader.
+///
+/// Parallel lanes (D-096) hold queues asked to run their operations
+/// concurrently (`QueueConfig::parallel`): a call that submits several
+/// independent operations before it waits (a page batch of several writes,
+/// a pipelined read) takes one. Everything else keeps the shared lanes, so a
+/// lone operation never leaves the caller's thread. They are created by the
+/// first such call (on the Linux synchronous tier that starts the platform's
+/// worker pool); if they cannot be, that call and every later one use the
+/// shared lanes.
 pub(crate) struct QueueSet<Q> {
     queues: Box<[Mutex<Lane<Q>>]>,
     flush: Option<Mutex<Lane<Q>>>,
-    /// One busy mark per shared lane, then one for the flush lane (D-095),
-    /// each alone on its cache line and shared with its lane: odd while the
-    /// lane is held, advanced by 2 at each completion. Only the holder
-    /// writes it; a watchdog reads it without the lock.
+    parallel: OnceLock<Box<[Mutex<Lane<Q>>]>>,
+    /// Serialises creating the parallel lanes.
+    parallel_init: Mutex<()>,
+    /// The parallel queues' worker threads (`Queue::workers`), once created.
+    parallel_workers: OnceLock<Option<usize>>,
+    /// Creating the parallel queues failed: every later call uses a shared
+    /// lane at once, without retrying (no lock convoy, no failed spawn per
+    /// call).
+    parallel_off: AtomicBool,
+    depth: usize,
+    /// One busy mark per shared lane, then one per parallel lane, then one
+    /// for the flush lane (D-095), each alone on its cache line and shared
+    /// with its lane: odd while the lane is held, advanced by 2 at each
+    /// completion. Only the holder writes it; a watchdog reads it without
+    /// the lock. A lane not created yet keeps its mark even.
     marks: Box<[Arc<LaneMark>]>,
     waiters: AtomicU64,
     wake: Mutex<()>,
@@ -74,7 +94,9 @@ impl LaneMark {
 #[repr(align(128))]
 pub(crate) struct LaneMark(AtomicU64);
 
-/// A borrowed queue; returning it wakes one caller waiting for a queue.
+/// A borrowed queue; returning a shared one wakes one caller waiting for a
+/// shared queue (nothing waits for a parallel lane: a call that finds them
+/// all busy takes a shared one).
 ///
 /// Fields drop in declaration order: the queue's lock is released first,
 /// then [`Notify`] wakes a waiter, which therefore always finds it free.
@@ -83,7 +105,7 @@ pub(crate) struct LaneGuard<'a, Q> {
     // released: only the holder may write it.
     _mark: Mark<'a>,
     guard: MutexGuard<'a, Lane<Q>>,
-    _notify: Notify<'a, Q>,
+    _notify: Option<Notify<'a, Q>>,
 }
 
 /// The flush lane, borrowed by the flush leader.
@@ -166,22 +188,24 @@ impl<Q: Queue> QueueSet<Q> {
     }
 
     fn build(queues: Vec<Q>, flush: Option<Q>, depth: usize) -> Self {
-        // One mark per shared lane, then the flush lane's (which stays even
-        // when there is no flush lane).
-        let marks: Box<[Arc<LaneMark>]> = (0..=queues.len())
+        // One mark per shared lane, one per parallel lane, then the flush
+        // lane's (which stays even when there is no flush lane).
+        let n = queues.len();
+        let marks: Box<[Arc<LaneMark>]> = (0..=2 * n)
             .map(|_| Arc::new(LaneMark(AtomicU64::new(0))))
             .collect();
-        let lane = |(queue, mark): (Q, &Arc<LaneMark>)| {
-            Mutex::new(Lane {
-                queue,
-                done: CompletionBuf::with_capacity(depth.max(1)),
-                mark: Arc::clone(mark),
-            })
-        };
-        let n = queues.len();
         Self {
-            queues: queues.into_iter().zip(marks.iter()).map(lane).collect(),
-            flush: flush.map(|q| lane((q, &marks[n]))),
+            queues: queues
+                .into_iter()
+                .zip(marks.iter())
+                .map(|(q, m)| lane(q, m, depth))
+                .collect(),
+            flush: flush.map(|q| lane(q, &marks[2 * n], depth)),
+            parallel: OnceLock::new(),
+            parallel_init: Mutex::new(()),
+            parallel_workers: OnceLock::new(),
+            parallel_off: AtomicBool::new(false),
+            depth,
             marks,
             waiters: AtomicU64::new(0),
             wake: Mutex::new(()),
@@ -195,14 +219,100 @@ impl<Q: Queue> QueueSet<Q> {
         self.flush.as_ref().map(|m| {
             let guard = m.lock().unwrap_or_else(PoisonError::into_inner);
             FlushGuard {
-                _mark: Mark::take(&self.marks[self.queues.len()].0),
+                _mark: Mark::take(&self.marks[2 * self.queues.len()].0),
                 guard,
             }
         })
     }
 
-    /// Every lane's busy mark: the shared lanes in order, then the flush
-    /// lane (odd while held; always even when the set has none).
+    /// A parallel lane (see [`QueueSet`]), starting the search at `hint`.
+    /// When every parallel lane is busy, the call takes a shared lane
+    /// instead (waiting, as any shared call does, for whichever is returned
+    /// first): never worse than a set without parallel lanes, and a thread
+    /// that already holds a parallel lane (a scan's visitor reading) can
+    /// never wait for itself. The first call creates them with
+    /// `make(count)`; if that fails, or returns another count, this and every
+    /// later call uses the shared lanes.
+    pub(crate) fn get_parallel(
+        &self,
+        hint: usize,
+        make: impl FnOnce(usize) -> Option<Vec<Q>>,
+    ) -> LaneGuard<'_, Q> {
+        let n = self.queues.len();
+        if self.parallel_off.load(Ordering::Relaxed) {
+            return self.get(hint);
+        }
+        let parallel = self.parallel.get().map(|b| &**b);
+        let Some(lanes) = parallel.or_else(|| self.create_parallel(make)) else {
+            return self.get(hint);
+        };
+        let found = (0..n).find_map(|i| {
+            let at = (hint + i) % n;
+            match lanes[at].try_lock() {
+                Ok(g) => Some((at, g)),
+                Err(TryLockError::Poisoned(p)) => Some((at, p.into_inner())),
+                Err(TryLockError::WouldBlock) => None,
+            }
+        });
+        let Some((at, guard)) = found else {
+            return self.get(hint);
+        };
+        LaneGuard {
+            // The lane's own `Lane::mark` (used by `progress`) is this same
+            // `marks[n + at]`, bound in `create_parallel`: the two must agree.
+            _mark: Mark::take(&self.marks[n + at].0),
+            guard,
+            _notify: None,
+        }
+    }
+
+    fn create_parallel(
+        &self,
+        make: impl FnOnce(usize) -> Option<Vec<Q>>,
+    ) -> Option<&[Mutex<Lane<Q>>]> {
+        let _one = self
+            .parallel_init
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(lanes) = self.parallel.get() {
+            return Some(&**lanes);
+        }
+        // A caller that queued here behind a failed start does not try again.
+        if self.parallel_off.load(Ordering::Relaxed) {
+            return None;
+        }
+        let n = self.queues.len();
+        let Some(queues) = make(n).filter(|qs| qs.len() == n && n > 0) else {
+            self.parallel_off.store(true, Ordering::Relaxed);
+            return None;
+        };
+        let _workers = self
+            .parallel_workers
+            .set(queues.first().and_then(Queue::workers));
+        let lanes: Box<[Mutex<Lane<Q>>]> = queues
+            .into_iter()
+            .zip(&self.marks[n..2 * n])
+            .map(|(q, m)| lane(q, m, self.depth))
+            .collect();
+        let _set = self.parallel.set(lanes);
+        self.parallel.get().map(|b| &**b)
+    }
+
+    /// Whether the parallel lanes exist.
+    #[cfg(test)]
+    pub(crate) fn has_parallel(&self) -> bool {
+        self.parallel.get().is_some()
+    }
+
+    /// Worker threads running the parallel lanes' operations, once they
+    /// exist and the backend runs them on a pool (`Queue::workers`).
+    pub(crate) fn parallel_workers(&self) -> Option<usize> {
+        self.parallel_workers.get().copied().flatten()
+    }
+
+    /// Every lane's busy mark: the shared lanes in order, the parallel lanes,
+    /// then the flush lane (odd while held; always even for a lane that does
+    /// not exist).
     pub(crate) fn marks(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.marks.iter().map(|m| m.0.load(Ordering::Relaxed))
     }
@@ -226,7 +336,7 @@ impl<Q: Queue> QueueSet<Q> {
             return LaneGuard {
                 _mark: Mark::take(&self.marks[at].0),
                 guard,
-                _notify: Notify { set: self },
+                _notify: Some(Notify { set: self }),
             };
         }
         let _registered = self.waiters.fetch_add(1, Ordering::AcqRel);
@@ -245,9 +355,18 @@ impl<Q: Queue> QueueSet<Q> {
         LaneGuard {
             _mark: Mark::take(&self.marks[at].0),
             guard,
-            _notify: Notify { set: self },
+            _notify: Some(Notify { set: self }),
         }
     }
+}
+
+/// A lane over `queue` with its completion buffer and busy mark.
+fn lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Mutex<Lane<Q>> {
+    Mutex::new(Lane {
+        queue,
+        done: CompletionBuf::with_capacity(depth.max(1)),
+        mark: Arc::clone(mark),
+    })
 }
 
 /// Outcome of one operation: the buffer (if any) and the raw result.

@@ -355,6 +355,12 @@ where
     /// [`ScanItem::Unreadable`], and skipped.
     /// Scans work on read-only and poisoned stores.
     ///
+    /// `visit` runs while the scan holds one of the store's queues. A call
+    /// from `visit` into the same store takes another queue, and waits for
+    /// one when all are busy: if every queue is held by such a scan (one scan
+    /// is enough with `StoreOptions::queues` = 1) it waits forever. Collect
+    /// what you need and act on the store after the scan returns.
+    ///
     /// # Errors
     ///
     /// `NotWritten(Misaligned | OutOfBounds | PoolExhausted)` before any I/O;
@@ -655,6 +661,12 @@ where
     /// reported the direct-I/O alignment, else store blocks), reported as
     /// [`ScanItem::Unreadable`], and skipped.
     /// Scans work on read-only and poisoned stores.
+    ///
+    /// `visit` runs while the scan holds one of the store's queues. A call
+    /// from `visit` into the same store takes another queue, and waits for
+    /// one when all are busy: if every queue is held by such a scan (one scan
+    /// is enough with `StoreOptions::queues` = 1) it waits forever. Collect
+    /// what you need and act on the store after the scan returns.
     ///
     /// # Errors
     ///

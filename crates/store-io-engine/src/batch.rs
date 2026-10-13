@@ -440,7 +440,13 @@ where
         let end = self.writes.last().map_or(0, |(at, b)| at + b.len() as u64);
         let c = ctx_range(state, start, end);
         let base = state.data_offset;
-        let mut lane = s.lane(state);
+        // Several writes run concurrently on a parallel lane; one stays on
+        // the caller's thread (D-096).
+        let mut lane = if self.writes.len() > 1 {
+            s.par_lane(state)
+        } else {
+            s.lane(state)
+        };
         let mut src = Placed {
             writes: self.writes.drain(..).map(|(at, b)| (base + at, b)),
         };

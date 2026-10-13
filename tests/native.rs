@@ -308,3 +308,66 @@ fn test_the_coarse_clock_advances_with_real_time() {
     );
     assert!(moved < 10_000, "the clock jumped {moved} ms in 250 ms");
 }
+
+/// Page batches of several writes and reads larger than one buffer run on
+/// the parallel lanes (D-096): on the Linux synchronous tier through the
+/// submit pool, on Windows through IOCP. Every byte comes back as written,
+/// one-page batches stay on the caller's thread, and the pool is reported.
+#[test]
+fn test_parallel_page_batches_and_large_reads_round_trip() {
+    let t = TempDir::new("parallel");
+    let (opts, _) = options_for(t.path());
+    // A store opened through the simple API has a platform, and so a pool,
+    // of its own: its size is this store's choice.
+    let opts = StoreOptions {
+        t3_pool_threads: 3,
+        ..opts
+    };
+    let store = Store::create(t.path().join("pages"), opts).unwrap();
+    let pages = store.provision_page_region("pages", 16 << 20).unwrap();
+    let bs = pages.block_size() as usize;
+    let page = |round: u8, i: usize| -> Vec<u8> {
+        (0..bs)
+            .map(|k| (k as u8) ^ (i as u8).wrapping_mul(31) ^ round)
+            .collect()
+    };
+    // 48 blocks spread over the first 8 MiB (a batch stages each write in a
+    // pool buffer: 64 per size class by default).
+    let stride = (8 << 20) / 48 / bs * bs;
+    let mut one = pages.batch();
+    one.write(pages.pos(0).unwrap(), &page(0, 0)).unwrap();
+    one.commit().unwrap();
+    assert_eq!(
+        store.submit_pool_threads(),
+        None,
+        "a one-write batch started the pool"
+    );
+    for round in 1..=3u8 {
+        let mut batch = pages.batch();
+        // Staged in reverse order: the batch sorts them.
+        for i in (0..48).rev() {
+            batch
+                .write(pages.pos((i * stride) as u64).unwrap(), &page(round, i))
+                .unwrap();
+        }
+        batch.commit().unwrap();
+        let mut back = vec![0u8; 8 << 20];
+        assert_eq!(
+            pages.read(pages.pos(0).unwrap(), &mut back).unwrap(),
+            back.len()
+        );
+        for i in 0..48 {
+            let at = i * stride;
+            assert!(
+                back[at..at + bs] == page(round, i),
+                "round {round}: block {i} differs"
+            );
+        }
+    }
+    if cfg!(target_os = "linux") {
+        assert_eq!(store.submit_pool_threads(), Some(3));
+    } else {
+        assert_eq!(store.submit_pool_threads(), None);
+    }
+    assert_eq!(store.oldest_outstanding(), None);
+}

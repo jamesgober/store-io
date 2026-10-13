@@ -8,7 +8,7 @@ use store_io_core::error::{
     ByteRange, CorruptionKind, Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError,
 };
 use store_io_core::observe::{Counter, Stage};
-use store_io_platform::{IoBuf, IoOp, Platform};
+use store_io_platform::{IoBuf, IoOp, Platform, QueueConfig};
 
 use std::ops::ControlFlow;
 
@@ -239,6 +239,21 @@ where
     /// A free queue for a call on `r`.
     pub(crate) fn lane(&self, r: &LiveRegion) -> LaneGuard<'_, P::Queue> {
         self.inner.queues.get(r.id.get() as usize)
+    }
+
+    /// A parallel lane for a call on `r` that submits several independent
+    /// operations before it waits (D-096); a shared lane if the parallel
+    /// queues cannot be created.
+    pub(crate) fn par_lane(&self, r: &LiveRegion) -> LaneGuard<'_, P::Queue> {
+        let inner = &*self.inner;
+        inner.queues.get_parallel(r.id.get() as usize, |n| {
+            let cfg = QueueConfig {
+                depth: inner.opts.queue_depth.max(1),
+                parallel: true,
+                pool_threads: inner.opts.t3_pool_threads,
+            };
+            (0..n).map(|_| inner.platform.queue(cfg).ok()).collect()
+        })
     }
 
     /// A pooled buffer of at least `len` bytes, with its length set to `len`.

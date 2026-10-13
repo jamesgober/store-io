@@ -193,7 +193,13 @@ where
         }
         let depth = free.len();
         let mut ring: Vec<Option<Pending>> = (0..depth).map(|_| None).collect();
-        let mut lane = self.lane(r);
+        // Several reads in flight: a parallel lane (D-096). A range of one
+        // buffer, or a pipeline of one, is a single read: the caller's lane.
+        let mut lane = if to - from > chunk as u64 && depth > 1 {
+            self.par_lane(r)
+        } else {
+            self.lane(r)
+        };
         let file = &self.inner.file;
         let (mut submitted, mut delivered) = (0u64, 0u64);
         let mut next = from;

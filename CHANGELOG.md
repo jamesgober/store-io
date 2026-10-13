@@ -158,6 +158,26 @@
   pooled queue in a child after `fork()`. `PosixPlatform::pool_threads` and
   `Queue::workers` report the size. Queues without the hint are unchanged:
   every operation stays on the calling thread.
+- `store-io-engine`: page batches of more than one write, reads larger than
+  one buffer, and scans run on parallel lanes (D-096): on the Linux
+  synchronous tier through the submit pool, elsewhere on the backend's own
+  asynchronous queues. The lanes are created by the first such call. A
+  one-write batch, every single write and read, a scan or read of one
+  buffer, barriers and slot commits stay on the caller's thread. When every
+  parallel lane is busy, a call takes a shared lane instead of waiting for
+  a parallel one. If the pool cannot start, the store uses its shared lanes
+  from then on. New `StoreOptions::t3_pool_threads` (0 = one per CPU, at
+  most 32) and `Store::submit_pool_threads()`. `StoreOptions` gains a field,
+  so code that builds one with a struct literal must add it.
+  `oldest_outstanding` covers the parallel lanes. The scan docs now state
+  that a visitor calling into the same store can wait forever with few
+  queues and several such scans; collect, then act after the scan. Measured
+  on Linux (WSL2 ext4 on a virtual disk, harness W4, N random 4 KiB pages +
+  one barrier per commit, median of 3 runs alternating with the previous
+  build): 1.45x the serial path at N = 16, 2.7x at 64, 4.7x at 256 (37,698
+  pages/s against 8,030; commit p50 6.7 ms against 31 ms); N = 1 and lone
+  durable writes (W1) unchanged, both equal to the raw `pwritev2` +
+  `fdatasync` floor [measured].
 - `store-io-platform`: `Queue::wait` states that it never waits for more than
   is in flight (every backend already behaved so).
 - `store-io-engine`: a store's queues are dropped before its file and
@@ -169,7 +189,8 @@
   it; entries for Linux-only packages run in the Linux CI and are reported as
   skipped elsewhere. Five entries guard the pooled queue's drop and depth,
   the workers' signal mask (blocked, with the fault signals open) and the
-  restored caller's mask. The list has 76 mutations, all caught.
+  restored caller's mask; one more guards that each parallel lane owns its
+  busy mark. The list has 77 mutations, all caught.
 - Tests: loom models the submit pool's job queue and inbox handoffs, with
   stray wakeups, and the smallest (one-worker) pool.
 - Harness: `observe-cost` measures what the observer adds per durable write.

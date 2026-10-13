@@ -297,6 +297,7 @@ These run only when you call them; store-io never reclaims space on its own.
 | `buffers_per_class` | 64 | Pooled buffers per size class; bounds how much a batch can stage. |
 | `queues` | CPU count | I/O queues shared by blocking calls. |
 | `queue_depth` | 64 | Operations in flight per queue. |
+| `t3_pool_threads` | CPU count, at most 32 | Linux synchronous tier: worker threads that run a page batch's writes and a large read's pieces concurrently, started by the first such call; one pool per platform, sized by the first store on it (each simple-API store has its own). A single write or read never uses them. |
 | `append_ring` | 4096 | Blocks an append may run ahead of the oldest incomplete one. |
 | `keyed_fill` | off | Fill new regions with an incompressible pattern instead of zeros (thin, deduplicating or compressing storage). |
 | `log2_table_slot` | 14 | Region-table size: 16 KiB holds 253 regions. |

@@ -222,6 +222,9 @@ impl Queue for SimQueue {
     }
 
     fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
+        if let Some(raw) = lock(&self.world).wait_fails() {
+            return Err(raw);
+        }
         let mut added = self.reap(out);
         let mut w = lock(&self.world);
         while added < min && !self.in_flight.is_empty() && out.room() > 0 {

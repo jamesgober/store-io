@@ -10,7 +10,7 @@ use store_io_core::id::VolumeId;
 use store_io_format::meta::{VOLUME_META_LEN, VolumeMeta, encode_table};
 use store_io_platform::{FileMode, FileName, IoOp, Platform, Queue};
 
-use crate::exec::{Lane, QueueSet, run};
+use crate::exec::{Lane, QueueSet, Ran, run};
 use crate::layout::{Layout, choose_log2_block};
 use crate::slots::{PairRead, plan_next, write_slot};
 use crate::store::*;
@@ -244,7 +244,7 @@ fn holds_slot_header<Q: Queue>(
     while at < len {
         let want = SCAN.min(len - at) as usize;
         let buf = pool.take(SCAN as usize).ok()?;
-        let done = run(
+        let Ran::Done { buf, result } = run(
             q,
             IoOp::Read {
                 file,
@@ -252,9 +252,12 @@ fn holds_slot_header<Q: Queue>(
                 buf,
             },
         )
-        .ok()?;
-        let mut b = done.buf?;
-        if done.result.ok()? != want {
+        .ok()?
+        else {
+            return None;
+        };
+        let mut b = buf?;
+        if result.ok()? != want {
             return None;
         }
         b.as_mut_slice()[want..].fill(0);

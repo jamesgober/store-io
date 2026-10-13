@@ -169,7 +169,9 @@ pub enum NotWrittenCause {
     ReadOnly,
     /// The device queue is full.
     QueueFull,
-    /// The operation was interrupted before any I/O was issued.
+    /// The operation was interrupted before any I/O was issued, or a read's
+    /// bytes never came back (a backend breaking its contract). Nothing was
+    /// written.
     Interrupted,
     /// The append region was reopened and its append position is not known
     /// yet: call `resume_at` with the end of your valid data first.
@@ -195,7 +197,9 @@ impl fmt::Display for NotWrittenCause {
             Self::InvalidName => "name is empty, longer than 24 bytes, or contains NUL",
             Self::ReadOnly => "store is open read-only",
             Self::QueueFull => "device queue is full",
-            Self::Interrupted => "interrupted before any I/O was issued",
+            Self::Interrupted => {
+                "interrupted before any I/O was issued, or a read's bytes never came back"
+            }
             Self::NotPositioned => "append position unknown after reopen; call resume_at first",
             Self::Overlap => "two writes in one batch overlap",
         })

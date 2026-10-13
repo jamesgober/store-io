@@ -14,7 +14,7 @@ use store_io_format::meta::{
 };
 use store_io_platform::{IoOp, Platform};
 
-use crate::exec::run;
+use crate::exec::{Ran, run};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
 use crate::slots::{PairRead, plan_next};
@@ -283,7 +283,7 @@ where
                 }
                 FillPattern::Zeros => dst[zeros..].fill(0),
             }
-            let done = run(
+            let ran = run(
                 &mut q,
                 IoOp::Write {
                     file: &inner.file,
@@ -304,9 +304,15 @@ where
             // A fill write that failed after submission stops the store
             // (fail-stop, D-071); only running out of space is reported as
             // `NoSpace` without poisoning: the region never became Ready.
-            match done.result {
+            // An abandoned write (its wait failed) is never "out of space":
+            // its fate is unknown, so it poisons like any other failure.
+            let (result, abandoned) = match ran {
+                Ran::Done { result, .. } => (result, false),
+                Ran::Abandoned(raw) => (Err(raw), true),
+            };
+            match result {
                 Ok(n) if n as u64 == len => {}
-                Err(raw) if store_io_core::errno::is_no_space(raw) => {
+                Err(raw) if !abandoned && store_io_core::errno::is_no_space(raw) => {
                     return Err(space_err(Op::Write, raw, 0));
                 }
                 result => {

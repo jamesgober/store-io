@@ -13,6 +13,36 @@
 
 ### Fixed
 
+- `store-io-engine`: **operations abandoned on a queue could affect the next
+  operation on it.** An operation is abandoned when the wait for it fails (a
+  Windows IOCP port can fail a wait; the Linux synchronous queues never do)
+  or when a scan's visitor panics with reads in flight (any platform).
+  - **Before.** The queue went back to the store with those operations still
+    in flight. The next user could take their completions for its own: a
+    read could return another read's bytes, a large read could deliver wrong
+    ranges, a batch could be acknowledged before its own writes completed,
+    and a queue full of abandoned operations refused everything forever.
+  - **Now.** Every user of a queue first collects and discards what an
+    earlier user abandoned (a completion means the device is done with its
+    buffer), so it always starts on an empty queue; on a clean queue that
+    is one length check each time a call takes the queue. A queue that
+    cannot even be cleared fails the call: with `Io` before any space is
+    reserved, or fail-stop inside a metadata update. Tests reproduce each case on the simulator with
+    out-of-order completions; each failed before the fix.
+- `store-io-engine`: a failed wait is a failure of the queue, never a verdict
+  on the media.
+  - **Before.** Its error code went through the media-error path. A single
+    read was reported as `Corruption(MediaError)` and rescanned; at open, a
+    slot whose read was abandoned was weighed as unreadable, so the open
+    could use the older region table, and a later provisioning overwrote the
+    newer one, losing a region. On the shipped backends a wait error has
+    never carried a media-class code, so this was seen on the simulator.
+  - **Now.** An abandoned operation is its own outcome: a read fails with
+    `Io` and its raw code, a write or flush is `DurabilityUnknown` and
+    poisons (no receipt), and `create` never reclaims a container it could
+    not read. Clearing an earlier caller's abandoned operations happens
+    before a call reserves space or submits anything; if it fails, the call
+    fails with `Io` and nothing of it happens.
 - `store-io-engine`: open no longer drops a region silently when it cannot use it.
   - **Which regions.** A ready table entry whose container is too short, whose header has no valid copy, or whose header holds impossible values, names another region or kind, or says released.
   - **Before.** Such a region was skipped, and a lookup of its name returned `NotFound`, the same answer as for a name that never existed. A caller could take that for a fresh start while the data was still on disk.
@@ -102,6 +132,8 @@
   chosen raw code.
 - `store-io-platform`: `Platform::lock_shared`, the reader form of the ownership lock, implemented by every backend. Outside implementers of `Platform` must add it.
 - `store-io-conformance`: a check that readers share the lock on read-only handles and exclude the owner.
+- `store-io-sim`: `FaultPlan::fail_wait` (the n-th queue wait fails with a
+  chosen raw code, leaving its operations in flight) and `World::waits`.
 - `store-io-sim`: `FaultPlan::read_only_media` (every read-write open fails with EROFS) and `World::faults`. The simulator's exclusive lock now refuses a read-only handle with EBADF, as Linux does.
 - `store-io-sim`: `FaultPlan::dir_sync_unsupported` (every directory flush
   fails as unsupported) and `FaultPlan::fail_set_len` (the n-th `set_len`
@@ -190,7 +222,11 @@
   skipped elsewhere. Five entries guard the pooled queue's drop and depth,
   the workers' signal mask (blocked, with the fault signals open) and the
   restored caller's mask; one more guards that each parallel lane owns its
-  busy mark. The list has 77 mutations, all caught.
+  busy mark, and ten that every queue user starts on an empty queue and
+  that an abandoned operation is never reported as done nor as a media
+  verdict, and two that an abandoned provisioning write never makes a
+  region ready or reads as "out of space". The list has 89 mutations, all
+  caught.
 - Tests: loom models the submit pool's job queue and inbox handoffs, with
   stray wakeups, and the smallest (one-worker) pool.
 - Harness: `observe-cost` measures what the observer adds per durable write.

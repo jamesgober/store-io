@@ -82,8 +82,10 @@ where
         let mut payload = [0u8; REGION_META_LEN];
         let _len = rm.encode(&mut payload).map_err(|_| metadata(c))?;
         let next = plan_next(&header, &payload, inner.owner_generation)?;
+        // Converted before the write, so nothing can fail after it.
+        let generation = Generation::from_raw(next.generation).ok_or_else(|| metadata(c))?;
         let at = self.header_at(r);
-        let mut lane = self.lane(r);
+        let mut lane = self.lane(r, Op::Write)?;
         let written = durable_slot::<P>(
             &mut lane,
             &inner.file,
@@ -96,7 +98,7 @@ where
         )
         .inspect_err(|_| self.wake_frontiers())?;
         *header = written;
-        Generation::from_raw(next.generation).ok_or_else(|| metadata(c))
+        Ok(generation)
     }
 
     /// Retires `r` for `how`, waiting out every operation in flight.
@@ -117,8 +119,10 @@ where
             Ok(g) => g,
             Err(e) => {
                 // Nothing changed on disk unless the write was submitted, in
-                // which case the domain is poisoned and stays that way.
-                if matches!(e, Error::NotWritten { .. } | Error::Corruption { .. }) {
+                // which case the domain is poisoned and stays that way; any
+                // other failure (refused, unreadable, or the lane could not
+                // be cleared) leaves the region as it was, open again.
+                if self.inner.domain.poisoned().is_none() {
                     r.gate.restore();
                 }
                 return Err(e);

@@ -13,7 +13,7 @@ use store_io_format::pair::{PairReport, decide};
 use store_io_format::slot::{Expect, SlotFields, SlotIndex, SlotStatus, encode, validate};
 use store_io_platform::{IoOp, Queue};
 
-use crate::exec::{Lane, run};
+use crate::exec::{Lane, Ran, run};
 
 /// Where a pair lives and what it must contain.
 #[derive(Debug, Clone, Copy)]
@@ -111,7 +111,7 @@ fn read_one<Q: Queue>(
         .take(at.size())
         .map_err(|_| pool_err(ErrorContext::default()))?;
     let offset = at.offset(i);
-    let done = run(q, IoOp::Read { file, offset, buf }).map_err(|(_b, raw)| match raw {
+    let ran = run(q, IoOp::Read { file, offset, buf }).map_err(|(_b, raw)| match raw {
         Some(raw) => Error::Io {
             op: Op::Read,
             raw,
@@ -127,14 +127,21 @@ fn read_one<Q: Queue>(
         raw,
         ctx: ErrorContext::default(),
     };
-    let media = matches!(done.result, Err(raw) if is_media_error(raw));
-    let Some(buf) = done.buf else {
-        return match done.result {
+    let (got, result) = match ran {
+        Ran::Done { buf, result } => (buf, result),
+        // A failed wait is never an unreadable slot: weighing it as one
+        // would let the pair decision pick the older copy (and a later write
+        // overwrite the newer one).
+        Ran::Abandoned(raw) => return Err(fail(raw)),
+    };
+    let media = matches!(result, Err(raw) if is_media_error(raw));
+    let Some(buf) = got else {
+        return match result {
             Err(raw) if !unreadable(raw) => Err(fail(raw)),
             _ => Ok((SlotStatus::ReadError, None, media)),
         };
     };
-    match done.result {
+    match result {
         Ok(n) if n == at.size() => {}
         Err(raw) if !unreadable(raw) => return Err(fail(raw)),
         _ => return Ok((SlotStatus::ReadError, None, media)),
@@ -245,7 +252,7 @@ pub(crate) fn write_slot<Q: Queue>(
         status,
         payload: Some(info.payload(buf.as_slice()).to_vec()),
     };
-    let done = run(
+    let ran = run(
         q,
         IoOp::Write {
             file,
@@ -262,7 +269,11 @@ pub(crate) fn write_slot<Q: Queue>(
         },
         ctx,
     })?;
-    match done.result {
+    let result = match ran {
+        Ran::Done { result, .. } => result,
+        Ran::Abandoned(raw) => Err(raw),
+    };
+    match result {
         Ok(n) if n == at.size() => Ok(written),
         Ok(_) => Err(Error::DurabilityUnknown {
             op: Op::Write,

@@ -63,4 +63,8 @@ pub struct FaultPlan {
     pub write_eio_ppm: u32,
     /// Per-million probability that any flush fails with EIO.
     pub flush_eio_ppm: u32,
+    /// The n-th `Queue::wait` (1-based, over every queue) fails with this raw
+    /// code before completing anything: the operations stay in flight, as
+    /// when waiting on an IOCP port fails.
+    pub fail_wait: Option<(u64, i32)>,
 }

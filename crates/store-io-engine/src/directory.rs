@@ -32,7 +32,7 @@ use store_io_core::error::{
 };
 use store_io_platform::{FileMode, FileName, IoOp, Platform, QueueConfig};
 
-use crate::exec::{QueueSet, run};
+use crate::exec::{QueueSet, Ran, run};
 use crate::io::not_written;
 
 /// Block granularity of directory-mode transfers.
@@ -236,7 +236,7 @@ impl<P: Platform> Directory<P> {
             let dst = buf.as_mut_slice();
             dst[..piece.len()].copy_from_slice(piece);
             dst[piece.len()..].fill(0);
-            let done = run(
+            let ran = run(
                 &mut lane,
                 IoOp::Write {
                     file,
@@ -251,9 +251,13 @@ impl<P: Platform> Directory<P> {
                     |r| io(Op::Write, r),
                 )
             })?;
+            let result = match ran {
+                Ran::Done { result, .. } => result,
+                Ran::Abandoned(raw) => Err(raw),
+            };
             // A failed or short write, or a failed flush, poisons the handle
             // (fail-stop), even though the target itself is untouched.
-            match done.result {
+            match result {
                 Ok(n) if n == piece_len => {}
                 Ok(_) => return Err(self.poison(Op::Write, None)),
                 Err(raw) => return Err(self.poison(Op::Write, Some(raw))),
@@ -299,7 +303,7 @@ impl<P: Platform> Directory<P> {
                 .pool
                 .take(padded)
                 .map_err(|_| not_written(NotWrittenCause::PoolExhausted, c))?;
-            let done = run(
+            let ran = run(
                 &mut lane,
                 IoOp::Read {
                     file: &file,
@@ -313,7 +317,12 @@ impl<P: Platform> Directory<P> {
                     |r| io(Op::Read, r),
                 )
             })?;
-            let n = done.result.map_err(|raw| {
+            let (got, result) = match ran {
+                Ran::Done { buf, result } => (buf, result),
+                // A failed wait: a failure of the queue, not of the media.
+                Ran::Abandoned(raw) => return Err(io(Op::Read, raw)),
+            };
+            let n = result.map_err(|raw| {
                 if store_io_core::errno::is_media_error(raw) {
                     Error::Corruption {
                         kind: CorruptionKind::MediaError,
@@ -323,7 +332,7 @@ impl<P: Platform> Directory<P> {
                     io(Op::Read, raw)
                 }
             })?;
-            let Some(buf) = done.buf else {
+            let Some(buf) = got else {
                 return Err(not_written(NotWrittenCause::QueueFull, c));
             };
             let got = n.min(want);

@@ -16,7 +16,7 @@ use store_io_format::pair::Winner;
 use store_io_platform::{FileMode, IoOp, Platform, Queue};
 
 use crate::domain::Domain;
-use crate::exec::{Lane, QueueSet, run};
+use crate::exec::{Lane, QueueSet, Ran, run};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
 use crate::layout::Layout;
@@ -328,7 +328,7 @@ fn find_volume<Q: Queue>(
                 raw,
                 ctx: ErrorContext::default(),
             };
-            let done = match run(
+            let (got, result) = match run(
                 q,
                 IoOp::Read {
                     file,
@@ -336,8 +336,9 @@ fn find_volume<Q: Queue>(
                     buf,
                 },
             ) {
-                Ok(d) => d,
-                Err((_, Some(raw))) => return Err(io(raw)),
+                Ok(Ran::Done { buf, result }) => (buf, result),
+                // A failed wait says nothing about this candidate: stop.
+                Ok(Ran::Abandoned(raw)) | Err((_, Some(raw))) => return Err(io(raw)),
                 Err((_, None)) => {
                     return Err(Error::NotWritten {
                         cause: NotWrittenCause::QueueFull,
@@ -345,7 +346,7 @@ fn find_volume<Q: Queue>(
                     });
                 }
             };
-            match done.result {
+            match result {
                 Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),
                 Ok(4096) => {}
                 Err(raw) => {
@@ -354,7 +355,7 @@ fn find_volume<Q: Queue>(
                 }
                 Ok(_) => continue,
             }
-            let Some(b) = done.buf else { continue };
+            let Some(b) = got else { continue };
             if b.as_slice()[..8] != store_io_format::slot::MAGIC {
                 continue;
             }

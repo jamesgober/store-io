@@ -211,6 +211,7 @@ pub struct World {
     reads_completed: u64,
     misaligned_reads: u64,
     clock_ms: u64,
+    waits: u64,
     flushes_completed: u64,
     dir_syncs: u64,
     set_lens: u64,
@@ -236,6 +237,7 @@ impl World {
             reads_completed: 0,
             misaligned_reads: 0,
             clock_ms: 0,
+            waits: 0,
             flushes_completed: 0,
             dir_syncs: 0,
             set_lens: 0,
@@ -286,6 +288,24 @@ impl World {
     #[must_use]
     pub fn writes(&self) -> u64 {
         self.writes_completed
+    }
+
+    /// Counts a queue wait; the raw error if the fault plan fails this one.
+    pub(crate) fn wait_fails(&mut self) -> Option<OsError> {
+        self.waits += 1;
+        match self.cfg.faults.fail_wait {
+            Some((at, code)) if at == self.waits => Some(OsError {
+                code,
+                source: OsErrorSource::Sim,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Queue waits so far (see [`FaultPlan::fail_wait`]).
+    #[must_use]
+    pub fn waits(&self) -> u64 {
+        self.waits
     }
 
     /// Directory syncs so far, successful or not. Arm

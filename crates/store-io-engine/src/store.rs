@@ -25,7 +25,7 @@ use store_io_format::meta::{RegionKind, RegionName, TableEntry, VolumeMeta};
 use store_io_platform::{FileName, IoOp, Platform, Queue, QueueConfig};
 
 use crate::domain::Domain;
-use crate::exec::{Lane, QueueSet, run};
+use crate::exec::{Lane, QueueSet, Ran, run};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
 use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT, region_object};
@@ -520,7 +520,8 @@ pub(crate) fn durable_slot<P: Platform>(
 /// (a full queue) carries no code: none is invented.
 pub(crate) fn flush_data<Q: Queue>(q: &mut Lane<Q>, file: &Q::File) -> Result<(), Option<OsError>> {
     match run(q, IoOp::FlushData { file }) {
-        Ok(done) => done.result.map(|_| ()).map_err(Some),
+        Ok(Ran::Done { result, .. }) => result.map(|_| ()).map_err(Some),
+        Ok(Ran::Abandoned(raw)) => Err(Some(raw)),
         Err((_b, raw)) => Err(raw),
     }
 }

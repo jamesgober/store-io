@@ -12,7 +12,7 @@ use store_io_platform::{IoBuf, IoOp, Platform, QueueConfig};
 
 use std::ops::ControlFlow;
 
-use crate::exec::{Lane, LaneGuard, Next, Pumped, Source, pump, run};
+use crate::exec::{Lane, LaneGuard, Next, Pumped, Ran, Source, clear_stale, pump, run};
 use crate::frontier::{AppendFrontier, Reservation};
 use crate::receipt::{DurableReceipt, WriteTicket};
 use crate::scan::ScanItem;
@@ -236,24 +236,53 @@ where
         (self.inner.pool.max_len() / block * block).max(block)
     }
 
-    /// A free queue for a call on `r`.
-    pub(crate) fn lane(&self, r: &LiveRegion) -> LaneGuard<'_, P::Queue> {
-        self.inner.queues.get(r.id.get() as usize)
+    /// A free queue for a call on `r`, cleared of anything an earlier holder
+    /// abandoned ([`clear_stale`]) before the call reserves space or submits
+    /// anything.
+    ///
+    /// # Errors
+    ///
+    /// `Io` for `op` if clearing failed: nothing of the call happened.
+    pub(crate) fn lane(&self, r: &LiveRegion, op: Op) -> Result<LaneGuard<'_, P::Queue>, Error> {
+        self.cleared(self.inner.queues.get(r.id.get() as usize), r, op)
     }
 
     /// A parallel lane for a call on `r` that submits several independent
     /// operations before it waits (D-096); a shared lane if the parallel
-    /// queues cannot be created.
-    pub(crate) fn par_lane(&self, r: &LiveRegion) -> LaneGuard<'_, P::Queue> {
+    /// queues cannot be created. Cleared as [`Self::lane`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lane`].
+    pub(crate) fn par_lane(
+        &self,
+        r: &LiveRegion,
+        op: Op,
+    ) -> Result<LaneGuard<'_, P::Queue>, Error> {
         let inner = &*self.inner;
-        inner.queues.get_parallel(r.id.get() as usize, |n| {
+        let lane = inner.queues.get_parallel(r.id.get() as usize, |n| {
             let cfg = QueueConfig {
                 depth: inner.opts.queue_depth.max(1),
                 parallel: true,
                 pool_threads: inner.opts.t3_pool_threads,
             };
             (0..n).map(|_| inner.platform.queue(cfg).ok()).collect()
-        })
+        });
+        self.cleared(lane, r, op)
+    }
+
+    fn cleared<'a>(
+        &self,
+        mut lane: LaneGuard<'a, P::Queue>,
+        r: &LiveRegion,
+        op: Op,
+    ) -> Result<LaneGuard<'a, P::Queue>, Error> {
+        clear_stale(&mut lane).map_err(|raw| Error::Io {
+            op,
+            raw,
+            ctx: ctx(r),
+        })?;
+        Ok(lane)
     }
 
     /// A pooled buffer of at least `len` bytes, with its length set to `len`.
@@ -456,14 +485,14 @@ where
         if len > chunk {
             return self.read_pipelined(r, offset, len, out, c);
         }
-        let mut lane = self.lane(r);
+        let mut lane = self.lane(r, Op::Read)?;
         let mut done = 0usize;
         while (done as u64) < len {
             let piece = chunk.min(len - done as u64);
             let piece_len =
                 usize::try_from(piece).map_err(|_| not_written(NotWrittenCause::TooLarge, c))?;
             let buf = self.take(piece_len, c)?;
-            let completed = run(
+            let ran = run(
                 &mut lane,
                 IoOp::Read {
                     file: &self.inner.file,
@@ -479,9 +508,23 @@ where
                 },
                 None => not_written(NotWrittenCause::QueueFull, c),
             })?;
-            self.inner.observer.add(Counter::Reads, 1);
-            self.inner.observer.add(Counter::ReadBytes, piece);
-            let n = match completed.result {
+            let (got, result) = match ran {
+                Ran::Done { buf, result } => (buf, result),
+                // The wait failed with the read in flight: a failure of the
+                // queue, no verdict on the media.
+                Ran::Abandoned(raw) => {
+                    return Err(Error::Io {
+                        op: Op::Read,
+                        raw,
+                        ctx: c,
+                    });
+                }
+            };
+            if got.is_some() {
+                self.inner.observer.add(Counter::Reads, 1);
+                self.inner.observer.add(Counter::ReadBytes, piece);
+            }
+            let n = match result {
                 Ok(n) => n,
                 Err(raw) => {
                     let start = offset + done as u64;
@@ -502,7 +545,7 @@ where
                     // full queue), the media error stands for the whole
                     // piece rather than being replaced by that failure.
                     self.inner.observer.add(Counter::MediaErrors, 1);
-                    drop(completed);
+                    drop(got);
                     drop(lane);
                     let (bad_start, bad_end) =
                         self.first_unreadable(r, start, end).unwrap_or((start, end));
@@ -512,8 +555,10 @@ where
                     });
                 }
             };
-            let Some(buf) = completed.buf else {
-                return Ok(done.min(out.len()));
+            let Some(buf) = got else {
+                // A backend that kept the buffer (platform contract 1): the
+                // bytes never came back, so nothing is reported as read.
+                return Err(not_written(NotWrittenCause::Interrupted, c));
             };
             let want = (out.len() - done.min(out.len())).min(n);
             out[done..done + want].copy_from_slice(&buf.as_slice()[..want]);

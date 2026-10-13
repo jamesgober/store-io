@@ -192,7 +192,9 @@ where
     /// # Errors
     ///
     /// `NotWritten(StaleGeneration | NotReady)` if the region was already
-    /// recycled or released; `Poisoned`; `DurabilityUnknown`.
+    /// recycled or released; `Io` if the store's queue could not be prepared
+    /// (nothing was written; the region stays usable); `Poisoned`;
+    /// `DurabilityUnknown`.
     pub fn recycle(&self) -> Result<Self, Error> {
         let state = self.store.recycle_region(&self.state)?;
         Ok(Self {
@@ -235,8 +237,9 @@ where
     /// # Errors
     ///
     /// `NotWritten` (empty data, region full, pool exhausted, read-only, not
-    /// positioned), `Poisoned`, or `DurabilityUnknown` (the domain is now
-    /// poisoned).
+    /// positioned), `Io` if the store's queue could not be prepared (nothing
+    /// was reserved or written), `Poisoned`, or `DurabilityUnknown` (the
+    /// domain is now poisoned).
     pub fn append(&self, data: &[u8]) -> Result<WriteTicket, Error> {
         let s = &self.store;
         let (f, _pass) = self.writable()?;
@@ -247,7 +250,7 @@ where
         // Everything that can fail without touching the device happens first:
         // the first piece is staged before any space is reserved.
         let mut stream = s.stage(data, c)?;
-        let mut lane = s.lane(&self.state);
+        let mut lane = s.lane(&self.state, Op::Write)?;
         let reserved = s.reserve_append(f, data.len() as u64, c)?;
         let r = reserved.range();
         stream.at(self.state.data_offset + r.start);
@@ -578,7 +581,7 @@ where
         let c = ctx_range(&self.state, pos.offset, end);
         let mut stream = s.stage(data, c)?;
         stream.at(self.state.data_offset + pos.offset);
-        let mut lane = s.lane(&self.state);
+        let mut lane = s.lane(&self.state, Op::Write)?;
         match s.pump(&mut lane, &mut stream) {
             Pumped::All => Ok(s.ticket(&self.state, pos.offset, end)),
             Pumped::Refused(raw) => Err(Store::<P>::refused(raw, c)),
@@ -777,7 +780,8 @@ where
     ///
     /// # Errors
     ///
-    /// `NotWritten(TooLarge)` beyond [`Self::capacity`], `Poisoned`, or
+    /// `NotWritten(TooLarge)` beyond [`Self::capacity`], `Io` if the store's
+    /// queue could not be prepared (nothing was written), `Poisoned`, or
     /// `DurabilityUnknown` (the domain is now poisoned).
     pub fn commit(&self, data: &[u8]) -> Result<DurableReceipt, Error> {
         let s = &self.store;
@@ -823,7 +827,7 @@ where
         let next = plan_next(&header, &payload, s.inner.owner_generation)?;
         let generation = next.generation;
         let at = self.at();
-        let mut lane = s.lane(&self.state);
+        let mut lane = s.lane(&self.state, Op::Write)?;
         let written = durable_slot::<P>(
             &mut lane,
             &s.inner.file,

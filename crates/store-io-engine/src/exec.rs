@@ -369,10 +369,43 @@ fn lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Mutex<Lane<Q>> {
     })
 }
 
-/// Outcome of one operation: the buffer (if any) and the raw result.
-pub(crate) struct Done {
-    pub(crate) buf: Option<IoBuf>,
-    pub(crate) result: RawResult<usize>,
+/// What became of an operation that reached the queue.
+pub(crate) enum Ran {
+    /// It completed: its buffer (if any) and the raw result.
+    Done {
+        buf: Option<IoBuf>,
+        result: RawResult<usize>,
+    },
+    /// Waiting failed with it in flight (or the queue could not even be
+    /// cleared for it), so there is no result. Its buffer stays with the
+    /// queue until it completes, and the next holder of the lane discards
+    /// that completion ([`clear_stale`]). For a write, durability is unknown;
+    /// for a read, it is a failure of the queue, never a verdict on the
+    /// media.
+    Abandoned(OsError),
+}
+
+/// Collects and discards what an earlier holder of this lane left in flight
+/// when its wait failed, so that every holder starts on an empty queue and
+/// no completion can ever be taken for another operation's. A completion
+/// means the device is done with its buffer, so dropping one is safe. One
+/// `in_flight` call when the queue is clean (every time, unless a wait has
+/// failed).
+///
+/// # Errors
+///
+/// The raw error if waiting for them fails; nothing of the caller's has been
+/// submitted.
+pub(crate) fn clear_stale<Q: Queue>(lane: &mut Lane<Q>) -> Result<(), OsError> {
+    lane.done.drain().for_each(drop);
+    while lane.queue.in_flight() > 0 {
+        let n = lane.queue.in_flight();
+        let _added = lane.queue.wait(n, &mut lane.done)?;
+        lane.done.drain().for_each(drop);
+        // Clearing is progress, not the holder's own operation aging.
+        lane.progress();
+    }
+    Ok(())
 }
 
 /// Submits one operation and waits for its completion.
@@ -380,20 +413,35 @@ pub(crate) struct Done {
 /// # Errors
 ///
 /// `Err((buf, raw))` when the operation was refused before reaching the
-/// device (media untouched); the buffer is returned.
+/// device (media untouched); the buffer is returned. If clearing an earlier
+/// holder's abandoned operations fails first, the result is
+/// [`Ran::Abandoned`].
 pub(crate) fn run<Q: Queue>(
     slot: &mut Lane<Q>,
     op: IoOp<'_, Q::File>,
-) -> Result<Done, (Option<IoBuf>, Option<OsError>)> {
+) -> Result<Ran, (Option<IoBuf>, Option<OsError>)> {
     const TAG: u64 = 0x5110;
+    let is_read = matches!(op, IoOp::Read { .. });
+    if let Err(raw) = clear_stale(slot) {
+        // The queue cannot be waited on: nothing of this operation was
+        // submitted, but the queue is broken, so it is abandoned, which
+        // every caller treats as fail-stop (never as a refusal whose code
+        // could read as "out of space").
+        drop(op);
+        return Ok(Ran::Abandoned(raw));
+    }
     slot.queue.submit(op, TAG).map_err(|r| (r.buf, r.raw))?;
     loop {
         // A borrow of the mark beside the drain of the completions.
         let mark = &slot.mark;
         for c in slot.done.drain() {
             if c.tag == TAG {
+                debug_assert!(
+                    !is_read || c.buf.is_some(),
+                    "a read completed without its buffer (platform contract 1)"
+                );
                 mark.advance();
-                return Ok(Done {
+                return Ok(Ran::Done {
                     buf: c.buf,
                     result: c.result,
                 });
@@ -401,12 +449,8 @@ pub(crate) fn run<Q: Queue>(
         }
         if let Err(raw) = slot.queue.wait(1, &mut slot.done) {
             // Waiting failed but the operation is in flight: its buffer is
-            // still owned by the kernel and must not be released. The only
-            // safe outcome is durability unknown; the caller poisons.
-            return Ok(Done {
-                buf: None,
-                result: Err(raw),
-            });
+            // still owned by the kernel and must not be released.
+            return Ok(Ran::Abandoned(raw));
         }
     }
 }
@@ -463,6 +507,7 @@ pub(crate) fn pump<Q: Queue>(
     obs: &Observer,
 ) -> Pumped {
     const TAG: u64 = 0x5111;
+    // The caller's lane is already cleared (`Store::lane`).
     let mut in_flight = 0usize;
     let mut submitted = 0usize;
     let mut failure: Option<Option<OsError>> = None;

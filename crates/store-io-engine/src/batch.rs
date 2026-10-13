@@ -237,12 +237,14 @@ where
     /// Writes the batch as one contiguous append and returns where it starts
     /// and a ticket, once every write has completed. Not yet durable: pass
     /// the ticket to [`AppendRegion::sync_through`], or use [`Self::commit`].
-    /// The batch is empty afterwards, whatever the outcome.
+    /// The batch is kept if the write fails before space is reserved, and is
+    /// empty after every other outcome.
     ///
     /// # Errors
     ///
-    /// `NotWritten(Empty | RegionFull | ReadOnly | NotPositioned)` (the batch
-    /// is kept), `Poisoned`, or `DurabilityUnknown` (the domain is now
+    /// Before any I/O, the batch kept: `NotWritten(Empty | RegionFull |
+    /// ReadOnly | NotPositioned)`, `Io` if the store's queue could not be
+    /// prepared, or `Poisoned`. After: `DurabilityUnknown` (the domain is now
     /// poisoned).
     pub fn write(&mut self) -> Result<(RegionPos, WriteTicket), Error> {
         let c = ctx(self.region.state());
@@ -253,7 +255,7 @@ where
         let s = self.region.store();
         let state = self.region.state();
         let block = s.block() as usize;
-        let mut lane = s.lane(state);
+        let mut lane = s.lane(state, Op::Write)?;
         let reserved = s.reserve_append(f, self.bytes, c)?;
         let r = reserved.range();
         if let Some(last) = self.chunks.last_mut() {
@@ -411,14 +413,16 @@ where
     /// The receipt names the span from the first written byte to the last;
     /// it proves durable every write in the batch (and every other write to
     /// this store that completed before the barrier). The batch is kept if
-    /// the commit fails with `NotWritten` or `Poisoned` before any I/O, and
-    /// is empty after every other outcome.
+    /// the commit fails before any I/O (`NotWritten`, `Poisoned`, or `Io`
+    /// preparing the queue), and is empty after every other outcome.
     ///
     /// # Errors
     ///
     /// `NotWritten(Empty | Overlap | ReadOnly)` before any I/O (the batch is
-    /// kept); `Io` if the platform refused the first write (nothing was
-    /// written or poisoned); `Poisoned`; or `DurabilityUnknown`.
+    /// kept); `Io` if the store's queue could not be prepared (nothing was
+    /// submitted; the batch is kept) or the platform refused the first write
+    /// (nothing was written or poisoned; the batch is empty), so
+    /// [`Self::is_empty`] tells which; `Poisoned`; or `DurabilityUnknown`.
     pub fn commit(&mut self) -> Result<DurableReceipt, Error> {
         let state = self.region.state();
         let c = ctx(state);
@@ -443,9 +447,9 @@ where
         // Several writes run concurrently on a parallel lane; one stays on
         // the caller's thread (D-096).
         let mut lane = if self.writes.len() > 1 {
-            s.par_lane(state)
+            s.par_lane(state, Op::Write)?
         } else {
-            s.lane(state)
+            s.lane(state, Op::Write)?
         };
         let mut src = Placed {
             writes: self.writes.drain(..).map(|(at, b)| (base + at, b)),

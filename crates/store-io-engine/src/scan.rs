@@ -20,7 +20,7 @@ use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
 use store_io_core::observe::Counter;
 use store_io_platform::{IoBuf, IoOp, Platform, Queue, RawResult};
 
-use crate::exec::{Lane, run};
+use crate::exec::{Lane, Ran, run};
 use crate::io::{ctx_range, not_written};
 use crate::store::{LiveRegion, Store};
 
@@ -196,9 +196,9 @@ where
         // Several reads in flight: a parallel lane (D-096). A range of one
         // buffer, or a pipeline of one, is a single read: the caller's lane.
         let mut lane = if to - from > chunk as u64 && depth > 1 {
-            self.par_lane(r)
+            self.par_lane(r, Op::Read)?
         } else {
-            self.lane(r)
+            self.lane(r, Op::Read)?
         };
         let file = &self.inner.file;
         let (mut submitted, mut delivered) = (0u64, 0u64);
@@ -258,17 +258,27 @@ where
                 };
                 delivered += 1;
                 let mut buf = buf;
+                debug_assert!(
+                    buf.is_some(),
+                    "a read completed without its buffer (platform contract 1)"
+                );
                 if failure.is_none() && !out.sum.stopped {
                     match result {
-                        Ok(n) => {
-                            let n = n.min(len);
-                            if let Some(b) = &buf {
+                        Ok(n) => match &buf {
+                            Some(b) => {
+                                let n = n.min(len);
                                 out.data(start, &b.as_slice()[..n]);
+                                // A short read inside the container: the
+                                // rest could not be read.
+                                out.unreadable(start + n as u64, start + len as u64);
                             }
-                            // A short read inside the container: the rest
-                            // could not be read.
-                            out.unreadable(start + n as u64, start + len as u64);
-                        }
+                            // No bytes came back (a backend breaking
+                            // platform contract 1): the scan stops, never
+                            // reporting the range as unreadable media.
+                            None => {
+                                failure = Some(not_written(NotWrittenCause::Interrupted, c));
+                            }
+                        },
                         Err(raw) if is_media_error(raw) => {
                             // Bisect on an idle queue: first collect every
                             // read still in flight (they are delivered later,
@@ -276,10 +286,19 @@ where
                             if let Err(e) = collect(&mut lane, &mut ring, depth, &mut in_flight) {
                                 return Err(read_error(e, c));
                             }
-                            if let Some(b) = buf.take() {
-                                match self.bisect(&mut lane, r, start, len as u64, b, &mut out, c) {
-                                    Ok(b) => buf = Some(b),
-                                    Err(e) => failure = Some(e),
+                            match buf.take() {
+                                Some(b) => {
+                                    match self
+                                        .bisect(&mut lane, r, start, len as u64, b, &mut out, c)
+                                    {
+                                        Ok(b) => buf = Some(b),
+                                        Err(e) => failure = Some(e),
+                                    }
+                                }
+                                // No buffer to bisect with (a backend breaking
+                                // platform contract 1): stop, never drop the range.
+                                None => {
+                                    failure = Some(not_written(NotWrittenCause::Interrupted, c));
                                 }
                             }
                         }
@@ -339,20 +358,21 @@ where
             },
         );
         let (result, back) = match done {
-            Ok(d) => {
+            Ok(Ran::Done { buf, result }) => {
                 self.inner.observer.add(Counter::Reads, 1);
                 self.inner.observer.add(Counter::ReadBytes, len);
-                (d.result, d.buf)
+                (result, buf)
             }
+            Ok(Ran::Abandoned(raw)) => return Err(read_error(raw, c)),
             Err((_refused, Some(raw))) => return Err(read_error(raw, c)),
             Err((_refused, None)) => return Err(not_written(NotWrittenCause::QueueFull, c)),
         };
         let Some(buf) = back else {
-            // The wait failed with the read in flight; its buffer stays with
-            // the queue.
+            // No buffer came back (a backend breaking platform contract 1;
+            // an abandoned read is `Ran::Abandoned` above).
             return Err(match result {
                 Err(raw) => read_error(raw, c),
-                Ok(_) => not_written(NotWrittenCause::QueueFull, c),
+                Ok(_) => not_written(NotWrittenCause::Interrupted, c),
             });
         };
         match result {

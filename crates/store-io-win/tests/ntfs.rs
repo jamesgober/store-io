@@ -673,3 +673,72 @@ fn test_set_len_truncates_and_extends_with_zeros() {
         "read-only handles cannot resize"
     );
 }
+
+/// Wakes sent to an idle queue collapse into one packet, which one wait
+/// spends: afterwards a wait for every write in flight returns once, with
+/// all of them; a wake while writes are in flight never counts as a
+/// completion, and every write still completes exactly once.
+#[test]
+fn test_idle_wakes_do_not_pile_up_and_never_count_as_completions() {
+    use store_io_platform::Wake;
+    let fx = fixture("wake");
+    let f = fx.p.create_file(&fx.dir, &name("w.sio")).unwrap();
+    fx.p.allocate(&f, 1 << 20).unwrap();
+    let mut q =
+        fx.p.queue(QueueConfig {
+            depth: 16,
+            ..QueueConfig::default()
+        })
+        .unwrap();
+    let w = q.waker();
+    std::thread::spawn(move || {
+        for _ in 0..1000 {
+            w.wake();
+        }
+    })
+    .join()
+    .unwrap();
+    let mut out = CompletionBuf::with_capacity(16);
+    assert_eq!(q.wait(1, &mut out).unwrap(), 0);
+    let submit = |q: &mut WinQueue, round: u64| {
+        for i in 0..8u64 {
+            let mut b = fx.pool.take(BLOCK).unwrap();
+            b.as_mut_slice().fill((round * 8 + i) as u8);
+            q.submit(
+                IoOp::Write {
+                    file: &f,
+                    offset: i * BLOCK as u64,
+                    buf: b,
+                    dsync: false,
+                },
+                i,
+            )
+            .unwrap();
+        }
+    };
+    // No stale wake left: one wait gathers all eight.
+    submit(&mut q, 0);
+    assert_eq!(
+        q.wait(8, &mut out).unwrap(),
+        8,
+        "a stale wake cut the wait short"
+    );
+    let mut tags: Vec<u64> = out.drain().map(|c| c.tag).collect();
+    tags.sort_unstable();
+    assert_eq!(tags, (0..8).collect::<Vec<_>>());
+    // A wake with writes in flight: never a completion, each write once.
+    submit(&mut q, 1);
+    q.waker().wake();
+    let mut got = Vec::new();
+    let mut waits = 0;
+    while got.len() < 8 {
+        waits += 1;
+        assert!(waits <= 9, "completions never arrived after a wake");
+        let _added = q.wait(8 - got.len(), &mut out).unwrap();
+        got.extend(out.drain().map(|c| c.tag));
+    }
+    got.sort_unstable();
+    assert_eq!(got, (0..8).collect::<Vec<_>>());
+    assert_eq!(q.in_flight(), 0);
+    assert_eq!(q.reap(&mut out), 0);
+}

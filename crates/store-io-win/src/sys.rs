@@ -30,6 +30,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::{
     CancelIoEx, CreateIoCompletionPort, DeviceIoControl, GetOverlappedResult,
     GetQueuedCompletionStatusEx, IO_STATUS_BLOCK, OVERLAPPED, OVERLAPPED_ENTRY,
+    PostQueuedCompletionStatus,
 };
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Win32::System::SystemServices::FLUSH_FLAGS_FILE_DATA_SYNC_ONLY;
@@ -822,6 +823,16 @@ pub fn get_queued(port: &Handle, entries: &mut Entries, block: bool) -> RawResul
     } else {
         Err(e)
     }
+}
+
+/// Posts a wake packet to `port`: a completion with no `OVERLAPPED`, which
+/// no I/O ever produces, so the queue can never mistake it for one. Returns
+/// whether the kernel accepted it.
+pub fn post_wake(port: &Handle) -> bool {
+    // SAFETY: PostQueuedCompletionStatus with a valid port handle (kept
+    // alive by the caller), zero bytes, key 0 and a null OVERLAPPED pointer,
+    // which the kernel stores without dereferencing.
+    unsafe { PostQueuedCompletionStatus(port.raw(), 0, 0, ptr::null()) != FALSE }
 }
 
 /// Cancels every outstanding operation on `h` (completions still arrive).

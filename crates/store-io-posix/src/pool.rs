@@ -46,6 +46,9 @@ struct InboxState {
     /// Completions the queue's waiting thread needs; 0 when none waits. The
     /// waiter is woken once, when its target is reached, not per post.
     want: usize,
+    /// The queue's waker fired (D-083): the current or next `wait` returns,
+    /// possibly short, and clears it.
+    woken: bool,
 }
 
 impl Inbox {
@@ -54,6 +57,7 @@ impl Inbox {
             state: Mutex::new(InboxState {
                 done: Vec::with_capacity(depth),
                 want: 0,
+                woken: false,
             }),
             ready: Condvar::new(),
         }
@@ -84,11 +88,36 @@ impl Inbox {
     /// in flight and at most `out`'s room, so the wait always ends.
     pub(crate) fn wait(&self, target: usize, out: &mut CompletionBuf) -> usize {
         let mut st = lock(&self.state);
-        while st.done.len() < target {
+        while st.done.len() < target && !st.woken {
             st.want = target;
             st = wait(&self.ready, st);
         }
         st.want = 0;
+        st.woken = false;
+        move_into(&mut st.done, out)
+    }
+
+    /// Ends the current or next [`Self::wait`] (the queue's waker). Never
+    /// blocks beyond the inbox lock; the notify follows the unlock.
+    pub(crate) fn wake(&self) {
+        let parked = {
+            let mut st = lock(&self.state);
+            let first = !st.woken;
+            st.woken = true;
+            // `want` is set exactly while a waiter is parked (or about to
+            // park, under this lock); otherwise the next wait sees `woken`.
+            first && st.want != 0
+        };
+        if parked {
+            self.ready.notify_one();
+        }
+    }
+
+    /// [`Self::reap`] for a wait that returns at once (nothing in flight): a
+    /// pending wake is spent on it, so it cannot cut a later wait short.
+    pub(crate) fn reap_spending_wake(&self, out: &mut CompletionBuf) -> usize {
+        let mut st = lock(&self.state);
+        st.woken = false;
         move_into(&mut st.done, out)
     }
 
@@ -415,6 +444,26 @@ mod loom_tests {
                 p.join().unwrap();
             }
             noise.join().unwrap();
+        });
+    }
+
+    /// A wake from another thread ends a wait whose target is not reached:
+    /// the waiter never stays parked, and gets what was posted.
+    #[test]
+    fn loom_inbox_wake_ends_a_short_wait() {
+        model(|| {
+            let inbox = LoomArc::new(Inbox::new(2));
+            let ib = LoomArc::clone(&inbox);
+            let poster = loom::thread::spawn(move || ib.post(completion(0)));
+            let ib = LoomArc::clone(&inbox);
+            let waker = loom::thread::spawn(move || ib.wake());
+            let mut out = CompletionBuf::with_capacity(2);
+            let mut got = inbox.wait(2, &mut out);
+            poster.join().unwrap();
+            waker.join().unwrap();
+            // Whatever the wait returned, the post is never lost.
+            got += inbox.reap(&mut out);
+            assert_eq!(got, 1);
         });
     }
 

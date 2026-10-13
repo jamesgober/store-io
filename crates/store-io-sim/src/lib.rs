@@ -16,5 +16,5 @@ pub mod rng;
 pub mod world;
 
 pub use fault::{FaultPlan, FlushFailure};
-pub use platform::{SimDir, SimFile, SimLock, SimPlatform, SimQueue};
+pub use platform::{SimDir, SimFile, SimLock, SimPlatform, SimQueue, SimWaker};
 pub use world::{CrashMode, DeviceKind, SimConfig, World};

@@ -265,6 +265,7 @@ where
                 depth: inner.opts.queue_depth.max(1),
                 parallel: true,
                 pool_threads: inner.opts.t3_pool_threads,
+                ..QueueConfig::default()
             };
             (0..n).map(|_| inner.platform.queue(cfg).ok()).collect()
         });

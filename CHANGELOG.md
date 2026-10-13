@@ -215,6 +215,27 @@
   `fdatasync` floor [measured].
 - Harness: W5 measures sequential appends and raw writes of 2 and 8 MiB per
   call as well as 1 MiB.
+- `store-io-platform`: queue wakers (D-083). `Queue::waker()` returns a
+  `Send + Sync + Clone` handle (trait `Wake`) another thread uses to end the
+  queue's current or next `wait`, which may then return having added
+  nothing; a wake never creates, loses or repeats a completion.
+  `QueueConfig::owner` (`Owner::Shared`, the default, or `Owner::Thread`)
+  says who uses a queue. Outside implementers of `Queue` must add the
+  `Waker` type and `waker()`; code that builds a `QueueConfig` with a struct
+  literal must add `owner` (`..QueueConfig::default()`).
+  - Linux (`PosixWaker`): a pooled queue's wait ends on the wake; an inline
+    queue never blocks, so its waker does nothing.
+  - Windows (`WinWaker`): a completion packet with no `OVERLAPPED` posted to
+    the queue's port, at most one at a time, which the queue never reports
+    as a completion; every wait spends any wake packet still posted before
+    it returns, so idle wakes do not pile up, and a wake ends at most one
+    wait, the current or the next. The port lives as long as any waker.
+  - Simulator (`SimWaker`): a flag the next wait sees.
+  - Tests: on every backend a wake never creates, loses or repeats a
+    completion (conformance, inline and parallel queues). Loom shows a wake
+    ends a blocked wait on the Linux pool's inbox; on NTFS, a thousand idle
+    wakes leave no stale packet and a wake is never counted as a
+    completion.
 - `store-io-platform`: `Queue::wait` states that it never waits for more than
   is in flight (every backend already behaved so).
 - `store-io-engine`: a store's queues are dropped before its file and

@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use store_io_platform::{
-    Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected,
+    Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected, Wake,
 };
 
 use crate::file::PosixFile;
@@ -258,8 +258,30 @@ fn check<F>(op: IoOp<'_, PosixFile>, fd: impl Fn(&PosixFile) -> F) -> Result<Wor
     }
 }
 
+/// Ends a [`PosixQueue`]'s wait from another thread (D-083). An inline
+/// queue never blocks in `wait`, so its waker has nothing to do.
+#[derive(Clone)]
+pub struct PosixWaker(Option<Arc<Inbox>>);
+
+impl core::fmt::Debug for PosixWaker {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("PosixWaker")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
+impl Wake for PosixWaker {
+    fn wake(&self) {
+        if let Some(inbox) = &self.0 {
+            inbox.wake();
+        }
+    }
+}
+
 impl Queue for PosixQueue {
     type File = PosixFile;
+    type Waker = PosixWaker;
 
     fn submit(&mut self, op: IoOp<'_, PosixFile>, tag: u64) -> Result<(), Rejected> {
         if self.in_flight() >= self.depth {
@@ -310,7 +332,8 @@ impl Queue for PosixQueue {
                 // always ends.
                 let target = min.min(p.in_flight).min(out.room());
                 let n = if target == 0 {
-                    p.inbox.reap(out)
+                    // Returns at once: a pending wake is spent here.
+                    p.inbox.reap_spending_wake(out)
                 } else {
                     p.inbox.wait(target, out)
                 };
@@ -322,6 +345,10 @@ impl Queue for PosixQueue {
 
     fn in_flight(&self) -> usize {
         self.ready.len() + self.pooled.as_ref().map_or(0, |p| p.in_flight)
+    }
+
+    fn waker(&self) -> PosixWaker {
+        PosixWaker(self.pooled.as_ref().map(|p| Arc::clone(&p.inbox)))
     }
 
     fn workers(&self) -> Option<usize> {

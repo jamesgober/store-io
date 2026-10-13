@@ -77,4 +77,4 @@ pub use lock::WinLock;
 #[cfg(windows)]
 pub use platform::WinPlatform;
 #[cfg(windows)]
-pub use queue::WinQueue;
+pub use queue::{WinQueue, WinWaker};

@@ -10,11 +10,12 @@ impl<P: Platform> Ctx<'_, P> {
     /// A queue asked to run its operations concurrently
     /// ([`QueueConfig::parallel`]); backends that are already asynchronous
     /// ignore the hint.
-    fn parallel_queue(&self, depth: u32) -> Result<P::Queue, String> {
+    pub(super) fn parallel_queue(&self, depth: u32) -> Result<P::Queue, String> {
         let cfg = QueueConfig {
             depth,
             parallel: true,
             pool_threads: 4,
+            ..QueueConfig::default()
         };
         super::ok(self.p.queue(cfg), "parallel queue")
     }

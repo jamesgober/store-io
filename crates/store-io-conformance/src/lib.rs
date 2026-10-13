@@ -124,6 +124,7 @@ fn name(s: &str) -> Result<FileName, String> {
 }
 
 mod parallel;
+mod wake;
 
 fn pattern(seed: u8, len: usize) -> Vec<u8> {
     (0..len)
@@ -184,6 +185,10 @@ where
             (
                 "a parallel queue dropped with operations in flight returns every buffer",
                 parallel::drop_in_flight,
+            ),
+            (
+                "a wake never creates, loses or repeats a completion",
+                wake::wake_keeps_every_completion,
             ),
             (
                 "a read-only handle reads and never writes",

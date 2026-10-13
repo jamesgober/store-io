@@ -77,7 +77,7 @@ pub use file::PosixFile;
 #[cfg(target_os = "linux")]
 pub use lock::PosixLock;
 #[cfg(target_os = "linux")]
-pub use queue::PosixQueue;
+pub use queue::{PosixQueue, PosixWaker};
 
 #[cfg(target_os = "linux")]
 mod platform {

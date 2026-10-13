@@ -44,6 +44,7 @@ fn parallel(depth: u32, threads: u32) -> QueueConfig {
         depth,
         parallel: true,
         pool_threads: threads,
+        ..QueueConfig::default()
     }
 }
 

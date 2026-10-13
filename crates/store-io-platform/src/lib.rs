@@ -159,6 +159,10 @@ pub struct QueueConfig {
     /// cap it). A pool already running is never resized; the backend reports
     /// its size.
     pub pool_threads: u32,
+    /// Who uses the queue: one thread for its whole life, or any thread that
+    /// borrows it (D-081, D-083). A backend may set the queue up differently
+    /// for each (a thread-owned io_uring ring); others ignore it.
+    pub owner: Owner,
 }
 
 impl Default for QueueConfig {
@@ -167,8 +171,28 @@ impl Default for QueueConfig {
             depth: 64,
             parallel: false,
             pool_threads: 0,
+            owner: Owner::Shared,
         }
     }
+}
+
+/// Who uses a queue ([`QueueConfig::owner`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Owner {
+    /// Borrowed by any thread, one at a time (the blocking layers' lanes).
+    #[default]
+    Shared,
+    /// Used by one thread for its whole life (an engine-layer submitter).
+    Thread,
+}
+
+/// Ends a [`Queue::wait`] from another thread (D-083): the queue's current
+/// wait, or its next one if none is in progress, returns, possibly having
+/// added nothing. A wake never creates, loses or repeats a completion.
+pub trait Wake: Send + Sync + Clone + 'static {
+    /// Wakes the queue's waiter. Cheap and never blocks.
+    fn wake(&self);
 }
 
 /// A data operation. Owns its buffer until it completes.
@@ -280,6 +304,8 @@ impl CompletionBuf {
 pub trait Queue {
     /// The platform's file handle type.
     type File;
+    /// The queue's waker ([`Self::waker`]).
+    type Waker: Wake;
 
     /// Submits an operation tagged with a caller value.
     ///
@@ -294,8 +320,10 @@ pub trait Queue {
     fn reap(&mut self, out: &mut CompletionBuf) -> usize;
 
     /// Blocks until at least `min` completions have been added to `out`, or
-    /// `out` is full, or nothing is left in flight; returns how many were
-    /// added. Never times out, and never waits for more than is in flight.
+    /// `out` is full, or nothing is left in flight, or the queue's waker
+    /// fired ([`Self::waker`]; the wait may then have added nothing); returns
+    /// how many were added. Never times out, and never waits for more than
+    /// is in flight.
     ///
     /// # Errors
     ///
@@ -304,6 +332,9 @@ pub trait Queue {
 
     /// Operations submitted and not yet reaped.
     fn in_flight(&self) -> usize;
+
+    /// A handle another thread uses to end this queue's wait (D-083).
+    fn waker(&self) -> Self::Waker;
 
     /// Worker threads that run this queue's operations concurrently, when
     /// the backend runs them on a pool ([`QueueConfig::parallel`]); `None`

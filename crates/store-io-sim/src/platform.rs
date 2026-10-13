@@ -11,6 +11,7 @@
 //! `FILE_FLAG_NO_BUFFERING` do.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use store_io_core::evidence::{
@@ -18,7 +19,7 @@ use store_io_core::evidence::{
 };
 use store_io_platform::{
     Completion, CompletionBuf, FileMode, FileName, IoBuf, IoOp, Platform, Queue, QueueConfig,
-    RangeState, RawResult, Rejected, ReleaseHow,
+    RangeState, RawResult, Rejected, ReleaseHow, Wake,
 };
 
 use crate::world::{DeviceKind, EBADF, EINVAL, FileId, SimConfig, World};
@@ -123,10 +124,24 @@ pub struct SimQueue {
     world: Arc<Mutex<World>>,
     in_flight: Vec<(u64, Pending)>,
     depth: usize,
+    woken: Arc<AtomicBool>,
+}
+
+/// Ends a [`SimQueue`]'s wait from another thread (D-083): the next wait sees
+/// the flag and does only what `reap` does, then returns. (A simulated wait
+/// never blocks, so a wake always ends the next wait, not one in progress.)
+#[derive(Debug, Clone)]
+pub struct SimWaker(Arc<AtomicBool>);
+
+impl Wake for SimWaker {
+    fn wake(&self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 impl Queue for SimQueue {
     type File = SimFile;
+    type Waker = SimWaker;
 
     fn submit(&mut self, op: IoOp<'_, SimFile>, tag: u64) -> Result<(), Rejected> {
         if self.in_flight.len() >= self.depth {
@@ -225,6 +240,9 @@ impl Queue for SimQueue {
         if let Some(raw) = lock(&self.world).wait_fails() {
             return Err(raw);
         }
+        if self.woken.swap(false, Ordering::AcqRel) {
+            return Ok(self.reap(out));
+        }
         let mut added = self.reap(out);
         let mut w = lock(&self.world);
         while added < min && !self.in_flight.is_empty() && out.room() > 0 {
@@ -245,6 +263,10 @@ impl Queue for SimQueue {
 
     fn in_flight(&self) -> usize {
         self.in_flight.len()
+    }
+
+    fn waker(&self) -> SimWaker {
+        SimWaker(Arc::clone(&self.woken))
     }
 }
 
@@ -489,6 +511,7 @@ impl Platform for SimPlatform {
             world: Arc::clone(&self.world),
             in_flight: Vec::new(),
             depth: cfg.depth.max(1) as usize,
+            woken: Arc::new(AtomicBool::new(false)),
         })
     }
 }

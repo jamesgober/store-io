@@ -41,9 +41,10 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use store_io_platform::{
-    Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected,
+    Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected, Wake,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, ERROR_TOO_MANY_OPEN_FILES, GENERIC_READ,
@@ -92,10 +93,23 @@ struct FileEntry {
     in_flight: u32,
 }
 
+/// The queue's completion port, shared with its wakers so that a wake can
+/// never post to a closed (and possibly reused) handle.
+#[derive(Debug)]
+struct Port {
+    handle: Handle,
+    /// A wake packet is posted and not yet collected. At most one is ever
+    /// outstanding, so wakes sent while the queue is idle do not pile up in
+    /// the port (kernel memory) or cut later waits short.
+    wake_posted: AtomicBool,
+}
+
 /// A per-thread IOCP submission queue (see the module docs).
 #[derive(Debug)]
 pub struct WinQueue {
-    port: Handle,
+    port: Arc<Port>,
+    /// A wake packet arrived: the current or next `wait` returns.
+    woken: bool,
     slots: Box<[Slot]>,
     free: Vec<u32>,
     ready: VecDeque<u32>,
@@ -108,7 +122,10 @@ pub struct WinQueue {
 impl WinQueue {
     pub(crate) fn new(cfg: QueueConfig) -> RawResult<Self> {
         let depth = cfg.depth.max(1) as usize;
-        let port = sys::create_port()?;
+        let port = Arc::new(Port {
+            handle: sys::create_port()?,
+            wake_posted: AtomicBool::new(false),
+        });
         let slots: Vec<Slot> = (0..depth)
             .map(|_| Slot {
                 ov: Overlapped::new(),
@@ -121,10 +138,13 @@ impl WinQueue {
             .collect();
         Ok(Self {
             port,
+            woken: false,
             slots: slots.into_boxed_slice(),
             free: (0..depth as u32).rev().collect(),
             ready: VecDeque::with_capacity(depth),
-            entries: Entries::new(depth),
+            // One more than the depth: a poll then always reaches a wake
+            // packet queued behind a full queue's completions.
+            entries: Entries::new(depth + 1),
             files: Vec::with_capacity(FILES_PER_QUEUE),
             kernel_pending: 0,
             draining: false,
@@ -179,7 +199,7 @@ impl WinQueue {
             sys::SHARE_ALL,
             FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED,
         )?;
-        sys::associate(&handle, &self.port, 0)?;
+        sys::associate(&handle, &self.port.handle, 0)?;
         self.files[slot] = Some(FileEntry {
             id: file.id(),
             handle,
@@ -259,6 +279,12 @@ impl WinQueue {
             else {
                 break;
             };
+            // A wake packet (no OVERLAPPED): never an I/O completion.
+            if overlapped == 0 {
+                self.woken = true;
+                self.port.wake_posted.store(false, Ordering::Release);
+                continue;
+            }
             let idx = overlapped.wrapping_sub(base) / stride;
             let Some(slot) = self.slots.get(idx) else {
                 continue;
@@ -319,8 +345,30 @@ impl WinQueue {
     }
 }
 
+/// Ends a [`WinQueue`]'s wait from another thread (D-083): a packet with no
+/// `OVERLAPPED` posted to the queue's port, at most one at a time. If the
+/// kernel refuses the post (out of non-paged memory), the next wake tries
+/// again; until then the waiter returns at its next completion.
+#[derive(Clone)]
+pub struct WinWaker(Arc<Port>);
+
+impl core::fmt::Debug for WinWaker {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("WinWaker")
+    }
+}
+
+impl Wake for WinWaker {
+    fn wake(&self) {
+        if !self.0.wake_posted.swap(true, Ordering::AcqRel) && !sys::post_wake(&self.0.handle) {
+            self.0.wake_posted.store(false, Ordering::Release);
+        }
+    }
+}
+
 impl Queue for WinQueue {
     type File = WinFile;
+    type Waker = WinWaker;
 
     fn submit(&mut self, op: IoOp<'_, WinFile>, tag: u64) -> Result<(), Rejected> {
         match op {
@@ -415,7 +463,7 @@ impl Queue for WinQueue {
         let mut added = self.drain_ready(out);
         if self.kernel_pending > 0 && out.room() > 0 {
             // A failed poll is not lost: `wait` reports the port error.
-            if let Ok(n) = sys::get_queued(&self.port, &mut self.entries, false) {
+            if let Ok(n) = sys::get_queued(&self.port.handle, &mut self.entries, false) {
                 self.process(n);
             }
             added += self.drain_ready(out);
@@ -425,16 +473,36 @@ impl Queue for WinQueue {
 
     fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
         let mut added = self.drain_ready(out);
-        while added < min && out.room() > 0 && self.kernel_pending > 0 {
-            let n = sys::get_queued(&self.port, &mut self.entries, true)?;
+        // A wake that arrived during a reap or an earlier wait's collection
+        // ends this wait.
+        while !std::mem::take(&mut self.woken)
+            && added < min
+            && out.room() > 0
+            && self.kernel_pending > 0
+        {
+            let n = sys::get_queued(&self.port.handle, &mut self.entries, true)?;
             self.process(n);
             added += self.drain_ready(out);
+        }
+        // A wake packet still in the port (posted while nothing was pending,
+        // or after the last packet this wait took) is spent here, on this
+        // wait, so it cannot cut a later one short.
+        if self.port.wake_posted.load(Ordering::Acquire) {
+            if let Ok(n) = sys::get_queued(&self.port.handle, &mut self.entries, false) {
+                self.process(n);
+                added += self.drain_ready(out);
+            }
+            self.woken = false;
         }
         Ok(added)
     }
 
     fn in_flight(&self) -> usize {
         self.slots.len() - self.free.len()
+    }
+
+    fn waker(&self) -> WinWaker {
+        WinWaker(Arc::clone(&self.port))
     }
 }
 
@@ -450,7 +518,7 @@ impl Drop for WinQueue {
             }
         }
         while self.kernel_pending > 0 {
-            match sys::get_queued(&self.port, &mut self.entries, true) {
+            match sys::get_queued(&self.port.handle, &mut self.entries, true) {
                 Ok(n) => self.process(n),
                 Err(_) => {
                     // The port cannot be waited on: buffers and handles the
@@ -463,5 +531,32 @@ impl Drop for WinQueue {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// A wake from another thread ends a wait that is blocked in the port
+    /// (an operation counted in the kernel, none completing): the wait
+    /// returns, having added nothing. Without a working waker it would block
+    /// forever.
+    #[test]
+    fn test_a_wake_ends_a_blocked_wait() {
+        let mut q = WinQueue::new(QueueConfig::default()).unwrap();
+        // Pretend one operation is in the kernel, so `wait` blocks on the
+        // port; nothing will ever complete it.
+        q.kernel_pending = 1;
+        let w = q.waker();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            w.wake();
+        });
+        let mut out = CompletionBuf::with_capacity(4);
+        assert_eq!(q.wait(1, &mut out).unwrap(), 0);
+        t.join().unwrap();
+        q.kernel_pending = 0;
     }
 }

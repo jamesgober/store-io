@@ -8,12 +8,11 @@
 //! (provision, release, lookup by name); reads and writes of region data never
 //! take it.
 
-use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use store_io_buf::{BufPool, PoolConfig};
 use store_io_core::class::{DurabilityClass, ReceiptLabel};
-use store_io_core::decide::{ClassDecision, DurableOpen, Trust, decide};
+use store_io_core::decide::{ClassDecision, DurableOpen, Trust};
 use store_io_core::errno::{Stage, classify};
 use store_io_core::error::{
     CorruptionKind, Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op, OsError,
@@ -21,21 +20,16 @@ use store_io_core::error::{
 };
 use store_io_core::evidence::Evidence;
 use store_io_core::id::{Generation, RegionId, VolumeId};
-use store_io_format::fill::fill_keyed_v1;
-use store_io_format::meta::{
-    FillPattern, REGION_META_LEN, RegionKind, RegionMeta, RegionName, RegionState, TableEntry,
-    VOLUME_META_LEN, VolumeMeta, decode_table, encode_table,
-};
-use store_io_format::pair::Winner;
-use store_io_platform::{FileMode, FileName, IoOp, Platform, Queue, QueueConfig};
+use store_io_format::meta::{RegionKind, RegionName, TableEntry, VolumeMeta};
+use store_io_platform::{FileName, IoOp, Platform, Queue, QueueConfig};
 
 use crate::domain::Domain;
 use crate::exec::{Lane, QueueSet, run};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
-use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT, choose_log2_block, region_object};
-use crate::slots::{NextSlot, PairAt, PairRead, plan_next, read_pair, write_slot};
-use crate::space::{Accounting, Reservation, lock_acct, no_space};
+use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT, region_object};
+use crate::slots::{NextSlot, PairAt, PairRead, write_slot};
+use crate::space::Accounting;
 
 /// The container file name inside the store directory.
 pub const CONTAINER: &str = "store.sio";
@@ -284,9 +278,6 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) epoch: u64,
 }
 
-/// Source of [`Inner::epoch`].
-static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
 /// A store: one container file on one device.
 pub struct Store<P: Platform> {
     pub(crate) inner: Arc<Inner<P>>,
@@ -311,19 +302,11 @@ impl<P: Platform> Clone for Store<P> {
     }
 }
 
-fn io(op: Op, raw: OsError) -> Error {
+pub(crate) fn io(op: Op, raw: OsError) -> Error {
     Error::Io {
         op,
         raw,
         ctx: ErrorContext::default(),
-    }
-}
-
-fn not_found_or(op: Op, raw: OsError, what: Named) -> Error {
-    if store_io_core::errno::is_not_found(raw) {
-        Error::NotFound { what }
-    } else {
-        io(op, raw)
     }
 }
 
@@ -334,7 +317,7 @@ pub(crate) fn lock_meta(m: &Mutex<Meta>) -> MutexGuard<'_, Meta> {
 /// A random 128-bit identity. Uniqueness matters, secrecy does not: the
 /// standard library's OS-seeded hasher keys, mixed with the clock and the
 /// process id through SplitMix64.
-fn random_uuid() -> [u8; 16] {
+pub(crate) fn random_uuid() -> [u8; 16] {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u128(
@@ -359,484 +342,6 @@ impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
-    /// Creates a new store in `path` (the directory is created if missing).
-    ///
-    /// The device is probed first; a durable open on an unsafe or unverified
-    /// device is refused (and nothing is left behind) unless `opts.trust`
-    /// attests or overrides it.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::AlreadyExists`] if a store is already there;
-    /// [`Error::UnsafeDevice`] / [`Error::Unverified`] on refusal;
-    /// [`Error::Io`] / [`Error::DurabilityUnknown`] on platform failures.
-    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
-        let dir = platform
-            .open_dir(path, true)
-            .map_err(|e| io(Op::Create, e))?;
-        let name = container_name()?;
-        let (file, lock) = match platform.create_file(&dir, &name) {
-            Ok(file) => {
-                let lock = platform.lock_exclusive(&file).map_err(|_| Error::Locked)?;
-                (file, lock)
-            }
-            Err(e) if store_io_core::errno::is_already_exists(e) => {
-                Self::reclaim_abandoned(&platform, &dir, &name, &opts)?
-            }
-            Err(e) => return Err(io(Op::Create, e)),
-        };
-        let built = Self::build_new(&platform, &dir, &file, &opts);
-        match built {
-            Ok((meta, report, layout, policy, pool, queues)) => {
-                if let Err(e) = platform.sync_dir(&dir) {
-                    return Err(Error::DurabilityUnknown {
-                        op: Op::SyncDir,
-                        raw: Some(e),
-                        ctx: ErrorContext::default(),
-                    });
-                }
-                let volume = report.volume;
-                Ok(Self::assemble(
-                    platform,
-                    dir,
-                    file,
-                    lock,
-                    volume,
-                    layout,
-                    policy,
-                    pool,
-                    queues,
-                    meta,
-                    Vec::new(),
-                    report,
-                    false,
-                    1,
-                    opts,
-                ))
-            }
-            Err(e) => {
-                drop(lock);
-                drop(file);
-                let _removed = platform.unlink(&dir, &name);
-                let _synced = platform.sync_dir(&dir);
-                Err(e)
-            }
-        }
-    }
-
-    /// A container left by a create that never finished (a crash before its
-    /// metadata was durable) is taken over by the next create; anything else
-    /// is a store and stays untouched (`AlreadyExists`). Abandoned means: no
-    /// one holds its lock, it is no longer than the largest metadata area,
-    /// and every block of it was read in full without finding a single slot
-    /// header whose header CRC verifies (D-068). A read error, an empty pool
-    /// or any verified header (a damaged store, or one of a newer format)
-    /// proves nothing, so the container is left untouched.
-    fn reclaim_abandoned(
-        platform: &P,
-        dir: &P::Dir,
-        name: &FileName,
-        opts: &StoreOptions,
-    ) -> Result<(P::File, P::Lock), Error> {
-        let exists = || Error::AlreadyExists { what: Named::Store };
-        let file = platform
-            .open_file(dir, name, FileMode::ReadWrite)
-            .map_err(|_| exists())?;
-        let lock = platform.lock_exclusive(&file).map_err(|_| exists())?;
-        let largest_metadata = 4u64 << crate::layout::MAX_LOG2_BLOCK;
-        if platform.size(&file).map_err(|e| io(Op::Open, e))? > largest_metadata {
-            return Err(exists());
-        }
-        let evidence = platform.probe(dir, &file).map_err(|e| io(Op::Probe, e))?;
-        let boot_pool = make_pool(
-            &evidence,
-            &Layout {
-                log2_block: crate::layout::MAX_LOG2_BLOCK,
-                log2_table: crate::layout::MAX_LOG2_BLOCK,
-            },
-            opts,
-        )?;
-        let queues = make_queues(platform, opts)?;
-        let len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
-        let holds = {
-            let mut q = queues.get(0);
-            holds_slot_header(&mut q, &file, &boot_pool, len)
-        };
-        if holds != Some(false) {
-            return Err(exists());
-        }
-        platform.set_len(&file, 0).map_err(|e| io(Op::Create, e))?;
-        Ok((file, lock))
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn build_new(
-        platform: &P,
-        dir: &P::Dir,
-        file: &P::File,
-        opts: &StoreOptions,
-    ) -> Result<
-        (
-            Meta,
-            StoreReport,
-            Layout,
-            Policy,
-            BufPool,
-            QueueSet<P::Queue>,
-        ),
-        Error,
-    > {
-        let evidence = platform.probe(dir, file).map_err(|e| io(Op::Probe, e))?;
-        let decision = decide(&evidence, &opts.trust);
-        refuse(&decision)?;
-        let layout = Layout {
-            log2_block: choose_log2_block(&evidence, opts.block_size),
-            log2_table: opts
-                .log2_table_slot
-                .clamp(choose_log2_block(&evidence, opts.block_size), 16),
-        };
-        let policy = policy_of(&decision);
-        let pool = make_pool(&evidence, &layout, opts)?;
-        let queues = make_queues(platform, opts)?;
-        let volume = VolumeId::from_bytes(random_uuid());
-        let header_len = layout.data_start();
-        platform
-            .allocate(file, header_len)
-            .map_err(|e| space_err(Op::Allocate, e, 0))?;
-        let vmeta = VolumeMeta {
-            log2_block_size: layout.log2_block,
-            log2_table_slot_size: layout.log2_table,
-            device_index: 0,
-            owner_generation: 1,
-            table_offset: layout.table_slots().0,
-            created_unix_s: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-            features: 0,
-        };
-        let mut vbuf = [0u8; VOLUME_META_LEN];
-        let _len = vmeta.encode(&mut vbuf).map_err(|_| meta_err())?;
-        let mut tbuf = vec![0u8; layout.table() as usize];
-        let tlen = encode_table(&mut tbuf, 0, &[]).map_err(|_| meta_err())?;
-        let vat = pair_volume(volume, &layout);
-        let tat = pair_table(volume, &layout);
-        let empty = PairRead {
-            report: store_io_format::pair::decide(
-                store_io_format::slot::SlotStatus::Blank,
-                store_io_format::slot::SlotStatus::Blank,
-            ),
-            payload: None,
-            media_error: false,
-        };
-        let mut q = queues.get(0);
-        let next_v = plan_next(&empty, &vbuf, 1)?;
-        let volume_slot = write_slot(&mut q, file, &pool, &vat, &next_v, false)?;
-        let next_t = plan_next(&empty, &tbuf[..tlen], 1)?;
-        let table_slot = write_slot(&mut q, file, &pool, &tat, &next_t, false)?;
-        drop(q);
-        platform
-            .flush_all(file)
-            .map_err(|e| Error::DurabilityUnknown {
-                op: Op::FlushAll,
-                raw: Some(e),
-                ctx: ErrorContext::default(),
-            })?;
-        // The in-memory state is what was written, not a read-back (D-069).
-        let volume_pair = empty.after(volume_slot);
-        let table_pair = empty.after(table_slot);
-        let report = StoreReport {
-            evidence,
-            decision,
-            block_size: layout.block(),
-            table_capacity: layout.table_capacity(),
-            volume,
-            owner_generation: 1,
-            read_only: false,
-            unavailable: Vec::new(),
-        };
-        let meta = Meta {
-            volume: vmeta,
-            volume_pair,
-            table_pair,
-            next_region_id: 0,
-            entries: Vec::new(),
-            container_len: header_len,
-        };
-        Ok((meta, report, layout, policy, pool, queues))
-    }
-
-    /// Opens an existing store for reading and writing.
-    ///
-    /// Takes the ownership lock, makes a dead owner's completed writes
-    /// durable (one full flush), reads the metadata, verifies every ready
-    /// region, and bumps the owner generation. Modifies no caller bytes.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::NotFound`], [`Error::Locked`], refusal errors,
-    /// [`Error::Corruption`] for unreadable or foreign metadata,
-    /// [`Error::Unsupported`] for a newer format.
-    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
-        Self::open_inner(platform, path, opts, false)
-    }
-
-    /// Opens an existing store read-only: no write rights, nothing modified,
-    /// no refusal on unsafe or unverified devices (reading is always allowed).
-    ///
-    /// # Errors
-    ///
-    /// As [`Store::open`], without the refusal errors.
-    pub fn open_readonly(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
-        Self::open_inner(platform, path, opts, true)
-    }
-
-    fn open_inner(
-        platform: P,
-        path: &Path,
-        opts: StoreOptions,
-        read_only: bool,
-    ) -> Result<Self, Error> {
-        let dir = platform
-            .open_dir(path, false)
-            .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
-        let name = container_name()?;
-        // A read-only open needs no write rights (a read-only mount, a
-        // backup copy): one read-only handle and the shared lock, which
-        // other readers may hold too and which excludes the writer (D-092).
-        let mode = if read_only {
-            FileMode::ReadOnly
-        } else {
-            FileMode::ReadWrite
-        };
-        let file = platform
-            .open_file(&dir, &name, mode)
-            .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
-        let lock = if read_only {
-            platform.lock_shared(&file)
-        } else {
-            platform.lock_exclusive(&file)
-        }
-        .map_err(|_| Error::Locked)?;
-        let evidence = platform.probe(&dir, &file).map_err(|e| io(Op::Probe, e))?;
-        let decision = decide(&evidence, &opts.trust);
-        if !read_only {
-            refuse(&decision)?;
-            // Drain a dead owner's completed-but-unflushed writes before
-            // reading any slot (a later write to the other slot could
-            // otherwise lose both copies at the next power cut).
-            platform
-                .flush_all(&file)
-                .map_err(|e| Error::DurabilityUnknown {
-                    op: Op::FlushAll,
-                    raw: Some(e),
-                    ctx: ErrorContext::default(),
-                })?;
-        }
-        let policy = policy_of(&decision);
-        let queues = make_queues(&platform, &opts)?;
-        let container_len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
-        // Geometry is in the volume record; the record's own location depends
-        // on it, so try every legal block size.
-        let boot_pool = make_pool(
-            &evidence,
-            &Layout {
-                log2_block: 16,
-                log2_table: 16,
-            },
-            &opts,
-        )?;
-        let (volume, layout, vmeta, volume_pair) = {
-            let mut q = queues.get(0);
-            find_volume(&mut q, &file, &boot_pool)?
-        };
-        let pool = make_pool(&evidence, &layout, &opts)?;
-        let tat = pair_table(volume, &layout);
-        let mut q = queues.get(0);
-        let table_pair = read_pair(&mut q, &file, &pool, &tat)?;
-        let table_bytes = winner_payload(&table_pair)?;
-        let table = decode_table(&table_bytes, layout.block()).map_err(|_| corrupt())?;
-        let next_region_id = table.next_region_id;
-        let entries: Vec<TableEntry> = table.iter().collect();
-        let mut regions = Vec::new();
-        // A region that fails any check below is reported, with the reason,
-        // and never used as ready (D-090).
-        let mut unavailable = Vec::new();
-        for e in entries.iter().filter(|e| e.state == RegionState::Ready) {
-            let mut skip = |reason| {
-                unavailable.push(UnavailableRegion {
-                    name: e.name.as_str().to_owned(),
-                    id: RegionId::from_raw(e.region_id),
-                    kind: e.kind,
-                    reason,
-                });
-            };
-            let end = layout
-                .extent(e.data_size)
-                .and_then(|l| e.offset.checked_add(l))
-                .ok_or_else(corrupt)?;
-            if end > container_len {
-                // The table names space the container does not hold.
-                skip(Unavailable::ContainerShort {
-                    needed: end,
-                    actual: container_len,
-                });
-                continue;
-            }
-            let at = pair_region(volume, &layout, e);
-            let header = read_pair(&mut q, &file, &pool, &at)?;
-            let (Some(bytes), Some((_, info))) =
-                (header.payload.clone(), header.report.winner_info())
-            else {
-                skip(Unavailable::HeaderUnreadable);
-                continue;
-            };
-            let Ok(rm) = RegionMeta::decode(&bytes) else {
-                skip(Unavailable::HeaderInvalid);
-                continue;
-            };
-            if rm.region_id != e.region_id || rm.kind != e.kind {
-                skip(Unavailable::HeaderMismatch);
-                continue;
-            }
-            if rm.state != RegionState::Ready {
-                skip(Unavailable::HeaderReleased);
-                continue;
-            }
-            let Some(generation) = Generation::from_raw(info.generation) else {
-                skip(Unavailable::HeaderInvalid);
-                continue;
-            };
-            let frontier = (e.kind == RegionKind::Append).then(|| {
-                AppendFrontier::new(
-                    0,
-                    e.data_size,
-                    u32::from(layout.log2_block),
-                    opts.append_ring,
-                )
-            });
-            regions.push(Arc::new(LiveRegion {
-                id: RegionId::from_raw(e.region_id),
-                name: e.name,
-                kind: e.kind,
-                generation,
-                data_offset: e.offset + 2 * layout.block(),
-                data_size: e.data_size,
-                header: Mutex::new(header),
-                frontier,
-                positioned: std::sync::atomic::AtomicBool::new(false),
-                gate: Gate::new(),
-            }));
-        }
-        drop(q);
-        let mut meta = Meta {
-            volume: vmeta,
-            volume_pair,
-            table_pair,
-            next_region_id,
-            entries,
-            container_len,
-        };
-        let owner_generation = if read_only {
-            0
-        } else {
-            let og = meta
-                .volume
-                .owner_generation
-                .checked_add(1)
-                .ok_or_else(corrupt)?;
-            let mut vm = meta.volume;
-            vm.owner_generation = og;
-            let mut vbuf = [0u8; VOLUME_META_LEN];
-            let _len = vm.encode(&mut vbuf).map_err(|_| meta_err())?;
-            let vat = pair_volume(volume, &layout);
-            let mut q = queues.get(0);
-            let next = plan_next(&meta.volume_pair, &vbuf, og)?;
-            let domain = Domain::new();
-            meta.volume_pair = durable_slot::<P>(
-                &mut q,
-                &file,
-                &pool,
-                &vat,
-                &meta.volume_pair,
-                &next,
-                &policy,
-                &domain,
-            )?;
-            meta.volume = vm;
-            og
-        };
-        let report = StoreReport {
-            evidence,
-            decision,
-            block_size: layout.block(),
-            table_capacity: layout.table_capacity(),
-            volume,
-            owner_generation,
-            read_only,
-            unavailable,
-        };
-        Ok(Self::assemble(
-            platform,
-            dir,
-            file,
-            lock,
-            volume,
-            layout,
-            policy,
-            pool,
-            queues,
-            meta,
-            regions,
-            report,
-            read_only,
-            owner_generation,
-            opts,
-        ))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn assemble(
-        platform: P,
-        dir: P::Dir,
-        file: P::File,
-        lock: P::Lock,
-        volume: VolumeId,
-        layout: Layout,
-        policy: Policy,
-        pool: BufPool,
-        queues: QueueSet<P::Queue>,
-        meta: Meta,
-        regions: Vec<Arc<LiveRegion>>,
-        report: StoreReport,
-        read_only: bool,
-        owner_generation: u64,
-        opts: StoreOptions,
-    ) -> Self {
-        let acct = Accounting::from_entries(&meta.entries, layout.block());
-        Self {
-            inner: Arc::new(Inner {
-                platform,
-                _dir: dir,
-                file,
-                _lock: lock,
-                volume,
-                layout,
-                policy,
-                domain: Domain::new(),
-                pool,
-                queues,
-                meta: Mutex::new(meta),
-                regions: Mutex::new(regions),
-                report,
-                read_only,
-                owner_generation,
-                opts,
-                acct: Mutex::new(acct),
-                epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            }),
-        }
-    }
-
     /// What the store learned about its device and what it decided.
     #[must_use]
     pub fn report(&self) -> &StoreReport {
@@ -930,371 +435,6 @@ where
     pub fn unavailable_regions(&self) -> Vec<UnavailableRegion> {
         self.inner.report.unavailable.clone()
     }
-
-    /// Provisions a region of `data_size` bytes (rounded up to the block size)
-    /// and returns its state, taking the space from `from` when given (else
-    /// under tag 0, growing the container past every outstanding
-    /// reservation).
-    pub(crate) fn provision(
-        &self,
-        name: &str,
-        kind: RegionKind,
-        data_size: u64,
-        from: Option<&mut Reservation<P>>,
-    ) -> Result<Arc<LiveRegion>, Error> {
-        let inner = &self.inner;
-        let tag = from.as_ref().map_or(0, |r| r.tag());
-        if inner.read_only {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::ReadOnly,
-                ctx: ErrorContext::default(),
-            });
-        }
-        if let Some(first) = inner.domain.poisoned() {
-            return Err(Error::Poisoned { first });
-        }
-        let rname = RegionName::new(name).map_err(|_| Error::NotWritten {
-            cause: NotWrittenCause::InvalidName,
-            ctx: ErrorContext::default(),
-        })?;
-        let block = inner.layout.block();
-        let data_size =
-            store_io_core::align::align_up(data_size, block).ok_or(Error::NotWritten {
-                cause: NotWrittenCause::TooLarge,
-                ctx: ErrorContext::default(),
-            })?;
-        if data_size / block >= u64::from(u32::MAX) {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::TooLarge,
-                ctx: ErrorContext::default(),
-            });
-        }
-        let mut meta = lock_meta(&inner.meta);
-        // Names are unique among the table's ready entries, including any
-        // region this open could not load (its header failed to verify):
-        // reusing such a name would make the table undecodable.
-        if meta
-            .entries
-            .iter()
-            .any(|e| e.state == RegionState::Ready && e.name == rname)
-        {
-            return Err(Error::AlreadyExists {
-                what: Named::Region,
-            });
-        }
-        let extent = inner.layout.extent(data_size).ok_or(Error::NotWritten {
-            cause: NotWrittenCause::TooLarge,
-            ctx: ErrorContext::default(),
-        })?;
-        // Space: a reservation must hold the extent; otherwise the tag's cap
-        // must allow it.
-        {
-            let mut acct = lock_acct(&inner.acct);
-            match &from {
-                Some(r) if extent > r.remaining() => return Err(no_space(tag)),
-                None if !acct.fits(tag, extent) => return Err(no_space(tag)),
-                _ => {}
-            }
-        }
-        // Placement. A large region's data area is aligned (see
-        // `Layout::place`). A reservation pays only for the extent: the
-        // alignment gap comes from growing the container past every
-        // reservation, and when that growth finds no space the region is
-        // placed unaligned instead, which needs no growth at all (the
-        // container already holds the reservation), so a reservation's
-        // guarantee always holds.
-        let too_large = || Error::NotWritten {
-            cause: NotWrittenCause::TooLarge,
-            ctx: ErrorContext::default(),
-        };
-        let reserved_after = {
-            let acct = lock_acct(&inner.acct);
-            match &from {
-                Some(_) => acct.reserved().saturating_sub(extent),
-                None => acct.reserved(),
-            }
-        };
-        let mut align = true;
-        let (offset, reuse) = loop {
-            let (offset, reuse, _grow) = inner
-                .layout
-                .place(&meta.entries, meta.container_len, extent, align)
-                .ok_or_else(too_large)?;
-            let end = offset.checked_add(extent).ok_or_else(too_large)?;
-            // The new table must fit its slot. Released entries stay in the
-            // table until their space is reused, so they count; a reused
-            // entry is replaced in place. Checked before any I/O.
-            if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {
-                return Err(Error::NoSpace {
-                    tag: ReserveTag::Table,
-                    ctx: ErrorContext::default(),
-                });
-            }
-            let target = self
-                .tail(&meta)
-                .max(end)
-                .checked_add(reserved_after)
-                .ok_or_else(too_large)?;
-            match self.grow_to(&mut meta, target, tag) {
-                Ok(()) => break (offset, reuse),
-                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,
-                Err(e) => return Err(e),
-            }
-        };
-        let id = meta.next_region_id;
-        let next_id = id.checked_add(1).ok_or(Error::NoSpace {
-            tag: ReserveTag::Table,
-            ctx: ErrorContext::default(),
-        })?;
-        let fill = if inner.opts.keyed_fill {
-            FillPattern::KeyedV1
-        } else {
-            FillPattern::Zeros
-        };
-        let fill_key = if fill == FillPattern::KeyedV1 {
-            random_uuid()
-        } else {
-            [0; 16]
-        };
-        // 1. Fill the header blocks and the data area with direct writes,
-        //    blanking any old header pair at this location.
-        self.fill(offset, extent, block, fill, &fill_key)?;
-        // 2. Make the fill and the size durable.
-        self.flush_all_accounted()?;
-        // 3. Verify the extent is really written and out of the page cache.
-        self.verify_ready(offset, extent)?;
-        // 4. Region header slot A, generation 1, Ready.
-        let rmeta = RegionMeta {
-            region_id: id,
-            kind,
-            state: RegionState::Ready,
-            fill,
-            data_offset: offset + 2 * block,
-            data_size,
-            fill_key,
-        };
-        let mut rbuf = [0u8; REGION_META_LEN];
-        let _len = rmeta.encode(&mut rbuf).map_err(|_| meta_err())?;
-        let entry = TableEntry {
-            region_id: id,
-            kind,
-            state: RegionState::Ready,
-            name: rname,
-            offset,
-            data_size,
-            fill,
-            tag,
-        };
-        let at = pair_region(inner.volume, &inner.layout, &entry);
-        let blank = PairRead {
-            report: store_io_format::pair::decide(
-                store_io_format::slot::SlotStatus::Blank,
-                store_io_format::slot::SlotStatus::Blank,
-            ),
-            payload: None,
-            media_error: false,
-        };
-        let next = plan_next(&blank, &rbuf, inner.owner_generation)?;
-        let header = {
-            // `durable_slot` poisons exactly when durability became unknown;
-            // an error before submission leaves the store usable.
-            let mut q = inner.queues.get(id as usize);
-            durable_slot::<P>(
-                &mut q,
-                &inner.file,
-                &inner.pool,
-                &at,
-                &blank,
-                &next,
-                &inner.policy,
-                &inner.domain,
-            )
-            .inspect_err(|_| self.wake_frontiers())?
-        };
-        // 5. Table flip adding the entry (replacing a reused released entry).
-        let mut entries = meta.entries.clone();
-        match reuse {
-            Some(i) => entries[i] = entry,
-            None => entries.push(entry),
-        }
-        self.flip_table(&mut meta, next_id, &entries)?;
-        meta.entries = entries;
-        meta.next_region_id = next_id;
-        if let Some(r) = from {
-            // Checked above against `remaining`, under the same `meta` lock.
-            r.consume(extent)?;
-        }
-        lock_acct(&inner.acct).add(&entry, block);
-        let state = Arc::new(LiveRegion {
-            id: RegionId::from_raw(id),
-            name: rname,
-            kind,
-            generation: Generation::FIRST,
-            data_offset: offset + 2 * block,
-            data_size,
-            header: Mutex::new(header),
-            frontier: (kind == RegionKind::Append).then(|| {
-                AppendFrontier::new(
-                    0,
-                    data_size,
-                    u32::from(inner.layout.log2_block),
-                    inner.opts.append_ring,
-                )
-            }),
-            positioned: std::sync::atomic::AtomicBool::new(true),
-            gate: Gate::new(),
-        });
-        inner
-            .regions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::clone(&state));
-        Ok(state)
-    }
-
-    fn fill(
-        &self,
-        offset: u64,
-        extent: u64,
-        block: u64,
-        fill: FillPattern,
-        key: &[u8; 16],
-    ) -> Result<(), Error> {
-        let inner = &self.inner;
-        let chunk = (inner.pool.max_len() as u64).min(1 << 20).max(block);
-        let mut q = inner.queues.get(0);
-        let mut at = 0u64;
-        while at < extent {
-            let len = chunk.min(extent - at);
-            let mut buf = inner
-                .pool
-                .take(len as usize)
-                .map_err(|_| Error::NotWritten {
-                    cause: NotWrittenCause::PoolExhausted,
-                    ctx: ErrorContext::default(),
-                })?;
-            // The two header blocks are always zero so no old header
-            // survives; the data area gets the pattern from its first byte,
-            // even inside a chunk that also covers the headers.
-            let dst = buf.as_mut_slice();
-            let zeros = (2 * block).saturating_sub(at).min(len) as usize;
-            dst[..zeros].fill(0);
-            match fill {
-                FillPattern::KeyedV1 => {
-                    fill_keyed_v1(key, at + zeros as u64 - 2 * block, &mut dst[zeros..]);
-                }
-                FillPattern::Zeros => dst[zeros..].fill(0),
-            }
-            let done = run(
-                &mut q,
-                IoOp::Write {
-                    file: &inner.file,
-                    offset: offset + at,
-                    buf,
-                    dsync: false,
-                },
-            )
-            .map_err(|(_, raw)| {
-                raw.map_or(
-                    Error::NotWritten {
-                        cause: NotWrittenCause::QueueFull,
-                        ctx: ErrorContext::default(),
-                    },
-                    |r| space_err(Op::Write, r, 0),
-                )
-            })?;
-            // A fill write that failed after submission stops the store
-            // (fail-stop, D-071); only running out of space is reported as
-            // `NoSpace` without poisoning: the region never became Ready.
-            match done.result {
-                Ok(n) if n as u64 == len => {}
-                Err(raw) if store_io_core::errno::is_no_space(raw) => {
-                    return Err(space_err(Op::Write, raw, 0));
-                }
-                result => {
-                    let raw = result.err();
-                    inner.domain.poison(FirstCause {
-                        op: Some(Op::Write),
-                        raw,
-                    });
-                    self.wake_frontiers();
-                    return Err(Error::DurabilityUnknown {
-                        op: Op::Write,
-                        raw,
-                        ctx: ErrorContext::default(),
-                    });
-                }
-            }
-            at += len;
-        }
-        Ok(())
-    }
-
-    fn flush_all_accounted(&self) -> Result<(), Error> {
-        let inner = &self.inner;
-        inner.platform.flush_all(&inner.file).map_err(|raw| {
-            inner.domain.poison(FirstCause {
-                op: Some(Op::FlushAll),
-                raw: Some(raw),
-            });
-            Error::DurabilityUnknown {
-                op: Op::FlushAll,
-                raw: Some(raw),
-                ctx: ErrorContext::default(),
-            }
-        })
-    }
-
-    fn verify_ready(&self, offset: u64, extent: u64) -> Result<(), Error> {
-        let inner = &self.inner;
-        let st = inner
-            .platform
-            .range_state(&inner.file, offset, extent)
-            .map_err(|e| io(Op::Probe, e))?;
-        use store_io_core::evidence::Tri;
-        let bad = st.unwritten == Tri::Yes
-            || st.shared == Tri::Yes
-            || st.cached_pages.is_some_and(|n| n > 0)
-            || st.valid_data == Tri::No;
-        if bad {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::NotReady,
-                ctx: ErrorContext::default(),
-            });
-        }
-        Ok(())
-    }
-
-    pub(crate) fn flip_table(
-        &self,
-        meta: &mut Meta,
-        next_id: u32,
-        entries: &[TableEntry],
-    ) -> Result<(), Error> {
-        let inner = &self.inner;
-        // The payload room of the table slot: the slot less its header.
-        let mut tbuf = vec![0u8; inner.layout.table() as usize - store_io_format::slot::HEADER_LEN];
-        let len = encode_table(&mut tbuf, next_id, entries).map_err(|_| Error::NoSpace {
-            tag: ReserveTag::Table,
-            ctx: ErrorContext::default(),
-        })?;
-        let tat = pair_table(inner.volume, &inner.layout);
-        let next = plan_next(&meta.table_pair, &tbuf[..len], inner.owner_generation)?;
-        let mut q = inner.queues.get(1);
-        // `durable_slot` poisons exactly when durability became unknown.
-        meta.table_pair = durable_slot::<P>(
-            &mut q,
-            &inner.file,
-            &inner.pool,
-            &tat,
-            &meta.table_pair,
-            &next,
-            &inner.policy,
-            &inner.domain,
-        )
-        .inspect_err(|_| self.wake_frontiers())?;
-        Ok(())
-    }
 }
 
 /// Writes one slot durably according to the store's policy: a `dsync` write
@@ -1342,7 +482,7 @@ pub(crate) fn flush_data<Q: Queue>(q: &mut Lane<Q>, file: &Q::File) -> Result<()
     }
 }
 
-fn container_name() -> Result<FileName, Error> {
+pub(crate) fn container_name() -> Result<FileName, Error> {
     FileName::new(CONTAINER).map_err(|_| Error::NotWritten {
         cause: NotWrittenCause::InvalidName,
         ctx: ErrorContext::default(),
@@ -1360,7 +500,7 @@ pub(crate) fn refuse(d: &ClassDecision) -> Result<(), Error> {
     }
 }
 
-fn policy_of(d: &ClassDecision) -> Policy {
+pub(crate) fn policy_of(d: &ClassDecision) -> Policy {
     let power_safe = d.class == DurabilityClass::PowerSafe;
     Policy {
         class: d.class,
@@ -1370,7 +510,11 @@ fn policy_of(d: &ClassDecision) -> Policy {
     }
 }
 
-fn make_pool(ev: &Evidence, layout: &Layout, opts: &StoreOptions) -> Result<BufPool, Error> {
+pub(crate) fn make_pool(
+    ev: &Evidence,
+    layout: &Layout,
+    opts: &StoreOptions,
+) -> Result<BufPool, Error> {
     let align = [
         4096usize,
         ev.fs.dio_mem_align as usize,
@@ -1394,7 +538,7 @@ fn make_pool(ev: &Evidence, layout: &Layout, opts: &StoreOptions) -> Result<BufP
     })
 }
 
-fn make_queues<P: Platform>(
+pub(crate) fn make_queues<P: Platform>(
     platform: &P,
     opts: &StoreOptions,
 ) -> Result<QueueSet<P::Queue>, Error> {
@@ -1425,39 +569,15 @@ pub(crate) fn space_err(op: Op, raw: OsError, tag: u32) -> Error {
     }
 }
 
-fn meta_err() -> Error {
+pub(crate) fn meta_err() -> Error {
     Error::Corruption {
         kind: store_io_core::error::CorruptionKind::Metadata,
         ctx: ErrorContext::default(),
     }
 }
 
-fn corrupt() -> Error {
+pub(crate) fn corrupt() -> Error {
     meta_err()
-}
-
-fn winner_payload(p: &PairRead) -> Result<Vec<u8>, Error> {
-    match p.report.winner {
-        Winner::Confirmed(_) | Winner::Unconfirmed(_) => p.payload.clone().ok_or_else(corrupt),
-        Winner::Refused => Err(Error::Unsupported {
-            what: store_io_core::error::Capability::FormatVersion,
-        }),
-        Winner::Fork => Err(Error::Corruption {
-            kind: store_io_core::error::CorruptionKind::Fork,
-            ctx: ErrorContext::default(),
-        }),
-        // No version left, and a slot was lost to a media error: report that
-        // (it may be transient) rather than corruption, which would invite a
-        // caller to recreate the store over its data.
-        Winner::Lost if p.media_error => Err(Error::Corruption {
-            kind: store_io_core::error::CorruptionKind::MediaError,
-            ctx: ErrorContext::default(),
-        }),
-        Winner::Empty | Winner::Lost => Err(Error::Corruption {
-            kind: store_io_core::error::CorruptionKind::HeaderCrc,
-            ctx: ErrorContext::default(),
-        }),
-    }
 }
 
 pub(crate) fn pair_volume(volume: VolumeId, l: &Layout) -> PairAt {
@@ -1490,169 +610,4 @@ pub(crate) fn pair_region(volume: VolumeId, l: &Layout, e: &TableEntry) -> PairA
         b: e.offset + l.block(),
         log2: l.log2_block,
     }
-}
-
-/// Finds the volume record by trying every legal block size.
-/// Whether some 4 KiB block of the first `len` bytes starts with a slot
-/// header whose header CRC verifies (any status past the header-CRC check:
-/// valid, foreign, misplaced, unsupported version, and so on). `None` when a
-/// block could not be read in full: nothing is proven then (D-068). Slot
-/// headers sit at block starts and blocks are at least 4 KiB, so every header
-/// starts on a 4 KiB boundary.
-fn holds_slot_header<Q: Queue>(
-    q: &mut Lane<Q>,
-    file: &Q::File,
-    pool: &BufPool,
-    len: u64,
-) -> Option<bool> {
-    use store_io_format::slot::{Expect, SlotIndex, SlotStatus, validate};
-    const SCAN: u64 = 4096;
-    let mut at = 0u64;
-    while at < len {
-        let want = SCAN.min(len - at) as usize;
-        let buf = pool.take(SCAN as usize).ok()?;
-        let done = run(
-            q,
-            IoOp::Read {
-                file,
-                offset: at,
-                buf,
-            },
-        )
-        .ok()?;
-        let mut b = done.buf?;
-        if done.result.ok()? != want {
-            return None;
-        }
-        b.as_mut_slice()[want..].fill(0);
-        let expect = Expect {
-            volume_uuid: [0; 16],
-            object_id: 0,
-            slot_offset: at,
-            slot_index: SlotIndex::A,
-            log2_slot_size: 12,
-        };
-        match validate(b.as_slice(), &expect) {
-            SlotStatus::Blank
-            | SlotStatus::BadMagic
-            | SlotStatus::BadHeaderCrc
-            | SlotStatus::BadLength
-            | SlotStatus::ReadError => {}
-            _ => return Some(true),
-        }
-        at += SCAN;
-    }
-    Some(false)
-}
-
-fn find_volume<Q: Queue>(
-    q: &mut Lane<Q>,
-    file: &Q::File,
-    pool: &BufPool,
-) -> Result<(VolumeId, Layout, VolumeMeta, PairRead), Error> {
-    // Read the first slot header at the smallest size to learn the volume id;
-    // either copy may be damaged, so try both locations per size.
-    let mut media_error = false;
-    for log2 in crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK {
-        let size = 1u64 << log2;
-        for probe_at in [0, size] {
-            let buf = pool.take(4096).map_err(|_| Error::NotWritten {
-                cause: NotWrittenCause::PoolExhausted,
-                ctx: ErrorContext::default(),
-            })?;
-            // Only an unreadable location (a media error, a short read, the
-            // end of the file) moves on to the next candidate. Any other
-            // failure is returned: treating it as "no volume here" would
-            // report a healthy store as corrupt (found by review).
-            let io = |raw| Error::Io {
-                op: Op::Read,
-                raw,
-                ctx: ErrorContext::default(),
-            };
-            let done = match run(
-                q,
-                IoOp::Read {
-                    file,
-                    offset: probe_at,
-                    buf,
-                },
-            ) {
-                Ok(d) => d,
-                Err((_, Some(raw))) => return Err(io(raw)),
-                Err((_, None)) => {
-                    return Err(Error::NotWritten {
-                        cause: NotWrittenCause::QueueFull,
-                        ctx: ErrorContext::default(),
-                    });
-                }
-            };
-            match done.result {
-                Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),
-                Ok(4096) => {}
-                Err(raw) => {
-                    media_error |= store_io_core::errno::is_media_error(raw);
-                    continue;
-                }
-                Ok(_) => continue,
-            }
-            let Some(b) = done.buf else { continue };
-            if b.as_slice()[..8] != store_io_format::slot::MAGIC {
-                continue;
-            }
-            let mut uuid = [0u8; 16];
-            uuid.copy_from_slice(&b.as_slice()[32..48]);
-            if b.as_slice()[78] != log2 {
-                continue;
-            }
-            let layout0 = Layout {
-                log2_block: log2,
-                log2_table: log2,
-            };
-            let at = pair_volume(VolumeId::from_bytes(uuid), &layout0);
-            let pair = read_pair(q, file, pool, &at)?;
-            media_error |= pair.media_error;
-            let bytes = match winner_payload(&pair) {
-                Ok(b) => b,
-                Err(Error::Unsupported { what }) => return Err(Error::Unsupported { what }),
-                Err(_) => continue,
-            };
-            // A longer record, or a feature this version does not know, is a
-            // newer format: refused as unsupported (and never rewritten),
-            // not reported as corruption.
-            let newer = Error::Unsupported {
-                what: store_io_core::error::Capability::FormatVersion,
-            };
-            if bytes.len() > store_io_format::meta::VOLUME_META_LEN {
-                return Err(newer);
-            }
-            let vm = VolumeMeta::decode(&bytes).map_err(|e| match e {
-                store_io_format::meta::MetaError::Field("features") => newer,
-                _ => corrupt(),
-            })?;
-            if vm.log2_block_size != log2 {
-                continue;
-            }
-            let layout = Layout {
-                log2_block: log2,
-                log2_table: vm.log2_table_slot_size,
-            };
-            if vm.table_offset != layout.table_slots().0 {
-                return Err(corrupt());
-            }
-            return Ok((VolumeId::from_bytes(uuid), layout, vm, pair));
-        }
-    }
-    // No volume record found. If a read failed on the media on the way (a
-    // probe or a slot of a candidate pair), that is the answer: it may be
-    // transient, and "corrupt" would invite a caller to recreate the store
-    // over its data. A media error at a candidate that was never the record
-    // also ends here; erring toward "do not recreate" is deliberate.
-    Err(Error::Corruption {
-        kind: if media_error {
-            store_io_core::error::CorruptionKind::MediaError
-        } else {
-            store_io_core::error::CorruptionKind::HeaderCrc
-        },
-        ctx: ErrorContext::default(),
-    })
 }

@@ -12,6 +12,7 @@ Usage: python3 dev/tools/mutate.py [index ...]
 """
 import os
 import subprocess
+import time
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,9 +41,9 @@ M = [
  ("crates/store-io-engine/src/gate.rs", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 {", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 && false {"),
  ("crates/store-io-engine/src/lifecycle.rs", "            .retain(|x| x.id != r.id);", "            .retain(|_| true);"),
  ("crates/store-io-engine/src/lifecycle.rs", "        entry.state = RegionState::Released;", ""),
- ("crates/store-io-engine/src/store.rs", "            .checked_add(reserved_after)", "            .checked_add(0 * reserved_after)"),
+ ("crates/store-io-engine/src/provision.rs", "            .checked_add(reserved_after)", "            .checked_add(0 * reserved_after)"),
  ("crates/store-io-engine/src/space.rs", "        t.cap.is_none_or(|cap| {", "        true || t.cap.is_none_or(|cap| {"),
- ("crates/store-io-engine/src/store.rs", "            r.consume(extent)?;", "            if false { r.consume(extent)?; }"),
+ ("crates/store-io-engine/src/provision.rs", "            r.consume(extent)?;", "            if false { r.consume(extent)?; }"),
  ("crates/store-io-engine/src/space.rs", "            a.add(e, block);", "            let _ = (e, block, &mut a);"),
  ("crates/store-io-engine/src/space.rs", "        lock_acct(&self.store.inner.acct).unreserve(self.tag, self.bytes);", ""),
  ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(&inner.meta);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(&inner.meta);\n        if !acct.fits(tag, bytes) {"),
@@ -50,22 +51,22 @@ M = [
  ("crates/store-io-engine/src/directory.rs", "            .set_len(file, len)", "            .set_len(file, len.div_ceil(4096) * 4096)"),
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::FlushAll, Some(raw)))", "            .or(Ok(()))"),
  ("crates/store-io-engine/src/directory.rs", "        let _absent_or_removed = self.platform.unlink(&self.dir, &temp);", ""),
- ("crates/store-io-engine/src/store.rs", "            .any(|e| e.state == RegionState::Ready && e.name == rname)", "            .any(|e| e.state == RegionState::Ready && e.name == rname && false)"),
- ("crates/store-io-engine/src/store.rs", "        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {", "        if false {"),
- ("crates/store-io-engine/src/store.rs", "            let zeros = (2 * block).saturating_sub(at).min(len) as usize;", "            let zeros = if at < 2 * block { len as usize } else { 0 };"),
+ ("crates/store-io-engine/src/provision.rs", "            .any(|e| e.state == RegionState::Ready && e.name == rname)", "            .any(|e| e.state == RegionState::Ready && e.name == rname && false)"),
+ ("crates/store-io-engine/src/provision.rs", "        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {", "        if false {"),
+ ("crates/store-io-engine/src/provision.rs", "            let zeros = (2 * block).saturating_sub(at).min(len) as usize;", "            let zeros = if at < 2 * block { len as usize } else { 0 };"),
  ("crates/store-io-engine/src/lifecycle.rs", ".release_range(&inner.file, r.data_offset, r.data_size, how)", ".release_range(&inner.file, r.data_offset - 2 * inner.layout.block(), r.data_size + 2 * inner.layout.block(), how)"),
- ("crates/store-io-engine/src/store.rs", "        if holds != Some(false) {", "        if holds != Some(false) && false {"),
- ("crates/store-io-engine/src/store.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", "                Err(Error::NoSpace { .. }) if align && from.is_some() && false => align = false,\n"),
+ ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) {", "        if holds != Some(false) && false {"),
+ ("crates/store-io-engine/src/provision.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", "                Err(Error::NoSpace { .. }) if align && from.is_some() && false => align = false,\n"),
  # v0.3.1 (D-068..D-072)
- ("crates/store-io-engine/src/store.rs", "        if holds != Some(false) {", "        if holds == Some(true) {"),
+ ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) {", "        if holds == Some(true) {"),
  ("crates/store-io-engine/src/slots.rs", "            Some((i, _)) if i == w.index => w.payload,", "            Some((i, _)) if i == w.index && false => w.payload,"),
  ("crates/store-io-engine/src/store.rs", "    Ok(prev.after(written))", "    let _ = written;\n    Ok(prev.clone())"),
  ("crates/store-io-engine/src/io.rs", "                Some(mut lane) => flush_data(&mut lane, file),", "                Some(_lane) => flush_data(&mut self.inner.queues.get(0), file),"),
- ("crates/store-io-engine/src/store.rs", "                    inner.domain.poison(FirstCause {\n                        op: Some(Op::Write),\n                        raw,\n                    });\n                    self.wake_frontiers();", "                    self.wake_frontiers();"),
+ ("crates/store-io-engine/src/provision.rs", "                    inner.domain.poison(FirstCause {\n                        op: Some(Op::Write),\n                        raw,\n                    });\n                    self.wake_frontiers();", "                    self.wake_frontiers();"),
  ("crates/store-io-engine/src/region.rs", "        if self.store.inner.read_only {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,", "        if self.store.inner.read_only && false {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,"),
  # D-090: unavailable regions are reported and never NotFound
  ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
- ("crates/store-io-engine/src/store.rs", "            read_only,\n            unavailable,\n        };", "            read_only,\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
+ ("crates/store-io-engine/src/open.rs", "            read_only,\n            unavailable,\n        };", "            read_only,\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
  # Read errors are classified and media errors name the exact range
  ("crates/store-io-engine/src/io.rs", "                    if !store_io_core::errno::is_media_error(raw) {", "                    if false {"),
  ("crates/store-io-engine/src/io.rs", "self.first_unreadable(r, start, end).unwrap_or((start, end));", "self.first_unreadable(r, start, end).map(|_| (start, end)).unwrap_or((start, end));"),
@@ -75,7 +76,7 @@ M = [
  # TYP-02: an already-durable receipt is counted
  ("crates/store-io-engine/src/region.rs", "            s.inner.domain.count_already_durable();", "            {}"),
  # D-092: a read-only open takes the shared lock on its read-only handle
- ("crates/store-io-engine/src/store.rs", "            platform.lock_shared(&file)", "            platform.lock_exclusive(&file)"),
+ ("crates/store-io-engine/src/open.rs", "            platform.lock_shared(&file)", "            platform.lock_exclusive(&file)"),
  # Sector-exact bisection, and the pipelined read names the exact range
  ("crates/store-io-engine/src/io.rs", "        need.next_power_of_two().min(self.block())", "        need.min(0).max(self.block())"),
  ("crates/store-io-engine/src/io.rs", "                Some((start, end)) => ctx_range(r, start, end),", "                Some(_) => c,"),
@@ -86,15 +87,15 @@ M = [
  ("crates/store-io-engine/src/scan.rs", "            Err(_) if len < self.block() => {", "            Err(_) if false => {"),
  # Second review: block-aligned halving; volume search keeps real errors; buffer released before the rescan
  ("crates/store-io-engine/src/scan.rs", "let unit = if len > block { block } else { sector };", "let unit = if len > block && false { block } else { sector };"),
- ("crates/store-io-engine/src/store.rs", "                Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),", "                Err(raw) if !crate::slots::unreadable(raw) && false => return Err(io(raw)),"),
+ ("crates/store-io-engine/src/open.rs", "                Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),", "                Err(raw) if !crate::slots::unreadable(raw) && false => return Err(io(raw)),"),
  ("crates/store-io-engine/src/io.rs", ".unwrap_or((start, end));", "?;"),
  # Final review: read_one classification on its own; volume search reports media errors
  ("crates/store-io-engine/src/slots.rs", "        Err(raw) if !unreadable(raw) => return Err(fail(raw)),", "        Err(raw) if !unreadable(raw) && false => return Err(fail(raw)),"),
- ("crates/store-io-engine/src/store.rs", "                    media_error |= store_io_core::errno::is_media_error(raw);", "                    media_error |= store_io_core::errno::is_media_error(raw) && false;"),
- ("crates/store-io-engine/src/store.rs", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN {", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN && false {"),
- ("crates/store-io-engine/src/store.rs", "store_io_format::meta::MetaError::Field(\"features\") => newer,", "store_io_format::meta::MetaError::Field(\"features\") if false => newer,"),
- ("crates/store-io-engine/src/store.rs", "            media_error |= pair.media_error;", "            media_error |= pair.media_error && false;"),
- ("crates/store-io-engine/src/store.rs", "        Winner::Lost if p.media_error => Err(Error::Corruption {", "        Winner::Lost if p.media_error && false => Err(Error::Corruption {"),
+ ("crates/store-io-engine/src/open.rs", "                    media_error |= store_io_core::errno::is_media_error(raw);", "                    media_error |= store_io_core::errno::is_media_error(raw) && false;"),
+ ("crates/store-io-engine/src/open.rs", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN {", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN && false {"),
+ ("crates/store-io-engine/src/open.rs", "store_io_format::meta::MetaError::Field(\"features\") => newer,", "store_io_format::meta::MetaError::Field(\"features\") if false => newer,"),
+ ("crates/store-io-engine/src/open.rs", "            media_error |= pair.media_error;", "            media_error |= pair.media_error && false;"),
+ ("crates/store-io-engine/src/open.rs", "        Winner::Lost if p.media_error => Err(Error::Corruption {", "        Winner::Lost if p.media_error && false => Err(Error::Corruption {"),
 ]
 
 def kill_stuck_tests():
@@ -123,20 +124,35 @@ def main():
             fh.write(src.replace(a, b))
         try:
             try:
-                r = subprocess.run(["cargo", "test", "-q", "-p", "store-io-engine", "-p", "store-io-sim"],
-                                   cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
-                out = r.stdout + r.stderr
-                killed = r.returncode != 0
-                # Any build failure (an `error[...]` or a lint denied by
-                # `deny(warnings)`) means the mutation never ran: invalid.
-                build_failed = "error[" in out or "could not compile" in out
-                why = "compile error" if build_failed else ("tests failed" if killed else "SURVIVED")
+                # Build first, test second, so a build failure can never be
+                # mistaken for a caught mutation. A failed build is retried
+                # once after clearing stuck test binaries (on Windows a binary
+                # still locked by the previous run can fail a good build); a
+                # second failure means the mutation never ran: invalid.
+                pkgs = ["-p", "store-io-engine", "-p", "store-io-sim"]
+                for attempt in range(2):
+                    built = subprocess.run(["cargo", "test", "-q", "--no-run"] + pkgs,
+                                       cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
+                    if built.returncode == 0:
+                        break
+                    kill_stuck_tests()
+                    time.sleep(2)
+                if built.returncode != 0:
+                    out = built.stdout + built.stderr
+                    first = next((l for l in out.splitlines() if l.startswith("error")), "")
+                    why = f"compile error ({first[:120]})"
+                    killed = False
+                else:
+                    r = subprocess.run(["cargo", "test", "-q"] + pkgs,
+                                       cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
+                    killed = r.returncode != 0
+                    why = "tests failed" if killed else "SURVIVED"
             except subprocess.TimeoutExpired:
                 # A hang is a caught mutation; clear the stuck test binaries.
                 kill_stuck_tests()
                 killed, why = True, "tests hung (caught)"
             print(f"[{i}] {f}: {why}", flush=True)
-            if why == "compile error":
+            if why.startswith("compile error"):
                 # A mutation that does not compile tests nothing.
                 invalid.append(i)
             elif not killed:

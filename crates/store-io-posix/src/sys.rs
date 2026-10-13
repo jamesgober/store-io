@@ -334,6 +334,26 @@ pub(crate) fn ofd_setlk(fd: RawFd, lock_type: c_int) -> RawResult<()> {
     check(unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &raw const fl) })
 }
 
+/// `clock_gettime(CLOCK_MONOTONIC_COARSE)` in milliseconds: a vDSO read of
+/// the kernel's tick, no system call. 0 if the call fails (it cannot for a
+/// valid clock id and pointer).
+pub(crate) fn monotonic_coarse_ms() -> u64 {
+    // Zeroed rather than a struct literal: some 32-bit targets add private
+    // padding fields to `timespec`.
+    let mut ts = MaybeUninit::<libc::timespec>::zeroed();
+    // SAFETY: clock_gettime(2) writes one `struct timespec` through the
+    // pointer, which is valid and exclusively borrowed for the call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_COARSE, ts.as_mut_ptr()) };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: zero-initialised, and filled by the successful call above.
+    let ts = unsafe { ts.assume_init() };
+    (ts.tv_sec as u64)
+        .saturating_mul(1000)
+        .saturating_add(ts.tv_nsec as u64 / 1_000_000)
+}
+
 /// `flock(2)`.
 pub(crate) fn flock(fd: RawFd, operation: c_int) -> RawResult<()> {
     // SAFETY: flock(2) takes a descriptor and an operation.

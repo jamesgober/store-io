@@ -290,3 +290,21 @@ fn test_a_write_protected_store_opens_read_only_for_two_readers() {
         assert!(writable.is_err(), "a writable open of a read-only file");
     }
 }
+
+/// The platform's coarse clock (`GetTickCount64`, `CLOCK_MONOTONIC_COARSE`)
+/// advances with real time: `oldest_outstanding` ages depend on it.
+#[test]
+fn test_the_coarse_clock_advances_with_real_time() {
+    use store_io_platform::Platform;
+    let p = store_io::NativePlatform::new();
+    let t0 = p.monotonic_ms();
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let t1 = p.monotonic_ms();
+    // Coarse resolution is at most 16 ms; allow a generous margin.
+    let moved = t1.wrapping_sub(t0);
+    assert!(
+        t1 >= t0 + 200,
+        "the clock advanced only {moved} ms in 250 ms"
+    );
+    assert!(moved < 10_000, "the clock jumped {moved} ms in 250 ms");
+}

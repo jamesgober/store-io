@@ -297,6 +297,7 @@ where
                 acct: Mutex::new(acct),
                 epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 observer: Observer::new(),
+                seen: Mutex::new(crate::stats::Seen::default()),
             }),
         }
     }

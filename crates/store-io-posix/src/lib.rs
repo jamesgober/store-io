@@ -233,6 +233,10 @@ mod platform {
             PosixLock::acquire(file, true)
         }
 
+        fn monotonic_ms(&self) -> u64 {
+            sys::monotonic_coarse_ms()
+        }
+
         fn allocate(&self, file: &PosixFile, len: u64) -> RawResult<()> {
             alloc::allocate(file, len)
         }

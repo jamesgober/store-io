@@ -15,7 +15,7 @@
 //! queue, or the returner sees the waiter and signals under the same mutex.
 
 use std::ops::{Deref, DerefMut};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use store_io_core::observe::{Counter, Observer};
 
 use store_io_core::error::OsError;
@@ -33,6 +33,11 @@ use crate::sync::{AtomicU64, Ordering};
 pub(crate) struct QueueSet<Q> {
     queues: Box<[Mutex<Lane<Q>>]>,
     flush: Option<Mutex<Lane<Q>>>,
+    /// One busy mark per shared lane, then one for the flush lane (D-095),
+    /// each alone on its cache line and shared with its lane: odd while the
+    /// lane is held, advanced by 2 at each completion. Only the holder
+    /// writes it; a watchdog reads it without the lock.
+    marks: Box<[Arc<LaneMark>]>,
     waiters: AtomicU64,
     wake: Mutex<()>,
     returned: Condvar,
@@ -42,15 +47,83 @@ pub(crate) struct QueueSet<Q> {
 pub(crate) struct Lane<Q> {
     pub(crate) queue: Q,
     pub(crate) done: CompletionBuf,
+    mark: Arc<LaneMark>,
 }
+
+impl<Q> Lane<Q> {
+    /// An operation on this lane completed: whatever is outstanding now is
+    /// a newer operation, so `oldest_outstanding` ages it from now, not
+    /// from when the lane was taken (D-095). Called by the holder only.
+    #[inline]
+    pub(crate) fn progress(&self) {
+        self.mark.advance();
+    }
+}
+
+impl LaneMark {
+    /// See [`Lane::progress`].
+    #[inline]
+    fn advance(&self) {
+        let v = self.0.load(Ordering::Relaxed);
+        self.0.store(v.wrapping_add(2), Ordering::Relaxed);
+    }
+}
+
+/// A lane's busy mark, alone on its cache line so that lanes used by
+/// different threads never share one.
+#[repr(align(128))]
+pub(crate) struct LaneMark(AtomicU64);
 
 /// A borrowed queue; returning it wakes one caller waiting for a queue.
 ///
 /// Fields drop in declaration order: the queue's lock is released first,
 /// then [`Notify`] wakes a waiter, which therefore always finds it free.
 pub(crate) struct LaneGuard<'a, Q> {
+    // Declared first, so the mark is back to even before the lock is
+    // released: only the holder may write it.
+    _mark: Mark<'a>,
     guard: MutexGuard<'a, Lane<Q>>,
     _notify: Notify<'a, Q>,
+}
+
+/// The flush lane, borrowed by the flush leader.
+pub(crate) struct FlushGuard<'a, Q> {
+    // As in `LaneGuard`: the mark goes back to even before the unlock.
+    _mark: Mark<'a>,
+    guard: MutexGuard<'a, Lane<Q>>,
+}
+
+impl<Q> Deref for FlushGuard<'_, Q> {
+    type Target = Lane<Q>;
+
+    fn deref(&self) -> &Lane<Q> {
+        &self.guard
+    }
+}
+
+impl<Q> DerefMut for FlushGuard<'_, Q> {
+    fn deref_mut(&mut self) -> &mut Lane<Q> {
+        &mut self.guard
+    }
+}
+
+/// A lane's busy mark while it is held: odd from `take` until dropped.
+struct Mark<'a>(&'a AtomicU64);
+
+impl<'a> Mark<'a> {
+    /// Called with the lane's lock held: no other thread writes the mark.
+    fn take(mark: &'a AtomicU64) -> Self {
+        let v = mark.load(Ordering::Relaxed);
+        mark.store(v.wrapping_add(1), Ordering::Relaxed);
+        Self(mark)
+    }
+}
+
+impl Drop for Mark<'_> {
+    fn drop(&mut self) {
+        let v = self.0.load(Ordering::Relaxed);
+        self.0.store(v.wrapping_add(1), Ordering::Relaxed);
+    }
 }
 
 /// Wakes one waiting caller, if any, when dropped.
@@ -93,15 +166,23 @@ impl<Q: Queue> QueueSet<Q> {
     }
 
     fn build(queues: Vec<Q>, flush: Option<Q>, depth: usize) -> Self {
-        let lane = |queue| {
+        // One mark per shared lane, then the flush lane's (which stays even
+        // when there is no flush lane).
+        let marks: Box<[Arc<LaneMark>]> = (0..=queues.len())
+            .map(|_| Arc::new(LaneMark(AtomicU64::new(0))))
+            .collect();
+        let lane = |(queue, mark): (Q, &Arc<LaneMark>)| {
             Mutex::new(Lane {
                 queue,
                 done: CompletionBuf::with_capacity(depth.max(1)),
+                mark: Arc::clone(mark),
             })
         };
+        let n = queues.len();
         Self {
-            queues: queues.into_iter().map(lane).collect(),
-            flush: flush.map(lane),
+            queues: queues.into_iter().zip(marks.iter()).map(lane).collect(),
+            flush: flush.map(|q| lane((q, &marks[n]))),
+            marks,
             waiters: AtomicU64::new(0),
             wake: Mutex::new(()),
             returned: Condvar::new(),
@@ -110,35 +191,49 @@ impl<Q: Queue> QueueSet<Q> {
 
     /// The flush lane, for the thread holding flush leadership only; `None`
     /// when the set has none.
-    pub(crate) fn flush_lane(&self) -> Option<MutexGuard<'_, Lane<Q>>> {
-        self.flush
-            .as_ref()
-            .map(|m| m.lock().unwrap_or_else(PoisonError::into_inner))
+    pub(crate) fn flush_lane(&self) -> Option<FlushGuard<'_, Q>> {
+        self.flush.as_ref().map(|m| {
+            let guard = m.lock().unwrap_or_else(PoisonError::into_inner);
+            FlushGuard {
+                _mark: Mark::take(&self.marks[self.queues.len()].0),
+                guard,
+            }
+        })
     }
 
-    fn try_any(&self, hint: usize) -> Option<MutexGuard<'_, Lane<Q>>> {
+    /// Every lane's busy mark: the shared lanes in order, then the flush
+    /// lane (odd while held; always even when the set has none).
+    pub(crate) fn marks(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
+        self.marks.iter().map(|m| m.0.load(Ordering::Relaxed))
+    }
+
+    fn try_any(&self, hint: usize) -> Option<(usize, MutexGuard<'_, Lane<Q>>)> {
         let n = self.queues.len();
-        (0..n).find_map(|i| match self.queues[(hint + i) % n].try_lock() {
-            Ok(g) => Some(g),
-            Err(TryLockError::Poisoned(p)) => Some(p.into_inner()),
-            Err(TryLockError::WouldBlock) => None,
+        (0..n).find_map(|i| {
+            let at = (hint + i) % n;
+            match self.queues[at].try_lock() {
+                Ok(g) => Some((at, g)),
+                Err(TryLockError::Poisoned(p)) => Some((at, p.into_inner())),
+                Err(TryLockError::WouldBlock) => None,
+            }
         })
     }
 
     /// Borrows a free queue, starting the search at `hint`; when all are
     /// busy, waits for the first one returned.
     pub(crate) fn get(&self, hint: usize) -> LaneGuard<'_, Q> {
-        if let Some(guard) = self.try_any(hint) {
+        if let Some((at, guard)) = self.try_any(hint) {
             return LaneGuard {
+                _mark: Mark::take(&self.marks[at].0),
                 guard,
                 _notify: Notify { set: self },
             };
         }
         let _registered = self.waiters.fetch_add(1, Ordering::AcqRel);
         let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
-        let guard = loop {
-            if let Some(guard) = self.try_any(hint) {
-                break guard;
+        let (at, guard) = loop {
+            if let Some(found) = self.try_any(hint) {
+                break found;
             }
             wake = self
                 .returned
@@ -148,6 +243,7 @@ impl<Q: Queue> QueueSet<Q> {
         drop(wake);
         let _unregistered = self.waiters.fetch_sub(1, Ordering::AcqRel);
         LaneGuard {
+            _mark: Mark::take(&self.marks[at].0),
             guard,
             _notify: Notify { set: self },
         }
@@ -173,8 +269,11 @@ pub(crate) fn run<Q: Queue>(
     const TAG: u64 = 0x5110;
     slot.queue.submit(op, TAG).map_err(|r| (r.buf, r.raw))?;
     loop {
+        // A borrow of the mark beside the drain of the completions.
+        let mark = &slot.mark;
         for c in slot.done.drain() {
             if c.tag == TAG {
+                mark.advance();
                 return Ok(Done {
                     buf: c.buf,
                     result: c.result,
@@ -308,6 +407,7 @@ pub(crate) fn pump<Q: Queue>(
         if let Err(raw) = lane.queue.wait(1, &mut lane.done) {
             return Pumped::Failed(Some(raw));
         }
+        lane.progress();
         for c in lane.done.drain() {
             in_flight = in_flight.saturating_sub(1);
             match (c.result, c.buf) {

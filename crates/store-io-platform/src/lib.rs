@@ -354,6 +354,11 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error.
     fn sync_dir(&self, dir: &Self::Dir) -> RawResult<()>;
 
+    /// A coarse monotonic clock in milliseconds (resolution 1-16 ms) that
+    /// never decreases. Cold: read only by queries such as
+    /// `oldest_outstanding`, never on the I/O path.
+    fn monotonic_ms(&self) -> u64;
+
     /// Takes the exclusive ownership lock on an open file. At most one lock
     /// (exclusive or shared) may be held per handle: on Linux a second lock
     /// on the same handle shares the first's open file description, and

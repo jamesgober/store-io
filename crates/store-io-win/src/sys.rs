@@ -529,6 +529,13 @@ fn sentinel_overlapped(ev: &Handle) -> OVERLAPPED {
     ov
 }
 
+/// `GetTickCount64`: milliseconds since boot, from shared memory (no system
+/// call), resolution 10-16 ms, never decreasing.
+pub fn tick_count_ms() -> u64 {
+    // SAFETY: GetTickCount64 takes no arguments and cannot fail.
+    unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() }
+}
+
 /// `LockFileEx(EXCLUSIVE | FAIL_IMMEDIATELY)` on the sentinel byte, or
 /// `LockFileEx(FAIL_IMMEDIATELY)` (shared) when `shared`.
 ///

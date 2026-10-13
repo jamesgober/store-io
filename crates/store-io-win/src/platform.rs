@@ -98,6 +98,10 @@ impl Platform for WinPlatform {
         WinLock::take(file, true)
     }
 
+    fn monotonic_ms(&self) -> u64 {
+        sys::tick_count_ms()
+    }
+
     fn allocate(&self, file: &WinFile, len: u64) -> RawResult<()> {
         alloc::allocate(file, len)
     }

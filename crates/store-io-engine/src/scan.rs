@@ -391,6 +391,7 @@ fn collect_one<Q: Queue>(
     in_flight: &mut usize,
 ) -> Result<(), OsError> {
     let _added = lane.queue.wait(1, &mut lane.done)?;
+    lane.progress();
     for comp in lane.done.drain() {
         *in_flight = in_flight.saturating_sub(1);
         if let Some(p) = ring[(comp.tag % depth as u64) as usize].as_mut() {

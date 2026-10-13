@@ -179,6 +179,7 @@ where
                 "the ownership lock admits one holder at a time",
                 ownership_lock,
             ),
+            ("the monotonic clock never goes back", monotonic_clock),
             (
                 "readers share the lock on read-only handles and exclude the owner",
                 shared_lock,
@@ -563,6 +564,16 @@ fn rename_unlink_sync<P: Platform>(c: &Ctx<'_, P>) -> Check {
             Ok(())
         }
     }
+}
+
+fn monotonic_clock<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    let mut last = c.p.monotonic_ms();
+    for _ in 0..10_000 {
+        let now = c.p.monotonic_ms();
+        check!(now >= last, "the clock went back: {last} then {now}");
+        last = now;
+    }
+    Ok(())
 }
 
 fn ownership_lock<P: Platform>(c: &Ctx<'_, P>) -> Check {

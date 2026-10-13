@@ -35,6 +35,7 @@ mod region;
 mod scan;
 mod slots;
 mod space;
+mod stats;
 mod store;
 mod sync;
 
@@ -45,5 +46,6 @@ pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
 pub use scan::{ScanItem, ScanSummary};
 pub use space::{Reservation, SpaceReport, TagSpace};
+pub use stats::Outstanding;
 pub use store::{CONTAINER, Store, StoreOptions, StoreReport, Unavailable, UnavailableRegion};
 pub use store_io_format::meta::RegionKind;

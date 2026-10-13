@@ -279,6 +279,8 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) epoch: u64,
     /// Per-stage timing and counters (zero-sized without feature `observe`).
     pub(crate) observer: Observer,
+    /// What `oldest_outstanding` queries have seen (D-095).
+    pub(crate) seen: Mutex<crate::stats::Seen>,
 }
 
 /// A store: one container file on one device.

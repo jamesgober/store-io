@@ -210,6 +210,7 @@ pub struct World {
     writes_completed: u64,
     reads_completed: u64,
     misaligned_reads: u64,
+    clock_ms: u64,
     flushes_completed: u64,
     dir_syncs: u64,
     set_lens: u64,
@@ -234,6 +235,7 @@ impl World {
             writes_completed: 0,
             reads_completed: 0,
             misaligned_reads: 0,
+            clock_ms: 0,
             flushes_completed: 0,
             dir_syncs: 0,
             set_lens: 0,
@@ -298,6 +300,18 @@ impl World {
     #[must_use]
     pub fn reads(&self) -> u64 {
         self.reads_completed
+    }
+
+    /// The simulated monotonic clock, in milliseconds (starts at 0; moves
+    /// only when a test advances it).
+    #[must_use]
+    pub fn clock_ms(&self) -> u64 {
+        self.clock_ms
+    }
+
+    /// Advances the simulated clock by `ms` milliseconds.
+    pub fn advance_clock(&mut self, ms: u64) {
+        self.clock_ms = self.clock_ms.saturating_add(ms);
     }
 
     /// Reads refused with EINVAL for breaking the device's alignment.

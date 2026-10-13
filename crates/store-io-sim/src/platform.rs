@@ -379,6 +379,10 @@ impl Platform for SimPlatform {
         })
     }
 
+    fn monotonic_ms(&self) -> u64 {
+        lock(&self.world).clock_ms()
+    }
+
     fn lock_shared(&self, file: &SimFile) -> RawResult<SimLock> {
         let mut w = lock(&self.world);
         file.check(&w, false)?;

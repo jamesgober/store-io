@@ -96,6 +96,11 @@ M = [
  ("crates/store-io-engine/src/open.rs", "store_io_format::meta::MetaError::Field(\"features\") => newer,", "store_io_format::meta::MetaError::Field(\"features\") if false => newer,"),
  ("crates/store-io-engine/src/open.rs", "            media_error |= pair.media_error;", "            media_error |= pair.media_error && false;"),
  ("crates/store-io-engine/src/open.rs", "        Winner::Lost if p.media_error => Err(Error::Corruption {", "        Winner::Lost if p.media_error && false => Err(Error::Corruption {"),
+ # D-095: lane marks flip on take and release; a new operation is first seen anew
+ ("crates/store-io-engine/src/exec.rs", "        self.0.store(v.wrapping_add(1), Ordering::Relaxed);", "        self.0.store(v, Ordering::Relaxed);"),
+ ("crates/store-io-engine/src/exec.rs", "        mark.store(v.wrapping_add(1), Ordering::Relaxed);", "        mark.store(v, Ordering::Relaxed);"),
+ ("crates/store-io-engine/src/stats.rs", "            if mark % 2 == 0 || entry.0 != mark {", "            if mark % 2 == 0 {"),
+ ("crates/store-io-engine/src/exec.rs", "        self.0.store(v.wrapping_add(2), Ordering::Relaxed);", "        self.0.store(v, Ordering::Relaxed);"),
 ]
 
 def kill_stuck_tests():

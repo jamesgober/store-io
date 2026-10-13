@@ -118,6 +118,19 @@
   after creation, no timer, no thread, no dependency. The facade and the
   engine pass the feature through to `store-io-core`, and the facade
   re-exports `store_io::observe`.
+- `store-io-engine`: `Store::oldest_outstanding()` and `Outstanding` (D-084,
+  D-095): the age of the oldest operation still in flight on the store's
+  shared queues, and whether it is a device flush, for a watchdog the caller
+  owns. The I/O path pays only a busy mark per queue, on a cache line of its
+  own (plain stores by the queue's holder: when it is taken, at each
+  completion, when it is released); the query reads the clock, so the age
+  counts from the first query that saw the operation and restarts at each
+  completion (a long job that keeps progressing never looks hung). Covers the
+  shared queues and the flush lane.
+- `store-io-platform`: `Platform::monotonic_ms`, a coarse monotonic clock
+  read only by queries (`GetTickCount64` on Windows,
+  `CLOCK_MONOTONIC_COARSE` on Linux; the simulator's clock moves only when a
+  test advances it). Outside implementers of `Platform` must add it.
 - `store-io-engine`: `Store::poisoned()` reports the failure that poisoned
   the store, if any.
 - Harness: `observe-cost` measures what the observer adds per durable write.

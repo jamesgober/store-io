@@ -26,6 +26,9 @@ pub type AppendBatch = store_io_engine::AppendBatch<NativePlatform>;
 pub type PageBatch = store_io_engine::PageBatch<NativePlatform>;
 /// Space set aside for provisioning (see [`store_io_engine::Reservation`]).
 pub type Reservation = store_io_engine::Reservation<NativePlatform>;
+/// Many reads and writes in flight from one thread, without blocking (see
+/// [`store_io_engine::Submitter`]); from [`Store::submitter`](store_io_engine::Store::submitter).
+pub type Submitter = store_io_engine::Submitter<NativePlatform>;
 
 /// A store: one container file in a directory of its own, on one device.
 ///

@@ -187,7 +187,10 @@ where
     /// must carry their generation. Every handle, ticket and position of the
     /// old generation is refused from then on (`StaleGeneration`).
     ///
-    /// Must not be called from inside this region's own scan visitor.
+    /// Must not be called from inside this region's own scan visitor, nor by
+    /// a thread whose own [`crate::Submitter`] has operations on this region
+    /// it has not reaped: recycle waits for them, and only that thread's
+    /// `reap` or `wait` finishes them (the same holds for `release`).
     ///
     /// # Errors
     ///
@@ -207,7 +210,8 @@ where
     /// released in the region table and its header (both durable), and gives
     /// its space back to the file system. Its contents are undefined from
     /// then on; every handle to it is refused (`NotReady`), and its space is
-    /// reused by later provisioning.
+    /// reused by later provisioning. Not from a thread with unreaped
+    /// [`crate::Submitter`] operations on it (see [`Self::recycle`]).
     ///
     /// # Errors
     ///
@@ -222,7 +226,7 @@ where
         &self.store
     }
 
-    pub(crate) fn state(&self) -> &LiveRegion {
+    pub(crate) fn state(&self) -> &Arc<LiveRegion> {
         &self.state
     }
 
@@ -524,7 +528,7 @@ where
         &self.store
     }
 
-    pub(crate) fn state(&self) -> &LiveRegion {
+    pub(crate) fn state(&self) -> &Arc<LiveRegion> {
         &self.state
     }
 

@@ -223,6 +223,13 @@ impl BufPool {
         Err(Exhausted)
     }
 
+    /// Whether `buf` came from this pool (or a clone of it): then it has the
+    /// pool's alignment and a capacity of whole pool classes.
+    #[must_use]
+    pub fn owns(&self, buf: &IoBuf) -> bool {
+        Arc::ptr_eq(&self.inner, &buf.pool)
+    }
+
     /// The largest buffer the pool can hand out.
     #[must_use]
     pub fn max_len(&self) -> usize {
@@ -398,6 +405,16 @@ mod tests {
         drop(b);
         let free: usize = p.occupancy().iter().map(|c| c.1).sum();
         assert_eq!(free, 2 * 5);
+    }
+
+    #[test]
+    fn test_owns_only_its_own_buffers() {
+        let p = pool(1);
+        let q = pool(1);
+        let b = p.take(1).unwrap_or_else(|_| panic!("exhausted"));
+        assert!(p.owns(&b));
+        assert!(p.clone().owns(&b));
+        assert!(!q.owns(&b));
     }
 
     #[test]

@@ -13,6 +13,12 @@
 
 ### Fixed
 
+- `store-io-engine`: `release` waited for the region's operations in flight
+  while holding the store's metadata lock, so an operation whose holder
+  needed that lock before finishing (a scan visitor provisioning a region;
+  now also a `Submitter` thread provisioning before it reaps) deadlocked
+  with it. It now waits first and takes the lock after. Test with a
+  submitter; found in review.
 - `store-io-engine`: **operations abandoned on a queue could affect the next
   operation on it.** An operation is abandoned when the wait for it fails (a
   Windows IOCP port can fail a wait; the Linux synchronous queues never do)
@@ -127,6 +133,43 @@
 
 ### Added
 
+- `store-io-engine`: the engine-layer **`Submitter`** (D-065, D-080, D-098),
+  from `Store::submitter(SubmitterConfig)`. One thread keeps many appends,
+  page writes and reads in flight without blocking, from the store's pooled
+  buffers (`take_buf`) with no copy; `reap` and `wait` hand back
+  `Completion`s, each with its tag, its buffer and `Done::Written(Written)`
+  (the `WriteTicket`) or `Done::Read`. The completion types are in
+  `store_io_engine::completion`; the facade exports `store_io::Submitter`
+  and a `store_io::submit` module (`SubmitterConfig`, `MAX_DEPTH`,
+  `Completion`, `Completions`, `Done`, `Written`, `Rejected`, `IoBuf`,
+  `Wake`).
+  - **Same rules as the blocking calls, per operation.** An append's
+    position is final at submission; its ticket is minted only when its
+    completion shows every byte written, and only then does the region's
+    completed prefix move past it. A write that fails or transfers short
+    after it was issued is `DurabilityUnknown` and poisons the store. Each
+    operation holds its region open until its completion is processed, so
+    recycle and release wait for it, and an operation on a recycled
+    generation is refused (`StaleGeneration`). Another store's region
+    (`ForeignPosition`) or buffer (`ForeignBuffer`) is refused before
+    anything is reserved.
+  - **Never blocks on submission.** A full submitter (`depth` operations
+    submitted and not yet taken back, at most 4096) refuses with `Rejected`
+    (`QueueFull`), buffer returned, nothing reserved. Nothing allocates
+    after creation; the oldest operation is tracked in amortised O(1). On the
+    Linux synchronous tier the operations run on the submit pool (D-096);
+    on Windows on IOCP.
+  - **Drop waits** for every operation in flight, untimed, before releasing
+    anything the device may still touch; `Store::oldest_outstanding` now
+    also reports a submitter's oldest unprocessed operation, for a watchdog.
+  - A thread must process its own submitter's operations on a region before
+    it recycles or releases that region, or syncs or appends far past them
+    (documented on `Submitter`, `recycle` and `release`). Buffers come from
+    the store's pool, shared with its blocking calls.
+  - Not yet: durable writes with receipts in the completion and barriers
+    (with the flush thread, D-074), vectored writes, forced data sync.
+- `store-io-buf`: `BufPool::owns`, whether a buffer came from that pool.
+- `store-io-core`: `NotWrittenCause::ForeignBuffer`.
 - `store-io-engine`: `Store::unavailable_regions()`, `UnavailableRegion` and
   `Unavailable`; `StoreReport::unavailable` (also in its `Display`).
 - `store-io-core`: `CorruptionKind::Truncated` (the container is shorter than

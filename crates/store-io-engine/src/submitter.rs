@@ -1,0 +1,625 @@
+//! The engine-layer [`Submitter`] (D-065, D-080, D-098): many operations in
+//! flight from one thread, without blocking, with the same integrity rules
+//! as the blocking calls.
+//!
+//! Every operation is admitted like a blocking call (the region's gate, the
+//! store's state, the same validation), then held in a fixed table until its
+//! completion is processed by [`Submitter::reap`] or [`Submitter::wait`]:
+//!
+//! - its region's **owned pass**, so recycle and release wait for it;
+//! - for an append, its **frontier reservation**, completed only when the
+//!   write transferred every byte (else the store is poisoned: the reserved
+//!   range is a hole no later append may be acknowledged past);
+//! - its tag and submission sequence.
+//!
+//! A [`WriteTicket`](crate::WriteTicket) is minted only from a full
+//! completion (D-080). Queue tags are table indices plus a generation, so a
+//! completion matches exactly one operation. Nothing allocates after
+//! creation.
+
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use store_io_core::error::{Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError};
+use store_io_core::observe::Counter;
+use store_io_platform::{CompletionBuf, IoBuf, IoOp, Owner, Platform, Queue, QueueConfig};
+
+use crate::completion::{Completions, Rejected, SubmitterConfig};
+use crate::exec::LaneMark;
+use crate::gate::{Gate, Gated, OwnedPass};
+use crate::io::{ctx, ctx_range, not_written};
+use crate::lifecycle::retired_error;
+use crate::optable::{Kind, Table};
+use crate::receipt::RegionPos;
+use crate::region::{AppendRegion, PageRegion};
+use crate::store::{LiveRegion, Store};
+
+/// The largest `SubmitterConfig::depth`.
+pub const MAX_DEPTH: u32 = 4096;
+
+impl Gated for LiveRegion {
+    fn gate(&self) -> &Gate {
+        &self.gate
+    }
+}
+
+/// Many reads and writes in flight from one thread (D-065, D-098).
+///
+/// Submitting never blocks: a full submitter is refused with the buffer
+/// given back ([`Rejected`], `NotWritten(QueueFull)`). Completions are
+/// handed back by [`Self::reap`] (never blocks) and [`Self::wait`]
+/// (blocks), with a [`WriteTicket`](crate::WriteTicket) for every write that
+/// completed in full. Buffers come from [`Self::take_buf`] (the store's
+/// pool, shared with its blocking calls: buffers held in flight or kept by
+/// the caller are not available to them) and come back in the completion.
+///
+/// The rules the blocking calls keep hold per operation:
+///
+/// - **An append's position is final at submission** (returned at once),
+///   but it counts as written only once its completion is processed by
+///   this submitter's `reap` or `wait`. Until then, on that region, from
+///   any thread: `sync_through` of any later append waits for it, and an
+///   append starting more than `StoreOptions::append_ring` blocks past it
+///   waits (blocking calls) or is refused `NotWritten(TooManyInFlight)`
+///   (submitters). Reap your own appends before syncing or appending far
+///   past them, or the thread waits for itself.
+/// - **Recycle and release wait** for every operation of the submitter on
+///   that region until its completion is processed: a thread must reap its
+///   own submitter's operations on a region before it recycles or releases
+///   that region.
+/// - **A write that fails or transfers short after it was issued** is
+///   `DurabilityUnknown`, and the store is poisoned.
+///
+/// Dropping the submitter waits, untimed, for every operation in flight
+/// before it releases anything the device may still touch. A device that
+/// never completes an operation blocks the drop: the fail-stop choice
+/// (see `Store::oldest_outstanding` for a watchdog).
+///
+/// A submitter belongs to the thread that created it:
+///
+/// ```compile_fail,E0277
+/// fn need_send<T: Send>() {}
+/// need_send::<store_io_engine::Submitter<store_io_sim::SimPlatform>>();
+/// ```
+pub struct Submitter<P: Platform>
+where
+    P::Queue: Send,
+{
+    // Declared first, so it drops (after `Drop::drop` drained it) before
+    // the table releases the passes and reservations.
+    queue: P::Queue,
+    raw: CompletionBuf,
+    table: Table,
+    id: u64,
+    store: Store<P>,
+    _thread: PhantomData<*const ()>,
+}
+
+impl<P: Platform> core::fmt::Debug for Submitter<P>
+where
+    P::Queue: Send,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Submitter")
+            .field("depth", &self.table.depth())
+            .field("in_flight", &self.table.live)
+            .field("ready", &self.table.ready.len())
+            .finish()
+    }
+}
+
+/// The request [`Submitter::issue`] turns into an [`IoOp`].
+enum Req {
+    Write { offset: u64, buf: IoBuf },
+    Read { offset: u64, buf: IoBuf },
+}
+
+fn rejected(error: Error, buf: IoBuf) -> Rejected {
+    Rejected {
+        error,
+        buf: Some(buf),
+    }
+}
+
+/// `?` for admission: refuses with the buffer given back.
+macro_rules! admit {
+    ($e:expr, $buf:ident) => {
+        match $e {
+            Ok(v) => v,
+            Err(error) => return Err(rejected(error, $buf)),
+        }
+    };
+}
+
+impl<P: Platform> Store<P>
+where
+    P::Queue: Send,
+{
+    /// A [`Submitter`] for this thread, with its own queue of
+    /// `cfg.depth` operations (1 to [`MAX_DEPTH`]).
+    ///
+    /// # Errors
+    ///
+    /// `Io` if the platform could not create the queue.
+    pub fn submitter(&self, cfg: SubmitterConfig) -> Result<Submitter<P>, Error> {
+        let depth = cfg.depth.clamp(1, MAX_DEPTH);
+        let queue = self
+            .inner
+            .platform
+            .queue(QueueConfig {
+                depth,
+                parallel: true,
+                pool_threads: self.inner.opts.t3_pool_threads,
+                owner: Owner::Thread,
+            })
+            .map_err(|raw| Error::Io {
+                op: Op::Open,
+                raw,
+                ctx: ErrorContext::default(),
+            })?;
+        let n = depth as usize;
+        let mark = Arc::new(LaneMark::new());
+        let id = self.register_submitter(&mark);
+        Ok(Submitter {
+            queue,
+            raw: CompletionBuf::with_capacity(n),
+            table: Table::new(n, mark),
+            id,
+            store: self.clone(),
+            _thread: PhantomData,
+        })
+    }
+}
+
+impl<P: Platform> Submitter<P>
+where
+    P::Queue: Send,
+{
+    /// A buffer of `len` bytes from the store's pool, for one operation.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(TooLarge)` beyond [`Self::max_buf`];
+    /// `NotWritten(PoolExhausted)` if none is free.
+    pub fn take_buf(&self, len: usize) -> Result<IoBuf, Error> {
+        if len > self.max_buf() {
+            return Err(not_written(
+                NotWrittenCause::TooLarge,
+                ErrorContext::default(),
+            ));
+        }
+        self.store.take(len, ErrorContext::default())
+    }
+
+    /// The largest buffer, and so the largest single operation, in bytes (a
+    /// whole number of blocks).
+    #[must_use]
+    pub fn max_buf(&self) -> usize {
+        self.store.chunk()
+    }
+
+    /// Operations submitted whose completions have not been processed yet.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        // Never more than the queue holds (an operation lost to a panic in
+        // processing is no longer waited for; the store is poisoned then).
+        self.table.live.min(self.queue.in_flight())
+    }
+
+    /// Ends this submitter's current or next [`Self::wait`] from another
+    /// thread (D-083).
+    #[must_use]
+    pub fn waker(&self) -> <P::Queue as Queue>::Waker {
+        self.queue.waker()
+    }
+
+    /// The checks every operation makes first: this store's region, room in
+    /// the table, and the region's gate.
+    fn admit(
+        &self,
+        store: &Store<P>,
+        state: &Arc<LiveRegion>,
+        buf: &IoBuf,
+    ) -> Result<OwnedPass<LiveRegion>, Error> {
+        let c = ctx(state);
+        if !Arc::ptr_eq(&store.inner, &self.store.inner) {
+            return Err(not_written(NotWrittenCause::ForeignPosition, c));
+        }
+        // Only this store's buffers have its alignment and whole blocks of
+        // capacity; any other could fail at the device after an append's
+        // space is reserved.
+        if !self.store.inner.pool.owns(buf) {
+            return Err(not_written(NotWrittenCause::ForeignBuffer, c));
+        }
+        if self.table.full() {
+            return Err(not_written(NotWrittenCause::QueueFull, c));
+        }
+        OwnedPass::enter(state).map_err(|why| retired_error(why, state))
+    }
+
+    /// Appends the buffer's bytes (any length of at least one byte) and
+    /// returns their position at once; the completion carries the ticket.
+    /// The append starts at a block boundary and the buffer's tail is
+    /// zero-padded in place to the next one (no copy): the buffer comes back
+    /// with its length set to the padded size.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejected`], with the buffer: `NotWritten` (`QueueFull`: the
+    /// submitter is full; `TooManyInFlight`: the region's append ring is
+    /// full, see [`Submitter`]; empty, region full, read-only, not
+    /// positioned, another store's region or buffer), `Poisoned`, or
+    /// `DurabilityUnknown` if the OS refused the write after its position
+    /// was reserved (the store is then poisoned, as for a blocking append).
+    pub fn append(
+        &mut self,
+        region: &AppendRegion<P>,
+        mut buf: IoBuf,
+        tag: u64,
+    ) -> Result<RegionPos, Rejected> {
+        let state = region.state();
+        let c = ctx(state);
+        let pass = admit!(self.admit(region.store(), state, &buf), buf);
+        admit!(self.store.ready(), buf);
+        let Some(f) = state.frontier.as_ref() else {
+            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
+        };
+        if !state.positioned.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(rejected(
+                not_written(NotWrittenCause::NotPositioned, c),
+                buf,
+            ));
+        }
+        let len = buf.len();
+        if len == 0 {
+            return Err(rejected(not_written(NotWrittenCause::Empty, c), buf));
+        }
+        // Checked before the reservation, so the padding below cannot fail
+        // (the pool's capacities are whole blocks anyway).
+        let block = self.store.block() as usize;
+        if len.div_ceil(block) * block > buf.capacity() {
+            return Err(rejected(not_written(NotWrittenCause::TooLarge, c), buf));
+        }
+        let domain = &self.store.inner.domain;
+        let reserved = f
+            .reserve(len as u64)
+            .map_err(|why| match domain.poisoned() {
+                Some(first) => Error::Poisoned { first },
+                None => not_written(why, c),
+            });
+        let r = admit!(reserved, buf);
+        let padded = (r.end - r.start) as usize;
+        buf.as_mut_capacity()[len..padded].fill(0);
+        let _fits = buf.set_len(padded);
+        let pos = RegionPos {
+            volume: self.store.inner.volume,
+            region: state.id,
+            generation: state.generation,
+            offset: r.start,
+        };
+        let req = Req::Write {
+            offset: state.data_offset + r.start,
+            buf,
+        };
+        match self.issue(req, tag, Kind::Append(r), pass) {
+            Ok(()) => Ok(pos),
+            // Past the reservation: a hole, as for a blocking append.
+            Err((raw, buf)) => Err(Rejected {
+                error: self
+                    .store
+                    .unknown(Op::Write, raw, ctx_range(state, r.start, r.data_end)),
+                buf,
+            }),
+        }
+    }
+
+    /// Writes the buffer (whole blocks) at `pos`; the completion carries the
+    /// ticket.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejected`], with the buffer: `NotWritten` (foreign, stale,
+    /// misaligned, out of range, submitter full, read-only, another store's
+    /// buffer), `Poisoned`, or `Io` if the OS refused it (nothing reached
+    /// the device).
+    pub fn write(
+        &mut self,
+        region: &PageRegion<P>,
+        pos: RegionPos,
+        buf: IoBuf,
+        tag: u64,
+    ) -> Result<(), Rejected> {
+        let state = region.state();
+        let pass = admit!(self.admit(region.store(), state, &buf), buf);
+        admit!(self.store.ready(), buf);
+        let end = admit!(region.check(&pos, buf.len()), buf);
+        let c = ctx_range(state, pos.offset, end);
+        let req = Req::Write {
+            offset: state.data_offset + pos.offset,
+            buf,
+        };
+        let kind = Kind::Page {
+            start: pos.offset,
+            end,
+        };
+        self.issue(req, tag, kind, pass)
+            .map_err(|(raw, buf)| Rejected {
+                error: Store::<P>::refused(raw, c),
+                buf,
+            })
+    }
+
+    /// Reads into the buffer (whole blocks) from the block-aligned `offset`
+    /// of an append region; the completion carries the bytes. Reads work on
+    /// read-only and poisoned stores.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejected`], with the buffer: `NotWritten` (empty, misaligned, out
+    /// of range, submitter full, another store's region or buffer), or `Io`
+    /// if the OS refused it.
+    pub fn read_append(
+        &mut self,
+        region: &AppendRegion<P>,
+        offset: u64,
+        buf: IoBuf,
+        tag: u64,
+    ) -> Result<(), Rejected> {
+        self.read(region.store(), region.state(), offset, buf, tag)
+    }
+
+    /// Reads into the buffer (whole blocks) at `pos` of a page region; the
+    /// completion carries the bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_append`], and `NotWritten(ForeignPosition |
+    /// StaleGeneration)` for a position of another region or generation.
+    pub fn read_page(
+        &mut self,
+        region: &PageRegion<P>,
+        pos: RegionPos,
+        buf: IoBuf,
+        tag: u64,
+    ) -> Result<(), Rejected> {
+        let state = region.state();
+        let c = ctx(state);
+        if pos.volume != self.store.inner.volume || pos.region != state.id {
+            return Err(rejected(
+                not_written(NotWrittenCause::ForeignPosition, c),
+                buf,
+            ));
+        }
+        if pos.generation != state.generation {
+            return Err(rejected(
+                not_written(NotWrittenCause::StaleGeneration, c),
+                buf,
+            ));
+        }
+        self.read(region.store(), state, pos.offset, buf, tag)
+    }
+
+    fn read(
+        &mut self,
+        store: &Store<P>,
+        state: &Arc<LiveRegion>,
+        offset: u64,
+        buf: IoBuf,
+        tag: u64,
+    ) -> Result<(), Rejected> {
+        let pass = admit!(self.admit(store, state, &buf), buf);
+        let len = buf.len() as u64;
+        let block = self.store.block();
+        let c = ctx_range(state, offset, offset.saturating_add(len));
+        if len == 0 {
+            return Err(rejected(not_written(NotWrittenCause::Empty, c), buf));
+        }
+        if offset % block != 0 || len % block != 0 {
+            return Err(rejected(not_written(NotWrittenCause::Misaligned, c), buf));
+        }
+        if offset.checked_add(len).is_none_or(|e| e > state.data_size) {
+            return Err(rejected(not_written(NotWrittenCause::OutOfBounds, c), buf));
+        }
+        let req = Req::Read {
+            offset: state.data_offset + offset,
+            buf,
+        };
+        let kind = Kind::Read {
+            start: offset,
+            end: offset + len,
+        };
+        self.issue(req, tag, kind, pass)
+            .map_err(|(raw, buf)| Rejected {
+                error: match raw {
+                    Some(raw) => Error::Io {
+                        op: Op::Read,
+                        raw,
+                        ctx: c,
+                    },
+                    None => not_written(NotWrittenCause::QueueFull, c),
+                },
+                buf,
+            })
+    }
+
+    /// Submits an admitted operation into a free row. On a refusal the row
+    /// stays free and the pass is released.
+    fn issue(
+        &mut self,
+        req: Req,
+        tag: u64,
+        kind: Kind,
+        pass: OwnedPass<LiveRegion>,
+    ) -> Result<(), (Option<OsError>, Option<IoBuf>)> {
+        // `admit` checked there is room: a free row always exists here.
+        let Some((index, qtag)) = self.table.claim() else {
+            let buf = match req {
+                Req::Write { buf, .. } | Req::Read { buf, .. } => buf,
+            };
+            return Err((None, Some(buf)));
+        };
+        let inner = &*self.store.inner;
+        let file = &inner.file;
+        let (op, write) = match req {
+            Req::Write { offset, buf } => {
+                let bytes = buf.len() as u64;
+                let op = IoOp::Write {
+                    file,
+                    offset,
+                    buf,
+                    dsync: inner.policy.dsync,
+                };
+                (op, Some(bytes))
+            }
+            Req::Read { offset, buf } => (IoOp::Read { file, offset, buf }, None),
+        };
+        if let Err(r) = self.queue.submit(op, qtag) {
+            self.table.unclaim(index);
+            if r.raw.is_none() {
+                inner.observer.add(Counter::Refused, 1);
+            }
+            return Err((r.raw, r.buf));
+        }
+        if let Some(bytes) = write {
+            inner.observer.add(Counter::Writes, 1);
+            inner.observer.add(Counter::WriteBytes, bytes);
+        }
+        self.table.start(index, tag, kind, pass);
+        Ok(())
+    }
+
+    /// Hands back every completion that has arrived, without blocking.
+    #[must_use = "completions not taken stay with the submitter and count against its depth"]
+    pub fn reap(&mut self) -> Completions<'_> {
+        let _added = self.queue.reap(&mut self.raw);
+        self.process();
+        Completions {
+            ready: &mut self.table.ready,
+        }
+    }
+
+    /// Blocks until at least `min` completions are ready to hand back (no
+    /// more than are in flight or ready), or the submitter's waker fires,
+    /// then hands back every one that has arrived.
+    ///
+    /// # Errors
+    ///
+    /// `Io` if waiting itself failed: the operations stay in flight and a
+    /// later `reap` or `wait` collects them (a failed wait is never a
+    /// verdict on the media, D-097).
+    #[must_use = "completions not taken stay with the submitter and count against its depth"]
+    pub fn wait(&mut self, min: usize) -> Result<Completions<'_>, Error> {
+        let t = &self.table;
+        let want = min.min(t.live + t.ready.len());
+        if t.ready.len() >= want {
+            let _added = self.queue.reap(&mut self.raw);
+            self.process();
+        } else {
+            let need = want - t.ready.len();
+            let waited = self.queue.wait(need, &mut self.raw);
+            // Whatever arrived is processed, even if the wait then failed.
+            self.process();
+            if let Err(raw) = waited {
+                return Err(Error::Io {
+                    op: if self.table.writes_live() {
+                        Op::Write
+                    } else {
+                        Op::Read
+                    },
+                    raw,
+                    ctx: ErrorContext::default(),
+                });
+            }
+        }
+        Ok(Completions {
+            ready: &mut self.table.ready,
+        })
+    }
+
+    /// Processes every raw completion collected.
+    fn process(&mut self) {
+        let _unwind = PoisonOnUnwind::new(&self.store);
+        for c in self.raw.drain() {
+            self.table.finish(&self.store, c.tag, c.buf, c.result);
+        }
+    }
+}
+
+/// Poisons the store if a panic unwinds through the processing of
+/// completions: an operation taken from its row but not settled may be an
+/// append whose reserved range is then never completed.
+struct PoisonOnUnwind<'a, P: Platform>
+where
+    P::Queue: Send,
+{
+    store: &'a Store<P>,
+    /// Already unwinding when created (a drop during another panic): not
+    /// this processing's panic.
+    was: bool,
+}
+
+impl<'a, P: Platform> PoisonOnUnwind<'a, P>
+where
+    P::Queue: Send,
+{
+    fn new(store: &'a Store<P>) -> Self {
+        Self {
+            store,
+            was: std::thread::panicking(),
+        }
+    }
+}
+
+impl<P: Platform> Drop for PoisonOnUnwind<'_, P>
+where
+    P::Queue: Send,
+{
+    fn drop(&mut self) {
+        if !self.was && std::thread::panicking() {
+            self.store.inner.domain.poison(FirstCause {
+                op: Some(Op::Write),
+                raw: None,
+            });
+            self.store.wake_frontiers();
+        }
+    }
+}
+
+impl<P: Platform> Drop for Submitter<P>
+where
+    P::Queue: Send,
+{
+    /// Waits for every operation in flight, untimed (TYP-05), so nothing the
+    /// device may still touch is released. If waiting fails, the queue's own
+    /// drop keeps what the kernel owns, and the store is poisoned when a
+    /// write was in flight: its range may never be written, and nothing of
+    /// its generation may be recycled while it could still land. The same
+    /// if a panic interrupted the processing of a completion (an operation
+    /// left unaccounted may have been an append).
+    fn drop(&mut self) {
+        let mut failed = None;
+        while self.table.live > 0 && self.queue.in_flight() > 0 {
+            match self.queue.wait(self.queue.in_flight(), &mut self.raw) {
+                Ok(_) => {
+                    self.process();
+                    self.table.ready.clear();
+                }
+                Err(raw) => {
+                    failed = Some(raw);
+                    break;
+                }
+            }
+        }
+        // Whatever the queue collected before a failed wait.
+        let _added = self.queue.reap(&mut self.raw);
+        self.process();
+        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) {
+            self.store.inner.domain.poison(FirstCause {
+                op: Some(Op::Write),
+                raw: failed,
+            });
+            self.store.wake_frontiers();
+        }
+        self.store.unregister_submitter(self.id);
+    }
+}

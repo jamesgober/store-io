@@ -10,6 +10,8 @@
 //!   the device report, poisoning.
 //! - [`AppendRegion`], [`PageRegion`], [`Slot`]: the data surfaces.
 //! - [`AppendBatch`], [`PageBatch`]: many writes, one barrier.
+//! - [`Submitter`]: many reads and writes in flight from one thread,
+//!   without blocking; tickets from completions ([`completion`]).
 //! - [`AppendRegion::scan`], [`PageRegion::scan`]: the raw ordered recovery
 //!   read, which never stops at bad data.
 //! - [`receipt`]: positions, write tickets and durability receipts, which
@@ -19,6 +21,7 @@
 #![forbid(unsafe_code)]
 
 mod batch;
+pub mod completion;
 mod create;
 mod directory;
 pub mod domain;
@@ -29,6 +32,7 @@ mod io;
 mod layout;
 mod lifecycle;
 mod open;
+mod optable;
 mod provision;
 pub mod receipt;
 mod region;
@@ -37,9 +41,11 @@ mod slots;
 mod space;
 mod stats;
 mod store;
+mod submitter;
 mod sync;
 
 pub use batch::{AppendBatch, PageBatch};
+pub use completion::SubmitterConfig;
 pub use directory::Directory;
 pub use domain::DomainStats;
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
@@ -49,3 +55,4 @@ pub use space::{Reservation, SpaceReport, TagSpace};
 pub use stats::Outstanding;
 pub use store::{CONTAINER, Store, StoreOptions, StoreReport, Unavailable, UnavailableRegion};
 pub use store_io_format::meta::RegionKind;
+pub use submitter::{MAX_DEPTH, Submitter};

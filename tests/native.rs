@@ -371,3 +371,109 @@ fn test_parallel_page_batches_and_large_reads_round_trip() {
     }
     assert_eq!(store.oldest_outstanding(), None);
 }
+
+/// The engine-layer submitter end to end on the real file system (D-098):
+/// its operations run on the submit pool on Linux and on IOCP on Windows.
+/// Appends and page writes complete in any order, land exactly where
+/// submission said, every ticket syncs, and reads through the submitter
+/// return every byte.
+#[test]
+fn test_submitter_round_trips_on_the_real_file_system() {
+    use store_io::submit::{Done, SubmitterConfig};
+    let full = |e: &Error| {
+        matches!(
+            e,
+            Error::NotWritten {
+                cause: store_io::NotWrittenCause::QueueFull,
+                ..
+            }
+        )
+    };
+    let t = TempDir::new("submitter");
+    let (opts, _) = options_for(t.path());
+    let store = Store::create(t.path().join("sub"), opts).unwrap();
+    let wal = store.provision_append_region("wal", 16 << 20).unwrap();
+    let pages = store.provision_page_region("pages", 16 << 20).unwrap();
+    let bs = pages.block_size() as usize;
+    let record = |i: u64, len: usize| -> Vec<u8> {
+        (0..len)
+            .map(|k| (k as u8).wrapping_mul(13) ^ (i as u8).wrapping_mul(29) ^ 0xA5)
+            .collect()
+    };
+    let mut sub = store
+        .submitter(SubmitterConfig::default().with_depth(32))
+        .unwrap();
+    let mut placed = Vec::new();
+    let mut done = Vec::new();
+    for i in 0..64u64 {
+        let len = 1 + (i as usize * 1531) % (3 * bs);
+        let mut buf = sub.take_buf(len).unwrap();
+        buf.as_mut_slice().copy_from_slice(&record(i, len));
+        let at = loop {
+            match sub.append(&wal, buf, i) {
+                Ok(pos) => break pos.offset(),
+                Err(r) => {
+                    assert!(full(&r.error), "{:?}", r.error);
+                    buf = r.buf.unwrap();
+                    done.extend(sub.wait(1).unwrap());
+                }
+            }
+        };
+        placed.push((at, len));
+        let mut page = sub.take_buf(bs).unwrap();
+        page.as_mut_slice().copy_from_slice(&record(1000 + i, bs));
+        let pos = pages.pos(i * 3 * bs as u64).unwrap();
+        while let Err(r) = sub.write(&pages, pos, page, 1000 + i) {
+            assert!(full(&r.error), "{:?}", r.error);
+            page = r.buf.unwrap();
+            done.extend(sub.wait(1).unwrap());
+        }
+    }
+    while sub.in_flight() > 0 {
+        done.extend(sub.wait(sub.in_flight()).unwrap());
+    }
+    done.extend(sub.reap());
+    assert_eq!(done.len(), 128);
+    let mut last = None;
+    for c in done {
+        let Ok(Done::Written(w)) = c.outcome else {
+            panic!("operation {} failed: {:?}", c.tag, c.outcome);
+        };
+        if c.tag >= 1000 {
+            assert_eq!(w.ticket.pos().offset(), (c.tag - 1000) * 3 * bs as u64);
+            pages.sync_through(&w.ticket).unwrap();
+        } else {
+            assert_eq!(w.ticket.pos().offset(), placed[c.tag as usize].0);
+            if c.tag == 63 {
+                last = Some(w.ticket);
+            }
+        }
+    }
+    wal.sync_through(&last.unwrap()).unwrap();
+    for (i, &(at, len)) in placed.iter().enumerate() {
+        let buf = sub.take_buf(len.div_ceil(bs) * bs).unwrap();
+        sub.read_append(&wal, at, buf, i as u64).unwrap();
+        let buf = sub.take_buf(bs).unwrap();
+        let pos = pages.pos(i as u64 * 3 * bs as u64).unwrap();
+        sub.read_page(&pages, pos, buf, 1000 + i as u64).unwrap();
+        for c in sub.wait(2).unwrap() {
+            let Ok(Done::Read { len: n }) = c.outcome else {
+                panic!("read {} failed: {:?}", c.tag, c.outcome);
+            };
+            let got = c.buf.unwrap();
+            if c.tag >= 1000 {
+                assert_eq!(n, bs);
+                assert!(got.as_slice() == record(c.tag, bs), "page {i} differs");
+            } else {
+                assert!(
+                    got.as_slice()[..len] == record(i as u64, len),
+                    "append {i} differs"
+                );
+                assert!(got.as_slice()[len..].iter().all(|&b| b == 0));
+            }
+        }
+    }
+    assert_eq!(sub.in_flight(), 0);
+    drop(sub);
+    assert_eq!(store.oldest_outstanding(), None);
+}

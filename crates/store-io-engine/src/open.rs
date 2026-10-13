@@ -298,6 +298,7 @@ where
                 epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 observer: Observer::new(),
                 seen: Mutex::new(crate::stats::Seen::default()),
+                submitters: Mutex::new(crate::stats::Submitters::default()),
             }),
         }
     }

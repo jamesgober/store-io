@@ -291,6 +291,8 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) observer: Observer,
     /// What `oldest_outstanding` queries have seen (D-095).
     pub(crate) seen: Mutex<crate::stats::Seen>,
+    /// Live submitters' busy marks (D-098).
+    pub(crate) submitters: Mutex<crate::stats::Submitters>,
 }
 
 /// A store: one container file on one device.

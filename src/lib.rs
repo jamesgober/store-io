@@ -64,6 +64,9 @@
 //!   caller's bytes once into aligned buffers.
 //! - **Batch:** [`AppendBatch`] and [`PageBatch`]: many writes, one barrier,
 //!   with in-place encoding and no copy.
+//! - **Submitter:** [`Submitter`] ([`submit`]): many reads and writes in
+//!   flight from one thread without blocking, from pooled buffers with no
+//!   copy; tickets come with the completions.
 //! - **Engine:** the generic [`engine`] crate under all of it, which also runs
 //!   on the deterministic simulator.
 //!
@@ -105,6 +108,19 @@ pub use store_io_engine::{
     WriteTicket,
 };
 
+/// The [`Submitter`]'s types: its configuration, buffers, completions and
+/// refusals, and the waker that ends its `wait` from another thread.
+pub mod submit {
+    pub use store_io_engine::completion::{Completion, Completions, Done, Rejected, Written};
+    pub use store_io_engine::{MAX_DEPTH, SubmitterConfig};
+    pub use store_io_platform::{IoBuf, Wake};
+
+    /// The waker of a [`Submitter`](crate::Submitter) on the native backend
+    /// (`Submitter::waker`).
+    #[cfg(any(windows, target_os = "linux"))]
+    pub type Waker = <<crate::NativePlatform as store_io_platform::Platform>::Queue as store_io_platform::Queue>::Waker;
+}
+
 /// The operating system's native backend.
 #[cfg(windows)]
 pub type NativePlatform = store_io_win::WinPlatform;
@@ -118,7 +134,8 @@ mod native;
 
 #[cfg(any(windows, target_os = "linux"))]
 pub use native::{
-    AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, Reservation, Slot, Store, probe,
+    AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, Reservation, Slot, Store,
+    Submitter, probe,
 };
 
 /// What [`probe`] found out about a directory's device.

@@ -91,9 +91,25 @@ impl LaneMark {
 }
 
 /// A lane's busy mark, alone on its cache line so that lanes used by
-/// different threads never share one.
+/// different threads never share one. A `Submitter` keeps one too (D-098).
 #[repr(align(128))]
 pub(crate) struct LaneMark(AtomicU64);
+
+impl LaneMark {
+    pub(crate) fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    /// Sets the mark (its only writer: the owner).
+    #[inline]
+    pub(crate) fn set(&self, v: u64) {
+        self.0.store(v, Ordering::Relaxed);
+    }
+
+    pub(crate) fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// A borrowed queue; returning a shared one wakes one caller waiting for a
 /// shared queue (nothing waits for a parallel lane: a call that finds them

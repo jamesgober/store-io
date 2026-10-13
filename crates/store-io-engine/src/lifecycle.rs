@@ -167,8 +167,13 @@ where
     pub(crate) fn release_region(&self, r: &Arc<LiveRegion>) -> Result<(), Error> {
         let inner = &self.inner;
         let c = ctx(r);
-        let mut meta = lock_meta(&inner.meta);
+        // Retired (waiting out every operation in flight) before the
+        // metadata lock is taken: a `Submitter` operation holds its pass
+        // until its thread processes the completion, and that thread may
+        // first call something that takes the metadata lock (provisioning,
+        // `space`). Holding the lock while waiting would deadlock.
         self.retire(r, Retire::Release)?;
+        let mut meta = lock_meta(&inner.meta);
         // 1. The table: the only authority on open.
         let mut entries = meta.entries.clone();
         let Some(entry) = entries.iter_mut().find(|e| e.region_id == r.id.get()) else {

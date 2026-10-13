@@ -24,6 +24,7 @@ ENGINE = ["-p", "store-io-engine", "-p", "store-io-sim"]
 # The Linux backend's own tests (its submit pool included); Linux only.
 POSIX = ["-p", "store-io-posix"]
 LINUX_ONLY = {"store-io-posix"}
+SUB = "crates/store-io-engine/src/submitter.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -44,7 +45,7 @@ M = [
  ("crates/store-io-engine/src/scan.rs", "                            out.unreadable(start + n as u64, start + len as u64);", ""),
  ("crates/store-io-engine/src/scan.rs", "        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() {", "        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() && false {"),
  ("crates/store-io-engine/src/scan.rs", "                let half = (len / unit).div_ceil(2) * unit;", "                let half = len - unit;"),
- ("crates/store-io-engine/src/gate.rs", "            LIVE => Ok(Pass { gate: self }),", "            s if s == LIVE || s != LIVE => Ok(Pass { gate: self }),"),
+ ("crates/store-io-engine/src/gate.rs", "            LIVE => Ok(()),\n            s => {\n                self.leave();", "            s if s == LIVE || s != LIVE => Ok(()),\n            s => {\n                self.leave();"),
  ("crates/store-io-engine/src/gate.rs", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 {", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 && false {"),
  ("crates/store-io-engine/src/lifecycle.rs", "            .retain(|x| x.id != r.id);", "            .retain(|_| true);"),
  ("crates/store-io-engine/src/lifecycle.rs", "        entry.state = RegionState::Released;", ""),
@@ -131,6 +132,29 @@ M = [
  ("crates/store-io-engine/src/create.rs", "        else {\n            return None;\n        };", "        else {\n            return Some(false);\n        };"),
  ("crates/store-io-engine/src/provision.rs", "                Ran::Abandoned(raw) => (Err(raw), true),", "                Ran::Abandoned(_raw) => (Ok(len as usize), false),"),
  ("crates/store-io-engine/src/provision.rs", "                Err(raw) if !abandoned && store_io_core::errno::is_no_space(raw) => {", "                Err(raw) if (abandoned || !abandoned) && store_io_core::errno::is_no_space(raw) => {"),
+ # D-098: the Submitter mints tickets and completes reservations only from full
+ # completions, holds passes until processed, drains on drop, admits like the
+ # blocking calls, and release never waits for it holding the metadata lock
+ ('crates/store-io-engine/src/optable.rs', '    let full = matches!((result, buf), (Ok(n), Some(b)) if n == b.len());', '    let full = matches!((result, buf), (Ok(_), Some(_)));'),
+ ('crates/store-io-engine/src/optable.rs', '            Some(f) if full => {', '            Some(f) if full || true => {'),
+ ('crates/store-io-engine/src/optable.rs', '                f.complete(r);\n', '                let _ = (f, r);\n'),
+ ('crates/store-io-engine/src/gate.rs', '        held.gate().admit()?;\n', '        held.gate().admit()?;\n        held.gate().leave();\n'),
+ (SUB, '        while self.table.live > 0 && self.queue.in_flight() > 0 {', '        while false {'),
+ (SUB, '        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) {', '        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) && false {'),
+ (SUB, '        if !Arc::ptr_eq(&store.inner, &self.store.inner) {', '        if !Arc::ptr_eq(&store.inner, &self.store.inner) && false {'),
+ (SUB, '        if !self.store.inner.pool.owns(buf) {', '        if !self.store.inner.pool.owns(buf) && false {'),
+ ('crates/store-io-engine/src/optable.rs', '        self.live + self.ready.len() >= self.rows.len()', '        self.live >= self.rows.len()'),
+ (SUB, '        let pass = admit!(self.admit(region.store(), state, &buf), buf);\n        admit!(self.store.ready(), buf);\n        let Some(f)', '        let pass = admit!(self.admit(region.store(), state, &buf), buf);\n        let Some(f)'),
+ (SUB, '        if !state.positioned.load(std::sync::atomic::Ordering::Acquire) {', '        if false {'),
+ (SUB, '        buf.as_mut_capacity()[len..padded].fill(0);', '        let _ = (len, padded);'),
+ (SUB, '        let end = admit!(region.check(&pos, buf.len()), buf);', '        let end = pos.offset + buf.len() as u64;'),
+ (SUB, '        if pos.generation != state.generation {', '        if false {'),
+ ('crates/store-io-engine/src/optable.rs', '                Err(raw) if is_media_error(raw) => {', '                Err(raw) if false && is_media_error(raw) => {'),
+ ('crates/store-io-engine/src/optable.rs', '                Ok(written(store.ticket(state, r.start, r.end)))', '                Ok(written(store.ticket(state, r.start, r.data_end)))'),
+ (SUB, '    _thread: PhantomData<*const ()>,', '    _thread: PhantomData<()>,'),
+ ('crates/store-io-engine/src/optable.rs', '            let _shorter = b.set_len(*len);', '            let _shorter = (b, len);'),
+ ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(&inner.meta);', '        let mut meta = lock_meta(&inner.meta);\n        self.retire(r, Retire::Release)?;'),
+ ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, _seq)) if self.live > 0 => 2 * self.next_seq + 1,'),
 ]
 
 def kill_stuck_tests():

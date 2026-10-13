@@ -18,7 +18,7 @@
 //! a condition variable signalled by the last operation out; there is no
 //! timer.
 
-use std::sync::PoisonError;
+use std::sync::{Arc, PoisonError};
 
 #[cfg(loom)]
 use loom::sync::{Condvar, Mutex};
@@ -71,6 +71,47 @@ impl Drop for Pass<'_> {
     }
 }
 
+/// Something admitted through a [`Gate`]: what an [`OwnedPass`] keeps alive.
+pub(crate) trait Gated {
+    fn gate(&self) -> &Gate;
+}
+
+impl Gated for Gate {
+    fn gate(&self) -> &Gate {
+        self
+    }
+}
+
+/// A [`Pass`] that owns what it was admitted to, for an operation whose I/O
+/// outlives the call that admitted it (the engine-layer `Submitter`, D-098).
+/// It keeps the region alive and counted in its gate until dropped, so a
+/// recycle or release waits for it exactly as for a borrowed pass.
+#[must_use]
+pub(crate) struct OwnedPass<T: Gated> {
+    held: Arc<T>,
+}
+
+impl<T: Gated> OwnedPass<T> {
+    /// Admits one operation on `held`, or says why it no longer takes any.
+    pub(crate) fn enter(held: &Arc<T>) -> Result<Self, Retired> {
+        held.gate().admit()?;
+        Ok(Self {
+            held: Arc::clone(held),
+        })
+    }
+
+    /// What the pass was admitted to.
+    pub(crate) fn get(&self) -> &Arc<T> {
+        &self.held
+    }
+}
+
+impl<T: Gated> Drop for OwnedPass<T> {
+    fn drop(&mut self) {
+        self.held.gate().leave();
+    }
+}
+
 fn retired(state: u64) -> Retired {
     if state == RELEASED {
         Retired::Released
@@ -91,9 +132,16 @@ impl Gate {
 
     /// Admits one operation, or says why the region no longer takes any.
     pub(crate) fn enter(&self) -> Result<Pass<'_>, Retired> {
+        self.admit()?;
+        Ok(Pass { gate: self })
+    }
+
+    /// Counts one operation in; the caller must [`Self::leave`] exactly once
+    /// on success (a [`Pass`] or an [`OwnedPass`] does).
+    fn admit(&self) -> Result<(), Retired> {
         let _was = self.active.fetch_add(1, Ordering::AcqRel);
         match self.state.fetch_add(0, Ordering::AcqRel) {
-            LIVE => Ok(Pass { gate: self }),
+            LIVE => Ok(()),
             s => {
                 self.leave();
                 Err(retired(s))
@@ -180,6 +228,28 @@ mod tests {
     }
 
     #[test]
+    fn test_an_owned_pass_holds_a_retirement_until_dropped() {
+        let gate = Arc::new(Gate::new());
+        let pass = OwnedPass::enter(&gate);
+        assert!(pass.is_ok());
+        let retirer = {
+            let gate = Arc::clone(&gate);
+            std::thread::spawn(move || gate.retire(Retire::Release))
+        };
+        while gate.check().is_ok() {
+            std::thread::yield_now();
+        }
+        assert!(OwnedPass::enter(&gate).is_err());
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !retirer.is_finished(),
+            "retire returned with an owned pass held"
+        );
+        drop(pass);
+        assert_eq!(retirer.join().ok(), Some(Ok(())));
+    }
+
+    #[test]
     fn test_released_gate_reports_release() {
         let gate = Gate::new();
         assert_eq!(gate.retire(Retire::Release), Ok(()));
@@ -209,6 +279,35 @@ mod loom_tests {
                         assert!(!retired.load(Ordering::SeqCst), "ran after retirement");
                         drop(pass);
                     }
+                })
+            };
+            if gate.retire(Retire::Recycle).is_ok() {
+                retired.store(true, Ordering::SeqCst);
+            }
+            let _joined = op.join();
+        });
+    }
+
+    /// The same for an owned pass, admitted on one thread and finished on
+    /// another, as a submitter's operation may be (admitted at submission,
+    /// released when its completion is processed).
+    #[test]
+    fn loom_no_owned_pass_outlives_a_retirement() {
+        loom::model(|| {
+            let gate = std::sync::Arc::new(Gate::new());
+            let retired = Arc::new(AtomicBool::new(false));
+            let op = {
+                let gate = std::sync::Arc::clone(&gate);
+                let retired = Arc::clone(&retired);
+                loom::thread::spawn(move || {
+                    let admitted = OwnedPass::enter(&gate);
+                    let finisher = loom::thread::spawn(move || {
+                        if let Ok(pass) = admitted {
+                            assert!(!retired.load(Ordering::SeqCst), "ran after retirement");
+                            drop(pass);
+                        }
+                    });
+                    let _joined = finisher.join();
                 })
             };
             if gate.retire(Retire::Recycle).is_ok() {

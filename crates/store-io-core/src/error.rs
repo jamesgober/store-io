@@ -167,7 +167,8 @@ pub enum NotWrittenCause {
     InvalidName,
     /// The store is open read-only.
     ReadOnly,
-    /// The device queue is full.
+    /// The device queue is full, or a `Submitter` holds as many operations
+    /// (in flight or not yet taken back) as its depth allows.
     QueueFull,
     /// The operation was interrupted before any I/O was issued, or a read's
     /// bytes never came back (a backend breaking its contract). Nothing was
@@ -178,6 +179,9 @@ pub enum NotWrittenCause {
     NotPositioned,
     /// Two writes in one batch overlap.
     Overlap,
+    /// The buffer does not come from this store's pool, so it may not meet
+    /// the device's alignment (use the submitter's `take_buf`).
+    ForeignBuffer,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -196,12 +200,13 @@ impl fmt::Display for NotWrittenCause {
             Self::TooLarge => "data exceeds the object's capacity",
             Self::InvalidName => "name is empty, longer than 24 bytes, or contains NUL",
             Self::ReadOnly => "store is open read-only",
-            Self::QueueFull => "device queue is full",
+            Self::QueueFull => "device queue (or submitter) is full",
             Self::Interrupted => {
                 "interrupted before any I/O was issued, or a read's bytes never came back"
             }
             Self::NotPositioned => "append position unknown after reopen; call resume_at first",
             Self::Overlap => "two writes in one batch overlap",
+            Self::ForeignBuffer => "the buffer is not from this store's pool",
         })
     }
 }

@@ -20,6 +20,7 @@ use store_io_core::error::{
 };
 use store_io_core::evidence::Evidence;
 use store_io_core::id::{Generation, RegionId, VolumeId};
+use store_io_core::observe::{Observer, Snapshot};
 use store_io_format::meta::{RegionKind, RegionName, TableEntry, VolumeMeta};
 use store_io_platform::{FileName, IoOp, Platform, Queue, QueueConfig};
 
@@ -276,6 +277,8 @@ pub(crate) struct Inner<P: Platform> {
     /// Unique per open store in this process: tickets and receipts of one
     /// open never vouch for another's writes.
     pub(crate) epoch: u64,
+    /// Per-stage timing and counters (zero-sized without feature `observe`).
+    pub(crate) observer: Observer,
 }
 
 /// A store: one container file on one device.
@@ -342,6 +345,22 @@ impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
+    /// The failure that poisoned the store, if one has: every write and
+    /// barrier fails with `Poisoned` from then on. A cheap check, for a
+    /// health probe or a monitor.
+    #[must_use]
+    pub fn poisoned(&self) -> Option<FirstCause> {
+        self.inner.domain.poisoned()
+    }
+
+    /// Event counters and sampled per-stage latencies since this handle was
+    /// opened. With feature `observe` off (the default) nothing is recorded
+    /// and the snapshot is all zeros.
+    #[must_use]
+    pub fn observe(&self) -> Snapshot {
+        self.inner.observer.snapshot()
+    }
+
     /// What the store learned about its device and what it decided.
     #[must_use]
     pub fn report(&self) -> &StoreReport {

@@ -8,6 +8,7 @@ use store_io_buf::BufPool;
 use store_io_core::decide::decide;
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsError};
 use store_io_core::id::{Generation, RegionId, VolumeId};
+use store_io_core::observe::Observer;
 use store_io_format::meta::{
     RegionKind, RegionMeta, RegionState, TableEntry, VOLUME_META_LEN, VolumeMeta, decode_table,
 };
@@ -295,6 +296,7 @@ where
                 opts,
                 acct: Mutex::new(acct),
                 epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                observer: Observer::new(),
             }),
         }
     }

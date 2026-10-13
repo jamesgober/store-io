@@ -20,6 +20,7 @@ pub mod errno;
 pub mod error;
 pub mod evidence;
 pub mod id;
+pub mod observe;
 pub mod set;
 pub mod untorn;
 

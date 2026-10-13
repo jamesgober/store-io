@@ -69,6 +69,8 @@ required-features = ["cli"]
 # #################################
 [features]
 default = []
+# Per-stage timing and counters (`Store::observe`). Off: compiled out.
+observe = ["store-io-engine/observe"]
 # Builds the `store-io` binary.
 cli = []
 

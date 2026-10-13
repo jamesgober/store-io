@@ -366,7 +366,7 @@ where
     ) -> Result<ScanSummary, Error> {
         let _pass = self.pass()?;
         self.store
-            .scan_region(&self.state, from, self.state.data_size, visit)
+            .scan_reported(&self.state, from, self.state.data_size, visit)
     }
 
     /// Moves the append position forward to `offset` (rounded up to a block),
@@ -667,7 +667,7 @@ where
     ) -> Result<ScanSummary, Error> {
         let _pass = self.pass()?;
         self.store
-            .scan_region(&self.state, from, self.state.data_size, visit)
+            .scan_reported(&self.state, from, self.state.data_size, visit)
     }
 
     /// Block size: writes must be whole blocks.
@@ -770,6 +770,10 @@ where
     pub fn commit(&self, data: &[u8]) -> Result<DurableReceipt, Error> {
         let s = &self.store;
         s.ready()?;
+        let _timed = s
+            .inner
+            .observer
+            .span(store_io_core::observe::Stage::SlotCommit);
         let c = ctx(&self.state);
         if data.len() > self.capacity() {
             return Err(Error::NotWritten {

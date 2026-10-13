@@ -106,6 +106,21 @@
 - `store-io-sim`: `FaultPlan::dir_sync_unsupported` (every directory flush
   fails as unsupported) and `FaultPlan::fail_set_len` (the n-th `set_len`
   fails).
+- The observer (feature `observe`, off by default; D-094). `Store::observe()`
+  returns exact event counters and sampled per-stage latency histograms
+  (log2 buckets with nearest-rank quantiles). Off, every hook compiles away
+  (0 ns). On, per durable write: 18.5 ns on one thread, 19.0 ns on four,
+  20.7 ns with all 16 cores busy (Windows; Linux 17.9, 18.3, 20.1)
+  [measured, harness `observe-cost`, median of 3 runs]. Counts are exact. There
+  is one counter block per CPU, so concurrent threads normally keep to their
+  own cache lines (a process that keeps creating threads can see two share a
+  block: still exact, slower). No allocation
+  after creation, no timer, no thread, no dependency. The facade and the
+  engine pass the feature through to `store-io-core`, and the facade
+  re-exports `store_io::observe`.
+- `store-io-engine`: `Store::poisoned()` reports the failure that poisoned
+  the store, if any.
+- Harness: `observe-cost` measures what the observer adds per durable write.
 - `store-io-engine`: `DomainStats::already_durable`, which counts the receipts
   `AppendRegion::sync_through` returned without a barrier because the ticket
   was already durable (SIO-TYP-02: a barrier is never a silent no-op).

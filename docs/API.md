@@ -45,6 +45,8 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | `store.report() -> &StoreReport` | The evidence, class decision, block size, table capacity, volume id, owner generation and unavailable regions. `Display` prints a readable report. |
 | `store.space() -> SpaceReport` | See [Space](#9-space). |
 | `store.reserve(bytes, tag)`, `set_cap(tag, cap)`, `extent_of(bytes)` | See [Space](#9-space). |
+| `store.observe() -> Snapshot` | Event counters (writes, bytes, reads, barriers, flushes, split writes, refused writes, media errors) and sampled latency histograms per stage (write, read, barrier, flush, slot commit, provisioning). Writes, reads and barriers are the data path (metadata writes are not counted); media errors are counted once per unreadable range reported. Recorded only with the `observe` feature, which is off by default and costs nothing when off; on, 18.5 ns per durable write on one thread and about 20.7 ns with every core busy [measured, harness `observe-cost`]. All zeros without it. The types are in `store_io::observe`. |
+| `store.poisoned() -> Option<FirstCause>` | The failure that poisoned the store, if any: every later write and barrier fails with `Poisoned`. A cheap check for a health probe. |
 | `store.domain_stats() -> DomainStats` | Flushes issued, barriers that joined another's flush, barriers that led one, and receipts returned without a barrier because the target was already durable (`already_durable`). |
 | `store.poison()` | Poisons the device's barrier domain on purpose: every later write and barrier fails. |
 | `store.volume() -> VolumeId` | The store's identity. |

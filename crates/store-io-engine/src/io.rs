@@ -7,6 +7,7 @@ use store_io_core::class::Missing;
 use store_io_core::error::{
     ByteRange, CorruptionKind, Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError,
 };
+use store_io_core::observe::{Counter, Stage};
 use store_io_platform::{IoBuf, IoOp, Platform};
 
 use std::ops::ControlFlow;
@@ -79,6 +80,10 @@ impl Stream<'_> {
 }
 
 impl Source for Stream<'_> {
+    fn is_split(&self) -> bool {
+        self.data.len() > self.chunk
+    }
+
     fn next(&mut self) -> Next {
         if let Some(buf) = self.first.take() {
             return Next::Write(self.base, buf);
@@ -278,7 +283,15 @@ where
 
     /// Submits a staged write on `lane`.
     pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {
-        pump(lane, &self.inner.file, self.inner.policy.dsync, src)
+        let obs = &self.inner.observer;
+        let _timed = obs.span(Stage::Write);
+        let outcome = pump(lane, &self.inner.file, self.inner.policy.dsync, src, obs);
+        if matches!(outcome, Pumped::Refused(_)) {
+            obs.add(Counter::Refused, 1);
+        } else if src.is_split() {
+            obs.add(Counter::Splits, 1);
+        }
+        outcome
     }
 
     /// Poisons the domain after a failure past submission and returns the
@@ -340,6 +353,9 @@ where
     /// else uses, so a leader never waits for a queue that a follower holds
     /// (D-070). Followers wait holding nothing.
     pub(crate) fn barrier(&self) -> Result<u64, Error> {
+        let obs = &self.inner.observer;
+        obs.add(Counter::Barriers, 1);
+        let _timed = obs.span(Stage::Barrier);
         if !self.inner.policy.flush {
             return match self.inner.domain.poisoned() {
                 Some(first) => Err(Error::Poisoned { first }),
@@ -350,9 +366,13 @@ where
         let file = &self.inner.file;
         self.inner
             .domain
-            .barrier(need, || match self.inner.queues.flush_lane() {
-                Some(mut lane) => flush_data(&mut lane, file),
-                None => flush_data(&mut self.inner.queues.get(0), file),
+            .barrier(need, || {
+                let _flush = obs.span(Stage::Flush);
+                obs.add(Counter::Flushes, 1);
+                match self.inner.queues.flush_lane() {
+                    Some(mut lane) => flush_data(&mut lane, file),
+                    None => flush_data(&mut self.inner.queues.get(0), file),
+                }
             })
             .inspect_err(|_| self.wake_frontiers())?;
         Ok(need)
@@ -416,6 +436,7 @@ where
         if offset.checked_add(len).is_none_or(|e| e > r.data_size) {
             return Err(not_written(NotWrittenCause::OutOfBounds, c));
         }
+        let _timed = self.inner.observer.span(Stage::Read);
         let chunk = self.chunk() as u64;
         if len > chunk {
             return self.read_pipelined(r, offset, len, out, c);
@@ -443,6 +464,8 @@ where
                 },
                 None => not_written(NotWrittenCause::QueueFull, c),
             })?;
+            self.inner.observer.add(Counter::Reads, 1);
+            self.inner.observer.add(Counter::ReadBytes, piece);
             let n = match completed.result {
                 Ok(n) => n,
                 Err(raw) => {
@@ -463,6 +486,7 @@ where
                     // its own. If the rescan itself fails (a short pool, a
                     // full queue), the media error stands for the whole
                     // piece rather than being replaced by that failure.
+                    self.inner.observer.add(Counter::MediaErrors, 1);
                     drop(completed);
                     drop(lane);
                     let (bad_start, bad_end) =
@@ -535,6 +559,7 @@ where
                 Some((start, end)) => ctx_range(r, start, end),
                 None => c,
             };
+            self.inner.observer.add(Counter::MediaErrors, 1);
             return Err(Error::Corruption {
                 kind: CorruptionKind::MediaError,
                 ctx,

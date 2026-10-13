@@ -97,6 +97,8 @@ pub use store_io_core::error::{
 };
 pub use store_io_core::evidence::Evidence;
 pub use store_io_core::id::{Generation, RegionId, VolumeId};
+/// The observer's types: `Store::observe()` returns an [`observe::Snapshot`].
+pub use store_io_core::observe;
 pub use store_io_engine::{
     CONTAINER, DomainStats, DurableReceipt, RegionKind, RegionPos, ScanItem, ScanSummary,
     SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable, UnavailableRegion, WriteTicket,

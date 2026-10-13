@@ -17,6 +17,7 @@ use std::ops::ControlFlow;
 
 use store_io_core::errno::is_media_error;
 use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
+use store_io_core::observe::Counter;
 use store_io_platform::{IoBuf, IoOp, Platform, Queue, RawResult};
 
 use crate::exec::{Lane, run};
@@ -132,6 +133,27 @@ where
     P::Queue: Send,
 {
     /// Scans `r` from `from` to `to` (clamped to the data area).
+    /// A scan whose unreadable ranges are reported to the caller: each is
+    /// counted once as a media error (internal rescans are not counted).
+    pub(crate) fn scan_reported<F>(
+        &self,
+        r: &LiveRegion,
+        from: u64,
+        to: u64,
+        mut visit: F,
+    ) -> Result<ScanSummary, Error>
+    where
+        F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
+    {
+        let obs = &self.inner.observer;
+        self.scan_region(r, from, to, |item| {
+            if matches!(item, ScanItem::Unreadable { .. }) {
+                obs.add(Counter::MediaErrors, 1);
+            }
+            visit(item)
+        })
+    }
+
     pub(crate) fn scan_region<F>(
         &self,
         r: &LiveRegion,
@@ -191,6 +213,8 @@ where
                 };
                 match lane.queue.submit(op, submitted) {
                     Ok(()) => {
+                        self.inner.observer.add(Counter::Reads, 1);
+                        self.inner.observer.add(Counter::ReadBytes, len as u64);
                         ring[(submitted % depth as u64) as usize] = Some(Pending {
                             start: next,
                             len,
@@ -309,7 +333,11 @@ where
             },
         );
         let (result, back) = match done {
-            Ok(d) => (d.result, d.buf),
+            Ok(d) => {
+                self.inner.observer.add(Counter::Reads, 1);
+                self.inner.observer.add(Counter::ReadBytes, len);
+                (d.result, d.buf)
+            }
             Err((_refused, Some(raw))) => return Err(read_error(raw, c)),
             Err((_refused, None)) => return Err(not_written(NotWrittenCause::QueueFull, c)),
         };

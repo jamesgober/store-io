@@ -25,6 +25,11 @@ store-io-format   = { path = "../store-io-format", version = "0.3.1" }
 store-io-buf      = { path = "../store-io-buf", version = "0.3.1" }
 store-io-platform = { path = "../store-io-platform", version = "0.3.1" }
 
+[features]
+default = []
+# Per-stage timing and counters (`Store::observe`). Off: compiled out.
+observe = ["store-io-core/observe"]
+
 [dev-dependencies]
 store-io-sim = { path = "../store-io-sim", version = "0.3.1" }
 

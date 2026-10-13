@@ -36,6 +36,10 @@ where
         data_size: u64,
         from: Option<&mut Reservation<P>>,
     ) -> Result<Arc<LiveRegion>, Error> {
+        let _timed = self
+            .inner
+            .observer
+            .span(store_io_core::observe::Stage::Provision);
         let inner = &self.inner;
         let tag = from.as_ref().map_or(0, |r| r.tag());
         if inner.read_only {

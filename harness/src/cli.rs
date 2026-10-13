@@ -17,6 +17,8 @@ COMMANDS:
     page-batch     W4  N random 4 KiB pages + one barrier
     sequential     W5  1 MiB sequential writes, 1/8 MiB sequential reads
     probe          create a store, print the device report and exit
+    observe-cost   what the observer adds per durable write (build with
+                   --features observe; without it, the compiled-out cost)
     help           this text
 
 OPTIONS:
@@ -44,6 +46,8 @@ pub enum Command {
     Sequential,
     /// Device report only.
     Probe,
+    /// The observer's cost per durable write.
+    ObserveCost,
     /// Usage.
     Help,
 }
@@ -60,6 +64,7 @@ impl Command {
             Self::PageBatch => "page-batch",
             Self::Sequential => "sequential",
             Self::Probe => "probe",
+            Self::ObserveCost => "observe-cost",
             Self::Help => "help",
         }
     }
@@ -73,6 +78,7 @@ impl Command {
             Self::PageBatch,
             Self::Sequential,
             Self::Probe,
+            Self::ObserveCost,
             Self::Help,
         ]
         .into_iter()

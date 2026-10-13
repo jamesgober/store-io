@@ -16,6 +16,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use store_io_core::observe::{Counter, Observer};
 
 use store_io_core::error::OsError;
 use store_io_platform::{CompletionBuf, IoBuf, IoOp, Queue, RawResult};
@@ -199,6 +200,11 @@ pub(crate) trait Source {
     fn next(&mut self) -> Next;
     /// A buffer whose write completed in full; the source may reuse it.
     fn recycle(&mut self, buf: IoBuf);
+    /// Whether this is one write larger than a buffer, submitted as several
+    /// device writes (observability only; a batch of several is not).
+    fn is_split(&self) -> bool {
+        false
+    }
 }
 
 /// What a [`Source`] has to offer.
@@ -236,6 +242,7 @@ pub(crate) fn pump<Q: Queue>(
     file: &Q::File,
     dsync: bool,
     src: &mut impl Source,
+    obs: &Observer,
 ) -> Pumped {
     const TAG: u64 = 0x5111;
     let mut in_flight = 0usize;
@@ -256,6 +263,7 @@ pub(crate) fn pump<Q: Queue>(
                     }
                 },
             };
+            let bytes = buf.len() as u64;
             match lane.queue.submit(
                 IoOp::Write {
                     file,
@@ -268,6 +276,8 @@ pub(crate) fn pump<Q: Queue>(
                 Ok(()) => {
                     in_flight += 1;
                     submitted += 1;
+                    obs.add(Counter::Writes, 1);
+                    obs.add(Counter::WriteBytes, bytes);
                 }
                 // Full: keep the write and retry once a completion frees room.
                 Err(r) if r.raw.is_none() && in_flight > 0 => {

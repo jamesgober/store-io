@@ -19,6 +19,7 @@ mod diag;
 mod env;
 mod fsys_cmp;
 mod json;
+mod observe_cost;
 mod raw;
 mod report;
 mod sio;
@@ -89,6 +90,10 @@ fn main() -> ExitCode {
     };
     if args.command == Command::Help {
         print!("{}", cli::USAGE);
+        return ExitCode::SUCCESS;
+    }
+    if args.command == Command::ObserveCost {
+        print!("{}", observe_cost::run());
         return ExitCode::SUCCESS;
     }
     match run(&args) {

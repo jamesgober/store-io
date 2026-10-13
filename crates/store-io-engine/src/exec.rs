@@ -34,8 +34,9 @@ use crate::sync::{AtomicBool, AtomicU64, Ordering};
 /// Parallel lanes (D-096) hold queues asked to run their operations
 /// concurrently (`QueueConfig::parallel`): a call that submits several
 /// independent operations before it waits (a page batch of several writes,
-/// a pipelined read) takes one. Everything else keeps the shared lanes, so a
-/// lone operation never leaves the caller's thread. They are created by the
+/// a read or scan spanning more than one buffer) takes one. Everything else
+/// keeps the shared lanes, so a single write or a read of one buffer never
+/// leaves the caller's thread. They are created by the
 /// first such call (on the Linux synchronous tier that starts the platform's
 /// worker pool); if they cannot be, that call and every later one use the
 /// shared lanes.
@@ -544,8 +545,13 @@ pub(crate) fn pump<Q: Queue>(
                 }
                 // Full: keep the write and retry once a completion frees room.
                 Err(r) if r.raw.is_none() && in_flight > 0 => {
-                    if let Some(buf) = r.buf {
-                        held = Some((offset, buf));
+                    match r.buf {
+                        Some(buf) => held = Some((offset, buf)),
+                        // A refusal that did not return the buffer (a backend
+                        // breaking platform contract 1): the write is lost,
+                        // so the call fails rather than being acknowledged
+                        // short.
+                        None => failure = Some(None),
                     }
                     break;
                 }

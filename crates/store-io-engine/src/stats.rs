@@ -581,6 +581,71 @@ mod tests {
         assert!(s.inner.queues.marks().all(|m| m % 2 == 0));
     }
 
+    /// A large append (more pieces than buffers, so buffers are refilled as
+    /// earlier pieces complete) with completions out of order lands every
+    /// byte where it belongs.
+    #[test]
+    fn test_a_large_append_out_of_order_lands_every_byte() {
+        for seed in 0..6 {
+            let mut cfg = SimConfig::volatile(800 + seed);
+            cfg.reorder = true;
+            let p = SimPlatform::new(cfg);
+            let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
+            let wal = s.provision_append_region("wal", 32 << 20).unwrap();
+            let data: Vec<u8> = (0..(12 << 20) + 777u32)
+                .map(|i| (i % 251) as u8 ^ (i >> 20) as u8)
+                .collect();
+            let t = wal.append(&data).unwrap();
+            let mut back = vec![0u8; data.len()];
+            let n = wal.read(t.pos().offset(), &mut back).unwrap();
+            assert_eq!(n, data.len());
+            assert!(
+                back == data,
+                "seed {seed}: the append read back other bytes"
+            );
+            assert_eq!(s.oldest_outstanding(), None);
+        }
+    }
+
+    /// A piece of a large append failing anywhere (the first, a middle or a
+    /// late completion):
+    /// `DurabilityUnknown`, the store poisoned, every buffer back in the
+    /// pool, nothing left outstanding.
+    #[test]
+    fn test_a_failed_piece_of_a_large_append_poisons_and_returns_buffers() {
+        for k in [1u64, 4, 9] {
+            let mut cfg = SimConfig::volatile(900 + k);
+            cfg.reorder = true;
+            let p = SimPlatform::new(cfg);
+            let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+            let wal = s.provision_append_region("wal", 32 << 20).unwrap();
+            let free = |s: &Store<SimPlatform>| {
+                s.inner
+                    .pool
+                    .occupancy()
+                    .iter()
+                    .map(|&(_, f, _)| f)
+                    .sum::<usize>()
+            };
+            let before = free(&s);
+            p.with_world(|w| {
+                let next = w.writes() + k;
+                w.faults_mut().fail_write = Some(next);
+            });
+            let r = wal.append(&vec![9u8; 12 << 20]);
+            assert!(
+                matches!(
+                    r,
+                    Err(store_io_core::error::Error::DurabilityUnknown { .. })
+                ),
+                "piece {k}: {r:?}"
+            );
+            assert!(s.poisoned().is_some());
+            assert_eq!(free(&s), before, "piece {k}: buffers were not returned");
+            assert_eq!(s.oldest_outstanding(), None);
+        }
+    }
+
     /// Ordinary work leaves every mark even (idle) when it is done.
     #[test]
     fn test_real_operations_leave_nothing_outstanding() {

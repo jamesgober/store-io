@@ -29,6 +29,9 @@
     cannot even be cleared fails the call: with `Io` before any space is
     reserved, or fail-stop inside a metadata update. Tests reproduce each case on the simulator with
     out-of-order completions; each failed before the fix.
+- `store-io-engine`: a write refused by a full queue that did not return its
+  buffer (a backend breaking its contract) fails the call; before, it was
+  skipped and the call could still report every write done.
 - `store-io-engine`: a failed wait is a failure of the queue, never a verdict
   on the media.
   - **Before.** Its error code went through the media-error path. A single
@@ -190,11 +193,11 @@
   pooled queue in a child after `fork()`. `PosixPlatform::pool_threads` and
   `Queue::workers` report the size. Queues without the hint are unchanged:
   every operation stays on the calling thread.
-- `store-io-engine`: page batches of more than one write, reads larger than
-  one buffer, and scans run on parallel lanes (D-096): on the Linux
+- `store-io-engine`: page batches of more than one write, and reads and
+  scans larger than one buffer, run on parallel lanes (D-096): on the Linux
   synchronous tier through the submit pool, elsewhere on the backend's own
   asynchronous queues. The lanes are created by the first such call. A
-  one-write batch, every single write and read, a scan or read of one
+  one-write batch, every single write (of any size), a read or scan of one
   buffer, barriers and slot commits stay on the caller's thread. When every
   parallel lane is busy, a call takes a shared lane instead of waiting for
   a parallel one. If the pool cannot start, the store uses its shared lanes
@@ -210,6 +213,8 @@
   pages/s against 8,030; commit p50 6.7 ms against 31 ms); N = 1 and lone
   durable writes (W1) unchanged, both equal to the raw `pwritev2` +
   `fdatasync` floor [measured].
+- Harness: W5 measures sequential appends and raw writes of 2 and 8 MiB per
+  call as well as 1 MiB.
 - `store-io-platform`: `Queue::wait` states that it never waits for more than
   is in flight (every backend already behaved so).
 - `store-io-engine`: a store's queues are dropped before its file and
@@ -224,9 +229,12 @@
   restored caller's mask; one more guards that each parallel lane owns its
   busy mark, and ten that every queue user starts on an empty queue and
   that an abandoned operation is never reported as done nor as a media
-  verdict, and two that an abandoned provisioning write never makes a
-  region ready or reads as "out of space". The list has 89 mutations, all
+  verdict, two that an abandoned provisioning write never makes a region
+  ready or reads as "out of space". The list has 89 mutations, all
   caught.
+- Tests: a large append whose pieces complete out of order (with buffers
+  reused for later pieces) lands every byte; a piece failing at any point
+  poisons and returns every buffer.
 - Tests: loom models the submit pool's job queue and inbox handoffs, with
   stray wakeups, and the smallest (one-worker) pool.
 - Harness: `observe-cost` measures what the observer adds per durable write.

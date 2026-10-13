@@ -23,8 +23,11 @@ use store_io_engine::AppendRegion;
 
 /// Region / file size.
 const SPAN: u64 = 1 << 30;
-/// Write size.
+/// Write size; also the unit every payload is generated and checked in.
 const CHUNK: usize = 1 << 20;
+/// Large write sizes: one call each, spanning several pool buffers in
+/// store-io.
+const LARGE: [usize; 2] = [2 << 20, 8 << 20];
 /// Read request sizes.
 const READS: [usize; 2] = [1 << 20, 8 << 20];
 /// Payload stream.
@@ -34,11 +37,12 @@ const STREAM: u64 = 5;
 pub fn run(ctx: &Ctx) -> Section {
     let mut sec = Section::new(
         "sequential",
-        "W5: sequential bandwidth (1 MiB writes, 1/8 MiB reads)",
+        "W5: sequential bandwidth (1, 2 and 8 MiB writes, 1/8 MiB reads)",
     );
     sec.method = vec![
         "Write: one thread writes 1 MiB chunks back to back (not durable), then one durability barrier; MB/s = bytes / (time inside the write calls + the barrier); payload generation between writes is excluded (the wall clock is recorded as `wall_s` in the JSON). No warm-up (the region is written once); the point stops at 1 GiB or at the time box.".to_owned(),
         format!("store-io: `AppendRegion::append(1 MiB)` into a fresh 1 GiB append region, then `sync_through(last ticket)`. raw: copy into an aligned buffer + {} per chunk into a ready 1 GiB file, then one data flush. fsys: journal `append(1 MiB)` + one `sync_through` on a fresh journal (buffered and direct, window off; fsys extends its file as it appends, store-io and raw overwrite preallocated space).", if cfg!(windows) { "WriteFile" } else { "pwritev2" }),
+        "Large writes: the same with 2 and 8 MiB per call (store-io `append` spanning several pool buffers; raw one write per call), each into its own fresh region / file; every 1 MiB of payload is generated and checked as in the 1 MiB case.".to_owned(),
         format!("Read: the bytes just written, front to back, repeated until the time box: store-io `AppendRegion::read(offset, &mut out)` with 1 MiB and 8 MiB `out`; raw {} with the same request sizes. Latency is per request; MB/s = bytes / time inside the read calls (the content spot-check between requests is excluded).", crate::raw::READ_PRIMITIVE),
         "fsys read: not measured. fsys 1.1.3 has no unbuffered positioned read (`Handle::read_at` opens the file buffered on every call, and `JournalReader` replays through a buffered reader), so it would measure the page cache, not the device.".to_owned(),
         "MB = 10^6 bytes.".to_owned(),
@@ -53,7 +57,7 @@ pub fn run(ctx: &Ctx) -> Section {
                 "AppendRegion::append(1 MiB) x N + sync_through",
             )
             .param("chunk_bytes", Json::Num(CHUNK as f64));
-            match store_write(ctx, &store, &mut wp) {
+            match store_write(ctx, &store, &mut wp, CHUNK) {
                 Ok((wal, written)) => {
                     pts.push(wp);
                     for &req in &READS {
@@ -80,10 +84,36 @@ pub fn run(ctx: &Ctx) -> Section {
         }
     }
 
+    for size in LARGE {
+        let variant = format!(
+            "AppendRegion::append({} MiB) x N + sync_through",
+            size >> 20
+        );
+        match ctx.store(&format!("w5-large-{}", size >> 20)) {
+            Ok((store, dir)) => {
+                let mut wp = Point::new(System::StoreIo, &variant)
+                    .param("chunk_bytes", Json::Num(size as f64));
+                if let Err(e) = store_write(ctx, &store, &mut wp, size) {
+                    wp.error = Some(e);
+                }
+                pts.push(wp);
+                drop(store);
+                if let Some(e) = remove(&dir) {
+                    sec.anomalies.push(e);
+                }
+            }
+            Err(e) => {
+                let mut p = Point::new(System::StoreIo, &variant);
+                p.error = Some(e);
+                pts.push(p);
+            }
+        }
+    }
+
     let raw_path = ctx.path("w5-raw.dat");
     let mut wp = Point::new(System::Raw, "1 MiB writes + one data flush")
         .param("chunk_bytes", Json::Num(CHUNK as f64));
-    match raw_write(ctx, &raw_path, &mut wp) {
+    match raw_write(ctx, &raw_path, &mut wp, CHUNK) {
         Ok((f, written)) => {
             pts.push(wp);
             for &req in &READS {
@@ -100,6 +130,21 @@ pub fn run(ctx: &Ctx) -> Section {
     }
     if let Some(e) = remove(&raw_path) {
         sec.anomalies.push(e);
+    }
+    for size in LARGE {
+        let raw_large = ctx.path(&format!("w5-raw-large-{}.dat", size >> 20));
+        let mut wp = Point::new(
+            System::Raw,
+            format!("{} MiB writes + one data flush", size >> 20),
+        )
+        .param("chunk_bytes", Json::Num(size as f64));
+        if let Err(e) = raw_write(ctx, &raw_large, &mut wp, size) {
+            wp.error = Some(e);
+        }
+        pts.push(wp);
+        if let Some(e) = remove(&raw_large) {
+            sec.anomalies.push(e);
+        }
     }
     for j in [Journal::WindowOff, Journal::DirectWindowOff] {
         pts.push(fsys_write(ctx, j));
@@ -157,11 +202,25 @@ pub fn run(ctx: &Ctx) -> Section {
         case: "sequential 1 MiB writes, one barrier at the end".to_owned(),
         metric: "MB/s".to_owned(),
         better: Better::Higher,
-        store_io: get(System::StoreIo, "append", None),
-        raw: get(System::Raw, "writes", None),
+        store_io: get(System::StoreIo, "append", Some(CHUNK)),
+        raw: get(System::Raw, "writes", Some(CHUNK)),
         fsys: fsys_best,
         note: "fsys: the better of its buffered and direct journals".to_owned(),
     });
+    for size in LARGE {
+        sec.comparisons.push(Comparison {
+            case: format!(
+                "sequential {} MiB writes, one barrier at the end",
+                size >> 20
+            ),
+            metric: "MB/s".to_owned(),
+            better: Better::Higher,
+            store_io: get(System::StoreIo, "append", Some(size)),
+            raw: get(System::Raw, "writes", Some(size)),
+            fsys: None,
+            note: format!("raw: one {} MiB write per call", size >> 20),
+        });
+    }
     for &req in &READS {
         sec.comparisons.push(Comparison {
             case: format!("sequential read, {} MiB requests", req >> 20),
@@ -190,9 +249,9 @@ struct Written {
     wall: Duration,
 }
 
-fn record_write(p: &mut Point, w: &Written, delta: &super::Delta) {
+fn record_write(p: &mut Point, w: &Written, delta: &super::Delta, size: usize) {
     let secs = w.total.as_secs_f64();
-    p.metric("request_bytes", Some(CHUNK as f64));
+    p.metric("request_bytes", Some(size as f64));
     p.metric(
         "mb_per_s",
         (secs > 0.0).then(|| w.bytes as f64 / secs / 1e6),
@@ -206,32 +265,43 @@ fn record_write(p: &mut Point, w: &Written, delta: &super::Delta) {
         Some(w.bytes as f64 / (secs - w.barrier.as_secs_f64()).max(1e-9) / 1e6),
     );
     p.latency(w.lat.summary().as_ref());
-    record_delta(p, delta, (w.bytes / CHUNK as u64).max(1));
+    record_delta(p, delta, (w.bytes / size as u64).max(1));
+}
+
+/// Fills `src` (whole `CHUNK`s) with the payload of write `i` of `size`
+/// bytes: chunk `k` of it is stream index `i * size / CHUNK + k`, so every
+/// read-back check works in `CHUNK` units whatever the write size.
+fn fill_write(ctx: &Ctx, i: u64, size: usize, src: &mut [u8]) {
+    let per = (size / CHUNK) as u64;
+    for (k, c) in src.chunks_mut(CHUNK).enumerate() {
+        ctx.pool.fill(STREAM, i * per + k as u64, c);
+    }
 }
 
 fn store_write(
     ctx: &Ctx,
     store: &SioStore,
     p: &mut Point,
+    size: usize,
 ) -> Result<(AppendRegion<Plat>, u64), String> {
     let wal = super::provision_append(store, "seq", SPAN, p)?;
-    let mut src = vec![0u8; CHUNK];
+    let mut src = vec![0u8; size];
     let mut lat = Samples::with_capacity(1024);
     let before = Snap::store(store);
     let deadline = Duration::from_secs_f64(ctx.secs);
     let start = Instant::now();
     let mut last = None;
     let mut i = 0u64;
-    while wal.tail() + CHUNK as u64 <= wal.len() && start.elapsed() < deadline {
-        ctx.pool.fill(STREAM, i, &mut src);
+    while wal.tail() + size as u64 <= wal.len() && start.elapsed() < deadline {
+        fill_write(ctx, i, size, &mut src);
         let t = Instant::now();
         let tk = wal.append(&src).map_err(|e| sioerr("append", &e))?;
         lat.push(t.elapsed());
-        if tk.pos().offset() != i * CHUNK as u64 {
+        if tk.pos().offset() != i * size as u64 {
             return Err(format!(
                 "append {i} landed at {} instead of {}",
                 tk.pos().offset(),
-                i * CHUNK as u64
+                i * size as u64
             ));
         }
         last = Some(tk);
@@ -246,7 +316,7 @@ fn store_write(
     let wall = start.elapsed();
     let total = lat.total() + barrier;
     let after = Snap::store(store);
-    let bytes = i * CHUNK as u64;
+    let bytes = i * size as u64;
     if rc.durable_through() < bytes {
         p.verify = Verify::Failed(format!(
             "receipt durable through {} < {bytes} bytes written",
@@ -263,6 +333,7 @@ fn store_write(
             wall,
         },
         &super::Delta::between(&before, &after),
+        size,
     );
     // Untimed integrity pass over everything written.
     if !matches!(p.verify, Verify::Failed(_)) {
@@ -348,25 +419,30 @@ fn record_read(p: &mut Point, run: &super::Run, req: usize) {
     p.metric("seconds", Some(run.lat.total().as_secs_f64()));
 }
 
-fn raw_write(ctx: &Ctx, path: &std::path::Path, p: &mut Point) -> Result<(RawFile, u64), String> {
+fn raw_write(
+    ctx: &Ctx,
+    path: &std::path::Path,
+    p: &mut Point,
+    size: usize,
+) -> Result<(RawFile, u64), String> {
     let (f, prep) = RawFile::create_ready(path, SPAN).map_err(|e| ioerr("raw create", &e))?;
     p.notes.push(format!(
         "file made ready (zero-filled unbuffered 1 MiB writes + flushed) in {:.2} s ({:.0} MB/s); compare store-io's provisioning note",
         prep.as_secs_f64(),
         SPAN as f64 / prep.as_secs_f64() / 1e6
     ));
-    let mut src = vec![0u8; CHUNK];
-    let mut abuf = AlignedBuf::zeroed(CHUNK);
+    let mut src = vec![0u8; size];
+    let mut abuf = AlignedBuf::zeroed(size);
     let mut lat = Samples::with_capacity(1024);
     let before = Snap::os();
     let deadline = Duration::from_secs_f64(ctx.secs);
     let start = Instant::now();
     let mut i = 0u64;
-    while (i + 1) * CHUNK as u64 <= SPAN && start.elapsed() < deadline {
-        ctx.pool.fill(STREAM, i, &mut src);
+    while (i + 1) * size as u64 <= SPAN && start.elapsed() < deadline {
+        fill_write(ctx, i, size, &mut src);
         let t = Instant::now();
         abuf.as_mut_slice().copy_from_slice(&src);
-        f.write_at(abuf.as_slice(), i * CHUNK as u64)
+        f.write_at(abuf.as_slice(), i * size as u64)
             .map_err(|e| ioerr("raw write", &e))?;
         lat.push(t.elapsed());
         i += 1;
@@ -377,7 +453,7 @@ fn raw_write(ctx: &Ctx, path: &std::path::Path, p: &mut Point) -> Result<(RawFil
     let wall = start.elapsed();
     let total = lat.total() + barrier;
     let after = Snap::os();
-    let bytes = i * CHUNK as u64;
+    let bytes = i * size as u64;
     record_write(
         p,
         &Written {
@@ -388,6 +464,7 @@ fn raw_write(ctx: &Ctx, path: &std::path::Path, p: &mut Point) -> Result<(RawFil
             wall,
         },
         &super::Delta::between(&before, &after),
+        size,
     );
     let mut out = AlignedBuf::zeroed(8 << 20);
     let mut checked = 0u64;
@@ -546,6 +623,7 @@ fn fsys_write(ctx: &Ctx, j: Journal) -> Point {
                 wall,
             },
             &super::Delta::between(&before, &after),
+            CHUNK,
         );
         journal.close().map_err(|e| fserr("close", &e))?;
         p.verify = fsys_cmp::verify_journal(&ctx.pool, &path, i);

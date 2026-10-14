@@ -159,7 +159,7 @@ where
                 owner: Owner::Thread,
             })
             .map_err(|raw| Error::Io {
-                op: Op::Open,
+                op: Op::Queue,
                 raw,
                 ctx: ErrorContext::default(),
             })?;

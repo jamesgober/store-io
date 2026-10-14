@@ -107,6 +107,7 @@ pub use store_io_engine::{
     ScanSummary, SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable, UnavailableRegion,
     WriteTicket,
 };
+pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 
 /// The [`Submitter`]'s types: its configuration, buffers, completions and
 /// refusals, and the waker that ends its `wait` from another thread.

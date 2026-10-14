@@ -213,6 +213,7 @@ where
             volume,
             owner_generation: 1,
             read_only: false,
+            io: platform.io_path(),
             unavailable: Vec::new(),
         };
         let meta = Meta {

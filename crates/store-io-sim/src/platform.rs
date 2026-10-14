@@ -408,6 +408,13 @@ impl Platform for SimPlatform {
         lock(&self.world).clock_ms()
     }
 
+    fn io_path(&self) -> store_io_platform::IoPath {
+        store_io_platform::IoPath {
+            interface: store_io_platform::IoInterface::Simulator,
+            reason: "the deterministic simulator".to_owned(),
+        }
+    }
+
     fn lock_shared(&self, file: &SimFile) -> RawResult<SimLock> {
         let mut w = lock(&self.world);
         file.check(&w, false)?;

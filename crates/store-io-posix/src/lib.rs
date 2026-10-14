@@ -81,29 +81,18 @@ pub use lock::PosixLock;
 #[cfg(target_os = "linux")]
 pub use queue::{PosixQueue, PosixWaker};
 
-/// Which kernel interface a [`PosixPlatform`]'s queues use (D-082).
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[non_exhaustive]
-pub enum LinuxTier {
-    /// One blocking system call per operation (T3), inline or on the
-    /// submit pool.
-    #[default]
-    Sync,
-    /// io_uring rings (store-io's own binding, D-093): operations complete
-    /// asynchronously and never run on kernel worker threads.
-    Uring,
-}
+pub use store_io_platform::LinuxTier;
 
 #[cfg(target_os = "linux")]
 mod platform {
     use core::sync::atomic::{AtomicU64, Ordering};
     use std::path::Path;
-    use std::sync::{Arc, Mutex, PoisonError};
+    use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
     use store_io_platform::{
-        Evidence, FileMode, FileName, Owner, Platform, QueueConfig, RangeState, RawResult,
-        ReleaseHow,
+        Evidence, FileMode, FileName, IoInterface, IoPath, OsError, Owner, Platform, QueueConfig,
+        RangeState, RawResult, ReleaseHow,
     };
 
     use super::LinuxTier;
@@ -154,9 +143,81 @@ mod platform {
         /// Parallel queues hold it too: its workers stop once the last
         /// reference, platform or queue, is gone.
         pool: Arc<Mutex<Option<Arc<SubmitPool>>>>,
+        /// `Sync` or `Uring` (never `Auto`: resolved at construction).
         tier: LinuxTier,
+        /// Why `tier` was chosen.
+        reason: Arc<str>,
+        /// `Uring` came from `Auto`: a ring the kernel refuses (for want of
+        /// descriptors or memory, or a filter added since the probe) gives a
+        /// synchronous queue instead of an error.
+        auto: bool,
+        /// Queues that fell back so, and the last refusal's code (stored
+        /// before the count is raised).
+        fell_back: Arc<AtomicU64>,
+        /// Queues on rings.
+        ringed: Arc<AtomicU64>,
+        last_refusal: Arc<core::sync::atomic::AtomicI32>,
         /// Testing: every queue gets a thread-owned ring.
         owned_rings: bool,
+    }
+
+    /// Whether this kernel accepts store-io's rings of both flavours; `Err`
+    /// holds the refusal and a description. An answer that cannot change
+    /// (accepted, or refused as unsupported or forbidden) is kept for the
+    /// process; a refusal for want of resources is asked again next time.
+    fn uring_available() -> Result<(), (OsError, String)> {
+        static PROBE: OnceLock<Result<(), (OsError, String)>> = OnceLock::new();
+        if let Some(known) = PROBE.get() {
+            return known.clone();
+        }
+        let answer = probe_rings();
+        let lasting = match &answer {
+            Ok(()) => true,
+            Err((e, _)) => [
+                libc::ENOSYS,
+                libc::EINVAL,
+                libc::EPERM,
+                libc::EACCES,
+                libc::EOPNOTSUPP,
+            ]
+            .contains(&e.code),
+        };
+        if lasting {
+            let _first = PROBE.set(answer.clone());
+        }
+        answer
+    }
+
+    /// A ring refusal a synchronous queue gets around: no descriptors or
+    /// memory, or a filter (seccomp, `io_uring_disabled`) added since the
+    /// probe. Any other code (a bad argument, say) is a fault to report.
+    fn passes_to_sync(e: OsError) -> bool {
+        [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOMEM,
+            libc::EAGAIN,
+            libc::EPERM,
+            libc::EACCES,
+            libc::ENOSYS,
+        ]
+        .contains(&e.code)
+    }
+
+    fn probe_rings() -> Result<(), (OsError, String)> {
+        for (flavour, name) in [(Flavour::Shared, "shared"), (Flavour::Owned, "owned")] {
+            if let Err(e) = Ring::new(flavour, 1) {
+                let knob = std::fs::read_to_string("/proc/sys/kernel/io_uring_disabled")
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| v != "0")
+                    .map_or(String::new(), |v| {
+                        format!("; kernel.io_uring_disabled = {v}")
+                    });
+                return Err((e, format!("io_uring refused a {name} ring ({e}){knob}")));
+            }
+        }
+        Ok(())
     }
 
     impl Default for PosixPlatform {
@@ -175,29 +236,56 @@ mod platform {
                 eagain_retries: Arc::new(AtomicU64::new(0)),
                 pool: Arc::new(Mutex::new(None)),
                 tier: LinuxTier::Sync,
+                reason: Arc::from("synchronous by default (PosixPlatform::new)"),
+                auto: false,
+                fell_back: Arc::new(AtomicU64::new(0)),
+                ringed: Arc::new(AtomicU64::new(0)),
+                last_refusal: Arc::new(core::sync::atomic::AtomicI32::new(0)),
                 owned_rings: false,
             }
         }
 
-        /// A platform whose queues use `tier`.
+        /// A platform whose queues use `tier`: [`LinuxTier::Auto`] takes
+        /// io_uring where the kernel accepts store-io's rings of both
+        /// flavours (probed once per process), else the synchronous tier.
+        /// The choice and its reason are [`Platform::io_path`]. Under `Auto`,
+        /// a queue whose ring the kernel refuses later (for want of
+        /// descriptors or memory, or a filter installed since the probe) is
+        /// a synchronous queue instead, counted in the reason at the time it
+        /// is read (and the interface is synchronous if every queue fell
+        /// back); any other refusal, and every refusal under `Uring`, is an
+        /// error.
         ///
         /// # Errors
         ///
-        /// For [`LinuxTier::Uring`], the kernel's refusal to set up a ring of
-        /// either kind (io_uring disabled, too old, or without a feature
-        /// store-io requires: `ENOSYS`).
+        /// For [`LinuxTier::Uring`] only: the kernel's refusal to set up a
+        /// ring (io_uring disabled, too old, or without a feature store-io
+        /// requires: `ENOSYS`).
         pub fn with_tier(tier: LinuxTier) -> RawResult<Self> {
-            if tier == LinuxTier::Uring {
-                drop(Ring::new(Flavour::Shared, 1)?);
-                drop(Ring::new(Flavour::Owned, 1)?);
-            }
+            let auto = !matches!(tier, LinuxTier::Sync | LinuxTier::Uring);
+            let (tier, reason) = match tier {
+                LinuxTier::Sync => (LinuxTier::Sync, "chosen".to_owned()),
+                LinuxTier::Uring => match uring_available() {
+                    Ok(()) => (LinuxTier::Uring, "chosen".to_owned()),
+                    Err((e, _)) => return Err(e),
+                },
+                _ => match uring_available() {
+                    Ok(()) => (
+                        LinuxTier::Uring,
+                        "auto: the kernel accepts both ring flavours".to_owned(),
+                    ),
+                    Err((_, why)) => (LinuxTier::Sync, format!("auto: {why}")),
+                },
+            };
             Ok(Self {
                 tier,
+                reason: Arc::from(reason),
+                auto: auto && tier == LinuxTier::Uring,
                 ..Self::new()
             })
         }
 
-        /// The tier this platform's queues use.
+        /// The tier this platform's queues use (`Sync` or `Uring`).
         #[must_use]
         pub fn tier(&self) -> LinuxTier {
             self.tier
@@ -339,6 +427,28 @@ mod platform {
             sys::monotonic_coarse_ms()
         }
 
+        fn io_path(&self) -> IoPath {
+            let fell_back = self.fell_back.load(Ordering::Acquire);
+            let ringed = self.ringed.load(Ordering::Relaxed);
+            let mut reason = self.reason.to_string();
+            if fell_back > 0 {
+                let code = self.last_refusal.load(Ordering::Relaxed);
+                reason.push_str(&format!(
+                    "; {fell_back} queue(s) synchronous: the kernel refused a ring ({})",
+                    sys::errno(code)
+                ));
+            }
+            IoPath {
+                // Every queue so far fell back: the store is synchronous.
+                interface: if self.tier == LinuxTier::Uring && (ringed > 0 || fell_back == 0) {
+                    IoInterface::IoUring
+                } else {
+                    IoInterface::Synchronous
+                },
+                reason,
+            }
+        }
+
         fn allocate(&self, file: &PosixFile, len: u64) -> RawResult<()> {
             alloc::allocate(file, len)
         }
@@ -376,7 +486,20 @@ mod platform {
         fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {
             if self.tier == LinuxTier::Uring {
                 let owned = self.owned_rings || cfg.owner == Owner::Thread;
-                return PosixQueue::uring(cfg, owned);
+                match PosixQueue::uring(cfg, owned) {
+                    Ok(q) => {
+                        let _n = self.ringed.fetch_add(1, Ordering::Relaxed);
+                        return Ok(q);
+                    }
+                    // `Auto` chose rings; this one was refused: a synchronous
+                    // queue, which needs nothing from the kernel, serves
+                    // (below), and is counted.
+                    Err(e) if self.auto && passes_to_sync(e) => {
+                        self.last_refusal.store(e.code, Ordering::Relaxed);
+                        let _n = self.fell_back.fetch_add(1, Ordering::Release);
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             if cfg.parallel {
                 Ok(PosixQueue::pooled(cfg, self.submit_pool(cfg.pool_threads)?))

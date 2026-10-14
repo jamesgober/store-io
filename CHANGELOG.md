@@ -11,6 +11,32 @@
 
 ## [Unreleased]
 
+Version 0.4.0 in development (`0.4.0-dev` on the development branch).
+
+### Added
+
+- `store-io-posix`: **io_uring on Linux**, through store-io's own binding
+  (no third-party io_uring crate). Reads and writes complete
+  asynchronously, many in flight from one thread; nothing ever runs on the
+  kernel's worker threads (what cannot be done without blocking is finished
+  by one ordinary system call, and counted). Engine submitters get rings
+  only their thread may use; the blocking API's lanes get shared rings.
+- `StoreOptions::linux_tier` (`Auto`, `Sync`, `Uring`): `Auto`, the
+  default, uses io_uring where the kernel accepts store-io's rings, else
+  the synchronous tier. `StoreReport::io` names the interface and why it
+  was chosen. Other systems ignore the option.
+- `Store::open_readonly_with` (explicit options for a read-only open);
+  `Op::Queue` for a failed queue setup (it was reported as `Open`).
+
+### Changed
+
+- **Linux stores use io_uring by default** (`linux_tier: Auto`). Each
+  io_uring queue holds two file descriptors; a queue whose ring the kernel
+  cannot set up for want of resources is synchronous instead, and the
+  report counts it. `linux_tier: Sync` keeps the 0.3 behaviour.
+- `StoreReport` is `#[non_exhaustive]`; `StoreOptions` and `StoreReport`
+  have new fields (`linux_tier`, `io`).
+
 ### Fixed
 
 - `store-io-engine`: `release` waited for the region's operations in flight

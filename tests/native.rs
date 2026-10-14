@@ -311,8 +311,9 @@ fn test_the_coarse_clock_advances_with_real_time() {
 
 /// Page batches of several writes and reads larger than one buffer run on
 /// the parallel lanes (D-096): on the Linux synchronous tier through the
-/// submit pool, on Windows through IOCP. Every byte comes back as written,
-/// one-page batches stay on the caller's thread, and the pool is reported.
+/// submit pool, on io_uring and on Windows (IOCP) in the kernel. Every byte
+/// comes back as written, one-page batches stay on the caller's thread, and
+/// the pool is reported where there is one.
 #[test]
 fn test_parallel_page_batches_and_large_reads_round_trip() {
     let t = TempDir::new("parallel");
@@ -364,7 +365,9 @@ fn test_parallel_page_batches_and_large_reads_round_trip() {
             );
         }
     }
-    if cfg!(target_os = "linux") {
+    // Only the Linux synchronous tier runs operations on a pool; io_uring
+    // runs them in the kernel.
+    if store.report().io.interface == store_io::IoInterface::Synchronous {
         assert_eq!(store.submit_pool_threads(), Some(3));
     } else {
         assert_eq!(store.submit_pool_threads(), None);
@@ -560,4 +563,67 @@ fn test_a_4_mib_submitter_append_on_the_real_file_system() {
         c.buf.unwrap().as_slice() == bytes,
         "4 MiB read back differs"
     );
+}
+
+/// The store reports the kernel interface its I/O uses and why (D-082).
+/// On Linux, `Auto` takes io_uring exactly when an explicit `Uring` choice
+/// is accepted, `Sync` is always honoured, and a store written on one tier
+/// reads back on the other.
+#[test]
+fn test_the_io_tier_is_chosen_and_reported() {
+    use store_io::{IoInterface, LinuxTier, Op};
+    let t = TempDir::new("tier");
+    let (opts, _) = options_for(t.path());
+    // Two lanes: on io_uring each queue holds two descriptors, and tests
+    // running beside this one could otherwise exhaust the process's limit
+    // and make `Auto` fall back (correctly, but not what is checked here).
+    let at = |tier| StoreOptions {
+        linux_tier: tier,
+        queues: 2,
+        ..opts.clone()
+    };
+    let path = t.path().join("tiers");
+    let store = Store::create(&path, at(LinuxTier::Sync)).unwrap();
+    let io = store.report().io.clone();
+    let line = format!("io               {} ({})", io.interface, io.reason);
+    assert!(store.report().to_string().contains(&line));
+    let wal = store.provision_append_region("wal", 1 << 20).unwrap();
+    let ticket = wal.append(b"written on one tier").unwrap();
+    wal.sync_through(&ticket).unwrap();
+    drop((wal, store));
+    if cfg!(windows) {
+        assert_eq!(io.interface, IoInterface::Iocp);
+        return;
+    }
+    assert_eq!(
+        (io.interface, io.reason.as_str()),
+        (IoInterface::Synchronous, "chosen")
+    );
+    let auto = Store::open_with(&path, at(LinuxTier::Auto)).unwrap();
+    let auto_io = auto.report().io.clone();
+    let wal = auto.append_region("wal").unwrap();
+    let mut back = vec![0u8; 19];
+    wal.read(ticket.pos().offset(), &mut back).unwrap();
+    assert_eq!(back, b"written on one tier");
+    drop((wal, auto));
+    let ro = Store::open_readonly_with(&path, at(LinuxTier::Sync)).unwrap();
+    assert_eq!(ro.report().io.interface, IoInterface::Synchronous);
+    drop(ro);
+    match Store::open_with(&path, at(LinuxTier::Uring)) {
+        Ok(s) => {
+            assert_eq!(s.report().io.interface, IoInterface::IoUring);
+            assert_eq!(auto_io.interface, IoInterface::IoUring);
+            assert!(auto_io.reason.starts_with("auto"), "{auto_io:?}");
+            assert!(!auto_io.reason.contains("synchronous"), "{auto_io:?}");
+        }
+        Err(Error::Io { op: Op::Queue, .. }) => {
+            assert!(
+                std::env::var_os("STORE_IO_EXPECT_URING").is_none(),
+                "io_uring refused where STORE_IO_EXPECT_URING says it works"
+            );
+            assert_eq!(auto_io.interface, IoInterface::Synchronous);
+            assert!(auto_io.reason.contains("io_uring refused"), "{auto_io:?}");
+        }
+        Err(e) => panic!("{e}"),
+    }
 }

@@ -139,11 +139,18 @@ impl Ring {
             return Err(errno(libc::ENOSYS));
         }
         let rings = Rings::new(&fd, p)?;
-        // D-073 guard: at most one io-wq worker of each kind. Nothing should
-        // ever punt (reads and writes are NOWAIT); a kernel without this
-        // registration still works.
-        let _guarded = sys::cap_io_workers(&fd);
-        let supported = sys::probe(&fd).map_err(|_| errno(libc::ENOSYS))?;
+        // D-073 (nothing on io-wq) is kept by the allowlist and NOWAIT, not
+        // by `IOWQ_MAX_WORKERS`: that limit belongs to the calling thread,
+        // so it would also cap the application's own rings on it.
+        // A kernel without the probe (`EINVAL`) is unsupported; any other
+        // refusal (memory, say) is passed on as it is.
+        let supported = sys::probe(&fd).map_err(|e| {
+            if e.code == libc::EINVAL {
+                errno(libc::ENOSYS)
+            } else {
+                e
+            }
+        })?;
         if ![op::NOP, op::READ, op::WRITE]
             .iter()
             .all(|o| supported[usize::from(*o)])

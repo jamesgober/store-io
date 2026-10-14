@@ -22,7 +22,7 @@ use store_io_core::evidence::Evidence;
 use store_io_core::id::{Generation, RegionId, VolumeId};
 use store_io_core::observe::{Observer, Snapshot};
 use store_io_format::meta::{RegionKind, RegionName, TableEntry, VolumeMeta};
-use store_io_platform::{FileName, IoOp, Platform, Queue, QueueConfig};
+use store_io_platform::{FileName, IoOp, IoPath, LinuxTier, Platform, Queue, QueueConfig};
 
 use crate::domain::Domain;
 use crate::exec::{Lane, QueueSet, Ran, run};
@@ -63,7 +63,9 @@ pub struct StoreOptions {
     /// pool too large to map fails `create` and `open` with
     /// `NotWritten(PoolExhausted)`.
     pub large_buffers: u32,
-    /// Queues shared by the blocking layers (0 = number of CPUs).
+    /// Queues shared by the blocking layers (0 = number of CPUs). On
+    /// io_uring each queue holds two file descriptors (its ring and its
+    /// eventfd), and a store has twice this many queues plus one.
     pub queues: usize,
     /// Operations in flight per queue.
     pub queue_depth: u32,
@@ -79,6 +81,11 @@ pub struct StoreOptions {
     /// Fill new regions with the keyed incompressible pattern instead of
     /// zeros (for thin, virtual, deduplicating or zero-detecting stacks).
     pub keyed_fill: bool,
+    /// The kernel interface on Linux (D-082): `Auto` (io_uring where the
+    /// kernel accepts it), `Sync` or `Uring`. Read by the native API when
+    /// it makes the platform; the choice is in [`StoreReport::io`]. Other
+    /// systems ignore it.
+    pub linux_tier: LinuxTier,
 }
 
 impl Default for StoreOptions {
@@ -96,6 +103,7 @@ impl Default for StoreOptions {
             t3_pool_threads: 0,
             append_ring: 4096,
             keyed_fill: false,
+            linux_tier: LinuxTier::Auto,
         }
     }
 }
@@ -182,6 +190,7 @@ pub struct UnavailableRegion {
 
 /// What the store learned about its device, and what it decided.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StoreReport {
     /// Raw evidence from the platform.
     pub evidence: Evidence,
@@ -197,6 +206,8 @@ pub struct StoreReport {
     pub owner_generation: u64,
     /// Whether the store was opened read-only.
     pub read_only: bool,
+    /// The kernel interface the store's I/O uses, and why.
+    pub io: IoPath,
     /// Regions the region table names that could not be opened, with the
     /// reason (D-090). Empty for a healthy store.
     pub unavailable: Vec<UnavailableRegion>,
@@ -206,6 +217,11 @@ impl core::fmt::Display for StoreReport {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let d = &self.decision;
         writeln!(f, "volume           {}", self.volume)?;
+        writeln!(
+            f,
+            "io               {} ({})",
+            self.io.interface, self.io.reason
+        )?;
         writeln!(f, "class            {}", d.class)?;
         writeln!(f, "label            {}", d.label)?;
         writeln!(f, "durable open     {:?}", d.durable_open)?;
@@ -656,10 +672,10 @@ pub(crate) fn make_queues<P: Platform>(
     };
     let mut qs = Vec::with_capacity(n);
     for _ in 0..n {
-        qs.push(platform.queue(cfg).map_err(|e| io(Op::Open, e))?);
+        qs.push(platform.queue(cfg).map_err(|e| io(Op::Queue, e))?);
     }
     // One more queue, used only by the flush leader (D-070).
-    let flush = platform.queue(cfg).map_err(|e| io(Op::Open, e))?;
+    let flush = platform.queue(cfg).map_err(|e| io(Op::Queue, e))?;
     Ok(QueueSet::with_flush_lane(qs, flush, cfg.depth as usize))
 }
 

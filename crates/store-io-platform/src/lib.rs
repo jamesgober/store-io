@@ -189,6 +189,62 @@ pub enum Owner {
     Thread,
 }
 
+/// Which kernel interface the Linux backend's queues use (D-082). Other
+/// backends have one interface and ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum LinuxTier {
+    /// io_uring where the kernel accepts store-io's rings (probed once per
+    /// process), else the synchronous tier; the reason is reported.
+    #[default]
+    Auto,
+    /// One blocking system call per operation (T3), inline or on the submit
+    /// pool.
+    Sync,
+    /// io_uring rings (store-io's own binding, D-093): operations complete
+    /// asynchronously and never run on kernel worker threads. Refused where
+    /// the kernel refuses the rings.
+    Uring,
+}
+
+/// A kernel interface for I/O ([`IoPath`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IoInterface {
+    /// Linux io_uring.
+    IoUring,
+    /// One blocking system call per operation (the Linux synchronous tier).
+    Synchronous,
+    /// Windows I/O completion ports.
+    Iocp,
+    /// The deterministic simulator.
+    Simulator,
+    /// Another backend's interface.
+    Other,
+}
+
+impl fmt::Display for IoInterface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::IoUring => "io_uring",
+            Self::Synchronous => "synchronous",
+            Self::Iocp => "IOCP",
+            Self::Simulator => "simulator",
+            Self::Other => "other",
+        })
+    }
+}
+
+/// The kernel interface a platform's queues use, and why (reported in
+/// `StoreReport`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IoPath {
+    /// The interface.
+    pub interface: IoInterface,
+    /// Why it was chosen.
+    pub reason: String,
+}
+
 /// Ends a [`Queue::wait`] from another thread (D-083): the queue's current
 /// wait, or its next one if none is in progress, returns, possibly having
 /// added nothing. A wake never creates, loses or repeats a completion.
@@ -414,6 +470,14 @@ pub trait Platform: Send + Sync + 'static {
     /// never decreases. Cold: read only by queries such as
     /// `oldest_outstanding`, never on the I/O path.
     fn monotonic_ms(&self) -> u64;
+
+    /// The kernel interface this platform's queues use, and why.
+    fn io_path(&self) -> IoPath {
+        IoPath {
+            interface: IoInterface::Other,
+            reason: "the backend's only interface".to_owned(),
+        }
+    }
 
     /// Takes the exclusive ownership lock on an open file. At most one lock
     /// (exclusive or shared) may be held per handle: on Linux a second lock

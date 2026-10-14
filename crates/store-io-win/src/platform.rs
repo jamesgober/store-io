@@ -102,6 +102,13 @@ impl Platform for WinPlatform {
         sys::tick_count_ms()
     }
 
+    fn io_path(&self) -> store_io_platform::IoPath {
+        store_io_platform::IoPath {
+            interface: store_io_platform::IoInterface::Iocp,
+            reason: "the Windows backend's only interface".to_owned(),
+        }
+    }
+
     fn allocate(&self, file: &WinFile, len: u64) -> RawResult<()> {
         alloc::allocate(file, len)
     }

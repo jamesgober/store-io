@@ -238,6 +238,7 @@ where
             volume,
             owner_generation,
             read_only,
+            io: platform.io_path(),
             unavailable,
         };
         Ok(Self::assemble(

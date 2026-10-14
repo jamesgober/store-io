@@ -5,9 +5,23 @@ use std::path::Path;
 
 use store_io_core::decide::{Trust, decide};
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsError};
-use store_io_platform::{FileName, Platform};
+use store_io_platform::{FileName, LinuxTier, Platform};
 
 use crate::{NativePlatform, Probe, StoreOptions};
+
+/// The native platform on the kernel interface `tier` asks for (D-082;
+/// only Linux has a choice).
+fn platform(tier: LinuxTier) -> Result<NativePlatform, Error> {
+    #[cfg(target_os = "linux")]
+    {
+        NativePlatform::with_tier(tier).map_err(|raw| io(Op::Queue, raw))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = tier;
+        Ok(NativePlatform::new())
+    }
+}
 
 /// Paths accepted by the simple API.
 fn path_of<P: AsRef<Path> + ?Sized>(p: &P) -> &Path {
@@ -60,7 +74,7 @@ impl Store {
     ///
     /// `AlreadyExists`, `UnsafeDevice`, `Unverified`, `NoSpace`, `Io`.
     pub fn create(path: impl AsRef<Path>, opts: StoreOptions) -> Result<Self, Error> {
-        store_io_engine::Store::create(NativePlatform::new(), path_of(&path), opts).map(Self)
+        store_io_engine::Store::create(platform(opts.linux_tier)?, path_of(&path), opts).map(Self)
     }
 
     /// Opens an existing store for writing, with default options. Takes the
@@ -81,7 +95,7 @@ impl Store {
     ///
     /// As [`Self::open`].
     pub fn open_with(path: impl AsRef<Path>, opts: StoreOptions) -> Result<Self, Error> {
-        store_io_engine::Store::open(NativePlatform::new(), path_of(&path), opts).map(Self)
+        store_io_engine::Store::open(platform(opts.linux_tier)?, path_of(&path), opts).map(Self)
     }
 
     /// Opens an existing store for reading and recovery only: no write
@@ -91,12 +105,18 @@ impl Store {
     ///
     /// `NotFound`, `Corruption`, `Io`.
     pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self, Error> {
-        store_io_engine::Store::open_readonly(
-            NativePlatform::new(),
-            path_of(&path),
-            StoreOptions::default(),
-        )
-        .map(Self)
+        Self::open_readonly_with(path, StoreOptions::default())
+    }
+
+    /// Opens an existing store for reading and recovery only, with
+    /// explicit options (for example `linux_tier: LinuxTier::Sync`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_readonly`].
+    pub fn open_readonly_with(path: impl AsRef<Path>, opts: StoreOptions) -> Result<Self, Error> {
+        store_io_engine::Store::open_readonly(platform(opts.linux_tier)?, path_of(&path), opts)
+            .map(Self)
     }
 
     /// The engine store underneath.
@@ -150,7 +170,7 @@ impl Directory {
     ///
     /// As [`Self::open`].
     pub fn open_with(path: impl AsRef<Path>, create: bool, trust: Trust) -> Result<Self, Error> {
-        store_io_engine::Directory::open(NativePlatform::new(), path_of(&path), create, trust)
+        store_io_engine::Directory::open(platform(LinuxTier::Auto)?, path_of(&path), create, trust)
             .map(Self)
     }
 }

@@ -113,13 +113,6 @@ pub(crate) fn restrict(fd: &OwnedFd, list: &mut [Restriction]) -> RawResult<()> 
     unsafe { register(fd, reg::RESTRICTIONS, list.as_mut_ptr().cast(), nr) }.map(|_| ())
 }
 
-/// Caps the ring's io-wq workers (bounded, unbounded) at `[1, 1]` (D-073).
-pub(crate) fn cap_io_workers(fd: &OwnedFd) -> RawResult<()> {
-    let mut workers = [1u32, 1u32];
-    // SAFETY: an array of two `u32`; the kernel writes back the old limits.
-    unsafe { register(fd, reg::IOWQ_MAX_WORKERS, workers.as_mut_ptr().cast(), 2) }.map(|_| ())
-}
-
 /// Registers `fd` in the calling thread's ring table (`REGISTER_RING_FDS`);
 /// returns its index. Valid only on this thread.
 pub(crate) fn register_ring_fd(fd: &OwnedFd) -> RawResult<u32> {

@@ -20,10 +20,10 @@ categories    = ["filesystem", "database-implementations"]
 workspace = true
 
 [dependencies]
-store-io-core     = { path = "../store-io-core", version = "0.3.1" }
-store-io-format   = { path = "../store-io-format", version = "0.3.1" }
-store-io-buf      = { path = "../store-io-buf", version = "0.3.1" }
-store-io-platform = { path = "../store-io-platform", version = "0.3.1" }
+store-io-core     = { path = "../store-io-core", version = "0.4.0-dev" }
+store-io-format   = { path = "../store-io-format", version = "0.4.0-dev" }
+store-io-buf      = { path = "../store-io-buf", version = "0.4.0-dev" }
+store-io-platform = { path = "../store-io-platform", version = "0.4.0-dev" }
 
 [features]
 default = []
@@ -31,7 +31,7 @@ default = []
 observe = ["store-io-core/observe"]
 
 [dev-dependencies]
-store-io-sim = { path = "../store-io-sim", version = "0.3.1" }
+store-io-sim = { path = "../store-io-sim", version = "0.4.0-dev" }
 
 # Model checker, compiled only with RUSTFLAGS="--cfg loom" (never in a
 # normal build) so dependent crates' loom runs model these atomics too.

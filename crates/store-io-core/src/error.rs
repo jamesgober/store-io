@@ -85,6 +85,8 @@ pub enum Op {
     Probe,
     /// Removing a file.
     Unlink,
+    /// Setting up an I/O queue (an io_uring ring, a completion port).
+    Queue,
 }
 
 impl fmt::Display for Op {
@@ -103,6 +105,7 @@ impl fmt::Display for Op {
             Self::Lock => "lock",
             Self::Probe => "probe",
             Self::Unlink => "unlink",
+            Self::Queue => "queue setup",
         })
     }
 }

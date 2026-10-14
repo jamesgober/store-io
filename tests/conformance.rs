@@ -24,18 +24,33 @@ fn test_the_native_backend_conforms() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_the_io_uring_tier_conforms() {
-    let p = store_io_posix::PosixPlatform::with_tier(store_io_posix::LinuxTier::Uring).unwrap();
+    let Some(p) = uring() else { return };
     conforms(&p, "uring");
+}
+
+/// The io_uring platform, or `None` (and a note) where the kernel refuses
+/// io_uring: the synchronous tier is the native backend there.
+#[cfg(target_os = "linux")]
+fn uring() -> Option<store_io_posix::PosixPlatform> {
+    match store_io_posix::PosixPlatform::with_tier(store_io_posix::LinuxTier::Uring) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            assert!(
+                std::env::var_os("STORE_IO_EXPECT_URING").is_none(),
+                "io_uring refused ({e}) where STORE_IO_EXPECT_URING says it works"
+            );
+            eprintln!("io_uring refused here ({e}): its conformance run is skipped");
+            None
+        }
+    }
 }
 
 /// The io_uring tier with every queue on a thread-owned ring.
 #[cfg(target_os = "linux")]
 #[test]
 fn test_the_io_uring_tier_conforms_on_owned_rings() {
-    let p = store_io_posix::PosixPlatform::with_tier(store_io_posix::LinuxTier::Uring)
-        .unwrap()
-        .with_owned_rings();
-    conforms(&p, "uring-owned");
+    let Some(p) = uring() else { return };
+    conforms(&p.with_owned_rings(), "uring-owned");
 }
 
 fn conforms(platform: &NativePlatform, label: &str) {

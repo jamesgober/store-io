@@ -254,11 +254,22 @@ impl DurableReceipt {
         self.label
     }
 
-    /// For append regions: every byte before this offset is durable. For page
-    /// regions and slots: the end of the covered write.
+    /// For a prefix receipt ([`Self::is_prefix`]: an append region's
+    /// `sync_through`, or a durable submitter append whose region was
+    /// complete up to it): every byte of the region before this offset is
+    /// durable. Otherwise (page regions, slots, and a submitter receipt for
+    /// one append whose region was not yet complete before it): the end of
+    /// the covered write; earlier bytes may not be durable.
     #[must_use]
     pub fn durable_through(&self) -> u64 {
         self.through
+    }
+
+    /// Whether this is a prefix receipt: every byte of the region before
+    /// [`Self::durable_through`] is durable (see there).
+    #[must_use]
+    pub fn is_prefix(&self) -> bool {
+        self.prefix
     }
 
     /// Whether the covered write was accepted as atomic (never torn).

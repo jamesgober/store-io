@@ -18,7 +18,8 @@ use std::time::Duration;
 use store_io_core::error::{CorruptionKind, Error, NotWrittenCause};
 use store_io_engine::completion::{Completion, Done};
 use store_io_engine::{
-    AppendRegion, Outstanding, Store, StoreOptions, Submitter, SubmitterConfig, WriteTicket,
+    AppendRegion, Outstanding, Store, StoreOptions, Submitter, SubmitterConfig, WriteMode,
+    WriteTicket,
 };
 use store_io_sim::{SimConfig, SimPlatform};
 
@@ -87,7 +88,7 @@ fn append(
 ) -> u64 {
     let mut buf = filled(sub, bytes);
     loop {
-        match sub.append(wal, buf, tag) {
+        match sub.append(wal, buf, WriteMode::Plain, tag) {
             Ok(pos) => return pos.offset(),
             Err(r) => {
                 assert!(
@@ -183,7 +184,7 @@ fn test_a_seed_replays_exactly() {
                 let mut buf = sub.take_buf(bs).unwrap();
                 buf.as_mut_slice().copy_from_slice(&data(i, bs));
                 let pos = pages.pos(i * bs as u64).unwrap();
-                while let Err(r) = sub.write(&pages, pos, buf, i) {
+                while let Err(r) = sub.write(&pages, pos, buf, WriteMode::Plain, i) {
                     buf = r.buf.unwrap();
                     done.extend(sub.wait(1).unwrap());
                 }
@@ -233,7 +234,7 @@ fn test_a_write_failing_in_flight_poisons() {
     );
     assert!(s.poisoned().is_some());
     let buf = sub.take_buf(10).unwrap();
-    let r = sub.append(&wal, buf, 99).unwrap_err();
+    let r = sub.append(&wal, buf, WriteMode::Plain, 99).unwrap_err();
     assert!(matches!(r.error, Error::Poisoned { .. }), "{:?}", r.error);
     assert!(r.buf.is_some());
     // A ticket from before the failure cannot be made durable past the hole.
@@ -261,7 +262,8 @@ fn test_a_short_write_is_unknown_and_poisons() {
     });
     let mut buf = sub.take_buf(4 * bs).unwrap();
     buf.as_mut_slice().fill(3);
-    sub.write(&pages, pages.pos(0).unwrap(), buf, 1).unwrap();
+    sub.write(&pages, pages.pos(0).unwrap(), buf, WriteMode::Plain, 1)
+        .unwrap();
     let c = sub.wait(1).unwrap().next().unwrap();
     assert!(matches!(c.outcome, Err(Error::DurabilityUnknown { .. })));
     assert!(s.poisoned().is_some());
@@ -277,20 +279,23 @@ fn test_back_pressure_returns_the_buffer_and_reserves_nothing() {
     let mut sub = sub(&s, 4);
     for i in 0..4 {
         let buf = sub.take_buf(10).unwrap();
-        sub.append(&wal, buf, i).unwrap();
+        sub.append(&wal, buf, WriteMode::Plain, i).unwrap();
     }
     let tail = wal.tail();
     let buf = sub.take_buf(10).unwrap();
-    let r = sub.append(&wal, buf, 4).unwrap_err();
+    let r = sub.append(&wal, buf, WriteMode::Plain, 4).unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::QueueFull));
     assert_eq!(wal.tail(), tail, "a refused append reserved space");
     // Completions arrive but are left with the submitter: still full.
     drop(sub.wait(4).unwrap());
     assert_eq!(sub.in_flight(), 0);
-    let r = sub.append(&wal, r.buf.unwrap(), 4).unwrap_err();
+    let r = sub
+        .append(&wal, r.buf.unwrap(), WriteMode::Plain, 4)
+        .unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::QueueFull));
     assert_eq!(sub.reap().count(), 4);
-    sub.append(&wal, r.buf.unwrap(), 4).unwrap();
+    sub.append(&wal, r.buf.unwrap(), WriteMode::Plain, 4)
+        .unwrap();
 }
 
 /// Another store's region or buffer is refused before anything is
@@ -309,13 +314,13 @@ fn test_foreign_regions_and_buffers_are_refused() {
             .unwrap(),
     );
     let buf = sub.take_buf(10).unwrap();
-    let r = sub.append(&theirs, buf, 0).unwrap_err();
+    let r = sub.append(&theirs, buf, WriteMode::Plain, 0).unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::ForeignPosition));
     let foreign = other_sub.take_buf(10).unwrap();
-    let r = sub.append(&wal, foreign, 0).unwrap_err();
+    let r = sub.append(&wal, foreign, WriteMode::Plain, 0).unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::ForeignBuffer));
     let empty = sub.take_buf(0).unwrap();
-    let r = sub.append(&wal, empty, 0).unwrap_err();
+    let r = sub.append(&wal, empty, WriteMode::Plain, 0).unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::Empty));
     assert_eq!(wal.tail(), 0);
     assert_eq!(theirs.tail(), 0);
@@ -339,10 +344,11 @@ fn test_an_unpositioned_region_refuses_appends() {
     let wal = s.append_region("wal").unwrap();
     let mut sub = sub(&s, 4);
     let buf = sub.take_buf(10).unwrap();
-    let r = sub.append(&wal, buf, 0).unwrap_err();
+    let r = sub.append(&wal, buf, WriteMode::Plain, 0).unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::NotPositioned));
     wal.resume_at(0).unwrap();
-    sub.append(&wal, r.buf.unwrap(), 0).unwrap();
+    sub.append(&wal, r.buf.unwrap(), WriteMode::Plain, 0)
+        .unwrap();
 }
 
 /// Dropping a submitter with operations in flight waits for them: every
@@ -366,7 +372,7 @@ fn test_drop_drains_and_releases_everything() {
     for i in 0..4 {
         let mut buf = sub.take_buf(max).unwrap();
         buf.as_mut_slice().fill(i as u8 + 1);
-        sub.append(&wal, buf, i).unwrap();
+        sub.append(&wal, buf, WriteMode::Plain, i).unwrap();
     }
     assert!(is_cause(
         &sub.take_buf(max).unwrap_err(),
@@ -393,7 +399,7 @@ fn test_recycle_waits_for_unprocessed_operations() {
     let wal = s.provision_append_region("wal", MIB).unwrap();
     let mut sub = sub(&s, 4);
     let buf = sub.take_buf(10).unwrap();
-    sub.append(&wal, buf, 0).unwrap();
+    sub.append(&wal, buf, WriteMode::Plain, 0).unwrap();
     let (tx, rx) = mpsc::channel();
     let recycler = {
         let wal = wal.clone();
@@ -408,9 +414,14 @@ fn test_recycle_waits_for_unprocessed_operations() {
     let fresh = rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
     recycler.join().unwrap();
     let buf = sub.take_buf(10).unwrap();
-    let r = sub.append(&wal, buf, 1).unwrap_err();
+    let r = sub.append(&wal, buf, WriteMode::Plain, 1).unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::StaleGeneration));
-    assert_eq!(sub.append(&fresh, r.buf.unwrap(), 1).unwrap().offset(), 0);
+    assert_eq!(
+        sub.append(&fresh, r.buf.unwrap(), WriteMode::Plain, 1)
+            .unwrap()
+            .offset(),
+        0
+    );
 }
 
 /// Poisoning with writes in flight: they complete with their raw results,
@@ -422,14 +433,14 @@ fn test_poison_mid_flight() {
     let mut sub = sub(&s, 8);
     for i in 0..3 {
         let buf = sub.take_buf(100).unwrap();
-        sub.append(&wal, buf, i).unwrap();
+        sub.append(&wal, buf, WriteMode::Plain, i).unwrap();
     }
     s.poison();
     let done: Vec<_> = sub.wait(3).unwrap().collect();
     assert_eq!(done.len(), 3);
     assert!(done.iter().all(|c| c.outcome.is_ok()));
     let buf = sub.take_buf(100).unwrap();
-    let r = sub.append(&wal, buf, 3).unwrap_err();
+    let r = sub.append(&wal, buf, WriteMode::Plain, 3).unwrap_err();
     assert!(matches!(r.error, Error::Poisoned { .. }));
     sub.read_append(&wal, 0, sub.take_buf(4096).unwrap(), 4)
         .unwrap();
@@ -448,8 +459,14 @@ fn test_page_writes_and_reads_round_trip() {
     for i in 0..8u64 {
         let mut buf = sub.take_buf(2 * bs).unwrap();
         buf.as_mut_slice().copy_from_slice(&data(i, 2 * bs));
-        sub.write(&pages, pages.pos(i * 2 * bs as u64).unwrap(), buf, i)
-            .unwrap();
+        sub.write(
+            &pages,
+            pages.pos(i * 2 * bs as u64).unwrap(),
+            buf,
+            WriteMode::Plain,
+            i,
+        )
+        .unwrap();
     }
     let mut done = Vec::new();
     drain(&mut sub, &mut done);
@@ -514,22 +531,34 @@ fn test_page_writes_and_reads_round_trip() {
     );
     // Page writes are checked as the blocking write checks them.
     let buf = sub.take_buf(bs).unwrap();
-    let r = sub.write(&pages, pages.pos(MIB - bs as u64).unwrap(), buf, 0);
+    let r = sub.write(
+        &pages,
+        pages.pos(MIB - bs as u64).unwrap(),
+        buf,
+        WriteMode::Plain,
+        0,
+    );
     assert!(r.is_ok());
     let buf = sub.take_buf(2 * bs).unwrap();
-    let r = sub.write(&pages, pages.pos(MIB - bs as u64).unwrap(), buf, 0);
+    let r = sub.write(
+        &pages,
+        pages.pos(MIB - bs as u64).unwrap(),
+        buf,
+        WriteMode::Plain,
+        0,
+    );
     assert!(is_cause(
         &r.unwrap_err().error,
         NotWrittenCause::OutOfBounds
     ));
     let buf = sub.take_buf(100).unwrap();
-    let r = sub.write(&pages, pages.pos(0).unwrap(), buf, 0);
+    let r = sub.write(&pages, pages.pos(0).unwrap(), buf, WriteMode::Plain, 0);
     assert!(is_cause(&r.unwrap_err().error, NotWrittenCause::Misaligned));
     drop(sub.wait(1).unwrap());
     let fresh = pages.recycle().unwrap();
     let buf = sub.take_buf(bs).unwrap();
     let r = sub
-        .write(&fresh, pages.pos(0).unwrap(), buf, 0)
+        .write(&fresh, pages.pos(0).unwrap(), buf, WriteMode::Plain, 0)
         .unwrap_err();
     assert!(is_cause(&r.error, NotWrittenCause::StaleGeneration));
     let buf = sub.take_buf(bs).unwrap();
@@ -559,7 +588,7 @@ fn test_failed_waits() {
     let wal = s.provision_append_region("wal", MIB).unwrap();
     let mut sub = sub(&s, 4);
     let buf = sub.take_buf(10).unwrap();
-    sub.append(&wal, buf, 0).unwrap();
+    sub.append(&wal, buf, WriteMode::Plain, 0).unwrap();
     p.with_world(|w| {
         let next = w.waits() + 1;
         w.faults_mut().fail_wait = Some((next, EIO));
@@ -569,7 +598,7 @@ fn test_failed_waits() {
     assert!(s.poisoned().is_none());
     assert_eq!(sub.wait(1).unwrap().count(), 1);
     let buf = sub.take_buf(10).unwrap();
-    sub.append(&wal, buf, 1).unwrap();
+    sub.append(&wal, buf, WriteMode::Plain, 1).unwrap();
     assert_eq!(sub.wait(1).unwrap().count(), 1);
 }
 
@@ -590,7 +619,8 @@ fn test_a_failed_drain_poisons_only_for_writes() {
                     let buf = sub.take_buf(4096).unwrap();
                     sub.read_append(&wal, 0, buf, i).unwrap();
                 } else {
-                    sub.append(&wal, filled(&sub, &data(i, 100)), i).unwrap();
+                    sub.append(&wal, filled(&sub, &data(i, 100)), WriteMode::Plain, i)
+                        .unwrap();
                 }
             }
             p.with_world(|w| {
@@ -626,7 +656,7 @@ fn test_a_short_append_is_unknown_and_poisons() {
         let next = w.writes() + 1;
         w.faults_mut().short_write = Some(next);
     });
-    sub.append(&wal, filled(&sub, &data(1, 3 * 4096)), 1)
+    sub.append(&wal, filled(&sub, &data(1, 3 * 4096)), WriteMode::Plain, 1)
         .unwrap();
     let c = sub.wait(1).unwrap().next().unwrap();
     assert!(
@@ -671,7 +701,9 @@ fn test_a_read_only_store_reads_and_refuses_writes() {
     let s = Store::open_readonly(p.clone(), Path::new("/db"), opts()).unwrap();
     let wal = s.append_region("wal").unwrap();
     let mut sub = sub(&s, 4);
-    let r = sub.append(&wal, filled(&sub, b"x"), 0).unwrap_err();
+    let r = sub
+        .append(&wal, filled(&sub, b"x"), WriteMode::Plain, 0)
+        .unwrap_err();
     assert!(
         is_cause(&r.error, NotWrittenCause::ReadOnly),
         "{:?}",
@@ -737,10 +769,12 @@ fn test_oldest_outstanding_moves_to_the_next_operation() {
         let (p, s) = store(900 + seed, true);
         let wal = s.provision_append_region("wal", MIB).unwrap();
         let mut sub = sub(&s, 4);
-        sub.append(&wal, filled(&sub, b"a"), 0).unwrap();
+        sub.append(&wal, filled(&sub, b"a"), WriteMode::Plain, 0)
+            .unwrap();
         assert!(s.oldest_outstanding().is_some());
         p.with_world(|w| w.advance_clock(5_000));
-        sub.append(&wal, filled(&sub, b"b"), 1).unwrap();
+        sub.append(&wal, filled(&sub, b"b"), WriteMode::Plain, 1)
+            .unwrap();
         let tags: Vec<u64> = sub.reap().map(|c| c.tag).collect();
         if tags == [0] {
             // The newer one was never the oldest before: first seen now.
@@ -773,7 +807,8 @@ fn test_drop_waits_for_every_operation() {
         let wal = s.provision_append_region("wal", MIB).unwrap();
         let mut sub = sub(&s, 8);
         for i in 0..8 {
-            sub.append(&wal, filled(&sub, &data(i, 300)), i).unwrap();
+            sub.append(&wal, filled(&sub, &data(i, 300)), WriteMode::Plain, i)
+                .unwrap();
         }
         assert!(s.oldest_outstanding().is_some());
         drop(sub);
@@ -792,7 +827,8 @@ fn test_oldest_outstanding_sees_submitted_operations() {
     let wal = s.provision_append_region("wal", MIB).unwrap();
     let mut sub = sub(&s, 4);
     assert_eq!(s.oldest_outstanding(), None);
-    sub.append(&wal, filled(&sub, b"a"), 0).unwrap();
+    sub.append(&wal, filled(&sub, b"a"), WriteMode::Plain, 0)
+        .unwrap();
     let at = |ms| {
         Some(Outstanding {
             age: Duration::from_millis(ms),
@@ -801,12 +837,14 @@ fn test_oldest_outstanding_sees_submitted_operations() {
     };
     assert_eq!(s.oldest_outstanding(), at(0));
     p.with_world(|w| w.advance_clock(3_000));
-    sub.append(&wal, filled(&sub, b"b"), 1).unwrap();
+    sub.append(&wal, filled(&sub, b"b"), WriteMode::Plain, 1)
+        .unwrap();
     // The newer operation does not hide the older one.
     assert_eq!(s.oldest_outstanding(), at(3_000));
     assert_eq!(sub.wait(2).unwrap().count(), 2);
     assert_eq!(s.oldest_outstanding(), None);
-    sub.append(&wal, filled(&sub, b"c"), 2).unwrap();
+    sub.append(&wal, filled(&sub, b"c"), WriteMode::Plain, 2)
+        .unwrap();
     p.with_world(|w| w.advance_clock(1_000));
     // A new operation is not dated from the old one.
     assert_eq!(s.oldest_outstanding(), at(0));

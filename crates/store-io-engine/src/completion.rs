@@ -53,10 +53,23 @@ pub struct Written {
     /// The write's ticket, for `sync_through` on its region. Minted only
     /// now, when every byte has been transferred (D-080).
     pub ticket: WriteTicket,
-    /// A receipt, when the write itself was durable on completion and the
-    /// submitter was asked for one. Always `None` in this release: make
-    /// the ticket durable with `sync_through`.
+    /// For a [`WriteMode::Durable`] write, the receipt for its own range;
+    /// `None` for a plain write (make the ticket durable with a barrier or
+    /// `sync_through`).
     pub receipt: Option<DurableReceipt>,
+}
+
+/// How a submitter write is made durable (D-099).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum WriteMode {
+    /// The completion carries the ticket; make it durable with a barrier.
+    #[default]
+    Plain,
+    /// The completion is handed back only once the write is durable, with a
+    /// receipt for its own range: at once on a power-safe store (the write
+    /// itself was durable), after a covering flush on a flush-required one.
+    Durable,
 }
 
 /// What a successful operation did.
@@ -65,6 +78,11 @@ pub struct Written {
 pub enum Done {
     /// An append or page write.
     Written(Written),
+    /// A barrier for one ticket: a receipt for that ticket's range.
+    Synced(DurableReceipt),
+    /// A barrier for the whole store: every write that completed in the
+    /// store before it was submitted is durable.
+    Flushed,
     /// A read: the bytes read into the buffer, whose length is set to it
     /// (fewer than asked only if the device returned fewer).
     Read {

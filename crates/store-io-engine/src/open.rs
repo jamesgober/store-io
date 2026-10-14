@@ -299,6 +299,7 @@ where
                 observer: Observer::new(),
                 seen: Mutex::new(crate::stats::Seen::default()),
                 submitters: Mutex::new(crate::stats::Submitters::default()),
+                flusher: std::sync::OnceLock::new(),
             }),
         }
     }

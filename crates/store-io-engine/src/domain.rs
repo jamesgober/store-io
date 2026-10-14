@@ -145,6 +145,16 @@ impl Domain {
         self.issued.load(Ordering::SeqCst).wrapping_add(1)
     }
 
+    /// Whether a flush `>= need` has already succeeded (a barrier for it
+    /// would return at once); counted as a joined barrier when it has.
+    pub(crate) fn join_if_done(&self, need: u64) -> bool {
+        let done = self.done.load(Ordering::SeqCst) >= need;
+        if done {
+            let _count = self.counters.joined.fetch_add(1, Ordering::Relaxed);
+        }
+        done
+    }
+
     /// Blocks until a flush issued after `need - 1` has succeeded, issuing it
     /// on this thread if no covering flush is running.
     ///
@@ -212,6 +222,21 @@ impl Domain {
                 self.follow(need);
             }
         }
+    }
+
+    /// Takes flush leadership, as a leader flushing would (tests: every
+    /// barrier then waits until [`Self::drop_leadership`]).
+    #[cfg(test)]
+    pub(crate) fn hold_leadership(&self) -> bool {
+        self.leader
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Gives back leadership taken by [`Self::hold_leadership`].
+    #[cfg(test)]
+    pub(crate) fn drop_leadership(&self) {
+        self.release_leadership();
     }
 
     fn release_leadership(&self) {

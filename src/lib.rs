@@ -112,13 +112,15 @@ pub use store_io_engine::{
 /// refusals, and the waker that ends its `wait` from another thread.
 pub mod submit {
     pub use store_io_engine::completion::{Completion, Completions, Done, Rejected, Written};
-    pub use store_io_engine::{MAX_DEPTH, SubmitterConfig};
+    pub use store_io_engine::{MAX_DEPTH, SubmitterConfig, WriteMode};
     pub use store_io_platform::{IoBuf, Wake};
 
     /// The waker of a [`Submitter`](crate::Submitter) on the native backend
     /// (`Submitter::waker`).
     #[cfg(any(windows, target_os = "linux"))]
-    pub type Waker = <<crate::NativePlatform as store_io_platform::Platform>::Queue as store_io_platform::Queue>::Waker;
+    pub type Waker = store_io_engine::SubmitterWaker<
+        <<crate::NativePlatform as store_io_platform::Platform>::Queue as store_io_platform::Queue>::Waker,
+    >;
 }
 
 /// The operating system's native backend.

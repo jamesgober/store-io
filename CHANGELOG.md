@@ -141,8 +141,8 @@
   (the `WriteTicket`) or `Done::Read`. The completion types are in
   `store_io_engine::completion`; the facade exports `store_io::Submitter`
   and a `store_io::submit` module (`SubmitterConfig`, `MAX_DEPTH`,
-  `Completion`, `Completions`, `Done`, `Written`, `Rejected`, `IoBuf`,
-  `Wake`).
+  `Completion`, `Completions`, `Done`, `Written`, `Rejected`, `WriteMode`,
+  `IoBuf`, `Wake`, and `Waker`, the native `SubmitterWaker`).
   - **Same rules as the blocking calls, per operation.** An append's
     position is final at submission; its ticket is minted only when its
     completion shows every byte written, and only then does the region's
@@ -166,8 +166,43 @@
     it recycles or releases that region, or syncs or appends far past them
     (documented on `Submitter`, `recycle` and `release`). Buffers come from
     the store's pool, shared with its blocking calls.
-  - Not yet: durable writes with receipts in the completion and barriers
-    (with the flush thread, D-074), vectored writes, forced data sync.
+  - **Durable writes and barriers (D-099).** `append` and `write` now take
+    a `WriteMode`: with `Durable`, the completion comes back only once the
+    write is durable, with a receipt (`Written::receipt`).
+    - **Receipt kinds.** A durable append whose region was complete up to
+      its end when it completed gets a prefix receipt (new
+      `DurableReceipt::is_prefix`: every byte before `durable_through` is
+      durable, as from `sync_through`, and the region's `durable_through`
+      advances); otherwise, and for `barrier(&ticket)` and page writes, the
+      receipt covers the write's own range. `durable_through`'s docs now
+      describe both kinds.
+    - **Barriers.** `barrier(&ticket)` completes with `Done::Synced` (a
+      receipt for that write), `barrier_all` with `Done::Flushed` (every
+      write completed in the store before it is durable). They take a place
+      in the submitter's depth; `barrier` is refused `ForeignPosition`,
+      `StaleGeneration`, `NotReady` (released region), `QueueFull` or
+      `ReadOnly`, `barrier_all` `QueueFull` or `ReadOnly`.
+    - **The flush thread.** On a flush-required store, `store-io-flush`
+      (one per store, started by the first request, parked with no timer
+      when idle) leads or joins the same shared flushes as the blocking
+      barriers, and wakes a submitter once per batch, only if it is
+      blocked. A barrier already covered by a finished flush completes at
+      once. Power-safe and read-only stores start no thread. None of these
+      calls blocks, unless the OS refused the thread: the flush then runs on
+      the calling thread.
+    - **Failures.** A receipt is only ever handed back after a flush issued
+      after the write completed has succeeded. A failed flush poisons; the
+      writes it was for complete `DurabilityUnknown` (with the write's
+      region and range) or `Poisoned`, except one an earlier flush already
+      covered, which keeps its receipt. On a poisoned store, power-safe or
+      not, durable writes and barriers complete `Poisoned`.
+    - **Lifecycle.** A durable write keeps its region open until its flush:
+      recycle and release wait for it (reap or wait until its completion is
+      handed back). Dropping a submitter waits for its pending flushes.
+    - **Waker.** `Submitter::waker` returns a `SubmitterWaker` (also
+      `store_io::submit::Waker`), which ends a wait for I/O or for a flush;
+      `wait` returns early only on that waker.
+  - Not yet: vectored writes, forced data sync.
 - `store-io-buf`: `BufPool::owns`, whether a buffer came from that pool.
 - `store-io-core`: `NotWrittenCause::ForeignBuffer`.
 - `store-io-engine`: `Store::unavailable_regions()`, `UnavailableRegion` and

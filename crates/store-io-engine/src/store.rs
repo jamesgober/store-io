@@ -266,6 +266,11 @@ pub(crate) struct Inner<P: Platform> {
     /// order): a queue whose operations run on worker threads waits for them
     /// in its drop, and none may land after the ownership lock is released.
     pub(crate) queues: QueueSet<P::Queue>,
+    /// The flush thread (D-099), started by the first submitter request on
+    /// a flush-required store; `None` inside if the OS refused it. Declared
+    /// early too: it is stopped and joined before the file and the ownership
+    /// lock are released.
+    pub(crate) flusher: std::sync::OnceLock<Option<crate::flusher::Flusher<P>>>,
     pub(crate) platform: P,
     /// The store directory, held open for directory syncs.
     pub(crate) _dir: P::Dir,

@@ -26,7 +26,7 @@ POSIX = ["-p", "store-io-posix"]
 LINUX_ONLY = {"store-io-posix"}
 # The observer's own tests (feature `observe`).
 OBSERVE = ["-p", "store-io-core", "--features", "store-io-core/observe"]
-SUB = "crates/store-io-engine/src/submitter.rs"
+SUB = "crates/store-io-engine/src/submitter/mod.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -141,7 +141,7 @@ M = [
  ('crates/store-io-engine/src/optable.rs', '            Some(f) if full => {', '            Some(f) if full || true => {'),
  ('crates/store-io-engine/src/optable.rs', '                f.complete(r);\n', '                let _ = (f, r);\n'),
  ('crates/store-io-engine/src/gate.rs', '        held.gate().admit()?;\n', '        held.gate().admit()?;\n        held.gate().leave();\n'),
- (SUB, '        while self.table.live > 0 && self.queue.in_flight() > 0 {', '        while false {'),
+ (SUB, '        while self.table.live > 0 && self.queue.in_flight() > 0 {', '        while self.table.live > 0 && self.queue.in_flight() > 0 && false {'),
  (SUB, '        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) {', '        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) && false {'),
  (SUB, '        if !Arc::ptr_eq(&store.inner, &self.store.inner) {', '        if !Arc::ptr_eq(&store.inner, &self.store.inner) && false {'),
  (SUB, '        if !self.store.inner.pool.owns(buf) {', '        if !self.store.inner.pool.owns(buf) && false {'),
@@ -157,6 +157,22 @@ M = [
  ('crates/store-io-engine/src/optable.rs', '            let _shorter = b.set_len(*len);', '            let _shorter = (b, len);'),
  ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(&inner.meta);', '        let mut meta = lock_meta(&inner.meta);\n        self.retire(r, Retire::Release)?;'),
  ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, _seq)) if self.live > 0 => 2 * self.next_seq + 1,'),
+ # D-099: a durable write's receipt only after a flush issued after its
+ # completion succeeded; barriers check their tickets; drop waits for flushes
+ ('crates/store-io-engine/src/optable.rs', '        if live.durable && store.inner.policy.flush {', '        if live.durable && store.inner.policy.flush && false {'),
+ ('crates/store-io-engine/src/optable.rs', '                let need = w.ticket.need;', '                let need = 0 * w.ticket.need;'),
+ ('crates/store-io-engine/src/flusher.rs', '        let outcome = held.barrier_to(need).map(|()| need);', '        let outcome = held.barrier_to(need).map(|()| need).or(Ok(need));'),
+ ('crates/store-io-engine/src/flusher.rs', '        let need = guard.batch.iter().map(|r| r.need).max().unwrap_or(0);', '        let need = guard.batch.iter().map(|r| r.need).min().unwrap_or(0);'),
+ ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live)) if g != ticket.generation || !live => {', '            Some((g, live)) if (g != ticket.generation || !live) && false => {'),
+ ('crates/store-io-engine/src/submitter/durable.rs', '        if ticket.epoch != inner.epoch || ticket.volume != inner.volume {', '        if (ticket.epoch != inner.epoch || ticket.volume != inner.volume) && false {'),
+ (SUB, '        while self.table.asked > 0 {\n            self.inbox.wait(false);', '        while self.table.asked > 0 && false {\n            self.inbox.wait(false);'),
+ ('crates/store-io-engine/src/domain.rs', '        let done = self.done.load(Ordering::SeqCst) >= need;', '        let done = self.done.load(Ordering::SeqCst) >= need || true;'),
+ ('crates/store-io-engine/src/optable.rs', '                    receipt.need = need;', '                    receipt.need = 0 * need;'),
+ ('crates/store-io-engine/src/optable.rs', '                if through >= r.end {', '                if through >= r.end || true {'),
+ ('crates/store-io-engine/src/submitter/durable.rs', '        if self.store.inner.read_only {\n            // Nothing to flush', '        if self.store.inner.read_only && false {\n            // Nothing to flush'),
+ ('crates/store-io-engine/src/flusher.rs', '            IN_QUEUE => self.queue.wake(),', '            IN_QUEUE => {}'),
+ ('crates/store-io-engine/src/flusher.rs', '        if self.count.load(Ordering::SeqCst) > 0 || self.woken.load(Ordering::SeqCst) {', '        if (self.count.load(Ordering::SeqCst) > 0 || self.woken.load(Ordering::SeqCst)) && false {'),
+ (SUB, '            if self.inbox.take_woken() {\n                break;', '            if self.inbox.take_woken() && false {\n                break;'),
  # D-100: only a block's one writer may update it without an atomic add
  ('crates/store-io-core/src/observe.rs', '                None => (&self.shared[index & self.mask], false),', '                None => (&self.shared[index & self.mask], true),', OBSERVE),
 ]

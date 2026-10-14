@@ -398,16 +398,24 @@ where
     /// else uses, so a leader never waits for a queue that a follower holds
     /// (D-070). Followers wait holding nothing.
     pub(crate) fn barrier(&self) -> Result<u64, Error> {
-        let obs = &self.inner.observer;
-        obs.add(Counter::Barriers, 1);
-        let _timed = obs.span(Stage::Barrier);
         if !self.inner.policy.flush {
+            self.inner.observer.add(Counter::Barriers, 1);
             return match self.inner.domain.poisoned() {
                 Some(first) => Err(Error::Poisoned { first }),
                 None => Ok(u64::MAX),
             };
         }
         let need = self.inner.domain.ticket();
+        self.barrier_to(need)?;
+        Ok(need)
+    }
+
+    /// The domain barrier for a ticket taken earlier (after the writes it
+    /// covers completed): a flush `>= need` (flush-required stores only).
+    pub(crate) fn barrier_to(&self, need: u64) -> Result<(), Error> {
+        let obs = &self.inner.observer;
+        obs.add(Counter::Barriers, 1);
+        let _timed = obs.span(Stage::Barrier);
         let file = &self.inner.file;
         self.inner
             .domain
@@ -419,8 +427,7 @@ where
                     None => flush_data(&mut self.inner.queues.get(0), file),
                 }
             })
-            .inspect_err(|_| self.wake_frontiers())?;
-        Ok(need)
+            .inspect_err(|_| self.wake_frontiers())
     }
 
     /// A ticket for a write of `r` that has just completed.
@@ -458,6 +465,25 @@ where
             need,
             prefix,
             epoch: self.inner.epoch,
+        }
+    }
+
+    /// A receipt for exactly a ticket's range, backed by flush `need`
+    /// (`u64::MAX` on a power-safe store, where writes are durable at
+    /// completion).
+    pub(crate) fn receipt_for(&self, t: &WriteTicket, need: u64) -> DurableReceipt {
+        DurableReceipt {
+            volume: t.volume,
+            region: t.region,
+            generation: t.generation,
+            class: self.inner.policy.class,
+            label: self.inner.policy.label,
+            start: t.start,
+            through: t.end,
+            untorn: false,
+            need,
+            prefix: false,
+            epoch: t.epoch,
         }
     }
 

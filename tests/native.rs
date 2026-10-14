@@ -410,7 +410,7 @@ fn test_submitter_round_trips_on_the_real_file_system() {
         let mut buf = sub.take_buf(len).unwrap();
         buf.as_mut_slice().copy_from_slice(&record(i, len));
         let at = loop {
-            match sub.append(&wal, buf, i) {
+            match sub.append(&wal, buf, store_io::submit::WriteMode::Plain, i) {
                 Ok(pos) => break pos.offset(),
                 Err(r) => {
                     assert!(full(&r.error), "{:?}", r.error);
@@ -423,7 +423,13 @@ fn test_submitter_round_trips_on_the_real_file_system() {
         let mut page = sub.take_buf(bs).unwrap();
         page.as_mut_slice().copy_from_slice(&record(1000 + i, bs));
         let pos = pages.pos(i * 3 * bs as u64).unwrap();
-        while let Err(r) = sub.write(&pages, pos, page, 1000 + i) {
+        while let Err(r) = sub.write(
+            &pages,
+            pos,
+            page,
+            store_io::submit::WriteMode::Plain,
+            1000 + i,
+        ) {
             assert!(full(&r.error), "{:?}", r.error);
             page = r.buf.unwrap();
             done.extend(sub.wait(1).unwrap());
@@ -474,6 +480,51 @@ fn test_submitter_round_trips_on_the_real_file_system() {
         }
     }
     assert_eq!(sub.in_flight(), 0);
+    drop(sub);
+    assert_eq!(store.oldest_outstanding(), None);
+}
+
+/// Durable submitter writes and barriers on the real file system: the flush
+/// thread's wake reaches a submitter blocked in its queue (IOCP on Windows,
+/// the submit pool on Linux), and every receipt covers its write.
+#[test]
+fn test_durable_submitter_writes_on_the_real_file_system() {
+    use store_io::submit::{Done, SubmitterConfig, WriteMode};
+    let t = TempDir::new("durable");
+    let (opts, _) = options_for(t.path());
+    let store = Store::create(t.path().join("d"), opts).unwrap();
+    let wal = store.provision_append_region("wal", 8 << 20).unwrap();
+    let pages = store.provision_page_region("pages", 8 << 20).unwrap();
+    let bs = pages.block_size() as usize;
+    let mut sub = store
+        .submitter(SubmitterConfig::default().with_depth(128))
+        .unwrap();
+    let mut done = Vec::new();
+    for i in 0..32u64 {
+        let mut buf = sub.take_buf(300 + i as usize).unwrap();
+        buf.as_mut_slice().fill(i as u8);
+        sub.append(&wal, buf, WriteMode::Durable, i).unwrap();
+        // Reads in flight alongside, so waits block in the queue.
+        let buf = sub.take_buf(bs).unwrap();
+        sub.read_page(&pages, pages.pos(0).unwrap(), buf, 1000 + i)
+            .unwrap();
+    }
+    sub.barrier_all(5000).unwrap();
+    while sub.in_flight() > 0 {
+        done.extend(sub.wait(1).unwrap());
+    }
+    done.extend(sub.reap());
+    assert_eq!(done.len(), 65);
+    for c in done {
+        match (c.tag, c.outcome) {
+            (5000, Ok(Done::Flushed)) => {}
+            (t, Ok(Done::Read { .. })) if t >= 1000 => {}
+            (t, Ok(Done::Written(w))) if t < 32 => {
+                assert!(w.receipt.unwrap().covers(&w.ticket), "write {t}");
+            }
+            (t, other) => panic!("operation {t}: {other:?}"),
+        }
+    }
     drop(sub);
     assert_eq!(store.oldest_outstanding(), None);
 }

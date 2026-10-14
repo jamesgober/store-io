@@ -62,7 +62,9 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `trust: Trust` | none | Certificate, attestation and override inputs to the class decision. |
 | `block_size: Option<u32>` | device's | Minimum block size; the device may require more. |
 | `log2_table_slot: u8` | 14 | Region-table slot size as a power of two (16 KiB holds 253 regions). |
-| `max_io: usize` | 1 MiB | Largest single I/O, and the batch buffer size. |
+| `max_io: usize` | 1 MiB | Largest single I/O of the blocking calls, and the batch buffer size. |
+| `max_write: usize` | 4 MiB | Largest single submitter operation: one buffer, one OS write or read (rounded up to a power of two, at most 1 GiB). |
+| `large_buffers: u32` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`). |
 | `buffers_per_class: u32` | 64 | Pooled buffers per size class. |
 | `queues: usize` | CPU count (0) | I/O queues shared by blocking calls. |
 | `queue_depth: u32` | 64 | Operations in flight per queue. |
@@ -243,7 +245,7 @@ None of these can be constructed outside store-io.
 
 - `store_io::engine` is the generic engine (`engine::Store<P>` and friends) over any `Platform`, including the deterministic simulator used by store-io's own tests.
 - `NativePlatform` is `store_io_win::WinPlatform` on Windows and `store_io_posix::PosixPlatform` on Linux. macOS is planned for 0.5; on other targets only the shared types compile.
-- The engine layer (a per-thread submitter with owned buffers and completion tags) is planned for 0.4.
+- The engine layer: `Store::submitter`, a per-thread submitter with owned buffers and completion tags (see `store_io::submit`).
 
 ---
 

@@ -528,3 +528,36 @@ fn test_durable_submitter_writes_on_the_real_file_system() {
     drop(sub);
     assert_eq!(store.oldest_outstanding(), None);
 }
+
+/// A 4 MiB durable append from one buffer on the real file system: one OS
+/// write (D-101), read back byte for byte.
+#[test]
+fn test_a_4_mib_submitter_append_on_the_real_file_system() {
+    use store_io::submit::{Done, SubmitterConfig, WriteMode};
+    let t = TempDir::new("large");
+    let (opts, _) = options_for(t.path());
+    let store = Store::create(t.path().join("l"), opts).unwrap();
+    let wal = store.provision_append_region("wal", 16 << 20).unwrap();
+    let mut sub = store.submitter(SubmitterConfig::default()).unwrap();
+    let len = sub.max_buf();
+    assert_eq!(len, 4 << 20);
+    let bytes: Vec<u8> = (0..len).map(|k| (k as u8) ^ (k >> 13) as u8).collect();
+    let mut buf = sub.take_buf(len).unwrap();
+    buf.as_mut_slice().copy_from_slice(&bytes);
+    let at = sub
+        .append(&wal, buf, WriteMode::Durable, 1)
+        .unwrap()
+        .offset();
+    let c = sub.wait(1).unwrap().next().unwrap();
+    let Ok(Done::Written(w)) = c.outcome else {
+        panic!("{:?}", c.outcome)
+    };
+    assert!(w.receipt.unwrap().covers(&w.ticket));
+    let buf = sub.take_buf(len).unwrap();
+    sub.read_append(&wal, at, buf, 2).unwrap();
+    let c = sub.wait(1).unwrap().next().unwrap();
+    assert!(
+        c.buf.unwrap().as_slice() == bytes,
+        "4 MiB read back differs"
+    );
+}

@@ -186,7 +186,7 @@ where
         }
         let chunk = self.chunk();
         let mut free: Vec<IoBuf> = (0..DEPTH)
-            .map_while(|_| self.inner.pool.take(chunk).ok())
+            .map_while(|_| self.inner.pool.take_within(chunk, chunk).ok())
             .collect();
         if free.is_empty() {
             return Err(not_written(NotWrittenCause::PoolExhausted, c));

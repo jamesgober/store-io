@@ -107,6 +107,8 @@ fn read_one<Q: Queue>(
     at: &PairAt,
     i: SlotIndex,
 ) -> Result<(SlotStatus, Option<Vec<u8>>, bool), Error> {
+    // Uncapped on purpose: a metadata read may use a large buffer rather
+    // than fail when every ordinary one is in use.
     let buf = pool
         .take(at.size())
         .map_err(|_| pool_err(ErrorContext::default()))?;

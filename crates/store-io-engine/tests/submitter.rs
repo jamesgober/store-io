@@ -363,10 +363,11 @@ fn test_drop_drains_and_releases_everything() {
     });
     let o = StoreOptions {
         buffers_per_class: 4,
+        large_buffers: 4,
         ..opts()
     };
     let s = Store::create(p.clone(), Path::new("/db"), o).unwrap();
-    let wal = s.provision_append_region("wal", 8 * MIB).unwrap();
+    let wal = s.provision_append_region("wal", 32 * MIB).unwrap();
     let mut sub = sub(&s, 8);
     let max = sub.max_buf();
     for i in 0..4 {

@@ -196,14 +196,17 @@ where
                 ErrorContext::default(),
             ));
         }
-        self.store.take(len, ErrorContext::default())
+        self.store.take_any(len, ErrorContext::default())
     }
 
     /// The largest buffer, and so the largest single operation, in bytes (a
-    /// whole number of blocks).
+    /// whole number of blocks): the pool's largest class, `max_write`
+    /// rounded up to a power of two (or `max_io` without large buffers). One
+    /// OS operation (D-101); the kernel may still split it into several
+    /// device requests.
     #[must_use]
     pub fn max_buf(&self) -> usize {
-        self.store.chunk()
+        self.store.max_op()
     }
 
     /// Operations submitted whose completions have not been handed to

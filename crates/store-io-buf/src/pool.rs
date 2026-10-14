@@ -200,10 +200,24 @@ impl BufPool {
     /// [`Exhausted`] when no class of at least `len` bytes has a free buffer,
     /// or `len` exceeds the largest class.
     pub fn take(&self, len: usize) -> Result<IoBuf, Exhausted> {
+        self.take_within(len, usize::MAX)
+    }
+
+    /// As [`Self::take`], but never from a class larger than `max` bytes:
+    /// a caller that never needs the largest buffers does not use them up
+    /// when the classes it needs run out.
+    ///
+    /// # Errors
+    ///
+    /// [`Exhausted`] when no class of `len` to `max` bytes has a free buffer.
+    pub fn take_within(&self, len: usize, max: usize) -> Result<IoBuf, Exhausted> {
         let inner = &self.inner;
         for (ci, class) in inner.classes.iter().enumerate() {
             if class.size < len {
                 continue;
+            }
+            if class.size > max {
+                break;
             }
             if let Some(index) = class.free.pop() {
                 let at = inner.offset + class.base + index as usize * class.size;
@@ -228,6 +242,12 @@ impl BufPool {
     #[must_use]
     pub fn owns(&self, buf: &IoBuf) -> bool {
         Arc::ptr_eq(&self.inner, &buf.pool)
+    }
+
+    /// The smallest buffer the pool can hand out.
+    #[must_use]
+    pub fn min_len(&self) -> usize {
+        self.inner.classes.first().map_or(0, |c| c.size)
     }
 
     /// The largest buffer the pool can hand out.
@@ -405,6 +425,18 @@ mod tests {
         drop(b);
         let free: usize = p.occupancy().iter().map(|c| c.1).sum();
         assert_eq!(free, 2 * 5);
+    }
+
+    #[test]
+    fn test_take_within_never_falls_back_past_its_cap() {
+        let p = pool(1);
+        let small: Vec<_> = (0..5)
+            .filter_map(|_| p.take_within(4096, 32768).ok())
+            .collect();
+        // The 4, 8, 16 and 32 KiB buffers, then nothing: never the 64 KiB one.
+        assert_eq!(small.len(), 4);
+        assert!(p.take_within(4096, 32768).is_err());
+        assert_eq!(p.take(4096).map(|b| b.capacity()).ok(), Some(65536));
     }
 
     #[test]

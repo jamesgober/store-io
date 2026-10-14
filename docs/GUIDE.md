@@ -72,7 +72,7 @@ A store is one container file (`store.sio`) in a directory of its own. Only one 
 **Append regions** are for logs. store-io chooses each append's position from an atomic tail, so appends from many threads never overlap, and a written block is never written again, so a torn later write can never damage an earlier receipt.
 
 - `append(&data)` accepts any length of at least one byte. The append starts on a block boundary and is zero-padded to the next one; the padding is not your data.
-- Data larger than one pooled buffer (1 MiB by default) is written in pieces, several in flight together.
+- Data larger than `max_io` (1 MiB by default) is written in pieces, several in flight together.
 
 **Page regions** are for blocks you address yourself and overwrite in place:
 
@@ -293,7 +293,9 @@ These run only when you call them; store-io never reclaims space on its own.
 | Option | Default | Effect |
 |---|---|---|
 | `block_size` | device's | Minimum block size; the device may require more. |
-| `max_io` | 1 MiB | Largest single I/O, and the batch buffer size. |
+| `max_io` | 1 MiB | Largest single I/O of the blocking calls, and the batch buffer size. |
+| `max_write` | 4 MiB | Largest single submitter operation: one buffer, one OS write or read (rounded up to a power of two, at most 1 GiB). |
+| `large_buffers` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`). |
 | `buffers_per_class` | 64 | Pooled buffers per size class; bounds how much a batch can stage. |
 | `queues` | CPU count | I/O queues shared by blocking calls. |
 | `queue_depth` | 64 | Operations in flight per queue. |
@@ -302,7 +304,7 @@ These run only when you call them; store-io never reclaims space on its own.
 | `keyed_fill` | off | Fill new regions with an incompressible pattern instead of zeros (thin, deduplicating or compressing storage). |
 | `log2_table_slot` | 14 | Region-table size: 16 KiB holds 253 regions. |
 
-The engine layer, a per-thread submitter with owned buffers and completion tags for full asynchronous control, arrives in 0.4.
+The engine layer, a per-thread submitter with owned buffers and completion tags for full asynchronous control, is `Store::submitter` (see `store_io::submit`).
 
 ---
 

@@ -259,18 +259,12 @@ where
         key: &[u8; 16],
     ) -> Result<(), Error> {
         let inner = &self.inner;
-        let chunk = (inner.pool.max_len() as u64).min(1 << 20).max(block);
+        let chunk = (self.chunk() as u64).min(1 << 20).max(block);
         let mut q = inner.queues.get(0);
         let mut at = 0u64;
         while at < extent {
             let len = chunk.min(extent - at);
-            let mut buf = inner
-                .pool
-                .take(len as usize)
-                .map_err(|_| Error::NotWritten {
-                    cause: NotWrittenCause::PoolExhausted,
-                    ctx: ErrorContext::default(),
-                })?;
+            let mut buf = self.take(len as usize, ErrorContext::default())?;
             // The two header blocks are always zero so no old header
             // survives; the data area gets the pattern from its first byte,
             // even inside a chunk that also covers the headers.

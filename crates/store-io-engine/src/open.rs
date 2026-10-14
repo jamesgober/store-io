@@ -107,12 +107,13 @@ where
                 log2_table: 16,
             },
             &opts,
+            false,
         )?;
         let (volume, layout, vmeta, volume_pair) = {
             let mut q = queues.get(0);
             find_volume(&mut q, &file, &boot_pool)?
         };
-        let pool = make_pool(&evidence, &layout, &opts)?;
+        let pool = make_pool(&evidence, &layout, &opts, true)?;
         let tat = pair_table(volume, &layout);
         let mut q = queues.get(0);
         let table_pair = read_pair(&mut q, &file, &pool, &tat)?;
@@ -317,6 +318,7 @@ fn find_volume<Q: Queue>(
     for log2 in crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK {
         let size = 1u64 << log2;
         for probe_at in [0, size] {
+            // The boot pool, which has no large buffers.
             let buf = pool.take(4096).map_err(|_| Error::NotWritten {
                 cause: NotWrittenCause::PoolExhausted,
                 ctx: ErrorContext::default(),

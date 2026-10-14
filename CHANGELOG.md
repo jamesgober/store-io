@@ -202,7 +202,20 @@
     - **Waker.** `Submitter::waker` returns a `SubmitterWaker` (also
       `store_io::submit::Waker`), which ends a wait for I/O or for a flush;
       `wait` returns early only on that waker.
-  - Not yet: vectored writes, forced data sync.
+  - **Large single operations (D-101).** `StoreOptions::max_write`
+    (default 4 MiB, rounded up to a power of two, at most 1 GiB) and
+    `large_buffers` (default 8): when `max_write` is above `max_io`, the
+    pool holds that many buffers of `max_write` bytes, used by submitters
+    only, and a submitter writes or reads up to `max_write` from one of them
+    as one OS operation (`Submitter::max_buf`). The defaults add 32 MiB to
+    each store's pool (Windows charges the whole pool to the commit limit at
+    creation; a buffer becomes resident when first used). The blocking calls
+    keep their `max_io` pieces and never take the large buffers.
+    `StoreOptions` gains two public fields (struct literals without
+    `..StoreOptions::default()` must add them). `max_io` is now also capped
+    at 1 GiB.
+  - Not yet: forced data sync. Vectored writes (gathering separately
+    filled buffers into one operation) are deferred (D-101).
 - `store-io-buf`: `BufPool::owns`, whether a buffer came from that pool.
 - `store-io-core`: `NotWrittenCause::ForeignBuffer`.
 - `store-io-engine`: `Store::unavailable_regions()`, `UnavailableRegion` and

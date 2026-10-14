@@ -491,7 +491,7 @@ mod tests {
         // Leave the pool one buffer of the scan's size: a pipeline of one.
         let chunk = s.chunk();
         let mut hold = Vec::new();
-        while let Ok(b) = s.inner.pool.take(chunk) {
+        while let Ok(b) = s.inner.pool.take_within(chunk, chunk) {
             hold.push(b);
         }
         drop(hold.pop());

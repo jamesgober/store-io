@@ -115,6 +115,7 @@ where
                 log2_table: crate::layout::MAX_LOG2_BLOCK,
             },
             opts,
+            false,
         )?;
         let queues = make_queues(platform, opts)?;
         let len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
@@ -156,7 +157,7 @@ where
                 .clamp(choose_log2_block(&evidence, opts.block_size), 16),
         };
         let policy = policy_of(&decision);
-        let pool = make_pool(&evidence, &layout, opts)?;
+        let pool = make_pool(&evidence, &layout, opts, true)?;
         let queues = make_queues(platform, opts)?;
         let volume = VolumeId::from_bytes(random_uuid());
         let header_len = layout.data_start();
@@ -243,6 +244,7 @@ fn holds_slot_header<Q: Queue>(
     let mut at = 0u64;
     while at < len {
         let want = SCAN.min(len - at) as usize;
+        // The boot pool, which has no large buffers.
         let buf = pool.take(SCAN as usize).ok()?;
         let Ran::Done { buf, result } = run(
             q,

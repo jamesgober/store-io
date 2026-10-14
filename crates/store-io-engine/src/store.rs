@@ -45,10 +45,24 @@ pub struct StoreOptions {
     pub block_size: Option<u32>,
     /// Region-table slot size as a power of two (14 = 16 KiB: 253 regions).
     pub log2_table_slot: u8,
-    /// Largest single I/O the buffer pool serves (bytes, power of two).
+    /// Largest single I/O of the blocking layers, and the batch buffer size
+    /// (bytes; rounded up to a power of two, 128 KiB to 1 GiB).
     pub max_io: usize,
-    /// Buffers per size class in the pool.
+    /// Buffers per size class in the pool, up to `max_io`.
     pub buffers_per_class: u32,
+    /// Largest single write or read a `Submitter` takes, from one buffer, as
+    /// one OS write or read operation (bytes; rounded up to a power of two,
+    /// at most 1 GiB): the pool holds `large_buffers` buffers of that size,
+    /// used by submitters only (D-101). Ignored when not above `max_io`.
+    pub max_write: usize,
+    /// Buffers of `max_write` bytes in the pool (0: none, so a submitter's
+    /// largest operation is `max_io`). The defaults add 32 MiB on top of
+    /// about 128 MiB of ordinary buffers per store: Windows charges the
+    /// whole pool to the commit limit at creation; on both systems a buffer
+    /// becomes resident when first used, and buffers are used in turn. A
+    /// pool too large to map fails `create` and `open` with
+    /// `NotWritten(PoolExhausted)`.
+    pub large_buffers: u32,
     /// Queues shared by the blocking layers (0 = number of CPUs).
     pub queues: usize,
     /// Operations in flight per queue.
@@ -75,6 +89,8 @@ impl Default for StoreOptions {
             log2_table_slot: 14,
             max_io: 1 << 20,
             buffers_per_class: 64,
+            max_write: 4 << 20,
+            large_buffers: 8,
             queues: 0,
             queue_depth: 64,
             t3_pool_threads: 0,
@@ -565,6 +581,7 @@ pub(crate) fn make_pool(
     ev: &Evidence,
     layout: &Layout,
     opts: &StoreOptions,
+    large: bool,
 ) -> Result<BufPool, Error> {
     let align = [
         4096usize,
@@ -576,17 +593,38 @@ pub(crate) fn make_pool(
     .unwrap_or(4096)
     .next_power_of_two();
     let min = (layout.block() as usize).max(align);
-    let max = opts.max_io.max(min).max(2 * (1 << 16)).next_power_of_two();
-    BufPool::new(&PoolConfig::uniform(
-        align,
-        min,
-        max,
-        opts.buffers_per_class.max(4),
-    ))
-    .map_err(|_| Error::NotWritten {
+    let max = io_max(opts).max(min);
+    let mut cfg = PoolConfig::uniform(align, min, max, opts.buffers_per_class.max(4));
+    // One class of larger buffers for single large submitter operations
+    // (D-101), fewer of them; a request between the two sizes takes one.
+    // Never in the short-lived pools that read the metadata at open.
+    let size = large_size(opts);
+    if large && opts.large_buffers > 0 && size > max {
+        cfg.classes.push(store_io_buf::ClassSpec {
+            size,
+            count: opts.large_buffers,
+        });
+    }
+    BufPool::new(&cfg).map_err(|_| Error::NotWritten {
         cause: NotWrittenCause::PoolExhausted,
         ctx: ErrorContext::default(),
     })
+}
+
+/// The largest single I/O anything may ask for: 1 GiB (above 2 GiB a single
+/// `pwrite` transfers short, above 4 GiB `WriteFile` refuses).
+const LARGEST_IO: usize = 1 << 30;
+
+/// The largest ordinary pool buffer, which the blocking layers never exceed:
+/// `max_io` rounded up to a power of two, between 128 KiB and 1 GiB.
+pub(crate) fn io_max(opts: &StoreOptions) -> usize {
+    opts.max_io.clamp(2 << 16, LARGEST_IO).next_power_of_two()
+}
+
+/// The large class's buffer size: `max_write` rounded up to a power of two,
+/// at most 1 GiB (no large class when that is not above [`io_max`]).
+pub(crate) fn large_size(opts: &StoreOptions) -> usize {
+    opts.max_write.clamp(1, LARGEST_IO).next_power_of_two()
 }
 
 pub(crate) fn make_queues<P: Platform>(

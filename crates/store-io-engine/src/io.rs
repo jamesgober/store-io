@@ -230,8 +230,17 @@ where
         need.next_power_of_two().min(self.block())
     }
 
-    /// The largest single write: the pool's largest buffer in whole blocks.
+    /// The blocking layers' largest single write or read: the largest
+    /// ordinary pool buffer (`max_io`), in whole blocks. The larger buffers
+    /// are for submitter operations (D-101).
     pub(crate) fn chunk(&self) -> usize {
+        let block = self.block() as usize;
+        (self.ordinary() / block * block).max(block)
+    }
+
+    /// A submitter's largest single operation: the pool's largest buffer
+    /// (`max_write`), in whole blocks.
+    pub(crate) fn max_op(&self) -> usize {
         let block = self.block() as usize;
         (self.inner.pool.max_len() / block * block).max(block)
     }
@@ -286,8 +295,23 @@ where
         Ok(lane)
     }
 
-    /// A pooled buffer of at least `len` bytes, with its length set to `len`.
+    /// The largest ordinary pool buffer, as the pool was built: `max_io`
+    /// (rounded and clamped), or the smallest class if that is larger.
+    pub(crate) fn ordinary(&self) -> usize {
+        crate::store::io_max(&self.inner.opts).max(self.inner.pool.min_len())
+    }
+
+    /// A pooled buffer of at least `len` bytes, with its length set to `len`,
+    /// from the ordinary classes (never a submitter's large buffers).
     pub(crate) fn take(&self, len: usize, c: ErrorContext) -> Result<IoBuf, Error> {
+        self.inner
+            .pool
+            .take_within(len, self.ordinary())
+            .map_err(|_| not_written(NotWrittenCause::PoolExhausted, c))
+    }
+
+    /// As [`Self::take`], from any class (a submitter's buffer).
+    pub(crate) fn take_any(&self, len: usize, c: ErrorContext) -> Result<IoBuf, Error> {
         self.inner
             .pool
             .take(len)
@@ -309,7 +333,7 @@ where
             // one buffer is enough, so a short pool never fails the write.
             let extra = data.len().div_ceil(chunk).saturating_sub(1).min(SPARES);
             for slot in spare.iter_mut().take(extra) {
-                *slot = self.inner.pool.take(chunk).ok();
+                *slot = self.inner.pool.take_within(chunk, chunk).ok();
             }
         }
         let mut stream = Stream {

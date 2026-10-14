@@ -15,7 +15,7 @@ impl<P: Platform> Ctx<'_, P> {
             depth,
             parallel: true,
             pool_threads: 4,
-            ..QueueConfig::default()
+            owner: self.owner,
         };
         super::ok(self.p.queue(cfg), "parallel queue")
     }

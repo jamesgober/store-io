@@ -425,6 +425,26 @@ mod on {
             }
         }
     }
+
+    #[cfg(test)]
+    mod blocks {
+        use super::Observer;
+
+        /// A block index past the per-thread blocks is a shared block,
+        /// written with atomic adds; only a thread's own block is written
+        /// plainly (D-100). Deterministic: no collision is needed.
+        #[test]
+        fn test_only_a_threads_own_block_is_written_plainly() {
+            let o = Observer::new();
+            let n = o.blocks.len();
+            assert!(o.block(0).1, "an owned block is written plainly");
+            for k in [n, n + 1, n + 7, 2 * n + 3] {
+                let (b, own) = o.block(k);
+                assert!(!own, "index {k}: a shared block must use atomic adds");
+                assert!(core::ptr::eq(b, &o.shared[k & o.mask]));
+            }
+        }
+    }
 }
 
 #[cfg(not(feature = "observe"))]

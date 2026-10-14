@@ -76,7 +76,7 @@ M = [
  ("crates/store-io-engine/src/region.rs", "        if self.store.inner.read_only {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,", "        if self.store.inner.read_only && false {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,"),
  # D-090: unavailable regions are reported and never NotFound
  ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
- ("crates/store-io-engine/src/open.rs", "            read_only,\n            unavailable,\n        };", "            read_only,\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
+ ("crates/store-io-engine/src/open.rs", "            io: platform.io_path(),\n            unavailable,\n        };", "            io: platform.io_path(),\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
  # Read errors are classified and media errors name the exact range
  ("crates/store-io-engine/src/io.rs", "                    if !store_io_core::errno::is_media_error(raw) {", "                    if false {"),
  ("crates/store-io-engine/src/io.rs", "self.first_unreadable(r, start, end).unwrap_or((start, end));", "self.first_unreadable(r, start, end).map(|_| (start, end)).unwrap_or((start, end));"),

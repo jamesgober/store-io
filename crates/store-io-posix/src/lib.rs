@@ -167,8 +167,6 @@ mod platform {
         /// Queues on rings.
         ringed: Arc<AtomicU64>,
         last_refusal: Arc<core::sync::atomic::AtomicI32>,
-        /// Testing: every queue gets a thread-owned ring.
-        owned_rings: bool,
     }
 
     /// Whether this kernel accepts store-io's rings of both flavours; `Err`
@@ -251,7 +249,6 @@ mod platform {
                 fell_back: Arc::new(AtomicU64::new(0)),
                 ringed: Arc::new(AtomicU64::new(0)),
                 last_refusal: Arc::new(core::sync::atomic::AtomicI32::new(0)),
-                owned_rings: false,
             }
         }
 
@@ -299,16 +296,6 @@ mod platform {
         #[must_use]
         pub fn tier(&self) -> LinuxTier {
             self.tier
-        }
-
-        /// Testing only: on the io_uring tier, every queue gets a ring only
-        /// its creating thread may use, whatever its `QueueConfig::owner`,
-        /// so suites written for shared queues cover thread-owned rings too.
-        #[doc(hidden)]
-        #[must_use]
-        pub fn with_owned_rings(mut self) -> Self {
-            self.owned_rings = true;
-            self
         }
 
         /// Worker threads in the submit pool, or `None` before the first
@@ -495,7 +482,7 @@ mod platform {
 
         fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {
             if self.tier == LinuxTier::Uring {
-                let owned = self.owned_rings || cfg.owner == Owner::Thread;
+                let owned = cfg.owner == Owner::Thread;
                 match PosixQueue::uring(cfg, owned) {
                     Ok(q) => {
                         let _n = self.ringed.fetch_add(1, Ordering::Relaxed);

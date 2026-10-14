@@ -121,6 +121,26 @@ jobs:
         run: cargo test --test conformance --test native -- --nocapture
         env:
           STORE_IO_TEST_DIR: /mnt/sio
+          STORE_IO_EXPECT_URING: "1"
+      # v0.4 exit criteria on this kernel and file system: an idle store is
+      # silent (60 s, both tiers), and nothing runs on io_uring's io-wq
+      # workers (fails closed: a positive control must see them, and every
+      # store-io point must run on io_uring), with fallbacks counted.
+      - name: Idle store is silent (60 s per tier)
+        run: |
+          uname -r; findmnt -no FSTYPE /mnt/sio
+          cargo test --test idle -- --ignored --test-threads=1 --nocapture
+        env:
+          STORE_IO_TEST_DIR: /mnt/sio
+          STORE_IO_EXPECT_URING: "1"
+      - name: No io-wq workers (W6 on io_uring), fallbacks counted
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq fio
+          (cd harness && cargo build --release)
+          echo "kernel $(uname -r), fs $(findmnt -no FSTYPE /mnt/sio)"
+          bash dev/tools/iowq-gate.sh
+        env:
+          STORE_IO_TEST_DIR: /mnt/sio
 
   # Fail-stop on a real kernel: the file system sits on a device-mapper
   # target that is switched, mid-run, to fail every I/O. No write may

@@ -36,8 +36,8 @@ use store_io_core::error::Error;
 use store_io_core::evidence::Tri;
 use store_io_engine::{CONTAINER, Directory, ScanItem, Store, StoreOptions};
 use store_io_platform::{
-    Completion, CompletionBuf, FileMode, FileName, IoOp, Platform, Queue, QueueConfig, RawResult,
-    ReleaseHow,
+    Completion, CompletionBuf, FileMode, FileName, IoOp, Owner, Platform, Queue, QueueConfig,
+    RawResult, ReleaseHow,
 };
 
 /// Bytes per block in the scenarios: a multiple of every direct-I/O
@@ -87,6 +87,7 @@ pub struct Suite<'a, P> {
     platform: &'a P,
     root: PathBuf,
     trust: Trust,
+    owner: Owner,
 }
 
 /// What a scenario gets: the platform, a fresh directory, buffers, trust.
@@ -95,6 +96,8 @@ struct Ctx<'a, P> {
     path: PathBuf,
     pool: BufPool,
     trust: Trust,
+    /// Who uses the queues the scenarios make themselves.
+    owner: Owner,
 }
 
 type Check = Result<(), String>;
@@ -124,6 +127,7 @@ fn name(s: &str) -> Result<FileName, String> {
 }
 
 mod parallel;
+mod submitter;
 mod wake;
 
 fn pattern(seed: u8, len: usize) -> Vec<u8> {
@@ -147,7 +151,19 @@ where
             platform,
             root: root.as_ref().to_path_buf(),
             trust,
+            owner: Owner::Shared,
         }
+    }
+
+    /// The suite with its own queues (those the queue scenarios make, not
+    /// the store's) set up for `owner` ([`QueueConfig::owner`]): with
+    /// [`Owner::Thread`], a backend that sets thread-owned queues up
+    /// differently (a thread-owned io_uring ring) is checked that way too.
+    /// Every scenario uses its queues on the thread that made them.
+    #[must_use]
+    pub fn owner(mut self, owner: Owner) -> Self {
+        self.owner = owner;
+        self
     }
 
     /// The scenarios, in run order.
@@ -218,6 +234,10 @@ where
             ),
             ("a store round-trips through a reopen", store_round_trip),
             (
+                "a submitter's writes, barrier and reads complete once each and round-trip",
+                submitter::submitter_round_trip,
+            ),
+            (
                 "a read-only open changes nothing",
                 read_only_open_changes_nothing,
             ),
@@ -253,6 +273,7 @@ where
                         path,
                         pool,
                         trust: self.trust,
+                        owner: self.owner,
                     })
                     .err(),
                     Err(e) => Some(format!("buffer pool: {e:?}")),
@@ -273,6 +294,7 @@ impl<P: Platform> Ctx<'_, P> {
         ok(
             self.p.queue(QueueConfig {
                 depth,
+                owner: self.owner,
                 ..QueueConfig::default()
             }),
             "queue",

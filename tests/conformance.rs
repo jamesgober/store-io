@@ -45,15 +45,21 @@ fn uring() -> Option<store_io_posix::PosixPlatform> {
     }
 }
 
-/// The io_uring tier with every queue on a thread-owned ring.
+/// The io_uring tier with the suite's own queues thread-owned (the queue
+/// scenarios on thread-owned rings; the stores as always: shared lanes,
+/// thread-owned submitters).
 #[cfg(target_os = "linux")]
 #[test]
 fn test_the_io_uring_tier_conforms_on_owned_rings() {
     let Some(p) = uring() else { return };
-    conforms(&p.with_owned_rings(), "uring-owned");
+    conforms_as(&p, "uring-owned", store_io_platform::Owner::Thread);
 }
 
 fn conforms(platform: &NativePlatform, label: &str) {
+    conforms_as(platform, label, store_io_platform::Owner::Shared);
+}
+
+fn conforms_as(platform: &NativePlatform, label: &str, owner: store_io_platform::Owner) {
     let base = std::env::var_os("STORE_IO_TEST_DIR")
         .map(PathBuf::from)
         .or_else(|| {
@@ -79,7 +85,7 @@ fn conforms(platform: &NativePlatform, label: &str) {
         override_refusal: refused,
         ..Trust::default()
     };
-    let report = Suite::new(platform, &root, trust).run();
+    let report = Suite::new(platform, &root, trust).owner(owner).run();
     let _cleanup = std::fs::remove_dir_all(&root);
     assert!(report.passed(), "{label}:\n{report}");
 }

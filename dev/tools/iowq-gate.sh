@@ -61,6 +61,8 @@ report=$(ls "$work"/*submitter.md 2>/dev/null | head -1)
 points=$(grep -c '^| store-io | Submitter' "$report" 2>/dev/null || true)
 on_ring=$(grep '^| store-io | Submitter' "$report" 2>/dev/null | grep -c 'io: io_uring' || true)
 echo "gate (store-io W6 on io_uring): io-wq threads seen = $seen; store-io points $points, on io_uring $on_ring"
+# Fallbacks per point (counted and reported, D-073; not a failure).
+grep -o 'io_uring fallbacks [0-9]* of [0-9]* operations' "$report" 2>/dev/null | sort | uniq -c
 if [ "$status" -ne 0 ] || ! grep -q ', 0 anomalies' "$work/run.log" \
    || [ "$points" -eq 0 ] || [ "$on_ring" -ne "$points" ] || [ "$seen" -ne 0 ]; then
   echo "FAIL"

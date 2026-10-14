@@ -217,7 +217,13 @@ fn probe_drive(drive: &Handle, ev: &mut Evidence) {
             d.logical_block = logical;
             d.physical_block = physical;
         }
-        None => ev.missing.insert(Missing::DioAlignment),
+        // The device's geometry is unknown; the alignment is missing only if
+        // the file system did not report it either (FileStorageInfo).
+        None => {
+            if ev.fs.dio_offset_align == 0 {
+                ev.missing.insert(Missing::DioAlignment);
+            }
+        }
     }
 
     if let Some((max_transfer, bus)) =

@@ -747,14 +747,24 @@ fn probe_is_honest<P: Platform>(c: &Ctx<'_, P>) -> Check {
     let ev = ok(c.p.probe(&dir, &f), "probe")?;
     let a = ev.fs.dio_offset_align;
     let m = ev.fs.dio_mem_align;
-    check!(
-        a.is_power_of_two() && a as usize <= BLOCK,
-        "direct-I/O offset alignment {a}"
-    );
-    check!(
-        m.is_power_of_two() && m as usize <= BLOCK,
-        "direct-I/O memory alignment {m}"
-    );
+    if ev.missing.contains(Missing::DioAlignment) || ev.fs.direct_io == Tri::No {
+        // Not reported (Linux before 6.1 has no STATX_DIOALIGN), or no direct
+        // I/O on this file (ext4 data=journal): unknown, never a guess; the
+        // engine then works in whole blocks.
+        check!(
+            a == 0 && m == 0,
+            "unread direct-I/O alignment given as {a} / {m}"
+        );
+    } else {
+        check!(
+            a.is_power_of_two() && a as usize <= BLOCK,
+            "direct-I/O offset alignment {a}"
+        );
+        check!(
+            m.is_power_of_two() && m as usize <= BLOCK,
+            "direct-I/O memory alignment {m}"
+        );
+    }
     if ev.device.cache_present == Tri::Unknown {
         check!(
             ev.missing.contains(Missing::CachePresence),

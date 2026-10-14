@@ -142,6 +142,72 @@ jobs:
         env:
           STORE_IO_TEST_DIR: /mnt/sio
 
+  # Crash states on a real kernel (D-079): the file system sits on a
+  # dm-log-writes target that logs a FUA write when it completes, any other
+  # write at the next flush, every flush, and the test's marks at once; the
+  # store is then rebuilt as it stood after every logged entry from its
+  # creation on, and every acknowledgement passed by then must hold
+  # (tests/crash.rs).
+  crash-replay:
+    name: Crash replay (dm-log-writes, ${{ matrix.fs }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [ext4, xfs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the test
+        run: cargo test --test crash --no-run
+      - name: Log a store workload
+        run: |
+          set -eux
+          W="$RUNNER_TEMP"
+          if [ "${{ matrix.fs }}" = xfs ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq xfsprogs
+          fi
+          sudo modprobe dm-log-writes || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            sudo modprobe dm-log-writes
+          }
+          # mkfs.xfs refuses file systems under 300 MB.
+          truncate -s 512M "$W/data.img"
+          truncate -s 2G "$W/log.img"
+          DATA=$(sudo losetup --show -f "$W/data.img")
+          LOG=$(sudo losetup --show -f "$W/log.img")
+          SECTORS=$(sudo blockdev --getsz "$DATA")
+          echo "0 $SECTORS log-writes $DATA $LOG" | sudo dmsetup create lw
+          # No discard of the whole device at mkfs (a huge first entry).
+          if [ "${{ matrix.fs }}" = xfs ]; then
+            sudo mkfs.xfs -q -K /dev/mapper/lw
+          else
+            sudo mkfs.ext4 -q -b 4096 -E nodiscard /dev/mapper/lw
+          fi
+          sudo mkdir -p /mnt/crash
+          sudo mount /dev/mapper/lw /mnt/crash
+          sudo chown "$(id -u):$(id -g)" /mnt/crash
+          uname -r
+          findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/crash
+          STORE_IO_CRASH_DIR=/mnt/crash STORE_IO_CRASH_ACKS="$W/acks" STORE_IO_CRASH_DM=lw \
+            cargo test --test crash -- --ignored --exact crash_phase_write --nocapture
+          for _ in $(seq 1 100); do sudo umount /mnt/crash && break; sleep 0.1; done
+          sudo dmsetup remove lw
+          sudo losetup -d "$DATA" "$LOG"
+      - name: Replay every crash state and check every acknowledgement
+        run: |
+          W="$RUNNER_TEMP"
+          STORE_IO_CRASH_LOG="$W/log.img" \
+          STORE_IO_CRASH_SIZE="$(stat -c %s "$W/data.img")" \
+          STORE_IO_CRASH_ACKS="$W/acks" \
+          STORE_IO_CRASH_MNT=/mnt/crash \
+          STORE_IO_CRASH_WORK="$W" \
+          STORE_IO_CRASH_FS="${{ matrix.fs }}" \
+            cargo test --test crash -- --ignored --exact crash_phase_replay --nocapture
+
   # Fail-stop on a real kernel: the file system sits on a device-mapper
   # target that is switched, mid-run, to fail every I/O. No write may
   # succeed after the first failure, and every acknowledged record must

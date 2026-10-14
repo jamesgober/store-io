@@ -27,12 +27,12 @@ for b in /sys/block/*; do
 done
 [ -n "$disk" ] || { echo "no disk of $bytes bytes"; ls /sys/block; exit 1; }
 mkfs.ext4 -q -F -b 4096 "$disk"
-mkdir -p /mnt/sio
-mount "$disk" /mnt/sio
-findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/sio
-# Every test's scratch space on that disk ($HOME too: the guest's own
-# writable layer is tmpfs, without direct I/O before 6.6).
-export STORE_IO_TEST_DIR=/mnt/sio HOME=/mnt/sio TMPDIR=/mnt/sio
+mkdir -p /tmp/sio
+mount "$disk" /tmp/sio
+findmnt -no SOURCE,FSTYPE,OPTIONS /tmp/sio
+# Every test's scratch space on that disk ($HOME too: the guest's root is
+# read-only and its tmpfs has no direct I/O before 6.6).
+export STORE_IO_TEST_DIR=/tmp/sio HOME=/tmp/sio TMPDIR=/tmp/sio
 if [ "$expect" = 1 ]; then export STORE_IO_EXPECT_URING=1; fi
 cd "$repo"
 cargo test --offline --test conformance --test native -- --nocapture

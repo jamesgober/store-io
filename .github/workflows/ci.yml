@@ -155,7 +155,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - kernel: v5.15.3
+          # 5.15.3, the 5.15 floor, has no published build; a late 5.15 LTS
+          # point release stands for the line (neither has SUBMIT_ALL).
+          - kernel: v5.15.150
             uring: 0
           - kernel: v6.1
             uring: 1
@@ -184,7 +186,10 @@ jobs:
         run: |
           set -euo pipefail
           truncate -s 4G "$RUNNER_TEMP/disk.img"
+          # The guest's root is read-only: the checkout and the toolchain are
+          # writable there through overlays (nothing reaches the host).
           vng -r ${{ matrix.kernel }} --user root --memory 4G --cpus 2 -D "$RUNNER_TEMP/disk.img" \
+            --overlay-rwdir "$PWD" --overlay-rwdir "$HOME/.cargo" --overlay-rwdir "$HOME/.rustup" \
             -- bash "$PWD/dev/tools/kernel-check.sh" "$PWD" "$HOME" ${{ matrix.uring }} 4294967296 \
             2>&1 | tee "$RUNNER_TEMP/vm.log"
           grep -q ": all passed" "$RUNNER_TEMP/vm.log"

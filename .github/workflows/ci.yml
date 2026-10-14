@@ -89,6 +89,8 @@ jobs:
           components: miri
       - name: Miri
         run: cargo miri test -p store-io-buf
+      - name: Miri (io_uring ring indices, simulated kernel)
+        run: cargo miri test -p store-io-posix --lib uring::sys::fake
 
   # The conformance suite and the end-to-end tests on real Linux file
   # systems with barriers on. The runner's own root is mounted `nobarrier`

@@ -69,6 +69,8 @@ mod queue;
 mod sync;
 #[cfg(target_os = "linux")]
 mod sys;
+#[cfg(target_os = "linux")]
+mod uring;
 
 #[cfg(target_os = "linux")]
 pub use dir::PosixDir;

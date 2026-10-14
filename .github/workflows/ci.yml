@@ -207,6 +207,28 @@ jobs:
           STORE_IO_CRASH_WORK="$W" \
           STORE_IO_CRASH_FS="${{ matrix.fs }}" \
             cargo test --test crash -- --ignored --exact crash_phase_replay --nocapture
+      - name: Subsets of the writes cached before each flush (SIM-05)
+        run: |
+          W="$RUNNER_TEMP"
+          STORE_IO_CRASH_LOG="$W/log.img" \
+          STORE_IO_CRASH_SIZE="$(stat -c %s "$W/data.img")" \
+          STORE_IO_CRASH_ACKS="$W/acks" \
+          STORE_IO_CRASH_MNT=/mnt/crash \
+          STORE_IO_CRASH_WORK="$W" \
+          STORE_IO_CRASH_FS="${{ matrix.fs }}" \
+          STORE_IO_CRASH_SUBSETS=64 \
+            cargo test --test crash -- --ignored --exact crash_phase_subsets --nocapture
+      - name: Keep the evidence of a failed crash check
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.fs }}
+          path: |
+            ${{ runner.temp }}/log.img
+            ${{ runner.temp }}/acks
+            ${{ runner.temp }}/state-*.img
+            ${{ runner.temp }}/subset.img
+          if-no-files-found: ignore
 
   # Fail-stop on a real kernel: the file system sits on a device-mapper
   # target that is switched, mid-run, to fail every I/O. No write may

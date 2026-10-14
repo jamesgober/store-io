@@ -24,8 +24,15 @@
 //!    each slot holding its last acknowledged value or the value of a
 //!    commit already attempted after it, never anything else.
 //!
-//! Both phases are `#[ignore]`d: they make sense only inside that job. The
-//! log reader is unit-tested here on a log built in memory.
+//! 3. `crash_phase_subsets` (SIM-05): a crash before a flush can keep any
+//!    subset of the writes the device still cached, in any order (a cache
+//!    writes back the newest data of a block, so overlapping writes keep log
+//!    order). For every run of such writes it checks the states keeping
+//!    some of them: exhaustively for runs of up to six, else each alone,
+//!    all but each one, and seeded random subsets, capped per run.
+//!
+//! The phases are `#[ignore]`d: they make sense only inside that job. The
+//! log reader and the subset generator are unit-tested here.
 
 #![cfg(target_os = "linux")]
 #![allow(
@@ -452,7 +459,9 @@ fn crash_phase_replay() {
         sh(&mut mount);
         let checked = check_state(&mnt, &passed);
         umount(&mnt);
-        std::fs::remove_file(&state_path).unwrap();
+        if checked.is_ok() {
+            std::fs::remove_file(&state_path).unwrap();
+        }
         if let Err(why) = checked {
             panic!(
                 "crash state after entry {n} of {} (flags {:#x}, mark {:?}): {why}",
@@ -490,6 +499,210 @@ fn crash_phase_replay() {
         acks.len()
     );
     assert!(states > 0);
+}
+
+// ----- subsets between flushes (SIM-05) -------------------------------------------
+
+/// A write the device may still hold in its volatile cache when it is logged:
+/// not FUA, not a flush, discard or mark. dm-log-writes logs such writes at
+/// the flush that makes them durable, as one run just before it.
+fn is_cached_write(e: &Entry) -> bool {
+    e.len > 0 && e.flags & (FLUSH | FUA | DISCARD | MARK) == 0
+}
+
+/// Which members of a run of `k` cached writes a crash before their flush
+/// could have kept, besides none and all (the prefix states), at most `cap`
+/// distinct subsets, each sorted: every proper subset when they fit;
+/// otherwise each write alone and all but each one (as many as fit), then
+/// seeded random subsets.
+fn subsets(k: usize, cap: usize, seed: u64) -> Vec<Vec<usize>> {
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    if k < 2 || cap == 0 {
+        return out;
+    }
+    if k < 63 && (1u64 << k) - 2 <= cap as u64 {
+        for mask in 1..(1u64 << k) - 1 {
+            out.push((0..k).filter(|i| mask & (1 << i) != 0).collect());
+        }
+        return out;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut add = |s: Vec<usize>, out: &mut Vec<Vec<usize>>| {
+        if out.len() < cap && !s.is_empty() && s.len() < k && seen.insert(s.clone()) {
+            out.push(s);
+        }
+    };
+    for i in 0..k {
+        add(vec![i], &mut out);
+        add((0..k).filter(|j| *j != i).collect(), &mut out);
+    }
+    // splitmix64: well mixed from any seed (an entry index is small).
+    let mut state = seed;
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    // Bounded: duplicates are skipped, never retried for ever.
+    for _ in 0..cap.saturating_mul(8) {
+        if out.len() == cap {
+            break;
+        }
+        let s: Vec<usize> = (0..k).filter(|_| next() >> 63 == 1).collect();
+        add(s, &mut out);
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Copies `base`, applies `extra` writes, mounts the copy as after a crash
+/// and checks `passed`; the copy is removed.
+fn check_copy(
+    work: &Path,
+    base_path: &Path,
+    log: &std::fs::File,
+    extra: &[&Entry],
+    fs: &str,
+    mnt: &Path,
+    passed: &[&Ack],
+    name: &str,
+) -> Result<(), String> {
+    let state_path = work.join(format!("{name}.img"));
+    sh(Command::new("cp")
+        .args(["--sparse=always"])
+        .arg(base_path)
+        .arg(&state_path));
+    let state = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&state_path)
+        .unwrap();
+    for e in extra {
+        apply(log, &state, e);
+    }
+    drop(state);
+    let mut mount = Command::new("sudo");
+    mount.args(["mount", "-o"]);
+    mount.arg(if fs == "xfs" { "loop,nouuid" } else { "loop" });
+    mount.arg(&state_path).arg(mnt);
+    let mounted = mount.output().unwrap();
+    let checked = if mounted.status.success() {
+        let c = check_state(mnt, passed);
+        umount(mnt);
+        c
+    } else {
+        Err(format!(
+            "the file system does not mount: {}",
+            String::from_utf8_lossy(&mounted.stderr).trim()
+        ))
+    };
+    // A failing state is kept for the CI job to upload.
+    if checked.is_ok() {
+        std::fs::remove_file(&state_path).unwrap();
+    } else {
+        eprintln!("kept the failing state as {}", state_path.display());
+    }
+    checked
+}
+
+/// Subset states (SIM-05): for every run of cached writes from the store's
+/// creation on, the device as a crash before their flush could leave it,
+/// keeping only some of them: the store opens and every acknowledgement
+/// passed before the run holds. `STORE_IO_CRASH_SUBSETS` caps the subsets
+/// per run (default 16).
+#[test]
+#[ignore = "run by the crash-replay CI job"]
+fn crash_phase_subsets() {
+    let log = std::fs::File::open(env_path("STORE_IO_CRASH_LOG")).unwrap();
+    let size: u64 = std::env::var("STORE_IO_CRASH_SIZE")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let cap: usize = std::env::var("STORE_IO_CRASH_SUBSETS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
+    let acks = parse_acks(&std::fs::read_to_string(env_path("STORE_IO_CRASH_ACKS")).unwrap());
+    let mnt = env_path("STORE_IO_CRASH_MNT");
+    let work = env_path("STORE_IO_CRASH_WORK");
+    let fs = std::env::var("STORE_IO_CRASH_FS").unwrap_or_default();
+    let entries = read_log(&log);
+    let base_path = work.join("subset-base.img");
+    let base = std::fs::File::create(&base_path).unwrap();
+    base.set_len(size).unwrap();
+    let mut passed: Vec<&Ack> = Vec::new();
+    let mut created = false;
+    let (mut runs, mut states, mut largest) = (0u64, 0u64, 0usize);
+    let mut n = 0;
+    while n < entries.len() {
+        let e = &entries[n];
+        if created && is_cached_write(e) {
+            let end = n + entries[n..]
+                .iter()
+                .take_while(|e| is_cached_write(e))
+                .count();
+            let run: Vec<&Entry> = entries[n..end].iter().collect();
+            base.sync_data().unwrap();
+            for s in subsets(run.len(), cap, n as u64) {
+                let kept: Vec<&Entry> = s.iter().map(|i| run[*i]).collect();
+                if let Err(why) =
+                    check_copy(&work, &base_path, &log, &kept, &fs, &mnt, &passed, "subset")
+                {
+                    panic!(
+                        "crash keeping writes {s:?} of the {} cached before entry {end}: {why}",
+                        run.len()
+                    );
+                }
+                states += 1;
+            }
+            runs += 1;
+            largest = largest.max(run.len());
+            for w in &run {
+                apply(&log, &base, w);
+            }
+            n = end;
+            continue;
+        }
+        apply(&log, &base, e);
+        if let Some(a) = e.mark.as_deref().and_then(|m| acks.get(m)) {
+            created |= matches!(a, Ack::Created);
+            passed.push(a);
+        }
+        n += 1;
+    }
+    std::fs::remove_file(&base_path).unwrap();
+    eprintln!(
+        "{states} subset states checked over {runs} runs of cached writes (largest {largest}, at most {cap} subsets each)"
+    );
+    assert!(created, "the log has no mark for the store's creation");
+    assert_eq!(
+        passed.len(),
+        acks.len(),
+        "acknowledgements missing from the log"
+    );
+    assert!(states > 0, "no run of cached writes was enumerated");
+}
+
+#[test]
+fn test_subsets_are_proper_distinct_and_bounded() {
+    assert!(subsets(1, 16, 1).is_empty());
+    // Exhaustive when they fit: 2^3 - 2, neither none nor all.
+    assert_eq!(subsets(3, 16, 1).len(), 6);
+    assert_eq!(subsets(7, 126, 1).len(), 126);
+    for (k, cap) in [(5usize, 16usize), (7, 16), (40, 64), (200, 64)] {
+        for seed in [0u64, 1, 99] {
+            let s = subsets(k, cap, seed);
+            assert_eq!(s.len(), cap, "k {k} cap {cap}");
+            let distinct: std::collections::BTreeSet<_> = s.iter().collect();
+            assert_eq!(distinct.len(), s.len(), "k {k}: duplicates");
+            assert!(s.iter().all(|x| !x.is_empty() && x.len() < k));
+            assert!(s.iter().all(|x| x.windows(2).all(|w| w[0] < w[1])));
+        }
+    }
+    // Each write alone and all but each one come first.
+    let s = subsets(10, 64, 3);
+    assert_eq!((&s[0], s[1].len()), (&vec![0], 9));
 }
 
 // ----- without a crash: the workload passes its own checks ------------------------

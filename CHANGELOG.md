@@ -187,7 +187,8 @@
       when idle) leads or joins the same shared flushes as the blocking
       barriers, and wakes a submitter once per batch, only if it is
       blocked. A barrier already covered by a finished flush completes at
-      once. Power-safe and read-only stores start no thread. None of these
+      once. Read-only stores start no thread; power-safe ones only
+      when a region forces data sync (D-102). None of these
       calls blocks, unless the OS refused the thread: the flush then runs on
       the calling thread.
     - **Failures.** A receipt is only ever handed back after a flush issued
@@ -214,8 +215,25 @@
     `StoreOptions` gains two public fields (struct literals without
     `..StoreOptions::default()` must add them). `max_io` is now also capped
     at 1 GiB.
-  - Not yet: forced data sync. Vectored writes (gathering separately
-    filled buffers into one operation) are deferred (D-101).
+  - **Forced data sync per region (D-102, G7).**
+    `set_force_data_sync` and `force_data_sync` on `AppendRegion`,
+    `PageRegion` and `Slot`: every barrier on that region issues the OS data
+    sync, even on a power-safe store, where barriers are otherwise free:
+    batches, `sync_through`, durable writes, slot commits, submitter durable
+    writes and barriers on it, and `Submitter::barrier_all` while any region
+    forces it. A device trusted as power-safe that still reports a volatile
+    write cache has that cache flushed (a device with none has nothing to
+    flush; on Windows power-safe writes are flushed already, so forcing adds
+    one). A runtime option shared by every handle and generation of the
+    region, never stored: set it again after each open. New
+    `DurableReceipt::data_synced`: whether a data sync issued after the
+    covered writes completed has succeeded (always on flush-required stores;
+    on power-safe stores for forced regions; false means not guaranteed). A
+    forced region's receipts carry a real flush number, so they cover only
+    writes completed before it. `AppendFrontier::synced` and `publish_synced`: the
+    contiguous prefix a data sync made durable.
+  - Vectored writes (gathering separately filled buffers into one
+    operation) are deferred (D-101).
 - `store-io-buf`: `BufPool::owns`, whether a buffer came from that pool.
 - `store-io-core`: `NotWrittenCause::ForeignBuffer`.
 - `store-io-engine`: `Store::unavailable_regions()`, `UnavailableRegion` and

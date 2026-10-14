@@ -1,6 +1,6 @@
 //! The store's flush thread (D-074, D-099): makes `Submitter` writes and
-//! barriers durable on flush-required stores without blocking the
-//! submitting thread.
+//! barriers durable without blocking the submitting thread, on
+//! flush-required stores and for regions forcing data sync (D-102).
 //!
 //! One thread per store, started by the first request and parked untimed
 //! when idle (no wakeups). It takes every pending request, leads or joins one
@@ -11,7 +11,8 @@
 //! while it flushes and answers, so it never keeps the store alive; the
 //! store's drop stops and joins it.
 //!
-//! Power-safe and read-only stores never start it.
+//! Read-only stores never start it, nor do power-safe stores unless a region
+//! forces data sync.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};

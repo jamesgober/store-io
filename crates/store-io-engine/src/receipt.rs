@@ -219,6 +219,8 @@ pub struct DurableReceipt {
     pub(crate) need: u64,
     /// `through` is a contiguous durable prefix of an append region.
     pub(crate) prefix: bool,
+    /// A data flush issued after the covered writes completed succeeded.
+    pub(crate) synced: bool,
     /// The open store that issued it.
     pub(crate) epoch: u64,
 }
@@ -270,6 +272,19 @@ impl DurableReceipt {
     #[must_use]
     pub fn is_prefix(&self) -> bool {
         self.prefix
+    }
+
+    /// Whether a data sync issued after the covered writes completed has
+    /// succeeded (D-102): always on a flush-required store; on a power-safe
+    /// store (writes durable at completion, no flush needed) for a region
+    /// forcing data sync. False means none is guaranteed, not that none
+    /// happened. Such a receipt covers ([`Self::covers`]) the tickets of
+    /// writes completed before its flush, not later ones (an unforced
+    /// power-safe receipt covers every write of its region, generation and
+    /// open).
+    #[must_use]
+    pub fn data_synced(&self) -> bool {
+        self.synced
     }
 
     /// Whether the covered write was accepted as atomic (never torn).

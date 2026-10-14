@@ -159,11 +159,11 @@ M = [
  ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, _seq)) if self.live > 0 => 2 * self.next_seq + 1,'),
  # D-099: a durable write's receipt only after a flush issued after its
  # completion succeeded; barriers check their tickets; drop waits for flushes
- ('crates/store-io-engine/src/optable.rs', '        if live.durable && store.inner.policy.flush {', '        if live.durable && store.inner.policy.flush && false {'),
+ ('crates/store-io-engine/src/optable.rs', '        if live.durable && flushes() {', '        if live.durable && flushes() && false {'),
  ('crates/store-io-engine/src/optable.rs', '                let need = w.ticket.need;', '                let need = 0 * w.ticket.need;'),
  ('crates/store-io-engine/src/flusher.rs', '        let outcome = held.barrier_to(need).map(|()| need);', '        let outcome = held.barrier_to(need).map(|()| need).or(Ok(need));'),
  ('crates/store-io-engine/src/flusher.rs', '        let need = guard.batch.iter().map(|r| r.need).max().unwrap_or(0);', '        let need = guard.batch.iter().map(|r| r.need).min().unwrap_or(0);'),
- ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live)) if g != ticket.generation || !live => {', '            Some((g, live)) if (g != ticket.generation || !live) && false => {'),
+ ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live, _)) if g != ticket.generation || !live => {', '            Some((g, live, _)) if (g != ticket.generation || !live) && false => {'),
  ('crates/store-io-engine/src/submitter/durable.rs', '        if ticket.epoch != inner.epoch || ticket.volume != inner.volume {', '        if (ticket.epoch != inner.epoch || ticket.volume != inner.volume) && false {'),
  (SUB, '        while self.table.asked > 0 {\n            self.inbox.wait(false);', '        while self.table.asked > 0 && false {\n            self.inbox.wait(false);'),
  ('crates/store-io-engine/src/domain.rs', '        let done = self.done.load(Ordering::SeqCst) >= need;', '        let done = self.done.load(Ordering::SeqCst) >= need || true;'),
@@ -177,6 +177,18 @@ M = [
  ('crates/store-io-engine/src/io.rs', '        (self.ordinary() / block * block).max(block)', '        (self.inner.pool.max_len() / block * block).max(block)'),
  (SUB, '        if len > self.max_buf() {', '        if len > self.max_buf() && false {'),
  ('crates/store-io-engine/src/io.rs', '            .take_within(len, self.ordinary())', '            .take(len)'),
+ # D-102: a forced region's barriers flush, and only flush-backed receipts say data_synced
+ ('crates/store-io-engine/src/io.rs', '        if !self.inner.policy.flush && !r.forced() {', '        if !self.inner.policy.flush && (!r.forced() || true) {'),
+ ('crates/store-io-engine/src/optable.rs', '            || store.inner.policy.flush || live.pass.as_ref().is_some_and(|p| p.get().forced());', '            || store.inner.policy.flush;'),
+ ('crates/store-io-engine/src/submitter/durable.rs', '        let flush = inner.policy.flush || forced;', '        let flush = inner.policy.flush || (forced && false);'),
+ ('crates/store-io-engine/src/region.rs', '        let synced = flushes || self.state.forced();', '        let synced = flushes;'),
+ ('crates/store-io-engine/src/io.rs', '            synced: need != u64::MAX && need != 0,', '            synced: (need != u64::MAX && need != 0) || true,'),
+ ('crates/store-io-engine/src/lifecycle.rs', '            force_sync: Arc::clone(&r.force_sync),', '            force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),'),
+ ('crates/store-io-engine/src/optable.rs', '                    receipt.synced = need != u64::MAX;', '                    receipt.synced = true;'),
+ ('crates/store-io-engine/src/region.rs', '        let flushed = s.inner.policy.flush || self.state.forced();', '        let flushed = s.inner.policy.flush;'),
+ ('crates/store-io-engine/src/region.rs', '        if synced {\n            f.publish_synced(through);', '        if synced && false {\n            f.publish_synced(through);'),
+ ('crates/store-io-engine/src/submitter/durable.rs', '                .any(|r| r.forced());', '                .any(|r| r.forced() && false);'),
+ ('crates/store-io-engine/src/optable.rs', '                if synced {\n                    f.publish_synced(through);', '                if synced && false {\n                    f.publish_synced(through);'),
  # D-100: only a block's one writer may update it without an atomic add
  ('crates/store-io-core/src/observe.rs', '                None => (&self.shared[index & self.mask], false),', '                None => (&self.shared[index & self.mask], true),', OBSERVE),
 ]

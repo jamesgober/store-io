@@ -151,6 +151,9 @@ where
             }),
             positioned: std::sync::atomic::AtomicBool::new(true),
             gate: Gate::new(),
+            // A runtime setting of the region, shared with its next
+            // generation.
+            force_sync: Arc::clone(&r.force_sync),
         });
         let mut regions = self
             .inner

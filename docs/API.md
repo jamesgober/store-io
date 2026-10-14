@@ -91,6 +91,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `release(self) -> Result<()>` | Gives the region's space back. |
 | `generation() -> Generation` | The generation this handle writes. |
 | `tail()`, `durable_through()`, `len()`, `is_empty()`, `block_size()` | Next append position, contiguous durable prefix, data-area size, block size. |
+| `set_force_data_sync(bool)`, `force_data_sync()` | Every barrier on the region issues a data sync, even on a power-safe store (also on page regions and slots). Runtime only: set it again after each open. |
 
 ---
 
@@ -175,7 +176,7 @@ None of these can be constructed outside store-io.
 |---|---|
 | `RegionPos` | `offset()`, `region()`, `generation()` |
 | `WriteTicket` | `pos()`, `end()` |
-| `DurableReceipt` | `class()`, `label()`, `durable_through()`, `covers(&WriteTicket)`, `untorn()`, `volume()`, `region()`, `generation()` |
+| `DurableReceipt` | `class()`, `label()`, `durable_through()`, `is_prefix()`, `covers(&WriteTicket)`, `data_synced()`, `untorn()`, `volume()`, `region()`, `generation()` |
 
 `covers(&ticket)` is exact: a receipt proves a ticket's write durable when the write completed before the receipt's flush was issued, or (append regions) lies within the durable prefix. Receipts and tickets from different opens of a store never match.
 

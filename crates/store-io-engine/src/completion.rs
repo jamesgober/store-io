@@ -67,8 +67,10 @@ pub enum WriteMode {
     #[default]
     Plain,
     /// The completion is handed back only once the write is durable, with a
-    /// receipt for its own range: at once on a power-safe store (the write
-    /// itself was durable), after a covering flush on a flush-required one.
+    /// receipt (a prefix receipt for an append whose region was complete up
+    /// to it, else one for its own range): at once on a power-safe store
+    /// (the write itself was durable) unless its region forces data sync,
+    /// else after a covering flush.
     Durable,
 }
 

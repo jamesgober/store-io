@@ -188,7 +188,7 @@ Each carries the volume, the region, the region generation, and the **epoch**: a
 | Value | Records |
 |---|---|
 | `WriteTicket` | Its byte range, and its flush number: `issued + 1` read when the write's completion was observed, the first flush that can cover it. |
-| `DurableReceipt` | Its class and label; `durable_through()`; `untorn()`; and the flush number it waited for. That number is `u64::MAX` on a power-safe store (every completed write is durable), and `0` for an append that was already inside the durable prefix (no barrier ran) and for a slot commit. |
+| `DurableReceipt` | Its class and label; `durable_through()` and `is_prefix()`; `untorn()`; `data_synced()` (a data sync issued after the covered writes completed succeeded); and the flush number it waited for. That number is `u64::MAX` on a power-safe store (every completed write is durable) unless the region forces data sync, and `0` for an append that was already inside the durable prefix (no barrier ran) and for a slot commit. |
 
 `receipt.covers(&ticket)` is true exactly when **all** of these hold:
 
@@ -201,7 +201,7 @@ Each carries the volume, the region, the region generation, and the **epoch**: a
 Consequences worth knowing:
 
 - A page-region receipt covers every ticket of that region and generation whose write completed before the receipt's flush started, not only the ticket passed to `sync_through`.
-- On a power-safe store a receipt covers every ticket of its region, generation and open, because each such write was durable when it completed.
+- On a power-safe store a receipt covers every ticket of its region, generation and open, because each such write was durable when it completed; except for a region forcing data sync, whose receipts carry a real flush number and cover only writes completed before that flush (so `covers` and `data_synced` together mean the write was flushed).
 - A slot-commit receipt covers no ticket: slots have no tickets, and the receipt stands for the commit alone.
 - A reopened store never vouches for an earlier open's writes: tickets and receipts from different opens never match, and `sync_through` refuses a foreign ticket (`ForeignPosition`). A ticket of an older generation is refused with `StaleGeneration`.
 - `durable_through()` is, for an append region, the offset before which every byte is durable; for a page region or a slot, the end of the covered write.
@@ -292,7 +292,7 @@ Source: [`crates/store-io-core/src/untorn.rs`](../crates/store-io-core/src/untor
 - crashes that lose every cached write, keep every one, keep any chosen subset (up to 64 writes, enumerable bit by bit), or keep, drop or tear each at random from the seed (tears at logical-block granularity), then truncate files to their durable length, restore directories, release locks and invalidate handles;
 - injected faults: a chosen write or flush failing; a failed flush that keeps or drops the cache (the second models the Linux behaviour in section 10); flushes that lie; short writes and reads; lost and misdirected writes; a failed directory sync; unreadable ranges; out of space; pages in the OS page cache; and random I/O errors at a given rate.
 
-The engine's tests run on it: receipted appends survive every crash subset; a slot reads back old or new after every crash mode; a crash during a recycle leaves the old or the new generation; a release interrupted after its table update still frees the space; a failed flush poisons the store and success is never reported again; a short transfer is never success; receipts cover exactly the writes completed before their flush; a reopened store never vouches for an earlier open; a power-safe store never flushes; a read-only open changes nothing; a directory replace leaves the old or the new file at every crash point.
+The engine's tests run on it: receipted appends survive every crash subset; a slot reads back old or new after every crash mode; a crash during a recycle leaves the old or the new generation; a release interrupted after its table update still frees the space; a failed flush poisons the store and success is never reported again; a short transfer is never success; receipts cover exactly the writes completed before their flush; a reopened store never vouches for an earlier open; a power-safe store never flushes unless a region forces data sync; a read-only open changes nothing; a directory replace leaves the old or the new file at every crash point.
 
 The format's own tests tear a slot overwrite at every byte boundary and flip every single bit of a slot; none is ever accepted as a mixed or altered version.
 

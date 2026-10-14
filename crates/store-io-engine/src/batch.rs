@@ -462,8 +462,8 @@ where
             Pumped::Failed(raw) => return Err(s.unknown(Op::Write, raw, c)),
         }
         drop(lane);
-        let need = s.barrier()?;
-        Ok(s.receipt(state, start, end, need, false))
+        let (need, synced) = s.barrier_for(state)?;
+        Ok(s.receipt(state, start, end, need, false, synced))
     }
 }
 

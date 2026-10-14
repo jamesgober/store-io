@@ -580,7 +580,8 @@ where
         let _unwind = PoisonOnUnwind::new(&self.store);
         for c in self.raw.drain() {
             if let Some((qtag, need)) = self.table.finish(&self.store, c.tag, c.buf, c.result) {
-                durable::ask(&mut self.table, &self.store, &self.inbox, qtag, need);
+                // Only a write needing a flush asks (see `Table::finish`).
+                durable::ask(&mut self.table, &self.store, &self.inbox, qtag, need, true);
             }
         }
         // Flush outcomes too, under the same guard.

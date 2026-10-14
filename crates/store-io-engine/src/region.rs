@@ -296,10 +296,18 @@ where
         if ticket.generation != self.state.generation {
             return Err(not_written(NotWrittenCause::StaleGeneration, c));
         }
-        let durable = f.durable();
+        // Already durable: no barrier. A forced region on a power-safe store
+        // counts only what a data flush made durable (D-102).
+        let flushes = s.inner.policy.flush;
+        let synced = flushes || self.state.forced();
+        let durable = if synced && !flushes {
+            f.synced()
+        } else {
+            f.durable()
+        };
         if durable >= ticket.end {
             s.inner.domain.count_already_durable();
-            return Ok(s.receipt(&self.state, 0, durable, 0, true));
+            return Ok(s.receipt(&self.state, 0, durable, 0, true, synced));
         }
         let domain = &s.inner.domain;
         if !f.wait_completed(ticket.end, || domain.poisoned().is_some()) {
@@ -312,9 +320,13 @@ where
         }
         // Snapshot the completed prefix BEFORE the barrier takes its ticket.
         let through = f.completed();
-        let need = s.barrier()?;
-        f.publish_durable(through);
-        Ok(s.receipt(&self.state, 0, through, need, true))
+        let (need, synced) = s.barrier_for(&self.state)?;
+        if synced {
+            f.publish_synced(through);
+        } else {
+            f.publish_durable(through);
+        }
+        Ok(s.receipt(&self.state, 0, through, need, true, synced))
     }
 
     /// Appends `data` and makes it durable before returning.
@@ -616,8 +628,8 @@ where
             .gate
             .check()
             .map_err(|why| retired_error(why, &self.state))?;
-        let need = s.barrier()?;
-        Ok(s.receipt(&self.state, ticket.start, ticket.end, need, false))
+        let (need, synced) = s.barrier_for(&self.state)?;
+        Ok(s.receipt(&self.state, ticket.start, ticket.end, need, false, synced))
     }
 
     /// Writes whole blocks at `pos` and makes them durable before returning.
@@ -741,6 +753,10 @@ impl<P: Platform> Slot<P>
 where
     P::Queue: Send,
 {
+    pub(crate) fn state(&self) -> &Arc<LiveRegion> {
+        &self.state
+    }
+
     /// Largest payload a commit accepts.
     #[must_use]
     pub fn capacity(&self) -> usize {
@@ -832,6 +848,12 @@ where
         let generation = next.generation;
         let at = self.at();
         let mut lane = s.lane(&self.state, Op::Write)?;
+        // A forced slot flushes on a power-safe store too (D-102).
+        let flushed = s.inner.policy.flush || self.state.forced();
+        let policy = crate::store::Policy {
+            flush: flushed,
+            ..s.inner.policy
+        };
         let written = durable_slot::<P>(
             &mut lane,
             &s.inner.file,
@@ -839,13 +861,13 @@ where
             &at,
             &header,
             &next,
-            &s.inner.policy,
+            &policy,
             &s.inner.domain,
         )
         .inspect_err(|_| s.wake_frontiers())?;
         *header = written;
         // A slot has no tickets: its receipt covers the commit alone.
-        let mut receipt = s.receipt(&self.state, 0, data.len() as u64, 0, false);
+        let mut receipt = s.receipt(&self.state, 0, data.len() as u64, 0, false, flushed);
         if let Some(g) = store_io_core::id::Generation::from_raw(generation) {
             receipt.generation = g;
         }

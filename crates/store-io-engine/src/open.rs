@@ -188,6 +188,7 @@ where
                 header: Mutex::new(header),
                 frontier,
                 positioned: std::sync::atomic::AtomicBool::new(false),
+                force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 gate: Gate::new(),
             }));
         }

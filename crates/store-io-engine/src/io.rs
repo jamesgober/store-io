@@ -434,6 +434,18 @@ where
         Ok(need)
     }
 
+    /// The barrier for a sync on `r`: a data flush when the store needs one
+    /// or the region forces it (D-102). Returns the flush waited for and
+    /// whether a flush backs it.
+    pub(crate) fn barrier_for(&self, r: &LiveRegion) -> Result<(u64, bool), Error> {
+        if !self.inner.policy.flush && !r.forced() {
+            return self.barrier().map(|need| (need, false));
+        }
+        let need = self.inner.domain.ticket();
+        self.barrier_to(need)?;
+        Ok((need, true))
+    }
+
     /// The domain barrier for a ticket taken earlier (after the writes it
     /// covers completed): a flush `>= need` (flush-required stores only).
     pub(crate) fn barrier_to(&self, need: u64) -> Result<(), Error> {
@@ -476,6 +488,7 @@ where
         through: u64,
         need: u64,
         prefix: bool,
+        synced: bool,
     ) -> DurableReceipt {
         DurableReceipt {
             volume: self.inner.volume,
@@ -488,6 +501,7 @@ where
             untorn: false,
             need,
             prefix,
+            synced,
             epoch: self.inner.epoch,
         }
     }
@@ -507,6 +521,9 @@ where
             untorn: false,
             need,
             prefix: false,
+            // A real flush number: not the power-safe "durable at
+            // completion" mark, nor 0 (no barrier yet).
+            synced: need != u64::MAX && need != 0,
             epoch: t.epoch,
         }
     }

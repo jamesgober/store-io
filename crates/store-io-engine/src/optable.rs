@@ -213,7 +213,11 @@ impl Table {
         let live = row?.live.as_mut()?;
         let mut prefix = None;
         let mut outcome = settle(store, live, buf.as_ref(), result, &mut prefix);
-        if live.durable && store.inner.policy.flush {
+        // A flush-required store, or a region forcing data sync (D-102):
+        // read only for a durable write.
+        let flushes =
+            || store.inner.policy.flush || live.pass.as_ref().is_some_and(|p| p.get().forced());
+        if live.durable && flushes() {
             if let Ok(Done::Written(w)) = outcome {
                 // The ticket's need was taken when the write's completion
                 // had been observed: a flush that far covers it (D-047).
@@ -269,6 +273,7 @@ impl Table {
             (None, Kind::Sync(mut receipt)) => {
                 let done = outcome.map(|need| {
                     receipt.need = need;
+                    receipt.synced = need != u64::MAX;
                     Done::Synced(receipt)
                 });
                 (None, done)
@@ -404,10 +409,15 @@ where
 {
     match (prefix, live.pass.as_ref().map(OwnedPass::get)) {
         (Some(through), Some(state)) => {
+            let synced = need != u64::MAX;
             if let Some(f) = state.frontier.as_ref() {
-                f.publish_durable(through);
+                if synced {
+                    f.publish_synced(through);
+                } else {
+                    f.publish_durable(through);
+                }
             }
-            store.receipt(state, 0, through, need, true)
+            store.receipt(state, 0, through, need, true, synced)
         }
         _ => store.receipt_for(t, need),
     }

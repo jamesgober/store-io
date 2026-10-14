@@ -27,6 +27,7 @@ mod directory;
 pub mod domain;
 mod exec;
 mod flusher;
+mod force;
 pub mod frontier;
 mod gate;
 mod io;

@@ -93,7 +93,8 @@ A position belongs to one region and one generation of it: passing it to another
 There are three ways to make writes durable. Each costs exactly what it says:
 
 ```rust
-// One durable write: one write, one flush (no flush on a power-safe device).
+// One durable write: one write, one flush (no flush on a power-safe device,
+// unless the region forces data sync: `set_force_data_sync`).
 let (pos, receipt) = wal.append_durable(&record)?;
 
 // Several writes, one barrier: N writes, one flush.

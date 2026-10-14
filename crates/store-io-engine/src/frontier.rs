@@ -32,6 +32,9 @@ pub struct AppendFrontier {
     tail: AtomicU64,
     prefix: AtomicU64,
     durable: AtomicU64,
+    /// Contiguously durable bytes made so by a data flush (a forced region
+    /// on a power-safe store reads its prefix from here, D-102).
+    synced: AtomicU64,
     ring: Box<[AtomicU64]>,
     mask: u64,
     waiters: AtomicU64,
@@ -74,6 +77,7 @@ impl AppendFrontier {
             tail: AtomicU64::new(resume),
             prefix: AtomicU64::new(resume),
             durable: AtomicU64::new(resume),
+            synced: AtomicU64::new(resume),
             ring: (0..ring).map(|_| AtomicU64::new(0)).collect(),
             mask: ring as u64 - 1,
             waiters: AtomicU64::new(0),
@@ -255,6 +259,19 @@ impl AppendFrontier {
         let _previous = self.durable.fetch_max(through, Ordering::SeqCst);
     }
 
+    /// Contiguously durable bytes made so by a data flush.
+    #[must_use]
+    pub fn synced(&self) -> u64 {
+        self.synced.load(Ordering::SeqCst)
+    }
+
+    /// Publishes a durable frontier after a successful barrier that issued
+    /// a data flush (also the durable frontier). Never moves backwards.
+    pub fn publish_synced(&self, through: u64) {
+        self.publish_durable(through);
+        let _previous = self.synced.fetch_max(through, Ordering::SeqCst);
+    }
+
     /// The next reservation's start.
     #[must_use]
     pub fn tail(&self) -> u64 {
@@ -290,7 +307,9 @@ impl AppendFrontier {
             return Err(NotWrittenCause::TooManyInFlight);
         }
         self.prefix.store(new, Ordering::SeqCst);
+        // A writable open flushed the device before reading anything.
         let _previous = self.durable.fetch_max(new, Ordering::SeqCst);
+        let _previous = self.synced.fetch_max(new, Ordering::SeqCst);
         Ok(new)
     }
 }

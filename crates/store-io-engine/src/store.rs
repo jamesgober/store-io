@@ -107,7 +107,8 @@ pub(crate) struct Policy {
     pub(crate) label: ReceiptLabel,
     /// Write with `dsync` (durable at completion): power-safe stores.
     pub(crate) dsync: bool,
-    /// Barriers issue a device flush: every class except power-safe.
+    /// Barriers issue a device flush: every class except power-safe (where
+    /// only regions forcing data sync flush, D-102).
     pub(crate) flush: bool,
 }
 
@@ -275,6 +276,18 @@ pub(crate) struct LiveRegion {
     pub(crate) positioned: std::sync::atomic::AtomicBool,
     /// Admission of data operations; closed by recycle and release.
     pub(crate) gate: Gate,
+    /// Every barrier on the region issues a data flush, even on a
+    /// power-safe store (D-102). Runtime only: never on disk. Shared by
+    /// every generation of the region, so a setting made through any handle
+    /// holds after a recycle.
+    pub(crate) force_sync: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LiveRegion {
+    /// Whether barriers on this region always flush (D-102).
+    pub(crate) fn forced(&self) -> bool {
+        self.force_sync.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 pub(crate) struct Inner<P: Platform> {
@@ -282,8 +295,9 @@ pub(crate) struct Inner<P: Platform> {
     /// order): a queue whose operations run on worker threads waits for them
     /// in its drop, and none may land after the ownership lock is released.
     pub(crate) queues: QueueSet<P::Queue>,
-    /// The flush thread (D-099), started by the first submitter request on
-    /// a flush-required store; `None` inside if the OS refused it. Declared
+    /// The flush thread (D-099), started by the first submitter request
+    /// that needs a flush (a flush-required store, or a region forcing data
+    /// sync); `None` inside if the OS refused it. Declared
     /// early too: it is stopped and joined before the file and the ownership
     /// lock are released.
     pub(crate) flusher: std::sync::OnceLock<Option<crate::flusher::Flusher<P>>>,

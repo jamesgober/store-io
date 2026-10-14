@@ -16,21 +16,24 @@ use crate::store::Store;
 
 use super::Submitter;
 
-/// Asks for a flush `>= need` for the row `qtag` names. Answered here when
-/// the store is power-safe, poisoned, or a flush already covers it (no
-/// thread hop), or when the flush thread is unavailable (then the flush runs
-/// on this thread); else by the flush thread, through `inbox`.
+/// Asks for a flush `>= need` for the row `qtag` names (`flush`: a real
+/// flush is wanted; else, on a power-safe store, the writes are durable
+/// already). Answered here when no flush is wanted, the store is poisoned,
+/// or a flush already covers it (no thread hop), or when the flush thread is
+/// unavailable (then the flush runs on this thread); else by the flush
+/// thread, through `inbox`.
 pub(super) fn ask<P: Platform>(
     table: &mut Table,
     store: &Store<P>,
     inbox: &Arc<Inbox<<P::Queue as Queue>::Waker>>,
     qtag: u64,
     need: u64,
+    flush: bool,
 ) where
     P::Queue: Send,
 {
     let domain = &store.inner.domain;
-    let now: Option<Flushed> = if !store.inner.policy.flush {
+    let now: Option<Flushed> = if !flush {
         Some(match domain.poisoned() {
             Some(first) => Err(Error::Poisoned { first }),
             None => Ok(u64::MAX),
@@ -63,9 +66,10 @@ where
     /// for the ticket's range (not a durable prefix: see
     /// [`DurableReceipt::is_prefix`](crate::DurableReceipt::is_prefix)) once
     /// a flush issued after that write completed has succeeded (at once on a
-    /// power-safe store, or when a finished flush already covers it). It does
-    /// not block (unless the store's flush thread could not be started: then
-    /// the flush runs on this thread).
+    /// power-safe store unless the region forces data sync, or when a
+    /// finished flush already covers it). It does not block (unless the
+    /// store's flush thread could not be started: then the flush runs on
+    /// this thread).
     ///
     /// # Errors
     ///
@@ -95,16 +99,17 @@ where
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find(|r| r.id == ticket.region)
-            .map(|r| (r.generation, r.gate.check().is_ok()));
-        match current {
+            .map(|r| (r.generation, r.gate.check().is_ok(), r.forced()));
+        let forced = match current {
             None => return Err(refuse(NotWrittenCause::NotReady)),
-            Some((g, live)) if g != ticket.generation || !live => {
+            Some((g, live, _)) if g != ticket.generation || !live => {
                 return Err(refuse(NotWrittenCause::StaleGeneration));
             }
-            Some(_) => {}
-        }
+            Some((_, _, forced)) => forced,
+        };
         let receipt = self.store.receipt_for(ticket, 0);
-        self.start_barrier(Kind::Sync(receipt), ticket.need, tag)
+        let flush = inner.policy.flush || forced;
+        self.start_barrier(Kind::Sync(receipt), ticket.need, flush, tag)
             .map_err(refuse)
     }
 
@@ -123,15 +128,30 @@ where
                 buf: None,
             });
         }
-        let need = self.store.inner.domain.ticket();
-        self.start_barrier(Kind::All, need, tag)
+        let inner = &self.store.inner;
+        let need = inner.domain.ticket();
+        // On a power-safe store, a flush only if a region forces data sync.
+        let flush = inner.policy.flush
+            || inner
+                .regions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|r| r.forced());
+        self.start_barrier(Kind::All, need, flush, tag)
             .map_err(|cause| Rejected {
                 error: not_written(cause, ErrorContext::default()),
                 buf: None,
             })
     }
 
-    fn start_barrier(&mut self, kind: Kind, need: u64, tag: u64) -> Result<(), NotWrittenCause> {
+    fn start_barrier(
+        &mut self,
+        kind: Kind,
+        need: u64,
+        flush: bool,
+        tag: u64,
+    ) -> Result<(), NotWrittenCause> {
         if self.table.full() {
             return Err(NotWrittenCause::QueueFull);
         }
@@ -139,7 +159,7 @@ where
             return Err(NotWrittenCause::QueueFull);
         };
         self.table.start(index, tag, kind, None, false);
-        ask(&mut self.table, &self.store, &self.inbox, qtag, need);
+        ask(&mut self.table, &self.store, &self.inbox, qtag, need, flush);
         Ok(())
     }
 }

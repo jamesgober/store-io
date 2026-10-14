@@ -1,0 +1,5 @@
+control (fio, fsync on io_uring): io-wq threads seen = 8
+[submitter] done in 119.2 s, 0 anomalies
+wrote /home/james/.iowq-gate-6554/2026-10-14-linux-msft-virtual-disk-submitter.md and /home/james/.iowq-gate-6554/2026-10-14-linux-msft-virtual-disk-submitter.json (119.8 s total)
+gate (store-io W6 on io_uring): io-wq threads seen = 0; store-io points 8, on io_uring 8
+PASS

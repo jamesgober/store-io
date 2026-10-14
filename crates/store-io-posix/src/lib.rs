@@ -84,6 +84,16 @@ pub use queue::{PosixQueue, PosixWaker};
 #[cfg(target_os = "linux")]
 pub use store_io_platform::LinuxTier;
 
+/// Operations, in this process so far, that the io_uring tier finished with
+/// one blocking system call because the kernel would have blocked (or
+/// could not honour NOWAIT for the file) or transferred short. A measure
+/// of how often the asynchronous path was not taken; never a failure.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn io_uring_fallbacks() -> u64 {
+    uring::queue::FALLBACKS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use core::sync::atomic::{AtomicU64, Ordering};

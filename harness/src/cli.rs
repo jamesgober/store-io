@@ -16,6 +16,7 @@ COMMANDS:
     caller-batch   W3  N records + one barrier (N = 1..1000, 64 B..4 KiB)
     page-batch     W4  N random 4 KiB pages + one barrier
     sequential     W5  1 MiB sequential writes, 1/8 MiB sequential reads
+    submitter      W6  N in flight from one thread, random 4 KiB, vs fio
     probe          create a store, print the device report and exit
     observe-cost   what the observer adds per durable write (build with
                    --features observe; without it, the compiled-out cost)
@@ -27,6 +28,7 @@ OPTIONS:
                      $HOME on Linux); a unique subdirectory is created and removed
     --out <PATH>     report directory (default: the harness's results/ folder)
     --commit <SHA>   store-io commit to record (default: git rev-parse HEAD)
+    --tier <T>       Linux I/O tier: auto (default), sync or uring
 ";
 
 /// A workload command.
@@ -44,6 +46,8 @@ pub enum Command {
     PageBatch,
     /// W5.
     Sequential,
+    /// W6.
+    Submitter,
     /// Device report only.
     Probe,
     /// The observer's cost per durable write.
@@ -63,6 +67,7 @@ impl Command {
             Self::CallerBatch => "caller-batch",
             Self::PageBatch => "page-batch",
             Self::Sequential => "sequential",
+            Self::Submitter => "submitter",
             Self::Probe => "probe",
             Self::ObserveCost => "observe-cost",
             Self::Help => "help",
@@ -77,6 +82,7 @@ impl Command {
             Self::CallerBatch,
             Self::PageBatch,
             Self::Sequential,
+            Self::Submitter,
             Self::Probe,
             Self::ObserveCost,
             Self::Help,
@@ -99,6 +105,8 @@ pub struct Args {
     pub out: PathBuf,
     /// Commit override.
     pub commit: Option<String>,
+    /// Linux I/O tier.
+    pub tier: store_io_platform::LinuxTier,
 }
 
 fn default_dir() -> PathBuf {
@@ -123,6 +131,7 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         dir: default_dir(),
         out: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/results")),
         commit: None,
+        tier: store_io_platform::LinuxTier::Auto,
     };
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("`{flag}` needs a value"));
@@ -138,6 +147,16 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--dir" => a.dir = PathBuf::from(value()?),
             "--out" => a.out = PathBuf::from(value()?),
             "--commit" => a.commit = Some(value()?),
+            "--tier" => {
+                use store_io_platform::LinuxTier;
+                let v = value()?;
+                a.tier = match v.as_str() {
+                    "auto" => LinuxTier::Auto,
+                    "sync" => LinuxTier::Sync,
+                    "uring" => LinuxTier::Uring,
+                    _ => return Err(format!("bad --tier `{v}` (auto, sync or uring)")),
+                };
+            }
             other => return Err(format!("unknown option `{other}`")),
         }
     }

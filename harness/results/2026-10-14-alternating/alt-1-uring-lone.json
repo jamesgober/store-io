@@ -1,0 +1,386 @@
+{
+  "schema": "store-io-harness/1",
+  "incomplete": null,
+  "run": {
+    "date": "2026-10-14T08:13:42Z",
+    "command": "lone",
+    "commit": "e4f90ecec8fe39c18eccbe385c6a10fe51cfce2c (crates/ modified)",
+    "os": "linux",
+    "os_version": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "cpus": 32,
+    "filesystem": "ext4 on / (device /dev/sdd 8:48, mount options rw,relatime, super options rw,discard,errors=remount-ro,data=ordered); store-io classified it Ext4",
+    "dir": "/home/james/store-io-harness-59300",
+    "device": "msft-virtual-disk",
+    "backend": "store-io-posix (PosixPlatform, O_DIRECT; tier in the report's io line)",
+    "secs_per_point": 3,
+    "warmup_secs": 0.30000000000000004,
+    "total_secs": 29.44671603,
+    "fsys": "fsys 1.1.3 (crates.io), Handle method Sync, durability primitive fsync",
+    "raw_primitives": [
+      "pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync",
+      "preadv2 on an O_DIRECT descriptor (one call per request)"
+    ]
+  },
+  "store": {
+    "report": "volume           4225c3f0-f28e-655f-cd8c-140fcc06bc76\nio               io_uring (chosen)\nclass            unverified\nlabel            overridden(running under a hypervisor without a certificate for this volume type)\ndurable open     Overridden\nreason           running under a hypervisor without a certificate for this volume type\nmissing          device identify data (needs a readable device node)\nmissing          SMART / health log (needs privilege on Linux)\nmissing          volatile write cache presence\nmissing          volatile write cache enabled state\nmissing          device atomic-write fields\nflush execution  inline (leader)\nblock size       4096\ntable capacity   253 regions\nfilesystem       Ext4\nbus              Virtual\nmodel            Msft Virtual Disk\nmode             read-write",
+    "class": "unverified (receipt label overridden(running under a hypervisor without a certificate for this volume type), durable open Overridden (Trust::override_refusal), block size 4096 B)",
+    "override_in_effect": true,
+    "override_refusal": "device durability is unverified: running under a hypervisor without a certificate for this volume type; missing: device identify data (needs a readable device node); SMART / health log (needs privilege on Linux); volatile write cache presence; volatile write cache enabled state; device atomic-write fields; [Unverified { missing: {Identify, Smart, CachePresence, CacheEnabled, AtomicFields}, reasons: {Hypervisor} }]",
+    "options": "StoreOptions {\n    trust: Trust {\n        certificate: None,\n        attestation: None,\n        override_refusal: true,\n    },\n    block_size: None,\n    log2_table_slot: 14,\n    max_io: 1048576,\n    buffers_per_class: 64,\n    max_write: 4194304,\n    large_buffers: 8,\n    queues: 0,\n    queue_depth: 64,\n    t3_pool_threads: 0,\n    append_ring: 4096,\n    keyed_fill: false,\n    linux_tier: Uring,\n}",
+    "evidence": "Evidence {\n    platform: Linux,\n    device: DeviceFacts {\n        model: Some(\n            \"Msft Virtual Disk\",\n        ),\n        firmware: Some(\n            \"1.0\",\n        ),\n        bus: Virtual,\n        cache_present: Unknown,\n        cache_enabled: Unknown,\n        os_cache_mode: WriteBack,\n        os_flush_supported: Yes,\n        user_power_protection: Unknown,\n        backup_failed: Unknown,\n        fua_supported: No,\n        logical_block: 512,\n        physical_block: 4096,\n        optimal_write: 4096,\n        max_transfer: 1310720,\n        atomic: AtomicFields {\n            awupf: None,\n            nsabp: false,\n            nawupf: 0,\n            nabspf: 0,\n            nabo: 0,\n        },\n        numa_node: Some(\n            0,\n        ),\n        multi_controller: false,\n    },\n    fs: FsFacts {\n        kind: Ext4,\n        data_journal: false,\n        no_barrier: false,\n        sync_disabled: false,\n        weak_error_mode: false,\n        transformed: false,\n        cow: No,\n        direct_io: Unknown,\n        full_flush: Yes,\n        dir_flush: Yes,\n        os_atomic_unit: 0,\n        dio_mem_align: 4,\n        dio_offset_align: 512,\n    },\n    stack: [],\n    hypervisor: Some(\n        HyperV,\n    ),\n    privilege: Unprivileged,\n    kernel: Some(\n        (\n            6,\n            6,\n            87,\n        ),\n    ),\n    timings: Timings {\n        flush_idle_ns: None,\n        flush_loaded_ns: None,\n        fua_extra_ns: None,\n        flush_blocks_writes_pct: None,\n    },\n    missing: {\n        Identify,\n        Smart,\n        CachePresence,\n        CacheEnabled,\n        AtomicFields,\n    },\n}"
+  },
+  "diagnostics": [],
+  "workloads": [
+    {
+      "key": "lone",
+      "title": "W1: lone writer, QD1 durable 4 KiB",
+      "elapsed_secs": 28.510882343,
+      "method": [
+        "One thread, one operation at a time; each operation is a 4 KiB write made durable before the next starts.",
+        "store-io `append_durable` appends to a freshly provisioned append region; `write_durable` overwrites a 256 MiB page region at sequentially cycling 4 KiB offsets.",
+        "raw: copy the payload into an aligned buffer (the copy store-io also makes), then pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync, at sequentially cycling offsets of a ready 256 MiB file.",
+        "fsys: `JournalHandle::append` + `sync_through(lsn)` (default, window off, direct+window off) on a fresh journal file; `Handle::write_at` + `Handle::sync` on a ready 256 MiB file (fsys opens the file on every call; that is its API).",
+        "Latency covers the write and the durability call only; payload generation happens before the timer starts."
+      ],
+      "points": [
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable",
+          "params": {
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 2417.6836994454316,
+            "ops_per_s": 871.3825033266979,
+            "samples": 2612,
+            "p50_us": 1058.129,
+            "p90_us": 1127.374,
+            "p99_us": 6330.91,
+            "p999_us": 6441.764,
+            "max_us": 6617.918,
+            "mean_us": 1147.6016516079633,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": null,
+            "window_s": 3.000514066,
+            "ops_total_incl_warmup": 2877
+          },
+          "verify": "passed: 2049 of 2877 records read back and compared byte for byte; all 2877 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 323 MiB append region in 0.14 s (2418 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append + sync_through (halves timed separately)",
+          "params": {
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 2830.3271943512595,
+            "ops_per_s": 440.1799333784536,
+            "samples": 1320,
+            "p50_us": 1962.532,
+            "p90_us": 3605.733,
+            "p99_us": 9530.915,
+            "p999_us": 17583.655,
+            "max_us": 23333.129,
+            "mean_us": 2271.7982446969695,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": null,
+            "window_s": 3.0003663,
+            "ops_total_incl_warmup": 1583,
+            "write_p50_us": 200.301,
+            "write_p99_us": 1114.246,
+            "write_mean_us": 232.14888250157927,
+            "sync_p50_us": 898.672,
+            "sync_p99_us": 8790.124,
+            "sync_mean_us": 1851.7502918509158
+          },
+          "verify": "passed: 1583 of 1583 records read back and compared byte for byte; all 1583 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 323 MiB append region in 0.12 s (2830 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "PageRegion::write_durable",
+          "params": {
+            "bytes": 4096,
+            "region_bytes": 268435456
+          },
+          "metrics": {
+            "ops_per_s": 416.5213687119078,
+            "samples": 1249,
+            "p50_us": 725.073,
+            "p90_us": 6910.144,
+            "p99_us": 12840.141,
+            "p999_us": 20716.106,
+            "max_us": 21331.504,
+            "mean_us": 2400.837208166533,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": null,
+            "window_s": 3.000010286,
+            "ops_total_incl_warmup": 1306
+          },
+          "verify": "passed: 1306 of 1306 written pages read back (latest write each) and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "write + data flush",
+          "params": {
+            "bytes": 4096,
+            "file_bytes": 268435456
+          },
+          "metrics": {
+            "ops_per_s": 1552.5549898420377,
+            "samples": 4651,
+            "p50_us": 584.141,
+            "p90_us": 679.312,
+            "p99_us": 2488.548,
+            "p999_us": 5923.002,
+            "max_us": 7752.338,
+            "mean_us": 644.0995691249194,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 3.000156043,
+            "ops_total_incl_warmup": 5120,
+            "write_p50_us": 122.172,
+            "write_p99_us": 282.635,
+            "write_mean_us": 136.3771361328125,
+            "sync_p50_us": 459.13,
+            "sync_p99_us": 841.807,
+            "sync_mean_us": 507.3531634765625
+          },
+          "verify": "passed: 2049 of 5120 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": [
+            "file made ready (zero-filled unbuffered + flushed) in 0.05 s (5961 MB/s)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): append + sync_through",
+          "params": {
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 450.1761770471223,
+            "samples": 1350,
+            "p50_us": 2149.094,
+            "p90_us": 2330.784,
+            "p99_us": 4239.781,
+            "p999_us": 7573.28,
+            "max_us": 7641.345,
+            "mean_us": 2221.352552592593,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4108,
+            "other_calls_per_op": null,
+            "window_s": 3.000229033,
+            "ops_total_incl_warmup": 1483
+          },
+          "verify": "passed: all 1483 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "journal backend KernelBuffered, direct active false"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: append + sync_through",
+          "params": {
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 643.3426302877791,
+            "samples": 1933,
+            "p50_us": 1490.872,
+            "p90_us": 1649.651,
+            "p99_us": 2115.936,
+            "p999_us": 6845.092,
+            "max_us": 6847.544,
+            "mean_us": 1554.3816823590275,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4108,
+            "other_calls_per_op": null,
+            "window_s": 3.006508413,
+            "ops_total_incl_warmup": 2123
+          },
+          "verify": "passed: all 2123 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "journal backend KernelBuffered, direct active false"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, direct, window off: append + sync_through",
+          "params": {
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 589.2117509190452,
+            "samples": 1767,
+            "p50_us": 1629.143,
+            "p90_us": 1850.777,
+            "p99_us": 2143.332,
+            "p999_us": 7253.123,
+            "max_us": 7479.703,
+            "mean_us": 1697.1827164685908,
+            "flushes_per_op": null,
+            "write_calls_per_op": 0,
+            "write_bytes_per_op": 0,
+            "other_calls_per_op": null,
+            "window_s": 3.000577401,
+            "ops_total_incl_warmup": 1945
+          },
+          "verify": "passed: all 1945 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "journal backend KernelDirect, direct active true"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "Handle::write_at + Handle::sync",
+          "params": {
+            "bytes": 4096,
+            "file_bytes": 268435456
+          },
+          "metrics": {
+            "ops_per_s": 1218.5617626029027,
+            "samples": 3652,
+            "p50_us": 610.918,
+            "p90_us": 1448.042,
+            "p99_us": 2530.479,
+            "p999_us": 6705.803,
+            "max_us": 7243.097,
+            "mean_us": 820.6395692771084,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 3.000205115,
+            "ops_total_incl_warmup": 4021
+          },
+          "verify": "passed: 2049 of 4021 written slots read back unbuffered and compared byte for byte",
+          "error": null,
+          "notes": []
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "QD1 durable 4 KiB append",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 871.3825033266979,
+          "raw": 1552.5549898420377,
+          "fsys": 643.3426302877791,
+          "store_io_vs_raw_ratio": 0.5612570949357197,
+          "store_io_vs_fsys_ratio": 1.3544610014991736,
+          "store_io_advantage_vs_raw_pct": -43.874290506428025,
+          "store_io_advantage_vs_fsys_pct": 35.446100149917356,
+          "note": "append_durable vs raw write+flush vs fsys journal append+sync_through (window off: fsys's best QD1 config)"
+        },
+        {
+          "case": "QD1 durable 4 KiB append",
+          "metric": "p50 µs",
+          "better": "lower",
+          "store_io": 1058.129,
+          "raw": 584.141,
+          "fsys": 1490.872,
+          "store_io_vs_raw_ratio": 1.8114273779789467,
+          "store_io_vs_fsys_ratio": 0.7097383276364435,
+          "store_io_advantage_vs_raw_pct": -81.14273779789467,
+          "store_io_advantage_vs_fsys_pct": 29.026167236355647,
+          "note": "append_durable vs raw write+flush vs fsys journal append+sync_through (window off: fsys's best QD1 config)"
+        },
+        {
+          "case": "QD1 durable 4 KiB append",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 6330.91,
+          "raw": 2488.548,
+          "fsys": 2115.936,
+          "store_io_vs_raw_ratio": 2.544017635986929,
+          "store_io_vs_fsys_ratio": 2.9920139361492972,
+          "store_io_advantage_vs_raw_pct": -154.40176359869292,
+          "store_io_advantage_vs_fsys_pct": -199.2013936149297,
+          "note": "append_durable vs raw write+flush vs fsys journal append+sync_through (window off: fsys's best QD1 config)"
+        },
+        {
+          "case": "QD1 durable 4 KiB append, fsys default config",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 871.3825033266979,
+          "raw": 1552.5549898420377,
+          "fsys": 450.1761770471223,
+          "store_io_vs_raw_ratio": 0.5612570949357197,
+          "store_io_vs_fsys_ratio": 1.9356477480492837,
+          "store_io_advantage_vs_raw_pct": -43.874290506428025,
+          "store_io_advantage_vs_fsys_pct": 93.56477480492838,
+          "note": "fsys JournalOptions::new() (500 µs group-commit window)"
+        },
+        {
+          "case": "QD1 durable 4 KiB page overwrite",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 416.5213687119078,
+          "raw": 1552.5549898420377,
+          "fsys": 1218.5617626029027,
+          "store_io_vs_raw_ratio": 0.2682812341186615,
+          "store_io_vs_fsys_ratio": 0.34181391661445165,
+          "store_io_advantage_vs_raw_pct": -73.17187658813384,
+          "store_io_advantage_vs_fsys_pct": -65.81860833855484,
+          "note": "write_durable vs raw write+flush vs fsys write_at+sync"
+        },
+        {
+          "case": "QD1 durable 4 KiB page overwrite",
+          "metric": "p50 µs",
+          "better": "lower",
+          "store_io": 725.073,
+          "raw": 584.141,
+          "fsys": 610.918,
+          "store_io_vs_raw_ratio": 1.2412636675049347,
+          "store_io_vs_fsys_ratio": 1.1868581380807244,
+          "store_io_advantage_vs_raw_pct": -24.126366750493467,
+          "store_io_advantage_vs_fsys_pct": -18.68581380807244,
+          "note": "write_durable vs raw write+flush vs fsys write_at+sync"
+        },
+        {
+          "case": "QD1 durable 4 KiB page overwrite",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 12840.141,
+          "raw": 2488.548,
+          "fsys": 2530.479,
+          "store_io_vs_raw_ratio": 5.159691916732167,
+          "store_io_vs_fsys_ratio": 5.07419385815887,
+          "store_io_advantage_vs_raw_pct": -415.9691916732167,
+          "store_io_advantage_vs_fsys_pct": -407.41938581588704,
+          "note": "write_durable vs raw write+flush vs fsys write_at+sync"
+        }
+      ],
+      "findings": [],
+      "anomalies": []
+    }
+  ]
+}

@@ -1,0 +1,2551 @@
+{
+  "schema": "store-io-harness/1",
+  "incomplete": null,
+  "run": {
+    "date": "2026-10-14T08:20:18Z",
+    "command": "caller-batch",
+    "commit": "e4f90ecec8fe39c18eccbe385c6a10fe51cfce2c (crates/ modified)",
+    "os": "linux",
+    "os_version": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "cpus": 32,
+    "filesystem": "ext4 on / (device /dev/sdd 8:48, mount options rw,relatime, super options rw,discard,errors=remount-ro,data=ordered); store-io classified it Ext4",
+    "dir": "/home/james/store-io-harness-59563",
+    "device": "msft-virtual-disk",
+    "backend": "store-io-posix (PosixPlatform, O_DIRECT; tier in the report's io line)",
+    "secs_per_point": 1,
+    "warmup_secs": 0.2,
+    "total_secs": 103.842076941,
+    "fsys": "fsys 1.1.3 (crates.io), Handle method Sync, durability primitive fsync",
+    "raw_primitives": [
+      "pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync",
+      "preadv2 on an O_DIRECT descriptor (one call per request)"
+    ]
+  },
+  "store": {
+    "report": "volume           2a8614e1-0bc7-3d5b-0430-19a0eca85052\nio               synchronous (chosen)\nclass            unverified\nlabel            overridden(running under a hypervisor without a certificate for this volume type)\ndurable open     Overridden\nreason           running under a hypervisor without a certificate for this volume type\nmissing          device identify data (needs a readable device node)\nmissing          SMART / health log (needs privilege on Linux)\nmissing          volatile write cache presence\nmissing          volatile write cache enabled state\nmissing          device atomic-write fields\nflush execution  inline (leader)\nblock size       4096\ntable capacity   253 regions\nfilesystem       Ext4\nbus              Virtual\nmodel            Msft Virtual Disk\nmode             read-write",
+    "class": "unverified (receipt label overridden(running under a hypervisor without a certificate for this volume type), durable open Overridden (Trust::override_refusal), block size 4096 B)",
+    "override_in_effect": true,
+    "override_refusal": "device durability is unverified: running under a hypervisor without a certificate for this volume type; missing: device identify data (needs a readable device node); SMART / health log (needs privilege on Linux); volatile write cache presence; volatile write cache enabled state; device atomic-write fields; [Unverified { missing: {Identify, Smart, CachePresence, CacheEnabled, AtomicFields}, reasons: {Hypervisor} }]",
+    "options": "StoreOptions {\n    trust: Trust {\n        certificate: None,\n        attestation: None,\n        override_refusal: true,\n    },\n    block_size: None,\n    log2_table_slot: 14,\n    max_io: 1048576,\n    buffers_per_class: 64,\n    max_write: 4194304,\n    large_buffers: 8,\n    queues: 0,\n    queue_depth: 64,\n    t3_pool_threads: 0,\n    append_ring: 4096,\n    keyed_fill: false,\n    linux_tier: Sync,\n}",
+    "evidence": "Evidence {\n    platform: Linux,\n    device: DeviceFacts {\n        model: Some(\n            \"Msft Virtual Disk\",\n        ),\n        firmware: Some(\n            \"1.0\",\n        ),\n        bus: Virtual,\n        cache_present: Unknown,\n        cache_enabled: Unknown,\n        os_cache_mode: WriteBack,\n        os_flush_supported: Yes,\n        user_power_protection: Unknown,\n        backup_failed: Unknown,\n        fua_supported: No,\n        logical_block: 512,\n        physical_block: 4096,\n        optimal_write: 4096,\n        max_transfer: 1310720,\n        atomic: AtomicFields {\n            awupf: None,\n            nsabp: false,\n            nawupf: 0,\n            nabspf: 0,\n            nabo: 0,\n        },\n        numa_node: Some(\n            0,\n        ),\n        multi_controller: false,\n    },\n    fs: FsFacts {\n        kind: Ext4,\n        data_journal: false,\n        no_barrier: false,\n        sync_disabled: false,\n        weak_error_mode: false,\n        transformed: false,\n        cow: No,\n        direct_io: Unknown,\n        full_flush: Yes,\n        dir_flush: Yes,\n        os_atomic_unit: 0,\n        dio_mem_align: 4,\n        dio_offset_align: 512,\n    },\n    stack: [],\n    hypervisor: Some(\n        HyperV,\n    ),\n    privilege: Unprivileged,\n    kernel: Some(\n        (\n            6,\n            6,\n            87,\n        ),\n    ),\n    timings: Timings {\n        flush_idle_ns: None,\n        flush_loaded_ns: None,\n        fua_extra_ns: None,\n        flush_blocks_writes_pct: None,\n    },\n    missing: {\n        Identify,\n        Smart,\n        CachePresence,\n        CacheEnabled,\n        AtomicFields,\n    },\n}"
+  },
+  "diagnostics": [],
+  "workloads": [
+    {
+      "key": "caller-batch",
+      "title": "W3: caller batch (N records, one barrier)",
+      "elapsed_secs": 103.288724597,
+      "method": [
+        "N in [1, 10, 100, 1000], record sizes [64, 512, 4096] bytes; one commit = N records made durable by one barrier; commits run back to back on one thread. Each point ends at the time box or after 3000 measured commits, whichever comes first.",
+        "store-io (a) `N x append + sync_through`: each append is its own write, padded to a block (documented behaviour). (b) `AppendBatch`: records packed back to back into pooled buffers, `commit()` = one reservation, the fewest writes (largest pooled buffer 1 MiB), one barrier. A fresh store per (N, size).",
+        "raw (a') N writes of one zero-padded block each, then one flush; (b') the N records packed into one aligned buffer padded to a block, one write, one flush. Primitive: pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync. A ready 1 GiB file, offsets cycling.",
+        "fsys: `append` x N + `sync_through(last lsn)`, and `append_batch(&records)` + `sync_through`, on a fresh journal per point, window off.",
+        "records/s = commits/s x N; payload MB/s counts caller bytes only (10^6 bytes); `write calls/commit` and `bytes written/commit` come from the OS counters and show the device writes each design issues per commit."
+      ],
+      "points": [
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 1,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 1371.7690546106803,
+            "commits_per_s": 268.58799487925904,
+            "samples": 269,
+            "p50_us": 3113.766,
+            "p90_us": 5526.988,
+            "p99_us": 10771.062,
+            "p999_us": null,
+            "max_us": 11428.797,
+            "mean_us": 3723.1745985130115,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.002715366,
+            "ops_total_incl_warmup": 337,
+            "records_per_s": 268.58799487925904,
+            "payload_mb_per_s": 0.017189631672272578
+          },
+          "verify": "passed: 337 of 337 records read back and compared byte for byte; all 337 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.05 s (1372 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 1,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 1226.992634756505,
+            "commits_per_s": 401.6556834769292,
+            "samples": 402,
+            "p50_us": 2360.273,
+            "p90_us": 2525.507,
+            "p99_us": 4290.542,
+            "p999_us": null,
+            "max_us": 18464.08,
+            "mean_us": 2489.6946343283585,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.001400721,
+            "ops_total_incl_warmup": 482,
+            "records_per_s": 401.6556834769292,
+            "payload_mb_per_s": 0.025705963742523468
+          },
+          "verify": "passed: 482 of 482 records read back and compared byte for byte; all 482 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.05 s (1227 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 1,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 403.25398416184044,
+            "samples": 404,
+            "p50_us": 2365.992,
+            "p90_us": 2535.467,
+            "p99_us": 3101.943,
+            "p999_us": null,
+            "max_us": 18441.162,
+            "mean_us": 2479.826707920792,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.002267549,
+            "ops_total_incl_warmup": 487,
+            "records_per_s": 403.25398416184044,
+            "payload_mb_per_s": 0.025808254986357786
+          },
+          "verify": "passed: all 1 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 1,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 395.1382790358869,
+            "samples": 395,
+            "p50_us": 2390.696,
+            "p90_us": 2547.28,
+            "p99_us": 3239.63,
+            "p999_us": null,
+            "max_us": 18273.824,
+            "mean_us": 2530.759617721519,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.000051771,
+            "ops_total_incl_warmup": 479,
+            "records_per_s": 395.1382790358869,
+            "payload_mb_per_s": 0.025288849858296762
+          },
+          "verify": "passed: all 1 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 1,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 188.72099921534303,
+            "samples": 189,
+            "p50_us": 5091.039,
+            "p90_us": 5407.488,
+            "p99_us": 21005.75,
+            "p999_us": null,
+            "max_us": 21160.807,
+            "mean_us": 5298.827391534392,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 76,
+            "other_calls_per_op": null,
+            "window_s": 1.001715411,
+            "ops_total_incl_warmup": 227,
+            "records_per_s": 188.72099921534303,
+            "payload_mb_per_s": 0.012078143949781954
+          },
+          "verify": "passed: all 227 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 1,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 182.71485355510822,
+            "samples": 183,
+            "p50_us": 5240.324,
+            "p90_us": 5540.529,
+            "p99_us": 20872.564,
+            "p999_us": null,
+            "max_us": 21529.698,
+            "mean_us": 5473.008792349727,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 76,
+            "other_calls_per_op": null,
+            "window_s": 1.001870288,
+            "ops_total_incl_warmup": 222,
+            "records_per_s": 182.71485355510822,
+            "payload_mb_per_s": 0.011693750627526926
+          },
+          "verify": "passed: all 222 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 1,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 510.50259919141746,
+            "commits_per_s": 175.79362391092454,
+            "samples": 176,
+            "p50_us": 4107.184,
+            "p90_us": 8174.605,
+            "p99_us": 36021.274,
+            "p999_us": null,
+            "max_us": 45454.566,
+            "mean_us": 5688.488454545454,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.001646105,
+            "ops_total_incl_warmup": 223,
+            "records_per_s": 175.79362391092454,
+            "payload_mb_per_s": 0.09000633544239336
+          },
+          "verify": "passed: 223 of 223 records read back and compared byte for byte; all 223 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.13 s (511 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 1,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 2020.5831385429312,
+            "commits_per_s": 151.5997091543622,
+            "samples": 152,
+            "p50_us": 4599.052,
+            "p90_us": 10916.671,
+            "p99_us": 30115.252,
+            "p999_us": null,
+            "max_us": 39819.626,
+            "mean_us": 6596.31872368421,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.002956425,
+            "ops_total_incl_warmup": 193,
+            "records_per_s": 151.5997091543622,
+            "payload_mb_per_s": 0.07761905108703344
+          },
+          "verify": "passed: 193 of 193 records read back and compared byte for byte; all 193 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.03 s (2021 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 1,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 131.34857647228853,
+            "samples": 132,
+            "p50_us": 6801.861,
+            "p90_us": 11168.4,
+            "p99_us": 24927.254,
+            "p999_us": null,
+            "max_us": 40487.837,
+            "mean_us": 7613.32956060606,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.005207185,
+            "ops_total_incl_warmup": 180,
+            "records_per_s": 131.34857647228853,
+            "payload_mb_per_s": 0.06725047115381172
+          },
+          "verify": "passed: all 1 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 1,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 179.26029262033884,
+            "samples": 180,
+            "p50_us": 4015.311,
+            "p90_us": 9140.921,
+            "p99_us": 31164.262,
+            "p999_us": null,
+            "max_us": 45740.409,
+            "mean_us": 5578.480238888888,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.004408531,
+            "ops_total_incl_warmup": 210,
+            "records_per_s": 179.26029262033884,
+            "payload_mb_per_s": 0.09178126982161348
+          },
+          "verify": "passed: all 1 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 1,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 70.59441405412367,
+            "samples": 71,
+            "p50_us": 13809.042,
+            "p90_us": 18216.643,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 54522.163,
+            "mean_us": 14165.426732394366,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 524,
+            "other_calls_per_op": null,
+            "window_s": 1.005964389,
+            "ops_total_incl_warmup": 99,
+            "records_per_s": 70.59441405412367,
+            "payload_mb_per_s": 0.03614433999571132
+          },
+          "verify": "passed: all 99 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 1,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 181.5305444037092,
+            "samples": 182,
+            "p50_us": 5092.291,
+            "p90_us": 5468.93,
+            "p99_us": 20989.185,
+            "p999_us": null,
+            "max_us": 21093.655,
+            "mean_us": 5508.714818681318,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 524,
+            "other_calls_per_op": null,
+            "window_s": 1.003070709,
+            "ops_total_incl_warmup": 197,
+            "records_per_s": 181.5305444037092,
+            "payload_mb_per_s": 0.09294363873469912
+          },
+          "verify": "passed: all 197 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 1,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1519.7653574821063,
+            "commits_per_s": 388.6496781757866,
+            "samples": 389,
+            "p50_us": 2394.552,
+            "p90_us": 2498.722,
+            "p99_us": 6459.684,
+            "p999_us": null,
+            "max_us": 18630.663,
+            "mean_us": 2573.011264781491,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.001572524,
+            "ops_total_incl_warmup": 466,
+            "records_per_s": 388.6496781757866,
+            "payload_mb_per_s": 1.591909081808022
+          },
+          "verify": "passed: 466 of 466 records read back and compared byte for byte; all 466 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.04 s (1520 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 1,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 2491.30502750598,
+            "commits_per_s": 388.71140937704763,
+            "samples": 389,
+            "p50_us": 2393.044,
+            "p90_us": 2553.305,
+            "p99_us": 6056.121,
+            "p999_us": null,
+            "max_us": 18529.866,
+            "mean_us": 2572.602645244216,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.00154255,
+            "ops_total_incl_warmup": 463,
+            "records_per_s": 388.71140937704763,
+            "payload_mb_per_s": 1.5921619328083871
+          },
+          "verify": "passed: 463 of 463 records read back and compared byte for byte; all 463 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.03 s (2491 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 1,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 381.8935265572218,
+            "samples": 382,
+            "p50_us": 2428.961,
+            "p90_us": 2586.306,
+            "p99_us": 6290.869,
+            "p999_us": null,
+            "max_us": 18282.012,
+            "mean_us": 2618.53090052356,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.001134231,
+            "ops_total_incl_warmup": 459,
+            "records_per_s": 381.8935265572218,
+            "payload_mb_per_s": 1.5642358847783804
+          },
+          "verify": "passed: all 1 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 1,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 375.92687470433253,
+            "samples": 376,
+            "p50_us": 2509.369,
+            "p90_us": 2683.328,
+            "p99_us": 4612.918,
+            "p999_us": null,
+            "max_us": 20765.893,
+            "mean_us": 2660.091808510638,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.000860224,
+            "ops_total_incl_warmup": 446,
+            "records_per_s": 375.92687470433253,
+            "payload_mb_per_s": 1.539796478788946
+          },
+          "verify": "passed: all 1 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 1,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 175.43005966442115,
+            "samples": 176,
+            "p50_us": 5462.086,
+            "p90_us": 5789.421,
+            "p99_us": 21126.681,
+            "p999_us": null,
+            "max_us": 21355.048,
+            "mean_us": 5700.277375,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4108,
+            "other_calls_per_op": null,
+            "window_s": 1.003792377,
+            "ops_total_incl_warmup": 213,
+            "records_per_s": 175.43005966442115,
+            "payload_mb_per_s": 0.718561524385469
+          },
+          "verify": "passed: all 213 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 1,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 176.0681862786365,
+            "samples": 176,
+            "p50_us": 5432.83,
+            "p90_us": 5747.606,
+            "p99_us": 21206.422,
+            "p999_us": null,
+            "max_us": 21618.924,
+            "mean_us": 5679.6177727272725,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4108,
+            "other_calls_per_op": null,
+            "window_s": 1.000096172,
+            "ops_total_incl_warmup": 209,
+            "records_per_s": 176.0681862786365,
+            "payload_mb_per_s": 0.721175290997295
+          },
+          "verify": "passed: all 209 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 10,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 2633.244836602489,
+            "commits_per_s": 242.74311636887327,
+            "samples": 243,
+            "p50_us": 3853.773,
+            "p90_us": 4463.475,
+            "p99_us": 10308.475,
+            "p999_us": null,
+            "max_us": 10590.735,
+            "mean_us": 4119.581288065844,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.002450665,
+            "ops_total_incl_warmup": 295,
+            "records_per_s": 2427.431163688733,
+            "payload_mb_per_s": 0.1553555944760789
+          },
+          "verify": "passed: 1025 of 2950 records read back and compared byte for byte; all 2950 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 235 MiB append region in 0.09 s (2633 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 10,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 1215.6546875041606,
+            "commits_per_s": 367.1276546910679,
+            "samples": 367,
+            "p50_us": 2566.857,
+            "p90_us": 2751.056,
+            "p99_us": 5090.873,
+            "p999_us": null,
+            "max_us": 18626.893,
+            "mean_us": 2723.8481961852863,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.000961086,
+            "ops_total_incl_warmup": 445,
+            "records_per_s": 3671.276546910679,
+            "payload_mb_per_s": 0.23496169900228345
+          },
+          "verify": "passed: 1025 of 4450 records read back and compared byte for byte; all 4450 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.06 s (1216 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 10,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 169.677371881879,
+            "samples": 170,
+            "p50_us": 4742.631,
+            "p90_us": 8699.551,
+            "p99_us": 28468.989,
+            "p999_us": null,
+            "max_us": 29136.008,
+            "mean_us": 5893.537770588235,
+            "flushes_per_op": null,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.00263791,
+            "ops_total_incl_warmup": 222,
+            "records_per_s": 1696.77371881879,
+            "payload_mb_per_s": 0.10859351800440256
+          },
+          "verify": "passed: all 10 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 10,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 300.9274367653179,
+            "samples": 301,
+            "p50_us": 2861.349,
+            "p90_us": 5185.208,
+            "p99_us": 7567.31,
+            "p999_us": null,
+            "max_us": 18521.254,
+            "mean_us": 3323.0602392026576,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "window_s": 1.001264622,
+            "ops_total_incl_warmup": 363,
+            "records_per_s": 3009.274367653179,
+            "payload_mb_per_s": 0.19259355952980345
+          },
+          "verify": "passed: all 10 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 10,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 177.9561588986499,
+            "samples": 178,
+            "p50_us": 5152.312,
+            "p90_us": 5588.383,
+            "p99_us": 21157.471,
+            "p999_us": null,
+            "max_us": 27343.387,
+            "mean_us": 5619.36156741573,
+            "flushes_per_op": null,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 760,
+            "other_calls_per_op": null,
+            "window_s": 1.000782247,
+            "ops_total_incl_warmup": 214,
+            "records_per_s": 1779.561588986499,
+            "payload_mb_per_s": 0.11389194169513593
+          },
+          "verify": "passed: all 2140 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 10,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 184.5460843608852,
+            "samples": 185,
+            "p50_us": 5099.575,
+            "p90_us": 5451.296,
+            "p99_us": 21102.269,
+            "p999_us": null,
+            "max_us": 21342.071,
+            "mean_us": 5418.700718918919,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 760,
+            "other_calls_per_op": null,
+            "window_s": 1.002927546,
+            "ops_total_incl_warmup": 223,
+            "records_per_s": 1845.460843608852,
+            "payload_mb_per_s": 0.11810949399096653
+          },
+          "verify": "passed: all 2230 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 10,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 1273.7331998395277,
+            "commits_per_s": 256.8434428772983,
+            "samples": 257,
+            "p50_us": 3621.39,
+            "p90_us": 4201.716,
+            "p99_us": 9377.74,
+            "p999_us": null,
+            "max_us": 26661.428,
+            "mean_us": 3893.4223463035023,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.001342374,
+            "ops_total_incl_warmup": 312,
+            "records_per_s": 2568.4344287729828,
+            "payload_mb_per_s": 1.3150384275317673
+          },
+          "verify": "passed: 1025 of 3120 records read back and compared byte for byte; all 3120 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 235 MiB append region in 0.19 s (1274 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 10,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 1291.5638876704159,
+            "commits_per_s": 381.76683437883577,
+            "samples": 382,
+            "p50_us": 2412.963,
+            "p90_us": 2635.718,
+            "p99_us": 5555.715,
+            "p999_us": null,
+            "max_us": 18684.134,
+            "mean_us": 2619.399879581152,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 8192,
+            "other_calls_per_op": null,
+            "window_s": 1.001378739,
+            "ops_total_incl_warmup": 466,
+            "records_per_s": 3817.6683437883576,
+            "payload_mb_per_s": 1.954646192019639
+          },
+          "verify": "passed: 1025 of 4660 records read back and compared byte for byte; all 4660 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.05 s (1292 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 10,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 262.323450246144,
+            "samples": 263,
+            "p50_us": 3569.152,
+            "p90_us": 4092.058,
+            "p99_us": 7119.308,
+            "p999_us": null,
+            "max_us": 22175.8,
+            "mean_us": 3812.0877072243347,
+            "flushes_per_op": null,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.003112636,
+            "ops_total_incl_warmup": 319,
+            "records_per_s": 2623.2345024614397,
+            "payload_mb_per_s": 1.343096065260257
+          },
+          "verify": "passed: all 10 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 10,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 399.6200356753993,
+            "samples": 400,
+            "p50_us": 2343.647,
+            "p90_us": 2534.207,
+            "p99_us": 4746.832,
+            "p999_us": null,
+            "max_us": 18248.874,
+            "mean_us": 2502.377035,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 8192,
+            "other_calls_per_op": null,
+            "window_s": 1.001878363,
+            "ops_total_incl_warmup": 483,
+            "records_per_s": 3996.200356753993,
+            "payload_mb_per_s": 2.0460545826580447
+          },
+          "verify": "passed: all 10 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 10,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 184.01092252033897,
+            "samples": 184,
+            "p50_us": 5172.043,
+            "p90_us": 5406.992,
+            "p99_us": 21061.089,
+            "p999_us": null,
+            "max_us": 21286.87,
+            "mean_us": 5434.460010869566,
+            "flushes_per_op": null,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 5240,
+            "other_calls_per_op": null,
+            "window_s": 1.001296504,
+            "ops_total_incl_warmup": 217,
+            "records_per_s": 1840.1092252033895,
+            "payload_mb_per_s": 0.9421359233041354
+          },
+          "verify": "passed: all 2170 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 10,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 186.40521599992485,
+            "samples": 187,
+            "p50_us": 5103.365,
+            "p90_us": 5353.286,
+            "p99_us": 20883.395,
+            "p999_us": null,
+            "max_us": 22914.865,
+            "mean_us": 5364.656748663101,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 5240,
+            "other_calls_per_op": null,
+            "window_s": 1.004022003,
+            "ops_total_incl_warmup": 218,
+            "records_per_s": 1864.0521599992485,
+            "payload_mb_per_s": 0.9543947059196152
+          },
+          "verify": "passed: all 2180 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 10,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1322.0160788981518,
+            "commits_per_s": 248.14887691870737,
+            "samples": 248,
+            "p50_us": 3762.637,
+            "p90_us": 4274.62,
+            "p99_us": 8204.66,
+            "p999_us": null,
+            "max_us": 30710.649,
+            "mean_us": 4029.8389112903224,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.001826612,
+            "ops_total_incl_warmup": 296,
+            "records_per_s": 2481.4887691870736,
+            "payload_mb_per_s": 10.164177998590253
+          },
+          "verify": "passed: 1025 of 2960 records read back and compared byte for byte; all 2960 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 235 MiB append region in 0.19 s (1322 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 10,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1286.4189372786082,
+            "commits_per_s": 396.5027397012631,
+            "samples": 396,
+            "p50_us": 2457.07,
+            "p90_us": 2683.549,
+            "p99_us": 4691.283,
+            "p999_us": null,
+            "max_us": 6226.067,
+            "mean_us": 2522.050669191919,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.001257375,
+            "ops_total_incl_warmup": 473,
+            "records_per_s": 3965.0273970126314,
+            "payload_mb_per_s": 16.24075221816374
+          },
+          "verify": "passed: 1025 of 4730 records read back and compared byte for byte; all 4730 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 235 MiB append region in 0.19 s (1286 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 10,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 261.1086742135337,
+            "samples": 261,
+            "p50_us": 3625.218,
+            "p90_us": 3938.521,
+            "p99_us": 11117.612,
+            "p999_us": null,
+            "max_us": 19732.646,
+            "mean_us": 3829.8229770114945,
+            "flushes_per_op": null,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.001306801,
+            "ops_total_incl_warmup": 316,
+            "records_per_s": 2611.086742135337,
+            "payload_mb_per_s": 10.69501129578634
+          },
+          "verify": "passed: all 10 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 10,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 372.9401006929049,
+            "samples": 372,
+            "p50_us": 2505.662,
+            "p90_us": 2935.183,
+            "p99_us": 5394.141,
+            "p999_us": null,
+            "max_us": 6437.087,
+            "mean_us": 2681.3957473118276,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 40960,
+            "other_calls_per_op": null,
+            "window_s": 1.000206418,
+            "ops_total_incl_warmup": 451,
+            "records_per_s": 3729.401006929049,
+            "payload_mb_per_s": 15.275626524381384
+          },
+          "verify": "passed: all 10 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 10,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 170.9172630549694,
+            "samples": 171,
+            "p50_us": 5377.117,
+            "p90_us": 7226.966,
+            "p99_us": 10590.417,
+            "p999_us": null,
+            "max_us": 21402.141,
+            "mean_us": 5850.7840701754385,
+            "flushes_per_op": null,
+            "write_calls_per_op": 10,
+            "write_bytes_per_op": 41080,
+            "other_calls_per_op": null,
+            "window_s": 1.002202711,
+            "ops_total_incl_warmup": 208,
+            "records_per_s": 1709.172630549694,
+            "payload_mb_per_s": 7.000771094731547
+          },
+          "verify": "passed: all 2080 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 10,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 181.03347399450897,
+            "samples": 181,
+            "p50_us": 5333.716,
+            "p90_us": 5796.736,
+            "p99_us": 10073.608,
+            "p999_us": null,
+            "max_us": 10509.65,
+            "mean_us": 5523.840303867403,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 41080,
+            "other_calls_per_op": null,
+            "window_s": 1.002213673,
+            "ops_total_incl_warmup": 220,
+            "records_per_s": 1810.3347399450897,
+            "payload_mb_per_s": 7.415131094815088
+          },
+          "verify": "passed: all 2200 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 100,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 2301.0741211835007,
+            "commits_per_s": 40.87104327554656,
+            "samples": 41,
+            "p50_us": 20934.241,
+            "p90_us": 30913.356,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 68012.529,
+            "mean_us": 24467.200243902436,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.006648347,
+            "ops_total_incl_warmup": 52,
+            "records_per_s": 4087.1043275546563,
+            "payload_mb_per_s": 0.261574676963498
+          },
+          "verify": "passed: 1025 of 5200 records read back and compared byte for byte; all 5200 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 0.93 s (2301 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 100,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 1752.5025943927692,
+            "commits_per_s": 374.6024659721844,
+            "samples": 372,
+            "p50_us": 2519.475,
+            "p90_us": 2682.777,
+            "p99_us": 4683.272,
+            "p999_us": null,
+            "max_us": 18554.401,
+            "mean_us": 2669.496575268817,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 8192,
+            "other_calls_per_op": null,
+            "window_s": 1.000321024,
+            "ops_total_incl_warmup": 447,
+            "records_per_s": 37460.246597218444,
+            "payload_mb_per_s": 2.3974557822219804
+          },
+          "verify": "passed: 1025 of 44700 records read back and compared byte for byte; all 44700 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 64 MiB append region in 0.04 s (1753 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 100,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 62.36471910713227,
+            "samples": 63,
+            "p50_us": 15234.644,
+            "p90_us": 17760.984,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 27151.359,
+            "mean_us": 16034.707031746031,
+            "flushes_per_op": null,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.01093301,
+            "ops_total_incl_warmup": 76,
+            "records_per_s": 6236.471910713227,
+            "payload_mb_per_s": 0.3991342022856465
+          },
+          "verify": "passed: all 100 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 100,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 394.7856411913246,
+            "samples": 394,
+            "p50_us": 2386.029,
+            "p90_us": 2593.777,
+            "p99_us": 5088.129,
+            "p999_us": null,
+            "max_us": 18397.382,
+            "mean_us": 2533.0201903553298,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 8192,
+            "other_calls_per_op": null,
+            "window_s": 1.001569309,
+            "ops_total_incl_warmup": 460,
+            "records_per_s": 39478.56411913246,
+            "payload_mb_per_s": 2.5266281036244775
+          },
+          "verify": "passed: all 100 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 100,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 181.06425553981322,
+            "samples": 181,
+            "p50_us": 5175.239,
+            "p90_us": 5569.806,
+            "p99_us": 20840.415,
+            "p999_us": null,
+            "max_us": 20960.583,
+            "mean_us": 5522.901232044199,
+            "flushes_per_op": null,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 7600,
+            "other_calls_per_op": null,
+            "window_s": 1.001507325,
+            "ops_total_incl_warmup": 220,
+            "records_per_s": 18106.42555398132,
+            "payload_mb_per_s": 1.1588112354548046
+          },
+          "verify": "passed: all 22000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 100,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 185.20299377856392,
+            "samples": 185,
+            "p50_us": 5112.61,
+            "p90_us": 5541.437,
+            "p99_us": 9230.544,
+            "p999_us": null,
+            "max_us": 26974.986,
+            "mean_us": 5399.480751351351,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 7600,
+            "other_calls_per_op": null,
+            "window_s": 1.001062945,
+            "ops_total_incl_warmup": 225,
+            "records_per_s": 18520.29937785639,
+            "payload_mb_per_s": 1.185299160182809
+          },
+          "verify": "passed: all 22500 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 100,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 4272.003517030512,
+            "commits_per_s": 61.857119518052585,
+            "samples": 62,
+            "p50_us": 15846.91,
+            "p90_us": 16935.383,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 25019.991,
+            "mean_us": 16166.28785483871,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.003244596,
+            "ops_total_incl_warmup": 74,
+            "records_per_s": 6185.711951805259,
+            "payload_mb_per_s": 3.1670845193242925
+          },
+          "verify": "passed: 1025 of 7400 records read back and compared byte for byte; all 7400 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 0.50 s (4272 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 100,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 3971.804846802467,
+            "commits_per_s": 373.80601047085497,
+            "samples": 372,
+            "p50_us": 2405.419,
+            "p90_us": 3551.933,
+            "p99_us": 5326.653,
+            "p999_us": null,
+            "max_us": 7209.446,
+            "mean_us": 2675.1843790322578,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 53248,
+            "other_calls_per_op": null,
+            "window_s": 1.001550203,
+            "ops_total_incl_warmup": 451,
+            "records_per_s": 37380.601047085496,
+            "payload_mb_per_s": 19.138867736107773
+          },
+          "verify": "passed: 1025 of 45100 records read back and compared byte for byte; all 45100 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 305 MiB append region in 0.08 s (3972 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 100,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 63.025513295011436,
+            "samples": 63,
+            "p50_us": 15477.91,
+            "p90_us": 17515.936,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 20691.811,
+            "mean_us": 15866.590333333334,
+            "flushes_per_op": null,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.001443642,
+            "ops_total_incl_warmup": 76,
+            "records_per_s": 6302.551329501143,
+            "payload_mb_per_s": 3.2269062807045854
+          },
+          "verify": "passed: all 100 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 100,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 390.13679581096903,
+            "samples": 389,
+            "p50_us": 2361.118,
+            "p90_us": 2573.575,
+            "p99_us": 6241.426,
+            "p999_us": null,
+            "max_us": 20538.608,
+            "mean_us": 2563.203498714653,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 53248,
+            "other_calls_per_op": null,
+            "window_s": 1.001837738,
+            "ops_total_incl_warmup": 467,
+            "records_per_s": 39013.679581096905,
+            "payload_mb_per_s": 19.975003945521614
+          },
+          "verify": "passed: all 100 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 100,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 178.23946222214298,
+            "samples": 178,
+            "p50_us": 5202.463,
+            "p90_us": 7045.622,
+            "p99_us": 12687.168,
+            "p999_us": null,
+            "max_us": 24078.943,
+            "mean_us": 5610.429853932585,
+            "flushes_per_op": null,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 52400,
+            "other_calls_per_op": null,
+            "window_s": 1.000730784,
+            "ops_total_incl_warmup": 215,
+            "records_per_s": 17823.946222214297,
+            "payload_mb_per_s": 9.12586046577372
+          },
+          "verify": "passed: all 21500 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 100,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 188.66644150474846,
+            "samples": 189,
+            "p50_us": 5171.652,
+            "p90_us": 5540.041,
+            "p99_us": 7934.649,
+            "p999_us": null,
+            "max_us": 8540.829,
+            "mean_us": 5300.359682539683,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 52400,
+            "other_calls_per_op": null,
+            "window_s": 1.004549484,
+            "ops_total_incl_warmup": 227,
+            "records_per_s": 18866.644150474847,
+            "payload_mb_per_s": 9.659721805043121
+          },
+          "verify": "passed: all 22700 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 100,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 2831.7644364199678,
+            "commits_per_s": 33.00939054443147,
+            "samples": 33,
+            "p50_us": 26806.7,
+            "p90_us": 47721.596,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 97862.435,
+            "mean_us": 30294.409666666666,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.00323284,
+            "ops_total_incl_warmup": 43,
+            "records_per_s": 3300.9390544431467,
+            "payload_mb_per_s": 13.520646366999129
+          },
+          "verify": "passed: 1025 of 4300 records read back and compared byte for byte; all 4300 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 0.76 s (2832 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 100,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1262.9475371009323,
+            "commits_per_s": 98.12583785009485,
+            "samples": 98,
+            "p50_us": 8507.19,
+            "p90_us": 18776.352,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 29490.618,
+            "mean_us": 10190.995785714285,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.004936541,
+            "ops_total_incl_warmup": 120,
+            "records_per_s": 9812.583785009485,
+            "payload_mb_per_s": 40.19234318339885
+          },
+          "verify": "passed: 1025 of 12000 records read back and compared byte for byte; all 12000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 1.70 s (1263 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 100,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 63.87912217589777,
+            "samples": 64,
+            "p50_us": 15265.365,
+            "p90_us": 15986.448,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 31113.779,
+            "mean_us": 15654.56703125,
+            "flushes_per_op": null,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.005489236,
+            "ops_total_incl_warmup": 76,
+            "records_per_s": 6387.912217589777,
+            "payload_mb_per_s": 26.16488844324773
+          },
+          "verify": "passed: all 100 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 100,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 243.05990545577328,
+            "samples": 240,
+            "p50_us": 2949.555,
+            "p90_us": 5957.255,
+            "p99_us": 8567.273,
+            "p999_us": null,
+            "max_us": 21657.779,
+            "mean_us": 4114.212083333334,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 409600,
+            "other_calls_per_op": null,
+            "window_s": 1.001610834,
+            "ops_total_incl_warmup": 300,
+            "records_per_s": 24305.990545577326,
+            "payload_mb_per_s": 99.55733727468473
+          },
+          "verify": "passed: all 100 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 100,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 124.84144519803517,
+            "samples": 124,
+            "p50_us": 6803.801,
+            "p90_us": 10114.213,
+            "p99_us": 26427.301,
+            "p999_us": null,
+            "max_us": 43814.185,
+            "mean_us": 8010.160395161291,
+            "flushes_per_op": null,
+            "write_calls_per_op": 100,
+            "write_bytes_per_op": 410800,
+            "other_calls_per_op": null,
+            "window_s": 1.000260167,
+            "ops_total_incl_warmup": 150,
+            "records_per_s": 12484.144519803518,
+            "payload_mb_per_s": 51.13505595311521
+          },
+          "verify": "passed: all 15000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 100,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 134.5841170050128,
+            "samples": 134,
+            "p50_us": 6329.516,
+            "p90_us": 9320.531,
+            "p99_us": 15173.396,
+            "p999_us": null,
+            "max_us": 25479.684,
+            "mean_us": 7430.297291044776,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 410800,
+            "other_calls_per_op": null,
+            "window_s": 1.003409563,
+            "ops_total_incl_warmup": 161,
+            "records_per_s": 13458.411700501281,
+            "payload_mb_per_s": 55.12565432525325
+          },
+          "verify": "passed: all 16100 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 1000,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 3906.2172931959194,
+            "commits_per_s": 6.810479786888568,
+            "samples": 7,
+            "p50_us": 145177.57,
+            "p90_us": 166260.449,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 166260.449,
+            "mean_us": 146832.5332857143,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.028891579,
+            "ops_total_incl_warmup": 9,
+            "records_per_s": 6810.479786888568,
+            "payload_mb_per_s": 0.43587070636086833
+          },
+          "verify": "passed: 1025 of 9000 records read back and compared byte for byte; all 9000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 0.55 s (3906 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 1000,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "provision_mb_per_s": 1719.1078291341753,
+            "commits_per_s": 256.32708343221134,
+            "samples": 263,
+            "p50_us": 2704.295,
+            "p90_us": 3528.643,
+            "p99_us": 67318.833,
+            "p999_us": null,
+            "max_us": 109467.195,
+            "mean_us": 3901.2654714828896,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 65536,
+            "other_calls_per_op": null,
+            "window_s": 1.083457152,
+            "ops_total_incl_warmup": 321,
+            "records_per_s": 256327.08343221134,
+            "payload_mb_per_s": 16.404933339661525
+          },
+          "verify": "passed: 1025 of 321000 records read back and compared byte for byte; all 321000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 375 MiB append region in 0.23 s (1719 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 1000,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 4.671865015363087,
+            "samples": 5,
+            "p50_us": 198636.865,
+            "p90_us": 276813.625,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 276813.625,
+            "mean_us": 214047.28019999998,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.070852687,
+            "ops_total_incl_warmup": 7,
+            "records_per_s": 4671.865015363087,
+            "payload_mb_per_s": 0.29899936098323754
+          },
+          "verify": "passed: all 1000 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 1000,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 146.51404781476575,
+            "samples": 150,
+            "p50_us": 2601.002,
+            "p90_us": 4904.107,
+            "p99_us": 140038.579,
+            "p999_us": null,
+            "max_us": 146319.492,
+            "mean_us": 6825.284093333334,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 65536,
+            "other_calls_per_op": null,
+            "window_s": 1.037798007,
+            "ops_total_incl_warmup": 173,
+            "records_per_s": 146514.04781476574,
+            "payload_mb_per_s": 9.376899060145007
+          },
+          "verify": "passed: all 1000 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 1000,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 45.02323806898073,
+            "samples": 45,
+            "p50_us": 6680.924,
+            "p90_us": 103942.725,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 162537.938,
+            "mean_us": 22210.752555555555,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 76000,
+            "other_calls_per_op": null,
+            "window_s": 1.005714345,
+            "ops_total_incl_warmup": 58,
+            "records_per_s": 45023.23806898073,
+            "payload_mb_per_s": 2.881487236414767
+          },
+          "verify": "passed: all 58000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 1000,
+            "record_bytes": 64
+          },
+          "metrics": {
+            "commits_per_s": 157.8855996352162,
+            "samples": 155,
+            "p50_us": 5603.006,
+            "p90_us": 8329.542,
+            "p99_us": 12163.851,
+            "p999_us": null,
+            "max_us": 24701.115,
+            "mean_us": 6333.699858064517,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 76000,
+            "other_calls_per_op": null,
+            "window_s": 1.004618014,
+            "ops_total_incl_warmup": 166,
+            "records_per_s": 157885.5996352162,
+            "payload_mb_per_s": 10.104678376653837
+          },
+          "verify": "passed: all 166000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 1000,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 1875.7843129925377,
+            "commits_per_s": 7.265981416682147,
+            "samples": 8,
+            "p50_us": 133981.62,
+            "p90_us": 154845.127,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 154845.127,
+            "mean_us": 137627.65725,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.102179482,
+            "ops_total_incl_warmup": 10,
+            "records_per_s": 7265.981416682147,
+            "payload_mb_per_s": 3.720182485341259
+          },
+          "verify": "passed: 1025 of 10000 records read back and compared byte for byte; all 10000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 1.14 s (1876 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 1000,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "provision_mb_per_s": 1588.0925897257737,
+            "commits_per_s": 205.90349441600594,
+            "samples": 197,
+            "p50_us": 3738.153,
+            "p90_us": 7866.583,
+            "p99_us": 19774.043,
+            "p999_us": null,
+            "max_us": 23323.677,
+            "mean_us": 4856.64414213198,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 512000,
+            "other_calls_per_op": null,
+            "window_s": 1.002969049,
+            "ops_total_incl_warmup": 231,
+            "records_per_s": 205903.49441600594,
+            "payload_mb_per_s": 105.42258914099504
+          },
+          "verify": "passed: 1025 of 231000 records read back and compared byte for byte; all 231000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 1.35 s (1588 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 1000,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 6.835563186162011,
+            "samples": 7,
+            "p50_us": 133082.556,
+            "p90_us": 218558.789,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 218558.789,
+            "mean_us": 146293.72485714286,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.025332841,
+            "ops_total_incl_warmup": 9,
+            "records_per_s": 6835.56318616201,
+            "payload_mb_per_s": 3.4998083513149494
+          },
+          "verify": "passed: all 1000 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 1000,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 288.1361243834167,
+            "samples": 283,
+            "p50_us": 2929.748,
+            "p90_us": 5516.58,
+            "p99_us": 6002.852,
+            "p999_us": null,
+            "max_us": 6504.794,
+            "mean_us": 3470.5818374558307,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 512000,
+            "other_calls_per_op": null,
+            "window_s": 1.004315079,
+            "ops_total_incl_warmup": 353,
+            "records_per_s": 288136.1243834167,
+            "payload_mb_per_s": 147.52569568430937
+          },
+          "verify": "passed: all 1000 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 1000,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 115.23109374485536,
+            "samples": 114,
+            "p50_us": 9113.096,
+            "p90_us": 10278.851,
+            "p99_us": 25659.409,
+            "p999_us": null,
+            "max_us": 25751.702,
+            "mean_us": 8678.213210526315,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 524000,
+            "other_calls_per_op": null,
+            "window_s": 1.000027368,
+            "ops_total_incl_warmup": 139,
+            "records_per_s": 115231.09374485536,
+            "payload_mb_per_s": 58.99831999736595
+          },
+          "verify": "passed: all 139000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 1000,
+            "record_bytes": 512
+          },
+          "metrics": {
+            "commits_per_s": 140.1565710431521,
+            "samples": 139,
+            "p50_us": 6183.808,
+            "p90_us": 9022.827,
+            "p99_us": 13409.674,
+            "p999_us": null,
+            "max_us": 13656.961,
+            "mean_us": 7134.877748201439,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 524000,
+            "other_calls_per_op": null,
+            "window_s": 1.004565882,
+            "ops_total_incl_warmup": 165,
+            "records_per_s": 140156.5710431521,
+            "payload_mb_per_s": 71.76016437409388
+          },
+          "verify": "passed: all 165000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "store-io",
+          "variant": "(a) N x AppendRegion::append + sync_through",
+          "params": {
+            "n": 1000,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 3286.713144302326,
+            "commits_per_s": 7.270815907421865,
+            "samples": 8,
+            "p50_us": 135518.766,
+            "p90_us": 144501.267,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 144501.267,
+            "mean_us": 137536.14625,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.104033486,
+            "ops_total_incl_warmup": 10,
+            "records_per_s": 7270.815907421865,
+            "payload_mb_per_s": 29.78126195679996
+          },
+          "verify": "passed: 1025 of 10000 records read back and compared byte for byte; all 10000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 0.65 s (3287 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "(b) AppendBatch: N x append + commit",
+          "params": {
+            "n": 1000,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 3174.680878795967,
+            "commits_per_s": 64.14232771193876,
+            "samples": 63,
+            "p50_us": 12715.322,
+            "p90_us": 24385.361,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 37841.615,
+            "mean_us": 15590.329126984127,
+            "flushes_per_op": 1,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 4,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.015188508,
+            "ops_total_incl_warmup": 101,
+            "records_per_s": 64142.327711938764,
+            "payload_mb_per_s": 262.7269743081012
+          },
+          "verify": "passed: 1025 of 101000 records read back and compared byte for byte; all 101000 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 2048 MiB append region in 0.68 s (3175 MB/s: fill, flush, verify)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "(a') N writes of one padded block + one flush",
+          "params": {
+            "n": 1000,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 5.887841696881786,
+            "samples": 6,
+            "p50_us": 166410.145,
+            "p90_us": 188132.67,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 188132.67,
+            "mean_us": 169841.52283333335,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.022409235,
+            "ops_total_incl_warmup": 8,
+            "records_per_s": 5887.8416968817855,
+            "payload_mb_per_s": 24.116599590427793
+          },
+          "verify": "passed: all 1000 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "raw",
+          "variant": "(b') packed: one write of N records + one flush",
+          "params": {
+            "n": 1000,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 64.93006315937976,
+            "samples": 64,
+            "p50_us": 11850.176,
+            "p90_us": 26432.642,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 62231.88,
+            "mean_us": 15401.1863125,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096000,
+            "other_calls_per_op": null,
+            "window_s": 1.015534448,
+            "ops_total_incl_warmup": 83,
+            "records_per_s": 64930.06315937976,
+            "payload_mb_per_s": 265.9535387008195
+          },
+          "verify": "passed: all 1000 records of the last commit read back unbuffered and compared (earlier commits are overwritten as offsets cycle)",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append x N + sync_through (window off)",
+          "params": {
+            "n": 1000,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 30.96835105749132,
+            "samples": 31,
+            "p50_us": 29787.618,
+            "p90_us": 39309.448,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 77544.207,
+            "mean_us": 32291.03151612903,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1000,
+            "write_bytes_per_op": 4108000,
+            "other_calls_per_op": null,
+            "window_s": 1.014845626,
+            "ops_total_incl_warmup": 40,
+            "records_per_s": 30968.35105749132,
+            "payload_mb_per_s": 126.84636593148444
+          },
+          "verify": "passed: all 40000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        },
+        {
+          "system": "fsys",
+          "variant": "append_batch(N) + sync_through (window off)",
+          "params": {
+            "n": 1000,
+            "record_bytes": 4096
+          },
+          "metrics": {
+            "commits_per_s": 56.80047708600284,
+            "samples": 55,
+            "p50_us": 17014.743,
+            "p90_us": 24654.854,
+            "p99_us": null,
+            "p999_us": null,
+            "max_us": 36436.461,
+            "mean_us": 17605.485927272726,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4108000,
+            "other_calls_per_op": null,
+            "window_s": 1.00143393,
+            "ops_total_incl_warmup": 64,
+            "records_per_s": 56800.477086002844,
+            "payload_mb_per_s": 232.65475414426766
+          },
+          "verify": "passed: all 64000 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": []
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "batch of 1 x 64 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 401.6556834769292,
+          "raw": 395.1382790358869,
+          "fsys": 182.71485355510822,
+          "store_io_vs_raw_ratio": 1.0164939839717486,
+          "store_io_vs_fsys_ratio": 2.1982650871664724,
+          "store_io_advantage_vs_raw_pct": 1.6493983971748616,
+          "store_io_advantage_vs_fsys_pct": 119.82650871664724,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "1 x append(64 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 268.58799487925904,
+          "raw": 403.25398416184044,
+          "fsys": 188.72099921534303,
+          "store_io_vs_raw_ratio": 0.6660516831284795,
+          "store_io_vs_fsys_ratio": 1.4232014243035167,
+          "store_io_advantage_vs_raw_pct": -33.39483168715205,
+          "store_io_advantage_vs_fsys_pct": 42.32014243035167,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 1 x 512 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 151.5997091543622,
+          "raw": 179.26029262033884,
+          "fsys": 181.5305444037092,
+          "store_io_vs_raw_ratio": 0.8456959817389125,
+          "store_io_vs_fsys_ratio": 0.835119564326413,
+          "store_io_advantage_vs_raw_pct": -15.430401826108753,
+          "store_io_advantage_vs_fsys_pct": -16.4880435673587,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "1 x append(512 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 175.79362391092454,
+          "raw": 131.34857647228853,
+          "fsys": 70.59441405412367,
+          "store_io_vs_raw_ratio": 1.3383747934871062,
+          "store_io_vs_fsys_ratio": 2.490191699532292,
+          "store_io_advantage_vs_raw_pct": 33.837479348710616,
+          "store_io_advantage_vs_fsys_pct": 149.01916995322918,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 1 x 4096 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 388.71140937704763,
+          "raw": 375.92687470433253,
+          "fsys": 176.0681862786365,
+          "store_io_vs_raw_ratio": 1.0340080359585098,
+          "store_io_vs_fsys_ratio": 2.2077322291597463,
+          "store_io_advantage_vs_raw_pct": 3.4008035958509764,
+          "store_io_advantage_vs_fsys_pct": 120.77322291597463,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "1 x append(4096 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 388.6496781757866,
+          "raw": 381.8935265572218,
+          "fsys": 175.43005966442115,
+          "store_io_vs_raw_ratio": 1.0176911917818343,
+          "store_io_vs_fsys_ratio": 2.2154109673064677,
+          "store_io_advantage_vs_raw_pct": 1.7691191781834315,
+          "store_io_advantage_vs_fsys_pct": 121.54109673064677,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 10 x 64 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 3671.276546910679,
+          "raw": 3009.274367653179,
+          "fsys": 1845.460843608852,
+          "store_io_vs_raw_ratio": 1.2199873120156108,
+          "store_io_vs_fsys_ratio": 1.989354886409506,
+          "store_io_advantage_vs_raw_pct": 21.998731201561085,
+          "store_io_advantage_vs_fsys_pct": 98.93548864095061,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "10 x append(64 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 2427.431163688733,
+          "raw": 1696.77371881879,
+          "fsys": 1779.561588986499,
+          "store_io_vs_raw_ratio": 1.4306157248702498,
+          "store_io_vs_fsys_ratio": 1.3640613388779708,
+          "store_io_advantage_vs_raw_pct": 43.06157248702498,
+          "store_io_advantage_vs_fsys_pct": 36.406133887797075,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 10 x 512 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 3817.6683437883576,
+          "raw": 3996.200356753993,
+          "fsys": 1864.0521599992485,
+          "store_io_vs_raw_ratio": 0.9553245590742471,
+          "store_io_vs_fsys_ratio": 2.0480480244661696,
+          "store_io_advantage_vs_raw_pct": -4.467544092575293,
+          "store_io_advantage_vs_fsys_pct": 104.80480244661696,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "10 x append(512 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 2568.4344287729828,
+          "raw": 2623.2345024614397,
+          "fsys": 1840.1092252033895,
+          "store_io_vs_raw_ratio": 0.9791097312737246,
+          "store_io_vs_fsys_ratio": 1.395805419370739,
+          "store_io_advantage_vs_raw_pct": -2.089026872627542,
+          "store_io_advantage_vs_fsys_pct": 39.580541937073896,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 10 x 4096 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 3965.0273970126314,
+          "raw": 3729.401006929049,
+          "fsys": 1810.3347399450897,
+          "store_io_vs_raw_ratio": 1.0631807600324557,
+          "store_io_vs_fsys_ratio": 2.190217814155683,
+          "store_io_advantage_vs_raw_pct": 6.318076003245565,
+          "store_io_advantage_vs_fsys_pct": 119.0217814155683,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "10 x append(4096 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 2481.4887691870736,
+          "raw": 2611.086742135337,
+          "fsys": 1709.172630549694,
+          "store_io_vs_raw_ratio": 0.9503662705428627,
+          "store_io_vs_fsys_ratio": 1.4518654961078985,
+          "store_io_advantage_vs_raw_pct": -4.963372945713729,
+          "store_io_advantage_vs_fsys_pct": 45.186549610789854,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 100 x 64 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 37460.246597218444,
+          "raw": 39478.56411913246,
+          "fsys": 18520.29937785639,
+          "store_io_vs_raw_ratio": 0.9488756096644386,
+          "store_io_vs_fsys_ratio": 2.02265880442556,
+          "store_io_advantage_vs_raw_pct": -5.112439033556138,
+          "store_io_advantage_vs_fsys_pct": 102.26588044255598,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "100 x append(64 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 4087.1043275546563,
+          "raw": 6236.471910713227,
+          "fsys": 18106.42555398132,
+          "store_io_vs_raw_ratio": 0.655355205005203,
+          "store_io_vs_fsys_ratio": 0.22572673526144788,
+          "store_io_advantage_vs_raw_pct": -34.46447949947971,
+          "store_io_advantage_vs_fsys_pct": -77.42732647385522,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 100 x 512 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 37380.601047085496,
+          "raw": 39013.679581096905,
+          "fsys": 18866.644150474847,
+          "store_io_vs_raw_ratio": 0.9581408738794616,
+          "store_io_vs_fsys_ratio": 1.9813063069907257,
+          "store_io_advantage_vs_raw_pct": -4.185912612053844,
+          "store_io_advantage_vs_fsys_pct": 98.13063069907257,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "100 x append(512 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 6185.711951805259,
+          "raw": 6302.551329501143,
+          "fsys": 17823.946222214297,
+          "store_io_vs_raw_ratio": 0.9814615745929779,
+          "store_io_vs_fsys_ratio": 0.3470450300223582,
+          "store_io_advantage_vs_raw_pct": -1.8538425407022108,
+          "store_io_advantage_vs_fsys_pct": -65.29549699776418,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 100 x 4096 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 9812.583785009485,
+          "raw": 24305.990545577326,
+          "fsys": 13458.411700501281,
+          "store_io_vs_raw_ratio": 0.4037105077700676,
+          "store_io_vs_fsys_ratio": 0.7291041471590588,
+          "store_io_advantage_vs_raw_pct": -59.62894922299324,
+          "store_io_advantage_vs_fsys_pct": -27.08958528409412,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "100 x append(4096 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 3300.9390544431467,
+          "raw": 6387.912217589777,
+          "fsys": 12484.144519803518,
+          "store_io_vs_raw_ratio": 0.5167477169385123,
+          "store_io_vs_fsys_ratio": 0.2644105128074165,
+          "store_io_advantage_vs_raw_pct": -48.32522830614877,
+          "store_io_advantage_vs_fsys_pct": -73.55894871925834,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 1000 x 64 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 256327.08343221134,
+          "raw": 146514.04781476574,
+          "fsys": 157885.5996352162,
+          "store_io_vs_raw_ratio": 1.7495051652403981,
+          "store_io_vs_fsys_ratio": 1.6234988119526885,
+          "store_io_advantage_vs_raw_pct": 74.95051652403981,
+          "store_io_advantage_vs_fsys_pct": 62.34988119526885,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "1000 x append(64 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 6810.479786888568,
+          "raw": 4671.865015363087,
+          "fsys": 45023.23806898073,
+          "store_io_vs_raw_ratio": 1.4577646752405737,
+          "store_io_vs_fsys_ratio": 0.15126588133119473,
+          "store_io_advantage_vs_raw_pct": 45.776467524057374,
+          "store_io_advantage_vs_fsys_pct": -84.87341186688053,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 1000 x 512 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 205903.49441600594,
+          "raw": 288136.1243834167,
+          "fsys": 140156.5710431521,
+          "store_io_vs_raw_ratio": 0.7146049279888781,
+          "store_io_vs_fsys_ratio": 1.4690962605856799,
+          "store_io_advantage_vs_raw_pct": -28.53950720111219,
+          "store_io_advantage_vs_fsys_pct": 46.90962605856799,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "1000 x append(512 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 7265.981416682147,
+          "raw": 6835.56318616201,
+          "fsys": 115231.09374485536,
+          "store_io_vs_raw_ratio": 1.062967486189211,
+          "store_io_vs_fsys_ratio": 0.06305573591768972,
+          "store_io_advantage_vs_raw_pct": 6.296748618921111,
+          "store_io_advantage_vs_fsys_pct": -93.69442640823102,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        },
+        {
+          "case": "batch of 1000 x 4096 B, one barrier",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 64142.327711938764,
+          "raw": 64930.06315937976,
+          "fsys": 56800.477086002844,
+          "store_io_vs_raw_ratio": 0.9878679396090007,
+          "store_io_vs_fsys_ratio": 1.1292568478750533,
+          "store_io_advantage_vs_raw_pct": -1.2132060390999344,
+          "store_io_advantage_vs_fsys_pct": 12.925684787505332,
+          "note": "AppendBatch::commit vs raw packed write+flush vs fsys append_batch+sync_through"
+        },
+        {
+          "case": "1000 x append(4096 B) + one sync_through",
+          "metric": "records/s",
+          "better": "higher",
+          "store_io": 7270.815907421865,
+          "raw": 5887.8416968817855,
+          "fsys": 30968.35105749132,
+          "store_io_vs_raw_ratio": 1.234886445957354,
+          "store_io_vs_fsys_ratio": 0.23478214561453173,
+          "store_io_advantage_vs_raw_pct": 23.48864459573541,
+          "store_io_advantage_vs_fsys_pct": -76.52178543854683,
+          "note": "N x append + sync_through vs raw N padded writes + flush vs fsys N x append + sync_through"
+        }
+      ],
+      "findings": [],
+      "anomalies": []
+    }
+  ]
+}

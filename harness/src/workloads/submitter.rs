@@ -1,0 +1,506 @@
+//! W6: N operations in flight from one thread, random 4 KiB.
+//!
+//! For queue depths N in {1, 8, 32, 128}, random 4 KiB writes (plain) and
+//! reads over a 256 MiB region / file, kept N deep from one thread:
+//!
+//! - store-io: the engine-layer `Submitter` on a provisioned page region
+//!   (on Linux, the tier is the run's `--tier`: io_uring rings or the
+//!   synchronous pool).
+//! - raw: fio at the same depth, block size and span, with direct I/O
+//!   (`io_uring` on Linux, `windowsaio` on Windows), on one file written in
+//!   full first (as store-io's region is): the best the OS offers one
+//!   thread, through a mature tool.
+//!
+//! Each point runs `REPS` times, the two systems alternating which goes
+//! first; the median repetition is reported, with the spread.
+
+use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
+
+use store_io_engine::completion::Done;
+use store_io_engine::{SubmitterConfig, WriteMode};
+
+use super::{Ctx, KIB4, fallbacks, remove, sioerr, with_store};
+use crate::data::Rng;
+use crate::json::Json;
+use crate::report::{Better, Comparison, Point, Section, System, Table, Verify};
+use crate::stats::Samples;
+
+/// Queue depths.
+pub const DEPTHS: [u32; 4] = [1, 8, 32, 128];
+/// Repetitions per point.
+const REPS: usize = 3;
+/// Region / file size.
+const SPAN: u64 = 256 << 20;
+/// Pages in the span.
+const PAGES: u64 = SPAN / KIB4 as u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rw {
+    Write,
+    Read,
+}
+
+impl Rw {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Write => "randwrite",
+            Self::Read => "randread",
+        }
+    }
+}
+
+/// One repetition's numbers.
+#[derive(Debug, Clone, Copy)]
+struct Rep {
+    ops: f64,
+    p50: Option<f64>,
+    p99: Option<f64>,
+    p999: Option<f64>,
+}
+
+/// Runs W6.
+pub fn run(ctx: &Ctx) -> Section {
+    let mut sec = Section::new(
+        "submitter",
+        "W6: N in flight from one thread, random 4 KiB (Submitter vs fio)",
+    );
+    sec.method = vec![
+        format!("Queue depth N in {DEPTHS:?}; uniformly random 4 KiB-aligned offsets over 256 MiB, with repeats (fio: --norandommap); one thread keeps N operations in flight, resubmitting as each completes; writes are plain (no per-write durability), reads read back and are checked for length."),
+        "store-io: `Store::submitter(depth N)`, `write(region, pos, buf, Plain)` / `read_page`, `wait(1)`; buffers from the submitter's pool (`take_buf`); the region is written in full by provisioning.".to_owned(),
+        format!("raw: fio --ioengine={} --direct=1 --bs=4k --iodepth=N --numjobs=1 --norandommap on one 256 MiB file written in full first (1 MiB direct writes, then fsync) and reused by every point; time-based, the same warm-up as ramp time.", fio_engine()),
+        "Latency: per operation, submit call to completion observed (store-io); fio's total latency (lat: submission and completion).".to_owned(),
+        format!("Each point runs {REPS} times, alternating which system goes first; the table shows the repetition with the median ops/s, and the notes give every repetition."),
+    ];
+    let fio_file = ctx.path("w6-fio");
+    let laid = lay_out(&fio_file);
+    let mut pts = Vec::new();
+    for rw in [Rw::Write, Rw::Read] {
+        for &qd in &DEPTHS {
+            let mut store = Vec::new();
+            let mut fio = Vec::new();
+            for rep in 0..REPS {
+                let order = if rep % 2 == 0 {
+                    [true, false]
+                } else {
+                    [false, true]
+                };
+                for store_first in order {
+                    if store_first {
+                        store.push(store_point(ctx, rw, qd));
+                    } else {
+                        fio.push(match &laid {
+                            Ok(()) => fio_point(ctx, &fio_file, rw, qd),
+                            Err(e) => Err(e.clone()),
+                        });
+                    }
+                }
+            }
+            pts.push(summarize(
+                System::StoreIo,
+                format!("Submitter {} QD{qd}", rw.name()),
+                rw,
+                qd,
+                store,
+            ));
+            pts.push(summarize(
+                System::Raw,
+                format!("fio {} {} QD{qd}", fio_engine(), rw.name()),
+                rw,
+                qd,
+                fio.into_iter().map(|r| r.map(|rep| (rep, None))).collect(),
+            ));
+        }
+    }
+    if let Some(e) = remove(&fio_file) {
+        sec.anomalies.push(e);
+    }
+    let mut t = Table::new(
+        "Results (median of the repetitions):",
+        &[
+            "pattern",
+            "N",
+            "system",
+            "variant",
+            "ops/s",
+            "ops/s min..max",
+            "p50 µs",
+            "p99 µs",
+            "p99.9 µs",
+        ],
+    );
+    for p in &pts {
+        t.row(vec![
+            p.params
+                .iter()
+                .find_map(|(k, v)| match v {
+                    Json::Str(s) if *k == "rw" => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            p.cell("qd", 0),
+            p.system.name().to_owned(),
+            p.variant.clone(),
+            p.cell("ops_per_s", 0),
+            format!(
+                "{}..{}",
+                p.cell("ops_per_s_min", 0),
+                p.cell("ops_per_s_max", 0)
+            ),
+            p.cell("p50_us", 1),
+            p.cell("p99_us", 1),
+            p.cell("p999_us", 1),
+        ]);
+    }
+    sec.tables.push(t);
+    for rw in [Rw::Write, Rw::Read] {
+        for &qd in &DEPTHS {
+            let get = |sys: System, k: &str| {
+                pts.iter()
+                    .find(|p| {
+                        p.system == sys
+                            && p.variant.contains(rw.name())
+                            && p.get("qd") == Some(f64::from(qd))
+                    })
+                    .and_then(|p| p.get(k))
+            };
+            for (k, metric, better) in [
+                ("ops_per_s", "ops/s", Better::Higher),
+                ("p99_us", "p99 µs", Better::Lower),
+            ] {
+                sec.comparisons.push(Comparison {
+                    case: format!("{} 4 KiB, {qd} in flight", rw.name()),
+                    metric: metric.to_owned(),
+                    better,
+                    store_io: get(System::StoreIo, k),
+                    raw: get(System::Raw, k),
+                    fsys: None,
+                    note: format!("Submitter vs fio {} (medians of {REPS})", fio_engine()),
+                });
+            }
+        }
+    }
+    sec.points = pts;
+    sec.collect_point_anomalies();
+    sec
+}
+
+/// One point from its repetitions: the median repetition by ops/s, with
+/// the spread and every repetition in the notes; any failed repetition
+/// fails the point. A repetition may carry the store's io line.
+fn summarize(
+    system: System,
+    variant: String,
+    rw: Rw,
+    qd: u32,
+    reps: Vec<Result<(Rep, Option<String>), String>>,
+) -> Point {
+    let mut p = Point::new(system, variant)
+        .param("qd", Json::Num(f64::from(qd)))
+        .param("rw", Json::Str(rw.name().to_owned()));
+    p.verify = Verify::NotChecked(if system == System::StoreIo {
+        "throughput point; read lengths and tags are checked".to_owned()
+    } else {
+        "fio baseline: fio's own checks".to_owned()
+    });
+    let mut ok = Vec::new();
+    for r in reps {
+        match r {
+            Ok((rep, io)) => {
+                if let Some(io) = io {
+                    if !p.notes.contains(&io) {
+                        p.notes.push(io);
+                    }
+                }
+                ok.push(rep);
+            }
+            Err(e) => {
+                p.error.get_or_insert(e);
+            }
+        }
+    }
+    if ok.is_empty() {
+        return p;
+    }
+    ok.sort_by(|a, b| a.ops.total_cmp(&b.ops));
+    let med = ok[ok.len() / 2];
+    p.metric("ops_per_s", Some(med.ops));
+    p.metric("ops_per_s_min", ok.first().map(|r| r.ops));
+    p.metric("ops_per_s_max", ok.last().map(|r| r.ops));
+    p.metric("p50_us", med.p50);
+    p.metric("p99_us", med.p99);
+    p.metric("p999_us", med.p999);
+    p.notes.push(format!(
+        "repetitions (ops/s, p99 µs): {}",
+        ok.iter()
+            .map(|r| format!(
+                "{:.0}/{}",
+                r.ops,
+                r.p99.map_or("-".to_owned(), |v| format!("{v:.0}"))
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    p
+}
+
+fn store_point(ctx: &Ctx, rw: Rw, qd: u32) -> Result<(Rep, Option<String>), String> {
+    let mut out = Err("not run".to_owned());
+    let p = with_store(ctx, "w6", Point::new(System::StoreIo, ""), |store, _| {
+        let pages = store
+            .provision_page_region("w6", SPAN)
+            .map_err(|e| sioerr("provision_page_region", &e))?;
+        let mut sub = store
+            .submitter(SubmitterConfig::default().with_depth(qd))
+            .map_err(|e| sioerr("submitter", &e))?;
+        let mut rng = Rng::new(6_000_000 + u64::from(qd));
+        let fallbacks_before = fallbacks();
+        let mut submitted = 0u64;
+        let n = qd as usize;
+        let mut started = vec![Instant::now(); n];
+        let mut free: Vec<usize> = (0..n).collect();
+        // Which slots have an operation in flight (a second completion for
+        // one fails the point).
+        let mut busy = vec![false; n];
+        let begin = Instant::now();
+        let measure_from = begin + Duration::from_secs_f64(ctx.warmup);
+        let stop_at = measure_from + Duration::from_secs_f64(ctx.secs);
+        // Room for every sample of a fast point, so the vector never grows
+        // inside the measured window.
+        let mut lat = Samples::with_capacity((ctx.secs * 600_000.0) as usize + 1024);
+        let mut last_done = measure_from;
+        loop {
+            if Instant::now() < stop_at {
+                while let Some(slot) = free.pop() {
+                    let off = rng.below(PAGES) * KIB4 as u64;
+                    let pos = pages.pos(off).map_err(|e| sioerr("pos", &e))?;
+                    let mut buf = sub.take_buf(KIB4).map_err(|e| sioerr("take_buf", &e))?;
+                    started[slot] = Instant::now();
+                    busy[slot] = true;
+                    let r = match rw {
+                        Rw::Write => {
+                            buf.as_mut_slice().fill(slot as u8);
+                            sub.write(&pages, pos, buf, WriteMode::Plain, slot as u64)
+                        }
+                        Rw::Read => sub.read_page(&pages, pos, buf, slot as u64),
+                    };
+                    r.map_err(|r| sioerr("submit", &r.error))?;
+                    submitted += 1;
+                }
+            }
+            if free.len() == n {
+                break;
+            }
+            let mut got = 0;
+            let done = sub.wait(1).map_err(|e| sioerr("wait", &e))?;
+            let at = Instant::now();
+            for c in done {
+                got += 1;
+                let slot = usize::try_from(c.tag).unwrap_or(usize::MAX);
+                match c.outcome.map_err(|e| sioerr("completion", &e))? {
+                    Done::Read { len } if len != KIB4 => {
+                        return Err(format!("a 4 KiB read returned {len} bytes"));
+                    }
+                    Done::Read { .. } | Done::Written(_) => {}
+                    other => return Err(format!("unexpected completion {other:?}")),
+                }
+                let t0 = *started
+                    .get(slot)
+                    .ok_or("a completion with an unknown tag")?;
+                if !std::mem::replace(&mut busy[slot], false) {
+                    return Err(format!("a second completion for tag {slot}"));
+                }
+                if t0 >= measure_from && t0 < stop_at {
+                    lat.push(at - t0);
+                    last_done = at;
+                }
+                free.push(slot);
+            }
+            if got == 0 && sub.in_flight() == 0 {
+                return Err(format!(
+                    "{} operations outstanding, none in flight: a completion was lost",
+                    n - free.len()
+                ));
+            }
+        }
+        let window = last_done
+            .saturating_duration_since(measure_from)
+            .as_secs_f64();
+        let s = lat.summary();
+        let ops = s.map_or(0, |s| s.n);
+        if window <= 0.0 || ops == 0 {
+            return Err("no measured operations".to_owned());
+        }
+        let io = &store.report().io;
+        let fell = match (fallbacks_before, fallbacks()) {
+            (Some(b), Some(a)) if io.interface == store_io_platform::IoInterface::IoUring => {
+                format!(
+                    "; io_uring fallbacks {} of {submitted} operations",
+                    a.saturating_sub(b)
+                )
+            }
+            _ => String::new(),
+        };
+        out = Ok((
+            Rep {
+                ops: ops as f64 / window,
+                p50: s.map(|s| s.p50),
+                p99: s.and_then(|s| s.p99),
+                p999: s.and_then(|s| s.p999),
+            },
+            Some(format!("io: {} ({}){fell}", io.interface, io.reason)),
+        ));
+        Ok(())
+    });
+    match p.error {
+        Some(e) => Err(e),
+        None => out,
+    }
+}
+
+/// fio's asynchronous engine on this system.
+fn fio_engine() -> &'static str {
+    if cfg!(windows) {
+        "windowsaio"
+    } else {
+        "io_uring"
+    }
+}
+
+/// Writes fio's file in full (1 MiB direct writes, then fsync), so random
+/// writes overwrite allocated, written blocks, as store-io's do.
+fn lay_out(file: &Path) -> Result<(), String> {
+    let o = Command::new("fio")
+        .arg("--name=w6-layout")
+        .arg(format!("--filename={}", fio_path(file)))
+        .arg(format!("--size={SPAN}"))
+        .args(["--rw=write", "--bs=1m", "--direct=1", "--end_fsync=1"])
+        .arg(format!("--ioengine={}", fio_engine()))
+        .output()
+        .map_err(|e| format!("fio did not run: {e}"))?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "fio layout failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ))
+    }
+}
+
+fn fio_point(ctx: &Ctx, file: &Path, rw: Rw, qd: u32) -> Result<Rep, String> {
+    let o = Command::new("fio")
+        .arg("--name=w6")
+        .arg(format!("--filename={}", fio_path(file)))
+        .arg(format!("--size={SPAN}"))
+        .arg(format!("--ioengine={}", fio_engine()))
+        .arg("--direct=1")
+        .arg(format!("--rw={}", rw.name()))
+        .arg("--bs=4k")
+        .arg(format!("--iodepth={qd}"))
+        .arg("--numjobs=1")
+        .arg("--norandommap")
+        .arg("--randrepeat=0")
+        .arg("--lat_percentiles=1")
+        .arg("--time_based")
+        .arg(format!("--runtime={}ms", (ctx.secs * 1000.0) as u64))
+        .arg(format!("--ramp_time={}ms", (ctx.warmup * 1000.0) as u64))
+        .arg("--output-format=json")
+        .output()
+        .map_err(|e| format!("fio did not run: {e}"))?;
+    if !o.status.success() {
+        return Err(format!(
+            "fio failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&o.stdout);
+    let side = match rw {
+        Rw::Write => "write",
+        Rw::Read => "read",
+    };
+    let (ops, p50, p99, p999) =
+        fio_stats(&text, side).ok_or_else(|| "fio output not understood".to_owned())?;
+    Ok(Rep {
+        ops,
+        p50: Some(p50),
+        p99: Some(p99),
+        p999: Some(p999),
+    })
+}
+
+/// fio's `--filename`: on Windows a `:` must be escaped.
+fn fio_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    if cfg!(windows) {
+        s.replace(':', "\\:")
+    } else {
+        s
+    }
+}
+
+/// The object that follows `key` in `s` (from its `{` to the matching
+/// `}`), so a search inside it cannot run into a later section.
+fn object_after<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+    let start = s.find(key)? + key.len();
+    let open = start + s[start..].find('{')?;
+    let mut depth = 0usize;
+    for (i, ch) in s[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[open..=open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// IOPS and total-latency p50 / p99 / p99.9 (µs) of the first job's `side`
+/// ("read" or "write") in fio's JSON output, each searched only inside its
+/// own object.
+fn fio_stats(json: &str, side: &str) -> Option<(f64, f64, f64, f64)> {
+    let jobs = &json[json.find("\"jobs\"")?..];
+    let sect = object_after(jobs, &format!("\"{side}\" :"))?;
+    let iops = number_after(sect, "\"iops\" :")?;
+    let lat = object_after(sect, "\"lat_ns\" :")?;
+    let pct = object_after(lat, "\"percentile\" :")?;
+    let at = |k: &str| number_after(pct, &format!("\"{k}\" :")).map(|ns| ns / 1000.0);
+    Some((iops, at("50.000000")?, at("99.000000")?, at("99.900000")?))
+}
+
+fn number_after(s: &str, key: &str) -> Option<f64> {
+    let i = s.find(key)? + key.len();
+    let rest = s[i..].trim_start();
+    let end = rest
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == '+'))
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fio_stats_reads_each_side_inside_its_own_object() {
+        let j = r#"{ "jobs" : [ { "job options" : { "rw" : "randwrite" },
+            "read" : { "iops" : 0.0, "lat_ns" : { "min" : 0 } },
+            "write" : { "iops" : 12345.5, "clat_ns" : { "percentile" : { "50.000000" : 1 } },
+                "lat_ns" : { "percentile" : { "50.000000" : 41984, "99.000000" : 70144, "99.900000" : 90112 } } } } ] }"#;
+        let w = fio_stats(j, "write").unwrap_or_else(|| panic!("parsed"));
+        assert!((w.0 - 12345.5).abs() < 1e-9);
+        assert!(
+            (w.1 - 41.984).abs() < 1e-9
+                && (w.2 - 70.144).abs() < 1e-9
+                && (w.3 - 90.112).abs() < 1e-9
+        );
+        // The read side has no percentiles: nothing is taken from "write".
+        assert!(fio_stats(j, "read").is_none());
+    }
+}

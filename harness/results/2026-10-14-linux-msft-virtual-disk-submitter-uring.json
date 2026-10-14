@@ -1,0 +1,623 @@
+{
+  "schema": "store-io-harness/1",
+  "incomplete": null,
+  "run": {
+    "date": "2026-10-14T08:36:22Z",
+    "command": "submitter",
+    "commit": "e4f90ecec8fe39c18eccbe385c6a10fe51cfce2c (crates/ modified)",
+    "os": "linux",
+    "os_version": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "cpus": 32,
+    "filesystem": "ext4 on / (device /dev/sdd 8:48, mount options rw,relatime, super options rw,discard,errors=remount-ro,data=ordered); store-io classified it Ext4",
+    "dir": "/home/james/store-io-harness-51510",
+    "device": "msft-virtual-disk",
+    "backend": "store-io-posix (PosixPlatform, O_DIRECT; tier in the report's io line)",
+    "secs_per_point": 3,
+    "warmup_secs": 0.30000000000000004,
+    "total_secs": 173.98062896,
+    "fsys": "fsys 1.1.3 (crates.io), Handle method Sync, durability primitive fsync",
+    "raw_primitives": [
+      "pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync",
+      "preadv2 on an O_DIRECT descriptor (one call per request)"
+    ]
+  },
+  "store": {
+    "report": "volume           428c2ceb-90c1-c46d-52be-e8ab4bff477e\nio               io_uring (chosen)\nclass            unverified\nlabel            overridden(running under a hypervisor without a certificate for this volume type)\ndurable open     Overridden\nreason           running under a hypervisor without a certificate for this volume type\nmissing          device identify data (needs a readable device node)\nmissing          SMART / health log (needs privilege on Linux)\nmissing          volatile write cache presence\nmissing          volatile write cache enabled state\nmissing          device atomic-write fields\nflush execution  inline (leader)\nblock size       4096\ntable capacity   253 regions\nfilesystem       Ext4\nbus              Virtual\nmodel            Msft Virtual Disk\nmode             read-write",
+    "class": "unverified (receipt label overridden(running under a hypervisor without a certificate for this volume type), durable open Overridden (Trust::override_refusal), block size 4096 B)",
+    "override_in_effect": true,
+    "override_refusal": "device durability is unverified: running under a hypervisor without a certificate for this volume type; missing: device identify data (needs a readable device node); SMART / health log (needs privilege on Linux); volatile write cache presence; volatile write cache enabled state; device atomic-write fields; [Unverified { missing: {Identify, Smart, CachePresence, CacheEnabled, AtomicFields}, reasons: {Hypervisor} }]",
+    "options": "StoreOptions {\n    trust: Trust {\n        certificate: None,\n        attestation: None,\n        override_refusal: true,\n    },\n    block_size: None,\n    log2_table_slot: 14,\n    max_io: 1048576,\n    buffers_per_class: 64,\n    max_write: 4194304,\n    large_buffers: 8,\n    queues: 0,\n    queue_depth: 64,\n    t3_pool_threads: 0,\n    append_ring: 4096,\n    keyed_fill: false,\n    linux_tier: Uring,\n}",
+    "evidence": "Evidence {\n    platform: Linux,\n    device: DeviceFacts {\n        model: Some(\n            \"Msft Virtual Disk\",\n        ),\n        firmware: Some(\n            \"1.0\",\n        ),\n        bus: Virtual,\n        cache_present: Unknown,\n        cache_enabled: Unknown,\n        os_cache_mode: WriteBack,\n        os_flush_supported: Yes,\n        user_power_protection: Unknown,\n        backup_failed: Unknown,\n        fua_supported: No,\n        logical_block: 512,\n        physical_block: 4096,\n        optimal_write: 4096,\n        max_transfer: 1310720,\n        atomic: AtomicFields {\n            awupf: None,\n            nsabp: false,\n            nawupf: 0,\n            nabspf: 0,\n            nabo: 0,\n        },\n        numa_node: Some(\n            0,\n        ),\n        multi_controller: false,\n    },\n    fs: FsFacts {\n        kind: Ext4,\n        data_journal: false,\n        no_barrier: false,\n        sync_disabled: false,\n        weak_error_mode: false,\n        transformed: false,\n        cow: No,\n        direct_io: Unknown,\n        full_flush: Yes,\n        dir_flush: Yes,\n        os_atomic_unit: 0,\n        dio_mem_align: 4,\n        dio_offset_align: 512,\n    },\n    stack: [],\n    hypervisor: Some(\n        HyperV,\n    ),\n    privilege: Unprivileged,\n    kernel: Some(\n        (\n            6,\n            6,\n            87,\n        ),\n    ),\n    timings: Timings {\n        flush_idle_ns: None,\n        flush_loaded_ns: None,\n        fua_extra_ns: None,\n        flush_blocks_writes_pct: None,\n    },\n    missing: {\n        Identify,\n        Smart,\n        CachePresence,\n        CacheEnabled,\n        AtomicFields,\n    },\n}"
+  },
+  "diagnostics": [],
+  "workloads": [
+    {
+      "key": "submitter",
+      "title": "W6: N in flight from one thread, random 4 KiB (Submitter vs fio)",
+      "elapsed_secs": 171.303468729,
+      "method": [
+        "Queue depth N in [1, 8, 32, 128]; uniformly random 4 KiB-aligned offsets over 256 MiB, with repeats (fio: --norandommap); one thread keeps N operations in flight, resubmitting as each completes; writes are plain (no per-write durability), reads read back and are checked for length.",
+        "store-io: `Store::submitter(depth N)`, `write(region, pos, buf, Plain)` / `read_page`, `wait(1)`; buffers from the submitter's pool (`take_buf`); the region is written in full by provisioning.",
+        "raw: fio --ioengine=io_uring --direct=1 --bs=4k --iodepth=N --numjobs=1 --norandommap on one 256 MiB file written in full first (1 MiB direct writes, then fsync) and reused by every point; time-based, the same warm-up as ramp time.",
+        "Latency: per operation, submit call to completion observed (store-io); fio's total latency (lat: submission and completion).",
+        "Each point runs 3 times, alternating which system goes first; the table shows the repetition with the median ops/s, and the notes give every repetition."
+      ],
+      "points": [
+        {
+          "system": "store-io",
+          "variant": "Submitter randwrite QD1",
+          "params": {
+            "qd": 1,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 8291.39069601874,
+            "ops_per_s_min": 6449.113779703817,
+            "ops_per_s_max": 8645.955790346059,
+            "p50_us": 104.856,
+            "p99_us": 243.256,
+            "p999_us": 1108.29
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 21288 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 27155 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 28511 operations",
+            "repetitions (ops/s, p99 µs): 6449/197, 8291/243, 8646/304"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randwrite QD1",
+          "params": {
+            "qd": 1,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 6765.744752,
+            "ops_per_s_min": 6535.488171,
+            "ops_per_s_max": 8398.867044,
+            "p50_us": 146.432,
+            "p99_us": 214.016,
+            "p999_us": 1990.656
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 6535/191, 6766/214, 8399/326"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randwrite QD8",
+          "params": {
+            "qd": 8,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 38723.94415056088,
+            "ops_per_s_min": 33705.58702053842,
+            "ops_per_s_max": 57580.46649784829,
+            "p50_us": 117.24,
+            "p99_us": 3668.342,
+            "p999_us": 8174.028
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 111034 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 128345 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 184951 operations",
+            "repetitions (ops/s, p99 µs): 33706/3977, 38724/3668, 57580/299"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randwrite QD8",
+          "params": {
+            "qd": 8,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 39834.165834,
+            "ops_per_s_min": 16419.860047,
+            "ops_per_s_max": 66153.615462,
+            "p50_us": 120.32,
+            "p99_us": 4292.608,
+            "p999_us": 7897.088
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 16420/6324, 39834/4293, 66154/251"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randwrite QD32",
+          "params": {
+            "qd": 32,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 91451.1348188784,
+            "ops_per_s_min": 90026.98459457245,
+            "ops_per_s_max": 91507.3529161675,
+            "p50_us": 326.456,
+            "p99_us": 560.779,
+            "p999_us": 2279.629
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 304996 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 297471 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 302187 operations",
+            "repetitions (ops/s, p99 µs): 90027/558, 91451/561, 91507/529"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randwrite QD32",
+          "params": {
+            "qd": 32,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 91748.083972,
+            "ops_per_s_min": 90673.108964,
+            "ops_per_s_max": 102126.957681,
+            "p50_us": 333.824,
+            "p99_us": 528.384,
+            "p999_us": 1187.84
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 90673/545, 91748/528, 102127/528"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randwrite QD128",
+          "params": {
+            "qd": 128,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 173483.70355274808,
+            "ops_per_s_min": 134120.74438527043,
+            "ops_per_s_max": 205280.96416196937,
+            "p50_us": 639.526,
+            "p99_us": 1267.542,
+            "p999_us": 2822.439
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 447243 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 674939 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 582638 operations",
+            "repetitions (ops/s, p99 µs): 134121/5296, 173484/1268, 205281/826"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randwrite QD128",
+          "params": {
+            "qd": 128,
+            "rw": "randwrite"
+          },
+          "metrics": {
+            "ops_per_s": 172132.955681,
+            "ops_per_s_min": 145909.030323,
+            "ops_per_s_max": 182775.074975,
+            "p50_us": 667.648,
+            "p99_us": 1417.216,
+            "p999_us": 3031.04
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 145909/2867, 172133/1417, 182775/1221"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randread QD1",
+          "params": {
+            "qd": 1,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 7518.7848299219995,
+            "ops_per_s_min": 7393.987072845934,
+            "ops_per_s_max": 7741.52829458993,
+            "p50_us": 126.357,
+            "p99_us": 217.666,
+            "p999_us": 362.829
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 24539 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 25449 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 24435 operations",
+            "repetitions (ops/s, p99 µs): 7394/213, 7519/218, 7742/207"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randread QD1",
+          "params": {
+            "qd": 1,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 5228.59047,
+            "ops_per_s_min": 5189.936688,
+            "ops_per_s_max": 5339.22026,
+            "p50_us": 185.344,
+            "p99_us": 272.384,
+            "p999_us": 456.704
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 5190/272, 5229/272, 5339/268"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randread QD8",
+          "params": {
+            "qd": 8,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 69987.82554824805,
+            "ops_per_s_min": 69436.18530500017,
+            "ops_per_s_max": 73497.00115112358,
+            "p50_us": 100.955,
+            "p99_us": 222.809,
+            "p999_us": 2016.873
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 239268 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 229330 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 231140 operations",
+            "repetitions (ops/s, p99 µs): 69436/219, 69988/223, 73497/211"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randread QD8",
+          "params": {
+            "qd": 8,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 40245.251583,
+            "ops_per_s_min": 38110.296568,
+            "ops_per_s_max": 40642.785738,
+            "p50_us": 193.536,
+            "p99_us": 301.056,
+            "p999_us": 585.728
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 38110/322, 40245/301, 40643/289"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randread QD32",
+          "params": {
+            "qd": 32,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 150761.44654910505,
+            "ops_per_s_min": 134711.95020931767,
+            "ops_per_s_max": 152716.83746498064,
+            "p50_us": 195.243,
+            "p99_us": 334.839,
+            "p999_us": 2268.574
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 490653 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 500019 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 448342 operations",
+            "repetitions (ops/s, p99 µs): 134712/408, 150761/335, 152717/319"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randread QD32",
+          "params": {
+            "qd": 32,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 137207.597468,
+            "ops_per_s_min": 132565.811396,
+            "ops_per_s_max": 141422.859047,
+            "p50_us": 216.064,
+            "p99_us": 468.992,
+            "p999_us": 2342.912
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 132566/469, 137208/469, 141423/383"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "Submitter randread QD128",
+          "params": {
+            "qd": 128,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 220131.5009082975,
+            "ops_per_s_min": 219048.08400838808,
+            "ops_per_s_max": 225462.6217863528,
+            "p50_us": 534.593,
+            "p99_us": 1008.281,
+            "p999_us": 2728.523
+          },
+          "verify": "not checked: throughput point; read lengths and tags are checked",
+          "error": null,
+          "notes": [
+            "io: io_uring (chosen); io_uring fallbacks 0 of 722246 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 746583 operations",
+            "io: io_uring (chosen); io_uring fallbacks 0 of 730686 operations",
+            "repetitions (ops/s, p99 µs): 219048/714, 220132/1008, 225463/858"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "fio io_uring randread QD128",
+          "params": {
+            "qd": 128,
+            "rw": "randread"
+          },
+          "metrics": {
+            "ops_per_s": 210611.462846,
+            "ops_per_s_min": 191220.926358,
+            "ops_per_s_max": 210765.078307,
+            "p50_us": 593.92,
+            "p99_us": 864.256,
+            "p999_us": 2670.592
+          },
+          "verify": "not checked: fio baseline: fio's own checks",
+          "error": null,
+          "notes": [
+            "repetitions (ops/s, p99 µs): 191221/2441, 210611/864, 210765/930"
+          ]
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "randwrite 4 KiB, 1 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 8291.39069601874,
+          "raw": 6765.744752,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.2254956401610848,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 22.54956401610848,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 1 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 243.256,
+          "raw": 214.016,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.1366252990430623,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -13.662529904306231,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 8 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 38723.94415056088,
+          "raw": 39834.165834,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.9721289084333855,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -2.787109156661449,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 8 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 3668.342,
+          "raw": 4292.608,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.8545718593451813,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 14.542814065481869,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 32 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 91451.1348188784,
+          "raw": 91748.083972,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.996763429378948,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -0.3236570621051982,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 32 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 560.779,
+          "raw": 528.384,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.061309577882752,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -6.130957788275193,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 128 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 173483.70355274808,
+          "raw": 172132.955681,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.0078471194920473,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 0.7847119492047305,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randwrite 4 KiB, 128 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 1267.542,
+          "raw": 1417.216,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.8943887170339595,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 10.56112829660405,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 1 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 7518.7848299219995,
+          "raw": 5228.59047,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.43801371957938,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 43.80137195793801,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 1 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 217.666,
+          "raw": 272.384,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.7991144854323308,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 20.088551456766922,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 8 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 69987.82554824805,
+          "raw": 40245.251583,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.7390331230482756,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 73.90331230482757,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 8 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 222.809,
+          "raw": 301.056,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.7400915444302721,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 25.990845556972786,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 32 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 150761.44654910505,
+          "raw": 137207.597468,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.0987835173213796,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 9.878351732137958,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 32 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 334.839,
+          "raw": 468.992,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 0.7139546090338428,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 28.60453909661572,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 128 in flight",
+          "metric": "ops/s",
+          "better": "higher",
+          "store_io": 220131.5009082975,
+          "raw": 210611.462846,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.0452018989548473,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": 4.5201898954847275,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        },
+        {
+          "case": "randread 4 KiB, 128 in flight",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 1008.281,
+          "raw": 864.256,
+          "fsys": null,
+          "store_io_vs_raw_ratio": 1.1666462251925356,
+          "store_io_vs_fsys_ratio": null,
+          "store_io_advantage_vs_raw_pct": -16.66462251925356,
+          "store_io_advantage_vs_fsys_pct": null,
+          "note": "Submitter vs fio io_uring (medians of 3)"
+        }
+      ],
+      "findings": [],
+      "anomalies": []
+    }
+  ]
+}

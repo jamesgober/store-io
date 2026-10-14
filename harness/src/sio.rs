@@ -17,10 +17,22 @@ pub type Plat = store_io_posix::PosixPlatform;
 /// A store on the backend under test.
 pub type SioStore = Store<Plat>;
 
-/// A fresh backend instance.
-#[must_use]
-pub fn platform() -> Plat {
-    Plat::new()
+/// A fresh backend instance on the Linux tier `opts.linux_tier` asks for.
+///
+/// # Errors
+///
+/// The tier was refused.
+pub fn platform(opts: &StoreOptions) -> Result<Plat, String> {
+    #[cfg(target_os = "linux")]
+    {
+        Plat::with_tier(opts.linux_tier)
+            .map_err(|e| format!("tier {:?} refused: {e}", opts.linux_tier))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = opts;
+        Ok(Plat::new())
+    }
 }
 
 /// Human-readable name of the backend.
@@ -28,7 +40,7 @@ pub fn platform() -> Plat {
 pub const BACKEND: &str = "store-io-win (WinPlatform: overlapped I/O on IOCP, NO_BUFFERING)";
 /// Human-readable name of the backend.
 #[cfg(target_os = "linux")]
-pub const BACKEND: &str = "store-io-posix (PosixPlatform: synchronous O_DIRECT, tier T3)";
+pub const BACKEND: &str = "store-io-posix (PosixPlatform, O_DIRECT; tier in the report's io line)";
 
 /// What the one-time probe found.
 pub struct Setup {
@@ -61,7 +73,7 @@ pub struct Setup {
 ///
 /// The store-io error, formatted.
 pub fn create(dir: &Path, opts: &StoreOptions) -> Result<SioStore, String> {
-    Store::create(platform(), dir, opts.clone())
+    Store::create(platform(opts)?, dir, opts.clone())
         .map_err(|e| format!("Store::create({}) failed: {e} [{e:?}]", dir.display()))
 }
 
@@ -73,9 +85,12 @@ pub fn create(dir: &Path, opts: &StoreOptions) -> Result<SioStore, String> {
 /// # Errors
 ///
 /// When even the overridden create fails.
-pub fn probe(dir: &Path) -> Result<Setup, String> {
-    let mut opts = StoreOptions::default();
-    let (store, refusal) = match Store::create(platform(), dir, opts.clone()) {
+pub fn probe(dir: &Path, tier: store_io_platform::LinuxTier) -> Result<Setup, String> {
+    let mut opts = StoreOptions {
+        linux_tier: tier,
+        ..StoreOptions::default()
+    };
+    let (store, refusal) = match Store::create(platform(&opts)?, dir, opts.clone()) {
         Ok(s) => (s, None),
         Err(e) => {
             let text = format!("{e} [{e:?}]");

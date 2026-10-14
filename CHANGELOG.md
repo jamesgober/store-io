@@ -25,6 +25,9 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   default, uses io_uring where the kernel accepts store-io's rings, else
   the synchronous tier. `StoreReport::io` names the interface and why it
   was chosen. Other systems ignore the option.
+- `store_io_posix::io_uring_fallbacks()`: operations the io_uring tier
+  finished with a blocking call (never a failure; a measure of how often
+  the asynchronous path was not taken).
 - `Store::open_readonly_with` (explicit options for a read-only open);
   `Op::Queue` for a failed queue setup (it was reported as `Open`).
 

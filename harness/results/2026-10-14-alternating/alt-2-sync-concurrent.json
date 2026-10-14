@@ -1,0 +1,1156 @@
+{
+  "schema": "store-io-harness/1",
+  "incomplete": null,
+  "run": {
+    "date": "2026-10-14T08:30:33Z",
+    "command": "concurrent",
+    "commit": "e4f90ecec8fe39c18eccbe385c6a10fe51cfce2c (crates/ modified)",
+    "os": "linux",
+    "os_version": "Ubuntu 24.04.4 LTS",
+    "kernel": "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@439a258ad544) (gcc (GCC) 11.2.0, GNU ld (GNU Binutils) 2.37) #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025",
+    "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "cpus": 32,
+    "filesystem": "ext4 on / (device /dev/sdd 8:48, mount options rw,relatime, super options rw,discard,errors=remount-ro,data=ordered); store-io classified it Ext4",
+    "dir": "/home/james/store-io-harness-49848",
+    "device": "msft-virtual-disk",
+    "backend": "store-io-posix (PosixPlatform, O_DIRECT; tier in the report's io line)",
+    "secs_per_point": 3,
+    "warmup_secs": 0.30000000000000004,
+    "total_secs": 99.902663532,
+    "fsys": "fsys 1.1.3 (crates.io), Handle method Sync, durability primitive fsync",
+    "raw_primitives": [
+      "pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync",
+      "preadv2 on an O_DIRECT descriptor (one call per request)"
+    ]
+  },
+  "store": {
+    "report": "volume           44e5f0c1-d416-3f16-a271-4d559dce8f10\nio               synchronous (chosen)\nclass            unverified\nlabel            overridden(running under a hypervisor without a certificate for this volume type)\ndurable open     Overridden\nreason           running under a hypervisor without a certificate for this volume type\nmissing          device identify data (needs a readable device node)\nmissing          SMART / health log (needs privilege on Linux)\nmissing          volatile write cache presence\nmissing          volatile write cache enabled state\nmissing          device atomic-write fields\nflush execution  inline (leader)\nblock size       4096\ntable capacity   253 regions\nfilesystem       Ext4\nbus              Virtual\nmodel            Msft Virtual Disk\nmode             read-write",
+    "class": "unverified (receipt label overridden(running under a hypervisor without a certificate for this volume type), durable open Overridden (Trust::override_refusal), block size 4096 B)",
+    "override_in_effect": true,
+    "override_refusal": "device durability is unverified: running under a hypervisor without a certificate for this volume type; missing: device identify data (needs a readable device node); SMART / health log (needs privilege on Linux); volatile write cache presence; volatile write cache enabled state; device atomic-write fields; [Unverified { missing: {Identify, Smart, CachePresence, CacheEnabled, AtomicFields}, reasons: {Hypervisor} }]",
+    "options": "StoreOptions {\n    trust: Trust {\n        certificate: None,\n        attestation: None,\n        override_refusal: true,\n    },\n    block_size: None,\n    log2_table_slot: 14,\n    max_io: 1048576,\n    buffers_per_class: 64,\n    max_write: 4194304,\n    large_buffers: 8,\n    queues: 0,\n    queue_depth: 64,\n    t3_pool_threads: 0,\n    append_ring: 4096,\n    keyed_fill: false,\n    linux_tier: Sync,\n}",
+    "evidence": "Evidence {\n    platform: Linux,\n    device: DeviceFacts {\n        model: Some(\n            \"Msft Virtual Disk\",\n        ),\n        firmware: Some(\n            \"1.0\",\n        ),\n        bus: Virtual,\n        cache_present: Unknown,\n        cache_enabled: Unknown,\n        os_cache_mode: WriteBack,\n        os_flush_supported: Yes,\n        user_power_protection: Unknown,\n        backup_failed: Unknown,\n        fua_supported: No,\n        logical_block: 512,\n        physical_block: 4096,\n        optimal_write: 4096,\n        max_transfer: 1310720,\n        atomic: AtomicFields {\n            awupf: None,\n            nsabp: false,\n            nawupf: 0,\n            nabspf: 0,\n            nabo: 0,\n        },\n        numa_node: Some(\n            0,\n        ),\n        multi_controller: false,\n    },\n    fs: FsFacts {\n        kind: Ext4,\n        data_journal: false,\n        no_barrier: false,\n        sync_disabled: false,\n        weak_error_mode: false,\n        transformed: false,\n        cow: No,\n        direct_io: Unknown,\n        full_flush: Yes,\n        dir_flush: Yes,\n        os_atomic_unit: 0,\n        dio_mem_align: 4,\n        dio_offset_align: 512,\n    },\n    stack: [],\n    hypervisor: Some(\n        HyperV,\n    ),\n    privilege: Unprivileged,\n    kernel: Some(\n        (\n            6,\n            6,\n            87,\n        ),\n    ),\n    timings: Timings {\n        flush_idle_ns: None,\n        flush_loaded_ns: None,\n        fua_extra_ns: None,\n        flush_blocks_writes_pct: None,\n    },\n    missing: {\n        Identify,\n        Smart,\n        CachePresence,\n        CacheEnabled,\n        AtomicFields,\n    },\n}"
+  },
+  "diagnostics": [],
+  "workloads": [
+    {
+      "key": "concurrent",
+      "title": "W2: concurrent durable writers, 4 KiB",
+      "elapsed_secs": 99.367815622,
+      "method": [
+        "Writer counts [1, 2, 4, 8, 16, 32, 64]; every thread loops a durable 4 KiB write at queue depth 1 for the whole point.",
+        "store-io: all threads call `AppendRegion::append_durable` on one append region of one store (a fresh store per point). Flush sharing is read from `Store::domain_stats()` deltas over the window: `flushes` issued, barriers that `led` a flush, barriers that `joined` one.",
+        "raw: each thread writes its own contiguous range of one ready 256 MiB file and makes it durable itself with pwritev2(flags=0) on an O_DIRECT descriptor + fdatasync (no sharing).",
+        "fsys: all threads call `append` + `sync_through` on one shared journal (fresh per point), window off and default (500 µs group-commit window).",
+        "An operation counts when it started and finished inside the measured window; rate = counted operations / window."
+      ],
+      "points": [
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 1,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1238.5129886086472,
+            "ops_per_s": 218.3539461860648,
+            "samples": 656,
+            "p50_us": 3787.616,
+            "p90_us": 9194.156,
+            "p99_us": 11648.402,
+            "p999_us": null,
+            "max_us": 17211.102,
+            "mean_us": 4569.5172042682925,
+            "flushes_per_op": 1.0015243902439024,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0015243902439024,
+            "write_bytes_per_op": 4102.243902439024,
+            "other_calls_per_op": null,
+            "flushes": 657,
+            "led": 657,
+            "joined": 0,
+            "writes_per_flush": 0.9984779299847792,
+            "window_s": 3.004296517
+          },
+          "verify": "passed: 695 of 695 records read back and compared byte for byte; all 695 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.44 s (1239 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 1,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 389.1829296944415,
+            "samples": 1203,
+            "p50_us": 2400.161,
+            "p90_us": 2548.471,
+            "p99_us": 6258.145,
+            "p999_us": 18217.492,
+            "max_us": 18281.781,
+            "mean_us": 2568.0828711554445,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1,
+            "write_bytes_per_op": 4096,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.091091382
+          },
+          "verify": "passed: 1025 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.000 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 1,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 184.6393853938385,
+            "samples": 575,
+            "p50_us": 5162.509,
+            "p90_us": 5432.809,
+            "p99_us": 20892.218,
+            "p999_us": null,
+            "max_us": 21403.051,
+            "mean_us": 5407.51899652174,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0017391304347827,
+            "write_bytes_per_op": 4115.144347826087,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.114178477
+          },
+          "verify": "passed: all 632 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 1,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 156.93387703168483,
+            "samples": 487,
+            "p50_us": 6101.721,
+            "p90_us": 6498.489,
+            "p99_us": 20835.977,
+            "p999_us": null,
+            "max_us": 22915.67,
+            "mean_us": 6356.418782340863,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.002053388090349,
+            "write_bytes_per_op": 4116.435318275154,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.103217796
+          },
+          "verify": "passed: all 539 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 2,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 910.1486180683952,
+            "ops_per_s": 406.75324803391516,
+            "samples": 1281,
+            "p50_us": 4800.274,
+            "p90_us": 5247.932,
+            "p99_us": 19293.07,
+            "p999_us": 21381.132,
+            "max_us": 23444.761,
+            "mean_us": 4911.425153786105,
+            "flushes_per_op": 1.0015612802498048,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0007806401249024,
+            "write_bytes_per_op": 4099.1975019516,
+            "other_calls_per_op": null,
+            "flushes": 1283,
+            "led": 1283,
+            "joined": 0,
+            "writes_per_flush": 0.9984411535463756,
+            "window_s": 3.149329492
+          },
+          "verify": "passed: 1025 of 1409 records read back and compared byte for byte; all 1409 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.59 s (910 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.001 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 2,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 470.8287639390939,
+            "samples": 1446,
+            "p50_us": 4166.153,
+            "p90_us": 4420.833,
+            "p99_us": 18910.477,
+            "p999_us": 20292.802,
+            "max_us": 20316.38,
+            "mean_us": 4242.455890041494,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0013831258644537,
+            "write_bytes_per_op": 4101.665283540802,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.071180248
+          },
+          "verify": "passed: 1026 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.001 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 2,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 346.19910234335373,
+            "samples": 1071,
+            "p50_us": 5308.899,
+            "p90_us": 5795.128,
+            "p99_us": 11422.802,
+            "p999_us": 24901.155,
+            "max_us": 24902.292,
+            "mean_us": 5767.766090569561,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0018674136321195,
+            "write_bytes_per_op": 4115.671335200747,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.093595543
+          },
+          "verify": "passed: all 1181 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 2,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 354.6553810595675,
+            "samples": 1064,
+            "p50_us": 5479.557,
+            "p90_us": 5797.001,
+            "p99_us": 7316.211,
+            "p999_us": 21582.234,
+            "max_us": 21582.446,
+            "mean_us": 5623.726332706767,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0018796992481203,
+            "write_bytes_per_op": 4115.721804511279,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000095464
+          },
+          "verify": "passed: all 1172 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 4,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 987.3898253220475,
+            "ops_per_s": 775.5385656991558,
+            "samples": 2368,
+            "p50_us": 4934.32,
+            "p90_us": 5345.967,
+            "p99_us": 19546.182,
+            "p999_us": 21299.797,
+            "max_us": 21691.779,
+            "mean_us": 5152.735750422297,
+            "flushes_per_op": 0.5038006756756757,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0016891891891893,
+            "write_bytes_per_op": 4102.918918918919,
+            "other_calls_per_op": null,
+            "flushes": 1193,
+            "led": 1193,
+            "joined": 1179,
+            "writes_per_flush": 1.9849119865884326,
+            "window_s": 3.053362018
+          },
+          "verify": "passed: 1025 of 2646 records read back and compared byte for byte; all 2646 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.55 s (987 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 4,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 424.6891153635572,
+            "samples": 1278,
+            "p50_us": 8867.033,
+            "p90_us": 9367.366,
+            "p99_us": 25289.398,
+            "p999_us": 27074.15,
+            "max_us": 27202.915,
+            "mean_us": 9396.331650234742,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0031298904538342,
+            "write_bytes_per_op": 4108.820031298905,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.009260077
+          },
+          "verify": "passed: 1028 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.003 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 4,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 559.9922955626023,
+            "samples": 1696,
+            "p50_us": 5369.93,
+            "p90_us": 10582.733,
+            "p99_us": 19883.344,
+            "p999_us": 29107.76,
+            "max_us": 29307.908,
+            "mean_us": 7126.254458136792,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0023584905660377,
+            "write_bytes_per_op": 4117.688679245283,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.028613096
+          },
+          "verify": "passed: all 1881 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 4,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 637.0097849261443,
+            "samples": 1948,
+            "p50_us": 6085.777,
+            "p90_us": 6359.049,
+            "p99_us": 10439.318,
+            "p999_us": 22504.313,
+            "max_us": 22521.246,
+            "mean_us": 6262.981699178645,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.002053388090349,
+            "write_bytes_per_op": 4116.435318275154,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.058037798
+          },
+          "verify": "passed: all 2176 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 8,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 891.6069806369535,
+            "ops_per_s": 1494.2941210632043,
+            "samples": 4483,
+            "p50_us": 4835.873,
+            "p90_us": 6985.439,
+            "p99_us": 19725.454,
+            "p999_us": 22067.896,
+            "max_us": 22160.453,
+            "mean_us": 5342.9166935088115,
+            "flushes_per_op": 0.2708008030336828,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0013383894713361,
+            "write_bytes_per_op": 4101.482043274593,
+            "other_calls_per_op": null,
+            "flushes": 1214,
+            "led": 1214,
+            "joined": 3277,
+            "writes_per_flush": 3.6927512355848435,
+            "window_s": 3.000078724
+          },
+          "verify": "passed: 1025 of 4916 records read back and compared byte for byte; all 4916 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.61 s (892 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.001 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 8,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 431.3130136380097,
+            "samples": 1308,
+            "p50_us": 17352.223,
+            "p90_us": 19415.707,
+            "p99_us": 33602.363,
+            "p999_us": 34875.451,
+            "max_us": 35022.908,
+            "mean_us": 18437.179882262997,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0061162079510704,
+            "write_bytes_per_op": 4121.051987767584,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.032600359
+          },
+          "verify": "passed: 1032 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.006 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 8,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 932.3094394854786,
+            "samples": 2797,
+            "p50_us": 9774.33,
+            "p90_us": 10803.937,
+            "p99_us": 20074.566,
+            "p999_us": 27329.344,
+            "max_us": 27361.251,
+            "mean_us": 8561.4610772256,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.002860207365034,
+            "write_bytes_per_op": 4119.74973185556,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000076886
+          },
+          "verify": "passed: all 3107 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.003 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 8,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 1345.861431004305,
+            "samples": 4038,
+            "p50_us": 5716.662,
+            "p90_us": 6035.886,
+            "p99_us": 10877.539,
+            "p999_us": 33021.624,
+            "max_us": 33042.887,
+            "mean_us": 5931.710458147598,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0019811788013868,
+            "write_bytes_per_op": 4116.138682516097,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000308878
+          },
+          "verify": "passed: all 4472 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 16,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 2233.9347050210886,
+            "ops_per_s": 2432.7164295984785,
+            "samples": 7299,
+            "p50_us": 6850.987,
+            "p90_us": 7757.137,
+            "p99_us": 21206.878,
+            "p999_us": 23637.812,
+            "max_us": 24046.117,
+            "mean_us": 6560.023229346486,
+            "flushes_per_op": 0.15782983970406905,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0019180709686257,
+            "write_bytes_per_op": 4103.856418687491,
+            "other_calls_per_op": null,
+            "flushes": 1152,
+            "led": 1152,
+            "joined": 6163,
+            "writes_per_flush": 6.3359375,
+            "window_s": 3.000349696
+          },
+          "verify": "passed: 1025 of 8127 records read back and compared byte for byte; all 8127 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.24 s (2234 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.002 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 16,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 312.3223327161304,
+            "samples": 937,
+            "p50_us": 44850.092,
+            "p90_us": 70234.732,
+            "p99_us": 102331.139,
+            "p999_us": null,
+            "max_us": 157595.859,
+            "mean_us": 50192.94904802561,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.017075773745998,
+            "write_bytes_per_op": 4165.942369263607,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000105666
+          },
+          "verify": "passed: 1040 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.017 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 16,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 827.0953396820228,
+            "samples": 2482,
+            "p50_us": 16431.843,
+            "p90_us": 30967.241,
+            "p99_us": 54284.111,
+            "p999_us": 67592.774,
+            "max_us": 67708.549,
+            "mean_us": 19213.749975825947,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0064464141821112,
+            "write_bytes_per_op": 4134.481869460113,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000863239
+          },
+          "verify": "passed: all 2750 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.006 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 16,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 1162.289458843411,
+            "samples": 3487,
+            "p50_us": 10754.42,
+            "p90_us": 28819.621,
+            "p99_us": 49677.887,
+            "p999_us": 69283.736,
+            "max_us": 69307.999,
+            "mean_us": 13689.221690564955,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0045884714654432,
+            "write_bytes_per_op": 4126.84944078004,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000113245
+          },
+          "verify": "passed: all 3710 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.005 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 32,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1500.257249241992,
+            "ops_per_s": 4551.170259907021,
+            "samples": 13655,
+            "p50_us": 7167.781,
+            "p90_us": 8411.028,
+            "p99_us": 10366.423,
+            "p999_us": 25018.25,
+            "max_us": 25672.925,
+            "mean_us": 7007.527604393995,
+            "flushes_per_op": 0.08604906627608934,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0037348956426217,
+            "write_bytes_per_op": 4111.298132552179,
+            "other_calls_per_op": null,
+            "flushes": 1175,
+            "led": 1175,
+            "joined": 12512,
+            "writes_per_flush": 11.62127659574468,
+            "window_s": 3.000327217
+          },
+          "verify": "passed: 1025 of 15123 records read back and compared byte for byte; all 15123 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.36 s (1500 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.004 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 32,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 454.58613733855196,
+            "samples": 1364,
+            "p50_us": 61458.376,
+            "p90_us": 99660.143,
+            "p99_us": 115498.639,
+            "p999_us": 121361.342,
+            "max_us": 121520.967,
+            "mean_us": 68683.46908577712,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0234604105571847,
+            "write_bytes_per_op": 4192.093841642229,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000531446
+          },
+          "verify": "passed: 1056 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.023 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 32,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 3147.2517922357324,
+            "samples": 9442,
+            "p50_us": 10453.573,
+            "p90_us": 10954.894,
+            "p99_us": 16350.196,
+            "p999_us": 26348.238,
+            "max_us": 26430.105,
+            "mean_us": 10147.567452764244,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0033891124761702,
+            "write_bytes_per_op": 4121.922474052108,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000077726
+          },
+          "verify": "passed: all 10354 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.003 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 32,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 2910.050556582928,
+            "samples": 8732,
+            "p50_us": 11431.839,
+            "p90_us": 12282.201,
+            "p99_us": 14210.89,
+            "p999_us": 18455.33,
+            "max_us": 18530.632,
+            "mean_us": 10957.726952702704,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0036646816307833,
+            "write_bytes_per_op": 4123.054512139258,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000635154
+          },
+          "verify": "passed: all 9687 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.004 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "store-io",
+          "variant": "AppendRegion::append_durable (shared region)",
+          "params": {
+            "threads": 64,
+            "bytes": 4096
+          },
+          "metrics": {
+            "provision_mb_per_s": 1392.3239516540666,
+            "ops_per_s": 8932.087882535685,
+            "samples": 26797,
+            "p50_us": 7081.486,
+            "p90_us": 8570.906,
+            "p99_us": 10674.891,
+            "p999_us": 22946.123,
+            "max_us": 24485.772,
+            "mean_us": 7140.400706161137,
+            "flushes_per_op": 0.04739336492890995,
+            "uring_fallbacks_per_op": 0,
+            "write_calls_per_op": 1.0031346792551405,
+            "write_bytes_per_op": 4108.839646229056,
+            "other_calls_per_op": null,
+            "flushes": 1270,
+            "led": 1270,
+            "joined": 25591,
+            "writes_per_flush": 21.1,
+            "window_s": 3.000082439
+          },
+          "verify": "passed: 1025 of 29460 records read back and compared byte for byte; all 29460 checked for overlap and alignment",
+          "error": null,
+          "notes": [
+            "provisioned a 516 MiB append region in 0.39 s (1392 MB/s: fill, flush, verify)",
+            "OS write calls in window / counted ops = 1.003 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "raw",
+          "variant": "own write + own data flush (per thread range)",
+          "params": {
+            "threads": 64,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 782.0170822365361,
+            "samples": 2347,
+            "p50_us": 82958.959,
+            "p90_us": 106003.71,
+            "p99_us": 121076.766,
+            "p999_us": 122257.019,
+            "max_us": 123910.793,
+            "mean_us": 79050.4958005965,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0293992330634854,
+            "write_bytes_per_op": 4216.419258628036,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.001213213
+          },
+          "verify": "passed: 1088 latest writes (sampled across all threads) read back unbuffered and compared",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.029 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, buffered, window off: shared journal append + sync_through",
+          "params": {
+            "threads": 64,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 5695.405509775953,
+            "samples": 17088,
+            "p50_us": 11070.97,
+            "p90_us": 11564.823,
+            "p99_us": 27578.118,
+            "p999_us": 35436.787,
+            "max_us": 35731.034,
+            "mean_us": 11184.897247600657,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.00374531835206,
+            "write_bytes_per_op": 4123.385767790262,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.000313142
+          },
+          "verify": "passed: all 18928 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.004 (straddling ops make this slightly above 1)"
+          ]
+        },
+        {
+          "system": "fsys",
+          "variant": "journal, default (buffered, 500 µs group-commit window): shared journal append + sync_through",
+          "params": {
+            "threads": 64,
+            "bytes": 4096
+          },
+          "metrics": {
+            "ops_per_s": 5927.834633173184,
+            "samples": 17784,
+            "p50_us": 10781.127,
+            "p90_us": 11299.019,
+            "p99_us": 25512.683,
+            "p999_us": 26152.5,
+            "max_us": 26450.212,
+            "mean_us": 10770.602105881691,
+            "flushes_per_op": null,
+            "write_calls_per_op": 1.0035987404408457,
+            "write_bytes_per_op": 4122.783625730995,
+            "other_calls_per_op": null,
+            "flushes": null,
+            "led": null,
+            "joined": null,
+            "writes_per_flush": null,
+            "window_s": 3.00008369
+          },
+          "verify": "passed: all 19696 records replayed with JournalReader and compared byte for byte",
+          "error": null,
+          "notes": [
+            "OS write calls in window / counted ops = 1.004 (straddling ops make this slightly above 1)"
+          ]
+        }
+      ],
+      "comparisons": [
+        {
+          "case": "1 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 218.3539461860648,
+          "raw": 389.1829296944415,
+          "fsys": 184.6393853938385,
+          "store_io_vs_raw_ratio": 0.5610573576736797,
+          "store_io_vs_fsys_ratio": 1.1825967992707118,
+          "store_io_advantage_vs_raw_pct": -43.89426423263203,
+          "store_io_advantage_vs_fsys_pct": 18.259679927071183,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (window off, the better fsys config here)"
+        },
+        {
+          "case": "1 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 11648.402,
+          "raw": 6258.145,
+          "fsys": 20835.977,
+          "store_io_vs_raw_ratio": 1.8613186495359246,
+          "store_io_vs_fsys_ratio": 0.5590523544924244,
+          "store_io_advantage_vs_raw_pct": -86.13186495359247,
+          "store_io_advantage_vs_fsys_pct": 44.09476455075756,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "2 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 406.75324803391516,
+          "raw": 470.8287639390939,
+          "fsys": 354.6553810595675,
+          "store_io_vs_raw_ratio": 0.8639090879471681,
+          "store_io_vs_fsys_ratio": 1.1468971563851653,
+          "store_io_advantage_vs_raw_pct": -13.609091205283185,
+          "store_io_advantage_vs_fsys_pct": 14.689715638516532,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "2 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 19293.07,
+          "raw": 18910.477,
+          "fsys": 7316.211,
+          "store_io_vs_raw_ratio": 1.020231800604501,
+          "store_io_vs_fsys_ratio": 2.637030287945495,
+          "store_io_advantage_vs_raw_pct": -2.0231800604501027,
+          "store_io_advantage_vs_fsys_pct": -163.7030287945495,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "4 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 775.5385656991558,
+          "raw": 424.6891153635572,
+          "fsys": 637.0097849261443,
+          "store_io_vs_raw_ratio": 1.8261324287420273,
+          "store_io_vs_fsys_ratio": 1.217467272954171,
+          "store_io_advantage_vs_raw_pct": 82.61324287420273,
+          "store_io_advantage_vs_fsys_pct": 21.746727295417088,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "4 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 19546.182,
+          "raw": 25289.398,
+          "fsys": 10439.318,
+          "store_io_vs_raw_ratio": 0.7729002485547501,
+          "store_io_vs_fsys_ratio": 1.8723619684734196,
+          "store_io_advantage_vs_raw_pct": 22.709975144524986,
+          "store_io_advantage_vs_fsys_pct": -87.23619684734196,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "8 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 1494.2941210632043,
+          "raw": 431.3130136380097,
+          "fsys": 1345.861431004305,
+          "store_io_vs_raw_ratio": 3.46452361466962,
+          "store_io_vs_fsys_ratio": 1.1102882411513468,
+          "store_io_advantage_vs_raw_pct": 246.45236146696197,
+          "store_io_advantage_vs_fsys_pct": 11.028824115134682,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "8 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 19725.454,
+          "raw": 33602.363,
+          "fsys": 10877.539,
+          "store_io_vs_raw_ratio": 0.5870257993463139,
+          "store_io_vs_fsys_ratio": 1.8134114711057345,
+          "store_io_advantage_vs_raw_pct": 41.297420065368605,
+          "store_io_advantage_vs_fsys_pct": -81.34114711057346,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "16 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 2432.7164295984785,
+          "raw": 312.3223327161304,
+          "fsys": 1162.289458843411,
+          "store_io_vs_raw_ratio": 7.789120965005001,
+          "store_io_vs_fsys_ratio": 2.093038365863925,
+          "store_io_advantage_vs_raw_pct": 678.9120965005001,
+          "store_io_advantage_vs_fsys_pct": 109.30383658639249,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "16 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 21206.878,
+          "raw": 102331.139,
+          "fsys": 49677.887,
+          "store_io_vs_raw_ratio": 0.20723777930391257,
+          "store_io_vs_fsys_ratio": 0.4268876814345989,
+          "store_io_advantage_vs_raw_pct": 79.27622206960874,
+          "store_io_advantage_vs_fsys_pct": 57.31123185654011,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "32 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 4551.170259907021,
+          "raw": 454.58613733855196,
+          "fsys": 3147.2517922357324,
+          "store_io_vs_raw_ratio": 10.01167850509605,
+          "store_io_vs_fsys_ratio": 1.4460775814425635,
+          "store_io_advantage_vs_raw_pct": 901.167850509605,
+          "store_io_advantage_vs_fsys_pct": 44.60775814425635,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (window off, the better fsys config here)"
+        },
+        {
+          "case": "32 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 10366.423,
+          "raw": 115498.639,
+          "fsys": 14210.89,
+          "store_io_vs_raw_ratio": 0.08975363770303822,
+          "store_io_vs_fsys_ratio": 0.7294703568882738,
+          "store_io_advantage_vs_raw_pct": 91.02463622969617,
+          "store_io_advantage_vs_fsys_pct": 27.052964311172623,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "64 concurrent durable 4 KiB writers",
+          "metric": "durable ops/s",
+          "better": "higher",
+          "store_io": 8932.087882535685,
+          "raw": 782.0170822365361,
+          "fsys": 5927.834633173184,
+          "store_io_vs_raw_ratio": 11.421857764270683,
+          "store_io_vs_fsys_ratio": 1.5068044969659211,
+          "store_io_advantage_vs_raw_pct": 1042.1857764270683,
+          "store_io_advantage_vs_fsys_pct": 50.68044969659211,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        },
+        {
+          "case": "64 concurrent durable 4 KiB writers",
+          "metric": "p99 µs",
+          "better": "lower",
+          "store_io": 10674.891,
+          "raw": 121076.766,
+          "fsys": 25512.683,
+          "store_io_vs_raw_ratio": 0.08816630434281668,
+          "store_io_vs_fsys_ratio": 0.41841506830151887,
+          "store_io_advantage_vs_raw_pct": 91.18336956571834,
+          "store_io_advantage_vs_fsys_pct": 58.158493169848114,
+          "note": "store-io shared flushes vs raw own flush per writer vs fsys shared journal (default window, the better fsys config here)"
+        }
+      ],
+      "findings": [
+        "store-io scaling: 218 durable ops/s at 1 writer, 8932 at 64 writers (21.10 writes per flush) [derived from the table]."
+      ],
+      "anomalies": []
+    }
+  ]
+}

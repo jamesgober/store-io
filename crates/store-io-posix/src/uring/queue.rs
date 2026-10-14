@@ -43,6 +43,11 @@ use crate::sys::{errno, fdatasync, preadv2, pwritev2};
 /// half is a slot index, below the depth.
 const WAKE: u64 = u64::MAX;
 
+/// Operations, process-wide, that a queue finished with a blocking call
+/// after NOWAIT refused them or cut them short (D-073's counted fallbacks;
+/// `crate::io_uring_fallbacks`).
+pub(crate) static FALLBACKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// The most operations a queue holds: with the wake read, within the
 /// completion ring (twice the largest submission ring, 4096), so the kernel
 /// never needs its overflow list.
@@ -372,6 +377,17 @@ impl UringQueue {
 
     /// Moves every completion the kernel posted into `ready`.
     fn collect(&mut self) {
+        let before = self.fallbacks;
+        self.collect_inner();
+        if self.fallbacks != before {
+            let _n = FALLBACKS.fetch_add(
+                self.fallbacks - before,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+
+    fn collect_inner(&mut self) {
         let Self {
             ring,
             slots,

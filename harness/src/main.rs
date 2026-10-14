@@ -44,7 +44,7 @@ struct Workload {
     points: usize,
 }
 
-const WORKLOADS: [Workload; 5] = [
+const WORKLOADS: [Workload; 6] = [
     Workload {
         command: Command::Lone,
         run: workloads::lone::run,
@@ -69,6 +69,11 @@ const WORKLOADS: [Workload; 5] = [
         command: Command::Sequential,
         run: workloads::sequential::run,
         points: 11,
+    },
+    Workload {
+        command: Command::Submitter,
+        run: workloads::submitter::run,
+        points: 16,
     },
 ];
 
@@ -132,7 +137,7 @@ fn run(args: &Args) -> Result<(), String> {
 fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
     eprintln!("probing the device under {} ...", base.display());
     let probe_dir = base.join("probe");
-    let setup = sio::probe(&probe_dir)?;
+    let setup = sio::probe(&probe_dir, args.tier)?;
     if let Some(e) = workloads::remove(&probe_dir) {
         eprintln!("warning: {e}");
     }

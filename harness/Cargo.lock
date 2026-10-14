@@ -350,6 +350,7 @@ dependencies = [
  "store-io-buf",
  "store-io-core",
  "store-io-engine",
+ "store-io-platform",
  "store-io-posix",
  "store-io-win",
  "windows-sys 0.61.2",

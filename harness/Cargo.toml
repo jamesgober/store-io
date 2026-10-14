@@ -28,6 +28,8 @@ observe = ["store-io-core/observe", "store-io-engine/observe"]
 [dependencies]
 store-io-core   = { path = "../crates/store-io-core" }
 store-io-engine = { path = "../crates/store-io-engine" }
+# `LinuxTier`, for `--tier`.
+store-io-platform = { path = "../crates/store-io-platform" }
 # Only for the W5 diagnostic that runs the raw primitive on a buffer from
 # store-io's own pool (separates pool-memory cost from engine-path cost).
 store-io-buf    = { path = "../crates/store-io-buf" }

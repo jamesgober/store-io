@@ -7,6 +7,7 @@ pub mod concurrent;
 pub mod lone;
 pub mod page_batch;
 pub mod sequential;
+pub mod submitter;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -17,7 +18,7 @@ use store_io_engine::{AppendRegion, StoreOptions};
 
 use crate::data::Pool;
 use crate::raw::{IoCounters, io_counters};
-use crate::report::{Point, Verify};
+use crate::report::{Point, System, Verify};
 use crate::sio::{self, Plat, SioStore};
 use crate::stats::Samples;
 
@@ -124,6 +125,20 @@ pub struct Snap {
     pub domain: Option<DomainStats>,
     /// OS per-process I/O counters.
     pub io: Option<IoCounters>,
+    /// io_uring operations finished by a blocking call (Linux).
+    pub fallbacks: Option<u64>,
+}
+
+/// The process's io_uring fallback count, where there is one.
+pub fn fallbacks() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(store_io_posix::io_uring_fallbacks())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 impl Snap {
@@ -133,6 +148,7 @@ impl Snap {
         Self {
             domain: None,
             io: io_counters(),
+            fallbacks: fallbacks(),
         }
     }
 
@@ -142,6 +158,7 @@ impl Snap {
         Self {
             domain: Some(s.domain_stats()),
             io: io_counters(),
+            fallbacks: fallbacks(),
         }
     }
 }
@@ -157,6 +174,8 @@ pub struct Delta {
     pub joined: Option<u64>,
     /// OS counter deltas.
     pub io: Option<IoCounters>,
+    /// io_uring fallbacks.
+    pub fallbacks: Option<u64>,
 }
 
 impl Delta {
@@ -177,6 +196,10 @@ impl Delta {
             joined: d.map(|x| x.2),
             io: match (before.io, after.io) {
                 (Some(b), Some(a)) => Some(a.since(&b)),
+                _ => None,
+            },
+            fallbacks: match (before.fallbacks, after.fallbacks) {
+                (Some(b), Some(a)) => Some(a.saturating_sub(b)),
                 _ => None,
             },
         }
@@ -492,6 +515,9 @@ pub fn record_run(p: &mut Point, run: &Run, rate_name: &'static str) {
 /// Records per-operation counter deltas on `p`.
 pub fn record_delta(p: &mut Point, d: &Delta, ops: u64) {
     p.metric("flushes_per_op", Delta::per(d.flushes, ops));
+    if p.system == System::StoreIo {
+        p.metric("uring_fallbacks_per_op", Delta::per(d.fallbacks, ops));
+    }
     p.metric(
         "write_calls_per_op",
         Delta::per(d.io.map(|x| x.write_calls), ops),

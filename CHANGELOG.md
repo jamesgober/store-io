@@ -187,12 +187,14 @@
 - The observer (feature `observe`, off by default; D-094). `Store::observe()`
   returns exact event counters and sampled per-stage latency histograms
   (log2 buckets with nearest-rank quantiles). Off, every hook compiles away
-  (0 ns). On, per durable write: 18.5 ns on one thread, 19.0 ns on four,
-  20.7 ns with all 16 cores busy (Windows; Linux 17.9, 18.3, 20.1)
-  [measured, harness `observe-cost`, median of 3 runs]. Counts are exact. There
-  is one counter block per CPU, so concurrent threads normally keep to their
-  own cache lines (a process that keeps creating threads can see two share a
-  block: still exact, slower). No allocation
+  (0 ns). On, per durable write: about 9 ns on one thread, 10 to 12 ns on
+  four, 15 ns with all 16 cores busy (Windows; Linux under WSL2 about 8, 9.5
+  to 10.5, 14.4 to 15.8) [measured, harness `observe-cost`, median of 3 runs,
+  on a busy machine]. Counts are exact. Each observer has one block per CPU
+  (rounded up to a power of two, 16 to 256); that many live threads own one
+  each and update it without locked instructions, and further threads
+  spread over as many shared blocks with atomic adds (still exact). No
+  allocation
   after creation, no timer, no thread, no dependency. The facade and the
   engine pass the feature through to `store-io-core`, and the facade
   re-exports `store_io::observe`.

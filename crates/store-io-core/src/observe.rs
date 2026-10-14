@@ -3,9 +3,12 @@
 //! With the `observe` feature off (the default) every type here is
 //! zero-sized and every hook is an empty inline function: nothing is
 //! compiled into the caller. With it on, one [`Observer`] per store holds a
-//! fixed set of cache-line-aligned blocks, one per thread (modulo the block
-//! count), allocated once at creation:
-//! - counters are exact: one relaxed add on the thread's own block;
+//! fixed set of cache-line-aligned blocks, allocated once at creation. Each
+//! live thread holds a process-wide slot; a thread whose slot is below the
+//! block count owns that block alone, any other thread spreads over as many
+//! shared blocks (D-100):
+//! - counters are exact: a plain load and store on an owned block (one
+//!   writer, no locked instruction), an atomic add on a shared one;
 //! - latency is sampled: one span in [`SAMPLE`] per stage and block reads
 //!   the clock, because a clock read (tens of nanoseconds) on every stage of
 //!   every operation would cost more than the observer's budget (≤ 20 ns per
@@ -183,23 +186,97 @@ pub const fn enabled() -> bool {
 
 #[cfg(feature = "observe")]
 mod on {
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+    use std::sync::atomic::{
+        AtomicU32, AtomicU64, AtomicUsize,
+        Ordering::{Acquire, Relaxed, Release},
+    };
     use std::time::Instant;
 
     use super::{BUCKETS, COUNTERS, Counter, SAMPLE, STAGES, Snapshot, Stage, bucket_of};
 
     /// Blocks per observer: the machine's CPU count rounded up to a power of
-    /// two (so picking a thread's block is a mask, not a division), at least
-    /// 16 and at most 256. Threads beyond that share blocks: their counts stay
-    /// exact, but their counter lines are shared between cores.
+    /// two, at least 16 and at most [`SLOTS`]. A thread whose slot is below
+    /// it owns that block alone; any other thread uses a shared block.
     fn block_count() -> usize {
         std::thread::available_parallelism()
             .map_or(16, std::num::NonZeroUsize::get)
             .next_power_of_two()
-            .clamp(16, 256)
+            .clamp(16, SLOTS)
     }
 
-    /// One thread's counters and histograms, on lines of its own.
+    /// Process-wide thread slots, one bit each. A power of two, and at least
+    /// every block count: an index of `SLOTS` or more (a thread without a
+    /// slot) can never name an owned block, and masking it spreads it over
+    /// the shared blocks.
+    const SLOTS: usize = 256;
+    const _: () = assert!(SLOTS.is_power_of_two());
+    static TAKEN: [AtomicU64; SLOTS / 64] = [const { AtomicU64::new(0) }; SLOTS / 64];
+
+    /// Claims the lowest free slot, if any. Acquire: the slot's previous
+    /// owner's last writes to its blocks happen before this thread's first.
+    #[cold]
+    fn claim() -> Option<usize> {
+        for (w, word) in TAKEN.iter().enumerate() {
+            let mut seen = word.load(Relaxed);
+            while seen != u64::MAX {
+                let bit = (!seen).trailing_zeros() as usize;
+                let was = word.fetch_or(1 << bit, Acquire);
+                if was & (1 << bit) == 0 {
+                    return Some(w * 64 + bit);
+                }
+                seen = was;
+            }
+        }
+        None
+    }
+
+    /// A thread's place: its slot, held until the thread exits (no two live
+    /// threads hold the same one, so a block indexed by it has one writer).
+    /// `index` is the slot, or for a thread that found none, [`SLOTS`] plus
+    /// a spread over the shared blocks: an observer uses its own block when
+    /// `index` is below its block count, else a shared block.
+    struct Place {
+        index: usize,
+    }
+
+    impl Place {
+        #[cold]
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            Self {
+                index: claim().unwrap_or_else(|| SLOTS + NEXT.fetch_add(1, Relaxed) % SLOTS),
+            }
+        }
+    }
+
+    impl Drop for Place {
+        fn drop(&mut self) {
+            let i = self.index;
+            if i < SLOTS {
+                // Release: this thread's writes happen before the next owner's.
+                let _was = TAKEN[i / 64].fetch_and(!(1 << (i % 64)), Release);
+            }
+        }
+    }
+
+    /// While a thread's thread-locals are destroyed (it may no longer hold
+    /// a slot): never an owned block.
+    const GONE: usize = usize::MAX;
+
+    /// This thread's index (see [`Place`]). Read only, so the lookups of one
+    /// operation's hooks can be merged; a thread that found no free slot
+    /// keeps to the shared blocks for its life (a retry here measured about
+    /// 8 ns more per durable write).
+    #[inline]
+    fn index() -> usize {
+        thread_local! {
+            static PLACE: Place = Place::new();
+        }
+        PLACE.try_with(|p| p.index).unwrap_or(GONE)
+    }
+
+    /// Counters and histograms, on lines of their own: owned by one thread,
+    /// or shared.
     #[repr(align(128))]
     struct Block {
         counters: [AtomicU64; COUNTERS],
@@ -221,10 +298,14 @@ mod on {
 
     /// Per-store observer (see the module docs).
     pub struct Observer {
-        /// A power-of-two number of blocks (see `block_count`), about 3 KB
-        /// each, built on the heap once.
+        /// One block per thread slot below `block_count`, about 3 KB each,
+        /// built on the heap once; each has one writer.
         blocks: Box<[Block]>,
-        /// `blocks.len() - 1`.
+        /// As many blocks again for every other thread (more live threads
+        /// than blocks), spread as every thread was before blocks were
+        /// owned: atomic adds only.
+        shared: Box<[Block]>,
+        /// `shared.len() - 1` (a power of two).
         mask: usize,
     }
 
@@ -242,12 +323,17 @@ mod on {
         }
     }
 
-    fn thread_index() -> usize {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        thread_local! {
-            static INDEX: usize = NEXT.fetch_add(1, Relaxed);
+    /// Adds `n` to a cell: a plain load and store in a block with one
+    /// writer (exact, no locked instruction), an atomic add in a shared one.
+    /// (Not from a signal handler: one could interrupt the owner between
+    /// its load and its store.)
+    #[inline]
+    fn bump(cell: &AtomicU64, n: u64, own: bool) {
+        if own {
+            cell.store(cell.load(Relaxed).wrapping_add(n), Relaxed);
+        } else {
+            let _old = cell.fetch_add(n, Relaxed);
         }
-        INDEX.with(|i| *i)
     }
 
     impl Observer {
@@ -257,34 +343,42 @@ mod on {
             let n = block_count();
             Self {
                 blocks: (0..n).map(|_| Block::new()).collect(),
+                shared: (0..n).map(|_| Block::new()).collect(),
                 mask: n - 1,
             }
         }
 
+        /// The block for `index`, and whether the caller is its one writer.
         #[inline]
-        fn block(&self) -> &Block {
-            &self.blocks[thread_index() & self.mask]
+        fn block(&self, index: usize) -> (&Block, bool) {
+            match self.blocks.get(index) {
+                Some(b) => (b, true),
+                None => (&self.shared[index & self.mask], false),
+            }
         }
 
         /// Adds `n` to a counter.
         #[inline]
         pub fn add(&self, c: Counter, n: u64) {
-            let _old = self.block().counters[c as usize].fetch_add(n, Relaxed);
+            let (block, own) = self.block(index());
+            bump(&block.counters[c as usize], n, own);
         }
 
         /// Starts timing a stage; the span records when dropped, if this
         /// span is one of the sampled ones.
         #[inline]
         pub fn span(&self, s: Stage) -> Span<'_> {
-            let block = self.block();
-            // The tick needs no atomic increment: a lost tick (two threads
-            // sharing a block) only shifts which span is sampled.
+            let index = index();
+            let (block, _) = self.block(index);
+            // The tick needs no atomic increment: a lost tick (threads
+            // sharing a shared block) only shifts which span is sampled.
             let tick = &block.ticks[s as usize];
             let n = tick.load(Relaxed);
             tick.store(n.wrapping_add(1), Relaxed);
             let sampled = n % SAMPLE == 0;
             Span {
-                timed: sampled.then(|| (block, s, Instant::now())),
+                timed: sampled.then(|| (self, index, s, Instant::now())),
+                _thread: core::marker::PhantomData,
             }
         }
 
@@ -293,7 +387,7 @@ mod on {
         pub fn snapshot(&self) -> Snapshot {
             let mut out = Snapshot::default();
             // Not an atomic cut across counters: each is read once, in turn.
-            for b in self.blocks.iter() {
+            for b in self.blocks.iter().chain(self.shared.iter()) {
                 for (sum, c) in out.counters.iter_mut().zip(&b.counters) {
                     *sum = sum.wrapping_add(c.load(Relaxed));
                 }
@@ -310,15 +404,24 @@ mod on {
     /// A stage being timed; records on drop when sampled.
     #[must_use = "a span records when it is dropped"]
     pub struct Span<'a> {
-        timed: Option<(&'a Block, Stage, Instant)>,
+        /// Sampled: the observer, the thread's index when it started, the
+        /// stage and the start.
+        timed: Option<(&'a Observer, usize, Stage, Instant)>,
+        /// Dropped on the thread that started it.
+        _thread: core::marker::PhantomData<*const ()>,
     }
 
     impl Drop for Span<'_> {
         #[inline]
         fn drop(&mut self) {
-            if let Some((block, stage, start)) = self.timed {
+            if let Some((observer, started, stage, start)) = self.timed {
                 let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                let _old = block.stages[stage as usize][bucket_of(ns)].fetch_add(1, Relaxed);
+                // A span dropped during the thread's teardown may outlive
+                // its slot, whose block may have a new owner: then it is
+                // recorded in a shared block.
+                let now = if index() == started { started } else { GONE };
+                let (block, own) = observer.block(now);
+                bump(&block.stages[stage as usize][bucket_of(ns)], 1, own);
             }
         }
     }
@@ -357,9 +460,10 @@ mod off {
         }
     }
 
-    /// A stage being timed: zero-sized, records nothing.
+    /// A stage being timed: zero-sized, records nothing. Bound to its
+    /// thread, as with the feature on (features are additive).
     #[must_use = "a span records when it is dropped"]
-    pub struct Span<'a>(core::marker::PhantomData<&'a ()>);
+    pub struct Span<'a>(core::marker::PhantomData<(&'a (), *const ())>);
 }
 
 #[cfg(feature = "observe")]
@@ -371,6 +475,15 @@ pub use off::{Observer, Span};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises the tests that spawn threads using an observer: slots are
+    /// process-wide.
+    #[cfg(feature = "observe")]
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ONE.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn test_buckets_split_durations_by_powers_of_two() {
@@ -422,6 +535,9 @@ mod tests {
     #[cfg(feature = "observe")]
     #[test]
     fn test_counters_are_exact_and_spans_are_sampled() {
+        // Alone: with another test's threads holding the slots, these could
+        // share a block, and shared ticks may be lost (sampling shifts).
+        let _one = serial();
         let o = Observer::new();
         std::thread::scope(|s| {
             for _ in 0..8 {
@@ -449,5 +565,38 @@ mod tests {
             "too many samples: {samples}"
         );
         assert_eq!(snap.stage(Stage::Read).samples(), 0);
+    }
+
+    /// More live threads than blocks (and than process-wide slots): the
+    /// extra threads use shared blocks with atomic adds, owners write their
+    /// own, and every count is exact. Every thread is joined (its slot freed)
+    /// before the second round, whose threads reuse the slots.
+    #[cfg(feature = "observe")]
+    #[test]
+    fn test_counts_stay_exact_beyond_the_blocks_and_across_slot_reuse() {
+        let _one = serial();
+        let o = Observer::new();
+        for round in 1..=2u64 {
+            let start = std::sync::Barrier::new(300);
+            std::thread::scope(|s| {
+                let workers: Vec<_> = (0..300)
+                    .map(|_| {
+                        let (o, start) = (&o, &start);
+                        s.spawn(move || {
+                            // All 300 alive at once.
+                            let _all = start.wait();
+                            for _ in 0..5_000 {
+                                o.add(Counter::Writes, 1);
+                                drop(o.span(Stage::Write));
+                            }
+                        })
+                    })
+                    .collect();
+                for w in workers {
+                    assert!(w.join().is_ok());
+                }
+            });
+            assert_eq!(o.snapshot().counter(Counter::Writes), round * 300 * 5_000);
+        }
     }
 }

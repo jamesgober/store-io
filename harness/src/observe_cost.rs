@@ -4,10 +4,11 @@
 //! adds. On a real device the write itself takes microseconds, so the
 //! observer's share cannot be seen end to end; this times exactly that hook
 //! sequence in a tight loop, minus the cost of the empty loop, on 1, 4, 16
-//! and 17 threads started together. The observer has one block per CPU
-//! (rounded up to a power of two, at least 16), so on a machine with 17 or
-//! more CPUs these threads do not share blocks and the rise with thread count
-//! is the CPU's lower all-core clock; with fewer CPUs, 17 threads share. A
+//! and 17 threads started together. The observer has one owned block per
+//! CPU (rounded up to a power of two, at least 16), so on a machine with 17
+//! or more CPUs every thread here owns one (plain stores, no locked
+//! instruction) and the rise with thread count is the CPU's lower all-core
+//! clock; with fewer CPUs, the extra threads use shared blocks (atomic adds). A
 //! difference below the empty loop's cost (noise) is reported as 0.
 //!
 //! Each figure is the median of three runs. Build with `--features observe`

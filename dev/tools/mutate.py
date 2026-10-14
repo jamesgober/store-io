@@ -24,6 +24,8 @@ ENGINE = ["-p", "store-io-engine", "-p", "store-io-sim"]
 # The Linux backend's own tests (its submit pool included); Linux only.
 POSIX = ["-p", "store-io-posix"]
 LINUX_ONLY = {"store-io-posix"}
+# The observer's own tests (feature `observe`).
+OBSERVE = ["-p", "store-io-core", "--features", "store-io-core/observe"]
 SUB = "crates/store-io-engine/src/submitter.rs"
 
 M = [
@@ -155,6 +157,8 @@ M = [
  ('crates/store-io-engine/src/optable.rs', '            let _shorter = b.set_len(*len);', '            let _shorter = (b, len);'),
  ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(&inner.meta);', '        let mut meta = lock_meta(&inner.meta);\n        self.retire(r, Retire::Release)?;'),
  ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, _seq)) if self.live > 0 => 2 * self.next_seq + 1,'),
+ # D-100: only a block's one writer may update it without an atomic add
+ ('crates/store-io-core/src/observe.rs', '                None => (&self.shared[index & self.mask], false),', '                None => (&self.shared[index & self.mask], true),', OBSERVE),
 ]
 
 def kill_stuck_tests():

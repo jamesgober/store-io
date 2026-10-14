@@ -421,6 +421,9 @@ mod tests {
 
     #[test]
     fn test_a_nop_round_trips_on_both_flavours() {
+        if crate::uring::skip() {
+            return;
+        }
         for mut r in rings() {
             assert!(r.supports(op::READ) && r.supports(op::WRITE));
             assert!(push_nop(&mut r, 7));
@@ -446,6 +449,9 @@ mod tests {
     /// An owned ring posts it only then.
     #[test]
     fn test_a_deferred_completion_is_reaped_without_waiting() {
+        if crate::uring::skip() {
+            return;
+        }
         for mut r in rings() {
             let efd = sys::eventfd().unwrap();
             // Leaked: if an assertion fails with the read pending, the kernel
@@ -484,6 +490,9 @@ mod tests {
     /// The allowlist refuses an opcode that always punts (D-073).
     #[test]
     fn test_the_allowlist_refuses_fsync() {
+        if crate::uring::skip() {
+            return;
+        }
         for mut r in rings() {
             let sqe = Sqe {
                 opcode: op::FSYNC,
@@ -505,6 +514,9 @@ mod tests {
     /// once; a full ring refuses a push.
     #[test]
     fn test_many_rounds_lose_and_repeat_nothing() {
+        if crate::uring::skip() {
+            return;
+        }
         for mut r in rings() {
             let size = r.space();
             let mut seen = vec![0u32; 2000];
@@ -535,6 +547,9 @@ mod tests {
     /// it, nothing lost.
     #[test]
     fn test_a_completion_backlog_is_collected() {
+        if crate::uring::skip() {
+            return;
+        }
         for mut r in rings() {
             let size = r.space();
             let total = 3 * size;
@@ -559,6 +574,9 @@ mod tests {
     /// from a thread that owns a ring of its own (no registered-index mix-up).
     #[test]
     fn test_thread_rules() {
+        if crate::uring::skip() {
+            return;
+        }
         let owned = Ring::new(Flavour::Owned, 8).unwrap();
         let shared = Ring::new(Flavour::Shared, 8).unwrap();
         std::thread::spawn(move || {

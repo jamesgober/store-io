@@ -56,20 +56,31 @@ struct Fixture {
     _dir: TempDir,
 }
 
-/// A uring platform, an empty file and a pool of `count` blocks.
-fn fixture(count: u32) -> Fixture {
+/// A uring platform, an empty file and a pool of `count` blocks; `None`
+/// (the test is skipped) where the kernel refuses io_uring, unless
+/// `STORE_IO_EXPECT_URING` says it works there.
+fn fixture(count: u32) -> Option<Fixture> {
+    let p = match PosixPlatform::with_tier(LinuxTier::Uring) {
+        Ok(p) => p,
+        Err(e) => {
+            assert!(
+                std::env::var_os("STORE_IO_EXPECT_URING").is_none(),
+                "io_uring refused ({e}) where STORE_IO_EXPECT_URING says it works"
+            );
+            return None;
+        }
+    };
     let dir = TempDir::new();
-    let p = PosixPlatform::with_tier(LinuxTier::Uring).unwrap();
     let d = p.open_dir(dir.path(), true).unwrap();
     let file = p.create_file(&d, &FileName::new("data").unwrap()).unwrap();
     let pool = BufPool::new(&PoolConfig::uniform(BLOCK, BLOCK, 2 * BLOCK, count)).unwrap();
-    Fixture {
+    Some(Fixture {
         p,
         file,
         pool,
         d,
         _dir: dir,
-    }
+    })
 }
 
 fn filled(pool: &BufPool, len: usize, byte: u8) -> IoBuf {
@@ -102,7 +113,7 @@ fn one(q: &mut PosixQueue) -> Completion {
 #[test]
 fn test_a_write_nowait_refuses_is_finished_by_a_blocking_call() {
     for owner in [Owner::Shared, Owner::Thread] {
-        let f = fixture(4);
+        let Some(f) = fixture(4) else { return };
         let mut q = queue(&f.p, owner, 8);
         let buf = filled(&f.pool, BLOCK, 0x5A);
         q.submit(
@@ -137,7 +148,7 @@ fn test_a_write_nowait_refuses_is_finished_by_a_blocking_call() {
 /// past it returns 0 bytes. Neither is an error.
 #[test]
 fn test_reads_at_the_end_of_the_file_are_short() {
-    let f = fixture(4);
+    let Some(f) = fixture(4) else { return };
     f.p.allocate(&f.file, BLOCK as u64).unwrap();
     let mut q = queue(&f.p, Owner::Shared, 8);
     let read = |q: &mut PosixQueue, offset| {
@@ -160,7 +171,7 @@ fn test_reads_at_the_end_of_the_file_are_short() {
 /// thread enters it: `reap` alone, never waiting, collects them (E12).
 #[test]
 fn test_reap_alone_collects_on_an_owned_ring() {
-    let f = fixture(8);
+    let Some(f) = fixture(8) else { return };
     f.p.allocate(&f.file, 8 * BLOCK as u64).unwrap();
     let mut q = queue(&f.p, Owner::Thread, 8);
     for i in 0..4u64 {
@@ -202,7 +213,7 @@ fn test_reap_alone_collects_on_an_owned_ring() {
 #[test]
 fn test_a_drop_in_flight_returns_every_buffer() {
     for owner in [Owner::Shared, Owner::Thread] {
-        let f = fixture(17);
+        let Some(f) = fixture(17) else { return };
         f.p.allocate(&f.file, 17 * BLOCK as u64).unwrap();
         // How many blocks the pool holds: all must come back.
         let capacity = {
@@ -250,7 +261,7 @@ fn test_a_drop_in_flight_returns_every_buffer() {
 /// Completions observed but not yet reaped still count against the depth.
 #[test]
 fn test_unreaped_completions_count_against_the_depth() {
-    let f = fixture(4);
+    let Some(f) = fixture(4) else { return };
     f.p.allocate(&f.file, 4 * BLOCK as u64).unwrap();
     let mut q = queue(&f.p, Owner::Shared, 2);
     for i in 0..2u64 {
@@ -289,7 +300,7 @@ fn test_unreaped_completions_count_against_the_depth() {
 /// reaches the kernel, and hands the buffer back.
 #[test]
 fn test_an_owned_queue_refuses_other_threads() {
-    let f = fixture(2);
+    let Some(f) = fixture(2) else { return };
     f.p.allocate(&f.file, BLOCK as u64).unwrap();
     let q = queue(&f.p, Owner::Thread, 4);
     let buf = filled(&f.pool, BLOCK, 1);
@@ -319,7 +330,7 @@ fn test_an_owned_queue_refuses_other_threads() {
 /// read-only handle is refused before it reaches the kernel.
 #[test]
 fn test_refusals_return_the_buffer() {
-    let f = fixture(4);
+    let Some(f) = fixture(4) else { return };
     f.p.allocate(&f.file, 4 * BLOCK as u64).unwrap();
     let mut q = queue(&f.p, Owner::Shared, 2);
     for i in 0..2u64 {

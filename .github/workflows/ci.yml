@@ -142,6 +142,53 @@ jobs:
         env:
           STORE_IO_TEST_DIR: /mnt/sio
 
+  # The CI kernel matrix (v0.4): conformance, the end-to-end tests and the
+  # Linux backend's tests on older kernels, each booted in a virtme-ng VM
+  # (KVM) with an ext4 disk. 5.15 lacks SUBMIT_ALL (5.18), so io_uring is
+  # refused there and the synchronous tier must carry everything; 6.1 has
+  # both ring flavours (without NO_SQARRAY, 6.6); 6.6 has everything.
+  kernels:
+    name: Kernel ${{ matrix.kernel }} (VM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kernel: v5.15.3
+            uring: 0
+          - kernel: v6.1
+            uring: 1
+          - kernel: v6.6
+            uring: 1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install virtme-ng
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 virtiofsd udev busybox-static
+          pipx install virtme-ng
+      - name: Build the tests on the host
+        run: |
+          cargo test --test conformance --test native --no-run
+          cargo test -p store-io-posix --lib --tests --no-run
+      - name: Run them on ${{ matrix.kernel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          truncate -s 4G "$RUNNER_TEMP/disk.img"
+          vng -r ${{ matrix.kernel }} --user root --memory 4G --cpus 2 -D "$RUNNER_TEMP/disk.img" \
+            -- bash "$PWD/dev/tools/kernel-check.sh" "$PWD" "$HOME" ${{ matrix.uring }} 4294967296 \
+            2>&1 | tee "$RUNNER_TEMP/vm.log"
+          grep -q ": all passed" "$RUNNER_TEMP/vm.log"
+
   # Crash states on a real kernel (D-079): the file system sits on a
   # dm-log-writes target that logs a FUA write when it completes, any other
   # write at the next flush, every flush, and the test's marks at once; the

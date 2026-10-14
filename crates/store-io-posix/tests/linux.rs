@@ -184,9 +184,12 @@ fn test_create_allocate_write_read_roundtrip_with_probe_alignment() {
     assert_eq!(p.size(&file).unwrap(), 1 << 20);
 
     let ev = p.probe(&dir, &file).unwrap();
-    assert!(ev.fs.dio_offset_align > 0, "{ev:?}");
-    assert_eq!(4096 % ev.fs.dio_offset_align, 0);
-    assert!(ev.fs.dio_mem_align <= 4096);
+    // statx reports direct-I/O alignment from 6.1 (STATX_DIOALIGN).
+    if ev.kernel.is_some_and(|k| k >= (6, 1, 0)) {
+        assert!(ev.fs.dio_offset_align > 0, "{ev:?}");
+        assert_eq!(4096 % ev.fs.dio_offset_align, 0);
+        assert!(ev.fs.dio_mem_align <= 4096);
+    }
 
     assert_eq!(write(&mut q, &file, &pool, 0, 4096, 0xA1, false), Ok(4096));
     assert_eq!(
@@ -499,11 +502,17 @@ fn test_probe_on_ext4_reports_filesystem_alignment_stack_and_device() {
     p.allocate(&file, 4096).unwrap();
     let ev = p.probe(&dir, &file).unwrap();
     assert_eq!(ev.fs.kind, FsKind::Ext4, "{ev:?}");
-    assert!(
-        ev.fs.dio_mem_align > 0 && ev.fs.dio_offset_align > 0,
-        "{ev:?}"
-    );
-    assert!(!ev.missing.contains(Missing::DioAlignment));
+    // statx reports direct-I/O alignment from 6.1 (STATX_DIOALIGN); before,
+    // the probe says it could not read it.
+    if ev.kernel.is_some_and(|k| k >= (6, 1, 0)) {
+        assert!(
+            ev.fs.dio_mem_align > 0 && ev.fs.dio_offset_align > 0,
+            "{ev:?}"
+        );
+        assert!(!ev.missing.contains(Missing::DioAlignment));
+    } else {
+        assert!(ev.missing.contains(Missing::DioAlignment), "{ev:?}");
+    }
     assert!(!ev.missing.contains(Missing::MountOptions), "{ev:?}");
     assert!(!ev.missing.contains(Missing::InodeFlags), "{ev:?}");
     assert!(!ev.missing.contains(Missing::Stack), "{ev:?}");

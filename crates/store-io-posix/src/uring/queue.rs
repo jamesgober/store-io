@@ -590,6 +590,9 @@ mod tests {
     /// might still use it), and nothing more is accepted.
     #[test]
     fn test_an_unexpected_completion_ends_the_queue() {
+        if crate::uring::skip() {
+            return;
+        }
         use store_io_platform::{FileName, Platform};
         let path = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
             .join(format!(".store-io-uring-unit-{}", std::process::id()));
@@ -642,6 +645,9 @@ mod tests {
     /// Only the table's own generation completes a slot.
     #[test]
     fn test_observe_matches_index_and_generation() {
+        if crate::uring::skip() {
+            return;
+        }
         let (mut q, _pool) = with_one_op(Flavour::Shared);
         let idx = q.slots.iter().position(|s| s.op.is_some()).unwrap() as u64;
         let generation = u64::from(q.slots[idx as usize].generation);
@@ -758,6 +764,9 @@ mod tests {
     /// timeout fails the test instead of hanging it).
     #[test]
     fn test_a_drop_completes_an_armed_wake_read() {
+        if crate::uring::skip() {
+            return;
+        }
         for flavour in [Flavour::Owned, Flavour::Shared] {
             let (tx, rx) = std::sync::mpsc::channel();
             let _detached = std::thread::spawn(move || {

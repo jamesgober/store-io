@@ -17,6 +17,28 @@ use store_io_conformance::Suite;
 
 #[test]
 fn test_the_native_backend_conforms() {
+    conforms(&NativePlatform::new(), "native");
+}
+
+/// The io_uring tier (D-103 3b), on rings any thread may use.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_the_io_uring_tier_conforms() {
+    let p = store_io_posix::PosixPlatform::with_tier(store_io_posix::LinuxTier::Uring).unwrap();
+    conforms(&p, "uring");
+}
+
+/// The io_uring tier with every queue on a thread-owned ring.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_the_io_uring_tier_conforms_on_owned_rings() {
+    let p = store_io_posix::PosixPlatform::with_tier(store_io_posix::LinuxTier::Uring)
+        .unwrap()
+        .with_owned_rings();
+    conforms(&p, "uring-owned");
+}
+
+fn conforms(platform: &NativePlatform, label: &str) {
     let base = std::env::var_os("STORE_IO_TEST_DIR")
         .map(PathBuf::from)
         .or_else(|| {
@@ -25,7 +47,10 @@ fn test_the_native_backend_conforms() {
                 .map(PathBuf::from)
         })
         .unwrap_or_else(std::env::temp_dir);
-    let root = base.join(format!(".store-io-conformance-{}", std::process::id()));
+    let root = base.join(format!(
+        ".store-io-conformance-{label}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&root).unwrap();
     let probe = store_io::probe(&root).unwrap();
     let refused = !matches!(probe.decision.durable_open, DurableOpen::Allowed);
@@ -39,8 +64,7 @@ fn test_the_native_backend_conforms() {
         override_refusal: refused,
         ..Trust::default()
     };
-    let platform = NativePlatform::new();
-    let report = Suite::new(&platform, &root, trust).run();
+    let report = Suite::new(platform, &root, trust).run();
     let _cleanup = std::fs::remove_dir_all(&root);
-    assert!(report.passed(), "\n{report}");
+    assert!(report.passed(), "{label}:\n{report}");
 }

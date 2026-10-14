@@ -25,6 +25,8 @@
 //! 1. An operation's buffer is not touched by the caller between `submit` and
 //!    the completion that returns it, and is never freed by the backend: it is
 //!    returned in the completion, or in [`Rejected`] if `submit` refuses it.
+//!    Only a failed completion may withhold it, for ever, when the kernel may
+//!    still use it (an asynchronous backend that lost track of its kernel).
 //! 2. A file handle passed in an operation stays open until that operation's
 //!    completion has been reaped. The engine guarantees this by keeping the
 //!    handle alive while operations are in flight; a backend may copy the raw

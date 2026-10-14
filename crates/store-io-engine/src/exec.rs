@@ -454,8 +454,8 @@ pub(crate) fn run<Q: Queue>(
         for c in slot.done.drain() {
             if c.tag == TAG {
                 debug_assert!(
-                    !is_read || c.buf.is_some(),
-                    "a read completed without its buffer (platform contract 1)"
+                    !is_read || c.buf.is_some() || c.result.is_err(),
+                    "a read succeeded without its buffer (platform contract 1)"
                 );
                 mark.advance();
                 return Ok(Ran::Done {

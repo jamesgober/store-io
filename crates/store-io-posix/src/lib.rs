@@ -81,6 +81,20 @@ pub use lock::PosixLock;
 #[cfg(target_os = "linux")]
 pub use queue::{PosixQueue, PosixWaker};
 
+/// Which kernel interface a [`PosixPlatform`]'s queues use (D-082).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum LinuxTier {
+    /// One blocking system call per operation (T3), inline or on the
+    /// submit pool.
+    #[default]
+    Sync,
+    /// io_uring rings (store-io's own binding, D-093): operations complete
+    /// asynchronously and never run on kernel worker threads.
+    Uring,
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use core::sync::atomic::{AtomicU64, Ordering};
@@ -88,8 +102,12 @@ mod platform {
     use std::sync::{Arc, Mutex, PoisonError};
 
     use store_io_platform::{
-        Evidence, FileMode, FileName, Platform, QueueConfig, RangeState, RawResult, ReleaseHow,
+        Evidence, FileMode, FileName, Owner, Platform, QueueConfig, RangeState, RawResult,
+        ReleaseHow,
     };
+
+    use super::LinuxTier;
+    use crate::uring::ring::{Flavour, Ring};
 
     use crate::alloc;
     use crate::dir::PosixDir;
@@ -136,6 +154,9 @@ mod platform {
         /// Parallel queues hold it too: its workers stop once the last
         /// reference, platform or queue, is gone.
         pool: Arc<Mutex<Option<Arc<SubmitPool>>>>,
+        tier: LinuxTier,
+        /// Testing: every queue gets a thread-owned ring.
+        owned_rings: bool,
     }
 
     impl Default for PosixPlatform {
@@ -153,7 +174,43 @@ mod platform {
                 eintr_retries: Arc::new(AtomicU64::new(0)),
                 eagain_retries: Arc::new(AtomicU64::new(0)),
                 pool: Arc::new(Mutex::new(None)),
+                tier: LinuxTier::Sync,
+                owned_rings: false,
             }
+        }
+
+        /// A platform whose queues use `tier`.
+        ///
+        /// # Errors
+        ///
+        /// For [`LinuxTier::Uring`], the kernel's refusal to set up a ring of
+        /// either kind (io_uring disabled, too old, or without a feature
+        /// store-io requires: `ENOSYS`).
+        pub fn with_tier(tier: LinuxTier) -> RawResult<Self> {
+            if tier == LinuxTier::Uring {
+                drop(Ring::new(Flavour::Shared, 1)?);
+                drop(Ring::new(Flavour::Owned, 1)?);
+            }
+            Ok(Self {
+                tier,
+                ..Self::new()
+            })
+        }
+
+        /// The tier this platform's queues use.
+        #[must_use]
+        pub fn tier(&self) -> LinuxTier {
+            self.tier
+        }
+
+        /// Testing only: on the io_uring tier, every queue gets a ring only
+        /// its creating thread may use, whatever its `QueueConfig::owner`,
+        /// so suites written for shared queues cover thread-owned rings too.
+        #[doc(hidden)]
+        #[must_use]
+        pub fn with_owned_rings(mut self) -> Self {
+            self.owned_rings = true;
+            self
         }
 
         /// Worker threads in the submit pool, or `None` before the first
@@ -317,6 +374,10 @@ mod platform {
         }
 
         fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {
+            if self.tier == LinuxTier::Uring {
+                let owned = self.owned_rings || cfg.owner == Owner::Thread;
+                return PosixQueue::uring(cfg, owned);
+            }
             if cfg.parallel {
                 Ok(PosixQueue::pooled(cfg, self.submit_pool(cfg.pool_threads)?))
             } else {

@@ -141,9 +141,11 @@ fn test_a_crash_during_recycle_leaves_the_old_or_the_new_generation() {
     }
 }
 
-#[test]
-fn test_recycle_waits_out_writers_and_no_old_write_lands_after_it() {
-    let p = SimPlatform::new(SimConfig::volatile(43));
+/// One recycle with four writers appending. Returns whether it proved
+/// anything: false when a writer filled the region before the recycle (a
+/// starved main thread), leaving no writer active during it.
+fn recycle_under_writers(seed: u64) -> bool {
+    let p = SimPlatform::new(SimConfig::volatile(seed));
     let s = create(&p);
     let wal = s.provision_append_region("wal", 64 << 20).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
@@ -152,18 +154,22 @@ fn test_recycle_waits_out_writers_and_no_old_write_lands_after_it() {
             let wal = wal.clone();
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let mut ok = 0u32;
                 while !stop.load(Ordering::SeqCst) {
                     match wal.append(&[0xAB; 3000]) {
-                        Ok(_) => ok += 1,
+                        Ok(_) => {}
                         Err(Error::NotWritten {
                             cause: NotWrittenCause::StaleGeneration,
                             ..
                         }) => break,
+                        // Full before the recycle: this run proves nothing.
+                        Err(Error::NotWritten {
+                            cause: NotWrittenCause::RegionFull,
+                            ..
+                        }) => return false,
                         Err(e) => panic!("{e:?}"),
                     }
                 }
-                ok
+                true
             })
         })
         .collect();
@@ -173,9 +179,10 @@ fn test_recycle_waits_out_writers_and_no_old_write_lands_after_it() {
     let wal2 = wal.recycle().unwrap();
     let writes_after = p.with_world(|w| w.writes());
     stop.store(true, Ordering::SeqCst);
-    for h in writers {
-        h.join().unwrap();
-    }
+    // Every writer is joined before the count is checked.
+    let ended: Vec<bool> = writers.into_iter().map(|h| h.join().unwrap()).collect();
+    let counted = ended.iter().all(|&c| c);
+    // Whether or not the run counts, no old write may land late.
     assert_eq!(
         p.with_world(|w| w.writes()),
         writes_after,
@@ -184,6 +191,18 @@ fn test_recycle_waits_out_writers_and_no_old_write_lands_after_it() {
     // The new generation starts clean at 0.
     let t = wal2.append(&[0xCD; 10]).unwrap();
     assert_eq!(t.pos().offset(), 0);
+    counted
+}
+
+#[test]
+fn test_recycle_waits_out_writers_and_no_old_write_lands_after_it() {
+    // A loaded machine can starve the recycling thread until the writers
+    // fill the region; such a run proves nothing, so up to five are made
+    // and at least one must have recycled under active writers.
+    assert!(
+        (43..48).any(recycle_under_writers),
+        "no run recycled while writers were active"
+    );
 }
 
 #[test]

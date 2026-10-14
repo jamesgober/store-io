@@ -1,0 +1,369 @@
+//! The io_uring tier's queue (D-103 3b) against a real Linux filesystem: a
+//! fresh directory under `$HOME` (ext4 on the development WSL2 box) for every
+//! test, removed afterwards. The conformance suite runs on this tier too
+//! (`tests/conformance.rs` at the workspace root); these tests cover what it
+//! cannot see: the NOWAIT fallback, short reads, reaping without waiting on a
+//! thread-owned ring, drops in flight and the owner thread.
+
+#![cfg(target_os = "linux")]
+#![allow(clippy::unwrap_used, clippy::expect_used, unused_results)]
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use store_io_buf::{BufPool, IoBuf, PoolConfig};
+use store_io_platform::{
+    Completion, CompletionBuf, FileMode, FileName, IoOp, Owner, Platform, Queue, QueueConfig,
+};
+use store_io_posix::{LinuxTier, PosixFile, PosixPlatform, PosixQueue};
+
+const BLOCK: usize = 4096;
+
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let base = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|h| h.is_dir())
+            .unwrap_or_else(std::env::temp_dir);
+        let d = base.join(format!(
+            ".store-io-uring-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        Self(d)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _cleanup = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct Fixture {
+    p: PosixPlatform,
+    file: PosixFile,
+    pool: BufPool,
+    d: store_io_posix::PosixDir,
+    _dir: TempDir,
+}
+
+/// A uring platform, an empty file and a pool of `count` blocks.
+fn fixture(count: u32) -> Fixture {
+    let dir = TempDir::new();
+    let p = PosixPlatform::with_tier(LinuxTier::Uring).unwrap();
+    let d = p.open_dir(dir.path(), true).unwrap();
+    let file = p.create_file(&d, &FileName::new("data").unwrap()).unwrap();
+    let pool = BufPool::new(&PoolConfig::uniform(BLOCK, BLOCK, 2 * BLOCK, count)).unwrap();
+    Fixture {
+        p,
+        file,
+        pool,
+        d,
+        _dir: dir,
+    }
+}
+
+fn filled(pool: &BufPool, len: usize, byte: u8) -> IoBuf {
+    let mut b = pool.take(len).unwrap();
+    b.as_mut_slice().fill(byte);
+    b
+}
+
+fn queue(p: &PosixPlatform, owner: Owner, depth: u32) -> PosixQueue {
+    p.queue(QueueConfig {
+        depth,
+        owner,
+        ..QueueConfig::default()
+    })
+    .unwrap()
+}
+
+/// Waits for exactly one completion.
+fn one(q: &mut PosixQueue) -> Completion {
+    let mut out = CompletionBuf::with_capacity(1);
+    while out.is_empty() {
+        q.wait(1, &mut out).unwrap();
+    }
+    out.drain().next().unwrap()
+}
+
+/// A write that extends the file is refused by NOWAIT (it needs block
+/// allocation) and finished by one blocking call: the data is there, and
+/// the fallback is counted.
+#[test]
+fn test_a_write_nowait_refuses_is_finished_by_a_blocking_call() {
+    for owner in [Owner::Shared, Owner::Thread] {
+        let f = fixture(4);
+        let mut q = queue(&f.p, owner, 8);
+        let buf = filled(&f.pool, BLOCK, 0x5A);
+        q.submit(
+            IoOp::Write {
+                file: &f.file,
+                offset: 0,
+                buf,
+                dsync: true,
+            },
+            1,
+        )
+        .unwrap();
+        let c = one(&mut q);
+        assert_eq!((c.tag, c.result), (1, Ok(BLOCK)), "{owner:?}");
+        assert_eq!(q.fallbacks(), 1, "{owner:?}");
+        q.submit(
+            IoOp::Read {
+                file: &f.file,
+                offset: 0,
+                buf: f.pool.take(BLOCK).unwrap(),
+            },
+            2,
+        )
+        .unwrap();
+        let c = one(&mut q);
+        assert_eq!(c.result, Ok(BLOCK));
+        assert!(c.buf.unwrap().as_slice().iter().all(|&b| b == 0x5A));
+    }
+}
+
+/// A read that reaches the end of the file returns what is there; a read
+/// past it returns 0 bytes. Neither is an error.
+#[test]
+fn test_reads_at_the_end_of_the_file_are_short() {
+    let f = fixture(4);
+    f.p.allocate(&f.file, BLOCK as u64).unwrap();
+    let mut q = queue(&f.p, Owner::Shared, 8);
+    let read = |q: &mut PosixQueue, offset| {
+        q.submit(
+            IoOp::Read {
+                file: &f.file,
+                offset,
+                buf: f.pool.take(2 * BLOCK).unwrap(),
+            },
+            offset,
+        )
+        .unwrap();
+        one(q).result
+    };
+    assert_eq!(read(&mut q, 0), Ok(BLOCK));
+    assert_eq!(read(&mut q, 2 * BLOCK as u64), Ok(0));
+}
+
+/// On a thread-owned ring the kernel posts completions only when the
+/// thread enters it: `reap` alone, never waiting, collects them (E12).
+#[test]
+fn test_reap_alone_collects_on_an_owned_ring() {
+    let f = fixture(8);
+    f.p.allocate(&f.file, 8 * BLOCK as u64).unwrap();
+    let mut q = queue(&f.p, Owner::Thread, 8);
+    for i in 0..4u64 {
+        let buf = filled(&f.pool, BLOCK, i as u8);
+        q.submit(
+            IoOp::Write {
+                file: &f.file,
+                offset: i * BLOCK as u64,
+                buf,
+                dsync: false,
+            },
+            i,
+        )
+        .unwrap();
+    }
+    let mut out = CompletionBuf::with_capacity(8);
+    let mut tags = Vec::new();
+    for _ in 0..10_000_000u32 {
+        q.reap(&mut out);
+        tags.extend(out.drain().map(|c| {
+            assert_eq!(c.result, Ok(BLOCK));
+            c.tag
+        }));
+        if tags.len() == 4 {
+            break;
+        }
+        std::thread::yield_now();
+    }
+    tags.sort_unstable();
+    assert_eq!(tags, [0, 1, 2, 3]);
+    assert_eq!(q.in_flight(), 0);
+}
+
+/// A queue dropped with operations in flight waits for them: every buffer
+/// is back in its pool when the drop returns. On an owned ring nothing is
+/// even posted before the drop enters the kernel, and its wake read is
+/// still armed from the first wait (a shared ring completes it before the
+/// wait returns).
+#[test]
+fn test_a_drop_in_flight_returns_every_buffer() {
+    for owner in [Owner::Shared, Owner::Thread] {
+        let f = fixture(17);
+        f.p.allocate(&f.file, 17 * BLOCK as u64).unwrap();
+        // How many blocks the pool holds: all must come back.
+        let capacity = {
+            let all: Vec<IoBuf> = std::iter::from_fn(|| f.pool.take(BLOCK).ok()).collect();
+            all.len()
+        };
+        let mut q = queue(&f.p, owner, 17);
+        let w = q.waker();
+        {
+            let buf = filled(&f.pool, BLOCK, 7);
+            q.submit(
+                IoOp::Write {
+                    file: &f.file,
+                    offset: 16 * BLOCK as u64,
+                    buf,
+                    dsync: true,
+                },
+                16,
+            )
+            .unwrap();
+            let c = one(&mut q);
+            assert_eq!(c.result, Ok(BLOCK));
+        }
+        for i in 0..16u64 {
+            let buf = filled(&f.pool, BLOCK, 7);
+            q.submit(
+                IoOp::Write {
+                    file: &f.file,
+                    offset: i * BLOCK as u64,
+                    buf,
+                    dsync: true,
+                },
+                i,
+            )
+            .unwrap();
+        }
+        assert_eq!(q.in_flight(), 16, "{owner:?}");
+        drop(w);
+        drop(q);
+        let all: Vec<IoBuf> = std::iter::from_fn(|| f.pool.take(BLOCK).ok()).collect();
+        assert_eq!(all.len(), capacity, "{owner:?}");
+    }
+}
+
+/// Completions observed but not yet reaped still count against the depth.
+#[test]
+fn test_unreaped_completions_count_against_the_depth() {
+    let f = fixture(4);
+    f.p.allocate(&f.file, 4 * BLOCK as u64).unwrap();
+    let mut q = queue(&f.p, Owner::Shared, 2);
+    for i in 0..2u64 {
+        q.submit(
+            IoOp::Read {
+                file: &f.file,
+                offset: i * BLOCK as u64,
+                buf: f.pool.take(BLOCK).unwrap(),
+            },
+            i,
+        )
+        .unwrap();
+    }
+    // Collect both into the queue without taking them (no room in `out`).
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let mut none = CompletionBuf::with_capacity(0);
+    q.wait(1, &mut none).unwrap();
+    q.reap(&mut none);
+    assert_eq!(q.in_flight(), 2);
+    let full = q
+        .submit(
+            IoOp::Read {
+                file: &f.file,
+                offset: 0,
+                buf: f.pool.take(BLOCK).unwrap(),
+            },
+            2,
+        )
+        .unwrap_err();
+    assert!(full.buf.is_some() && full.raw.is_none());
+    let mut out = CompletionBuf::with_capacity(2);
+    assert_eq!(q.reap(&mut out), 2);
+}
+
+/// A thread-owned queue refuses use from another thread before anything
+/// reaches the kernel, and hands the buffer back.
+#[test]
+fn test_an_owned_queue_refuses_other_threads() {
+    let f = fixture(2);
+    f.p.allocate(&f.file, BLOCK as u64).unwrap();
+    let q = queue(&f.p, Owner::Thread, 4);
+    let buf = filled(&f.pool, BLOCK, 1);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let mut q = q;
+            let r = q.submit(
+                IoOp::Write {
+                    file: &f.file,
+                    offset: 0,
+                    buf,
+                    dsync: false,
+                },
+                1,
+            );
+            let rejected = r.unwrap_err();
+            assert_eq!(rejected.raw.map(|e| e.code), Some(libc::EXDEV));
+            assert!(rejected.buf.is_some());
+            assert_eq!(q.in_flight(), 0);
+            // Nothing in flight: the drop on this thread has nothing to wait
+            // for (a wait would be refused here too).
+        });
+    });
+}
+
+/// A full queue refuses with the buffer and no OS error; a write on a
+/// read-only handle is refused before it reaches the kernel.
+#[test]
+fn test_refusals_return_the_buffer() {
+    let f = fixture(4);
+    f.p.allocate(&f.file, 4 * BLOCK as u64).unwrap();
+    let mut q = queue(&f.p, Owner::Shared, 2);
+    for i in 0..2u64 {
+        q.submit(
+            IoOp::Read {
+                file: &f.file,
+                offset: i * BLOCK as u64,
+                buf: f.pool.take(BLOCK).unwrap(),
+            },
+            i,
+        )
+        .unwrap();
+    }
+    let full = q
+        .submit(
+            IoOp::Read {
+                file: &f.file,
+                offset: 0,
+                buf: f.pool.take(BLOCK).unwrap(),
+            },
+            2,
+        )
+        .unwrap_err();
+    assert!(full.buf.is_some() && full.raw.is_none());
+    let mut out = CompletionBuf::with_capacity(2);
+    while out.len() < 2 {
+        q.wait(2, &mut out).unwrap();
+    }
+    drop(out);
+    let ro =
+        f.p.open_file(&f.d, &FileName::new("data").unwrap(), FileMode::ReadOnly)
+            .unwrap();
+    let refused = q
+        .submit(
+            IoOp::Write {
+                file: &ro,
+                offset: 0,
+                buf: filled(&f.pool, BLOCK, 3),
+                dsync: false,
+            },
+            3,
+        )
+        .unwrap_err();
+    assert_eq!(refused.raw.map(|e| e.code), Some(libc::EBADF));
+    assert!(refused.buf.is_some());
+    assert_eq!(q.in_flight(), 0);
+}

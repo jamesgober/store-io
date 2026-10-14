@@ -259,8 +259,8 @@ where
                 delivered += 1;
                 let mut buf = buf;
                 debug_assert!(
-                    buf.is_some(),
-                    "a read completed without its buffer (platform contract 1)"
+                    buf.is_some() || result.is_err(),
+                    "a read succeeded without its buffer (platform contract 1)"
                 );
                 if failure.is_none() && !out.sum.stopped {
                     match result {
@@ -295,7 +295,8 @@ where
                                         Err(e) => failure = Some(e),
                                     }
                                 }
-                                // No buffer to bisect with (a backend breaking
+                                // No buffer to bisect with (withheld by a
+                                // backend that lost track of its kernel,
                                 // platform contract 1): stop, never drop the range.
                                 None => {
                                     failure = Some(not_written(NotWrittenCause::Interrupted, c));

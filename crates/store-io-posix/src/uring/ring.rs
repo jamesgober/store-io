@@ -193,7 +193,7 @@ impl Ring {
 
     /// Refuses an owned ring's use from another thread (its registered
     /// index and its single issuer belong to the owner).
-    fn check_thread(&self) -> RawResult<()> {
+    pub(crate) fn check_thread(&self) -> RawResult<()> {
         match self.owner {
             Some(id) if !is_this_thread(id) => Err(errno(libc::EXDEV)),
             _ => Ok(()),

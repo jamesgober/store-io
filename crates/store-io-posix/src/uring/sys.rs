@@ -169,6 +169,15 @@ pub(crate) fn eventfd_signal(fd: &OwnedFd) {
     let _n = unsafe { libc::write(fd.as_raw_fd(), (&raw const one).cast(), 8) };
 }
 
+/// Empties a (non-blocking) eventfd's counter; an empty one (`EAGAIN`) is
+/// already empty.
+pub(crate) fn eventfd_drain(fd: &OwnedFd) {
+    let mut value = 0u64;
+    // SAFETY: read(2) of 8 bytes into `value`, as an eventfd requires; the
+    // descriptor is non-blocking, so the call never waits.
+    let _n = unsafe { libc::read(fd.as_raw_fd(), (&raw mut value).cast(), 8) };
+}
+
 // ----- the shared rings ---------------------------------------------------------
 
 /// One `mmap` of a ring region, unmapped on drop (in tests, heap memory

@@ -197,6 +197,22 @@ M = [
  ('crates/store-io-posix/src/uring/sys.rs', '            return Err(einval());\n        }\n        if p.flags & setup::NO_SQARRAY == 0 {', '            let _ = pow2;\n        }\n        if p.flags & setup::NO_SQARRAY == 0 {', POSIX),
  ('crates/store-io-posix/src/uring/ring.rs', '            Some(id) if !is_this_thread(id) => Err(errno(libc::EXDEV)),', '            Some(id) if false && !is_this_thread(id) => Err(errno(libc::EXDEV)),', POSIX),
  ('crates/store-io-posix/src/uring/ring.rs', '        let registered = if flavour == Flavour::Owned && can_release {', '        let registered = if (flavour == Flavour::Owned || true) && can_release {', POSIX),
+ # D-103 3b: the io_uring queue
+ ('crates/store-io-posix/src/uring/queue.rs', '        if self.lost {\n            return Err(refuse(Some(buf), Some(libc::EBADR)));', '        if false {\n            return Err(refuse(Some(buf), Some(libc::EBADR)));', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        if let Err(e) = self.ring.check_thread() {\n            return Err(Rejected {\n                buf: Some(buf),', '        if let Err(e) = self.ring.check_thread().or_else(|_| Ok::<(), OsError>(())) {\n            return Err(Rejected {\n                buf: Some(buf),', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        if write.is_some() && !file.is_writable() {', '        if false && write.is_some() && !file.is_writable() {', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        if self.in_flight() >= self.depth || self.ring.space() == 0 {', '        if self.ring.space() == 0 {', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        r if r == -libc::EAGAIN || r == -libc::EOPNOTSUPP => 0,', '        r if r == -libc::EOPNOTSUPP => 0,', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        r if r == -libc::EAGAIN || r == -libc::EOPNOTSUPP => 0,', '        r if r == -libc::EAGAIN => 0,', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '            op.buf.as_ptr().wrapping_add(done),', '            op.buf.as_ptr(),', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '    let dsync = if write == Some(true) {', '    let dsync = if write == Some(true) && false {', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        self.dropping = true;\n        if self.armed {\n            sys::eventfd_signal(&self.wake);', '        self.dropping = true;\n        if false {\n            sys::eventfd_signal(&self.wake);', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '    if done >= len || (op.write.is_none() && res == 0) {', '    if done >= len || (op.write.is_none() && res == 0) || op.write.is_some() {', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '    let offset = op.offset + done as libc::off_t;', '    let offset = op.offset + 0 * done as libc::off_t;', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '                core::mem::forget(op.buf);\n                self.ready.push_back(', '                drop(op.buf);\n                self.ready.push_back(', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '    if slot.generation != (ud >> 32) as u32 {', '    if false && slot.generation != (ud >> 32) as u32 {', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '            Ok(_) if !unexpected => {}', '            Ok(_) if !unexpected || true => {}', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        while !self.lost && (self.kernel > 0 || self.armed) {', '        while false && !self.lost && (self.kernel > 0 || self.armed) {', POSIX),
  # D-100: only a block's one writer may update it without an atomic add
  ('crates/store-io-core/src/observe.rs', '                None => (&self.shared[index & self.mask], false),', '                None => (&self.shared[index & self.mask], true),', OBSERVE),
 ]

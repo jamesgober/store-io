@@ -396,6 +396,11 @@ mod tests {
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .push((k, clock.fetch_add(1, Ordering::SeqCst)));
+                            // A flush takes time, as a real one does, so the
+                            // barriers overlap even on a loaded machine (an
+                            // instant one lets them run one after another,
+                            // sharing nothing).
+                            std::thread::sleep(std::time::Duration::from_micros(100));
                             Ok(())
                         });
                         assert!(r.is_ok());

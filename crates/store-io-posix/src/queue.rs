@@ -1,11 +1,12 @@
-//! The synchronous queue (tier T3). Inline, each operation is one system
-//! call made inside `submit`, and its completion is pushed into a fixed ready
-//! ring. Pooled (`QueueConfig::parallel`, D-096), `submit` hands the
-//! operation to the platform's submit pool and its completion arrives in the
-//! queue's inbox.
+//! The Linux queue. On the synchronous tier (T3), inline, each operation is
+//! one system call made inside `submit`, and its completion is pushed into a
+//! fixed ready ring; pooled (`QueueConfig::parallel`, D-096), `submit` hands
+//! the operation to the platform's submit pool and its completion arrives in
+//! the queue's inbox. On the io_uring tier the queue is a ring
+//! (`crate::uring::queue`).
 
 use core::ffi::c_int;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 
 use store_io_platform::{
@@ -15,6 +16,8 @@ use store_io_platform::{
 use crate::file::PosixFile;
 use crate::pool::{Inbox, Job, SubmitPool};
 use crate::sys;
+use crate::uring::queue::UringQueue;
+use crate::uring::ring::Flavour;
 
 /// A per-thread synchronous queue.
 ///
@@ -36,13 +39,26 @@ use crate::sys;
 /// In both modes at most `depth` operations are submitted and not yet
 /// reaped; beyond that `submit` refuses the operation and returns its buffer.
 ///
-/// A write asked for durability at completion uses `RWF_DSYNC`, except on a
-/// raw block device, where the synchronous `RWF_DSYNC` path issues both a
-/// FUA write and a cache flush: there the write is plain and one `fdatasync`
-/// follows it. Short transfers are returned as `Ok(n)` with `n` below the
-/// buffer length and never retried; `EINTR` from a data call is returned as
-/// the raw result, since a direct I/O on a regular file is not interrupted
-/// before the device sees it in practice.
+/// **io_uring** (a platform on [`crate::LinuxTier::Uring`]): each read and
+/// write is submitted to a ring without blocking and completes
+/// asynchronously; `parallel` is not needed and not looked at. A queue for
+/// one thread ([`store_io_platform::Owner::Thread`]) gets a ring only that
+/// thread may use (any other gets `EXDEV`); other queues get a ring any
+/// thread may use, one at a time. Dropping it waits for every operation in
+/// flight. What the kernel cannot do without blocking, or transfers short,
+/// is finished by one blocking call in `reap` or `wait` (counted:
+/// [`PosixQueue::fallbacks`]). A durable write uses `RWF_DSYNC` on every
+/// file, raw block devices included (there the asynchronous path makes it a
+/// FUA write).
+///
+/// On the synchronous tier, a write asked for durability at completion uses
+/// `RWF_DSYNC`, except on a raw block device, where the synchronous
+/// `RWF_DSYNC` path issues both a FUA write and a cache flush: there the
+/// write is plain and one `fdatasync` follows it. Short transfers are
+/// returned as `Ok(n)` with `n` below the buffer length and never retried;
+/// `EINTR` from a data call is returned as the raw result, since a direct
+/// I/O on a regular file is not interrupted before the device sees it in
+/// practice.
 ///
 /// # Examples
 ///
@@ -74,6 +90,7 @@ pub struct PosixQueue {
     ready: Vec<Completion>,
     depth: usize,
     pooled: Option<Pooled>,
+    uring: Option<UringQueue>,
 }
 
 /// The pooled mode's state.
@@ -105,7 +122,31 @@ impl PosixQueue {
             ready: Vec::with_capacity(depth),
             depth,
             pooled: None,
+            uring: None,
         }
+    }
+
+    /// A queue on an io_uring ring, thread-owned if `owned`.
+    pub(crate) fn uring(cfg: QueueConfig, owned: bool) -> RawResult<Self> {
+        let depth = depth_of(cfg);
+        let flavour = if owned {
+            Flavour::Owned
+        } else {
+            Flavour::Shared
+        };
+        Ok(Self {
+            ready: Vec::new(),
+            depth,
+            pooled: None,
+            uring: Some(UringQueue::new(flavour, depth)?),
+        })
+    }
+
+    /// Operations the io_uring tier finished with a blocking call because
+    /// the kernel would have blocked (0 on the synchronous tier).
+    #[must_use]
+    pub fn fallbacks(&self) -> u64 {
+        self.uring.as_ref().map_or(0, UringQueue::fallbacks)
     }
 
     /// A pooled queue on `pool`, reserving room for its depth there.
@@ -120,6 +161,7 @@ impl PosixQueue {
                 inbox: Arc::new(Inbox::new(depth)),
                 in_flight: 0,
             }),
+            uring: None,
         }
     }
 
@@ -261,20 +303,33 @@ fn check<F>(op: IoOp<'_, PosixFile>, fd: impl Fn(&PosixFile) -> F) -> Result<Wor
 /// Ends a [`PosixQueue`]'s wait from another thread (D-083). An inline
 /// queue never blocks in `wait`, so its waker has nothing to do.
 #[derive(Clone)]
-pub struct PosixWaker(Option<Arc<Inbox>>);
+pub struct PosixWaker(Wakes);
+
+#[derive(Clone)]
+enum Wakes {
+    Inline,
+    Pooled(Arc<Inbox>),
+    /// The eventfd an io_uring queue's wait watches.
+    Ring(Arc<OwnedFd>),
+}
 
 impl core::fmt::Debug for PosixWaker {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_tuple("PosixWaker")
-            .field(&self.0.is_some())
-            .finish()
+        let kind = match self.0 {
+            Wakes::Inline => "inline",
+            Wakes::Pooled(_) => "pooled",
+            Wakes::Ring(_) => "ring",
+        };
+        f.debug_tuple("PosixWaker").field(&kind).finish()
     }
 }
 
 impl Wake for PosixWaker {
     fn wake(&self) {
-        if let Some(inbox) = &self.0 {
-            inbox.wake();
+        match &self.0 {
+            Wakes::Inline => {}
+            Wakes::Pooled(inbox) => inbox.wake(),
+            Wakes::Ring(fd) => crate::uring::sys::eventfd_signal(fd),
         }
     }
 }
@@ -284,6 +339,9 @@ impl Queue for PosixQueue {
     type Waker = PosixWaker;
 
     fn submit(&mut self, op: IoOp<'_, PosixFile>, tag: u64) -> Result<(), Rejected> {
+        if let Some(u) = &mut self.uring {
+            return u.submit(op, tag);
+        }
         if self.in_flight() >= self.depth {
             let buf = match op {
                 IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),
@@ -312,6 +370,9 @@ impl Queue for PosixQueue {
     }
 
     fn reap(&mut self, out: &mut CompletionBuf) -> usize {
+        if let Some(u) = &mut self.uring {
+            return u.reap(out);
+        }
         match &mut self.pooled {
             None => self.drain_ready(out),
             Some(p) => {
@@ -323,6 +384,9 @@ impl Queue for PosixQueue {
     }
 
     fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
+        if let Some(u) = &mut self.uring {
+            return u.wait(min, out);
+        }
         match &mut self.pooled {
             // Everything completed inside `submit`; nothing to wait for.
             None => Ok(self.drain_ready(out)),
@@ -344,11 +408,17 @@ impl Queue for PosixQueue {
     }
 
     fn in_flight(&self) -> usize {
-        self.ready.len() + self.pooled.as_ref().map_or(0, |p| p.in_flight)
+        self.ready.len()
+            + self.pooled.as_ref().map_or(0, |p| p.in_flight)
+            + self.uring.as_ref().map_or(0, UringQueue::in_flight)
     }
 
     fn waker(&self) -> PosixWaker {
-        PosixWaker(self.pooled.as_ref().map(|p| Arc::clone(&p.inbox)))
+        PosixWaker(match (&self.uring, &self.pooled) {
+            (Some(u), _) => Wakes::Ring(u.waker()),
+            (None, Some(p)) => Wakes::Pooled(Arc::clone(&p.inbox)),
+            (None, None) => Wakes::Inline,
+        })
     }
 
     fn workers(&self) -> Option<usize> {

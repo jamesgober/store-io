@@ -492,8 +492,11 @@ where
             }
             Req::Read { offset, buf } => (IoOp::Read { file, offset, buf }, None),
         };
+        // Recorded (and the busy mark published) before the submission: a
+        // queue may do the I/O inside `submit`.
+        self.table.start(index, tag, kind, Some(pass), durable);
         if let Err(r) = self.queue.submit(op, qtag) {
-            self.table.unclaim(index);
+            self.table.abort(index);
             if r.raw.is_none() {
                 inner.observer.add(Counter::Refused, 1);
             }
@@ -503,7 +506,6 @@ where
             inner.observer.add(Counter::Writes, 1);
             inner.observer.add(Counter::WriteBytes, bytes);
         }
-        self.table.start(index, tag, kind, Some(pass), durable);
         Ok(())
     }
 

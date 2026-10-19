@@ -144,6 +144,10 @@ impl Queue for SimQueue {
     type Waker = SimWaker;
 
     fn submit(&mut self, op: IoOp<'_, SimFile>, tag: u64) -> Result<(), Rejected> {
+        let probe = lock(&self.world).submit_probe.0.clone();
+        if let Some(probe) = probe {
+            probe();
+        }
         if self.in_flight.len() >= self.depth {
             let buf = match op {
                 IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),

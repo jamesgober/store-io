@@ -193,6 +193,21 @@ pub enum CrashMode {
     Random,
 }
 
+/// A test hook run at the start of every `Queue::submit`, with the world
+/// unlocked (to observe what the engine published before submitting).
+#[derive(Clone, Default)]
+pub(crate) struct SubmitProbe(pub(crate) Option<std::sync::Arc<dyn Fn() + Send + Sync>>);
+
+impl core::fmt::Debug for SubmitProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "SubmitProbe(set)"
+        } else {
+            "SubmitProbe(none)"
+        })
+    }
+}
+
 /// The whole simulated state.
 #[derive(Debug, Clone)]
 pub struct World {
@@ -213,6 +228,7 @@ pub struct World {
     clock_ms: u64,
     waits: u64,
     write_submits: u64,
+    pub(crate) submit_probe: SubmitProbe,
     flushes_completed: u64,
     dir_syncs: u64,
     set_lens: u64,
@@ -240,6 +256,7 @@ impl World {
             clock_ms: 0,
             waits: 0,
             write_submits: 0,
+            submit_probe: SubmitProbe::default(),
             flushes_completed: 0,
             dir_syncs: 0,
             set_lens: 0,
@@ -315,6 +332,11 @@ impl World {
             }),
             _ => None,
         }
+    }
+
+    /// Sets (or clears) the hook every `Queue::submit` runs first.
+    pub fn set_submit_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+        self.submit_probe = SubmitProbe(probe);
     }
 
     /// Write submissions so far (see [`FaultPlan::fail_submit`]).

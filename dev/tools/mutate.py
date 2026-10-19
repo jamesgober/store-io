@@ -220,6 +220,11 @@ M = [
  # refusal), and a pump that failed is never acknowledged
  ('crates/store-io-engine/src/settle.rs', '        (Pumped::Refused(raw) | Pumped::Failed(raw), _) => {\n', '        (Pumped::Refused(raw) | Pumped::Failed(raw), _) => {\n            if matches!(outcome, Pumped::Refused(_)) {\n                return Err(Store::<P>::refused(raw, ErrorContext::default()));\n            }\n'),
  ('crates/store-io-engine/src/settle.rs', '            settle_write(store, state, wrote, false, raw, &mut no_prefix)', '            settle_write(store, state, wrote, true, raw, &mut no_prefix)'),
+ # A1 C3: a submitter operation is recorded (busy mark published) before it
+ # is submitted, and a refused submission is aborted
+ ('crates/store-io-engine/src/submitter/mod.rs', '        self.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = self.queue.submit(op, qtag) {', '        let refused = self.queue.submit(op, qtag);\n        self.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = refused {'),
+ ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n        self.live -= 1;', '        drop(live);\n        self.free.push(index);'),
+ ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n', '        drop(live);\n'),
 ]
 
 def kill_stuck_tests():

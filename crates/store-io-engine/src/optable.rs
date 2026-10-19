@@ -119,13 +119,35 @@ impl Table {
         Some((index, u64::from(index) | (u64::from(generation) << 32)))
     }
 
-    /// Gives back a claimed row whose operation was refused.
-    pub(crate) fn unclaim(&mut self, index: u32) {
+    /// Undoes [`Self::start`] for an operation the queue refused: the row is
+    /// free again (same generation: no completion can name it) and the busy
+    /// mark is republished. Its pass, if any, is released.
+    pub(crate) fn abort(&mut self, index: u32) {
+        let Some(row) = self.rows.get_mut(index as usize) else {
+            return;
+        };
+        let Some(live) = row.live.take() else { return };
+        if matches!(live.kind, Kind::Sync(_) | Kind::All) {
+            self.flushing -= 1;
+        }
+        drop(live);
         self.free.push(index);
+        self.live -= 1;
+        while let Some(&(i, s)) = self.order.front() {
+            if is_live(&self.rows, i, s) {
+                break;
+            }
+            let _stale = self.order.pop_front();
+        }
+        self.publish();
     }
 
-    /// Records a submitted operation in its claimed row (a barrier waits for
-    /// a flush from the start).
+    /// Records an operation in its claimed row and publishes the busy mark,
+    /// **before** the operation is submitted: a queue that performs the
+    /// operation inside `submit` (the synchronous tier) must already show
+    /// it as outstanding, so a hung device is visible to
+    /// `Store::oldest_outstanding`. A refused submission is undone with
+    /// [`Self::abort`]. A barrier waits for a flush from the start.
     pub(crate) fn start(
         &mut self,
         index: u32,

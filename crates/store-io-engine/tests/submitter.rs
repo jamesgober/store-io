@@ -852,3 +852,95 @@ fn test_oldest_outstanding_sees_submitted_operations() {
     drop(sub);
     assert_eq!(s.oldest_outstanding(), None);
 }
+
+/// A submitter operation shows as outstanding from before it is submitted
+/// (A1 C3): a queue that does the I/O inside `submit` (the synchronous
+/// tier) must not hide a hung device from `Store::oldest_outstanding`.
+#[test]
+fn test_an_operation_is_outstanding_while_it_is_being_submitted() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let p = SimPlatform::new(SimConfig::volatile(810));
+    let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+    let pages = s.provision_page_region("pages", 1 << 20).unwrap();
+    let mut sub = s
+        .submitter(SubmitterConfig::default().with_depth(4))
+        .unwrap();
+    let (seen, idle) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    {
+        let (s, seen, idle) = (s.clone(), Arc::clone(&seen), Arc::clone(&idle));
+        p.with_world(|w| {
+            w.set_submit_probe(Some(Arc::new(move || {
+                let n = if s.oldest_outstanding().is_some() {
+                    &seen
+                } else {
+                    &idle
+                };
+                n.fetch_add(1, Ordering::Relaxed);
+            })));
+        });
+    }
+    let buf = sub.take_buf(4096).unwrap();
+    sub.write(&pages, pages.pos(0).unwrap(), buf, WriteMode::Plain, 1)
+        .map_err(|r| r.error)
+        .unwrap();
+    p.with_world(|w| w.set_submit_probe(None));
+    assert_eq!(
+        (seen.load(Ordering::Relaxed), idle.load(Ordering::Relaxed)),
+        (1, 0),
+        "the write was not outstanding while being submitted"
+    );
+    let done: Vec<_> = sub.wait(1).unwrap().collect();
+    assert_eq!(done.len(), 1);
+    drop(done);
+    assert!(
+        s.oldest_outstanding().is_none(),
+        "idle again after the completion"
+    );
+}
+
+/// A refused submission leaves nothing outstanding (A1 C3: the row begun
+/// before `submit` is aborted).
+#[test]
+fn test_a_refused_submission_leaves_nothing_outstanding() {
+    let p = SimPlatform::new(SimConfig::volatile(811));
+    let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+    let pages = s.provision_page_region("pages", 1 << 20).unwrap();
+    let mut sub = s
+        .submitter(SubmitterConfig::default().with_depth(1))
+        .unwrap();
+    p.with_world(|w| {
+        let next = w.write_submits() + 1;
+        w.faults_mut().fail_submit = Some((next, 5));
+    });
+    let buf = sub.take_buf(4096).unwrap();
+    let r = sub.write(&pages, pages.pos(0).unwrap(), buf, WriteMode::Plain, 1);
+    let rejected = r.expect_err("the submission was refused");
+    assert!(rejected.buf.is_some(), "the buffer comes back");
+    assert_eq!(sub.in_flight(), 0);
+    assert!(
+        s.oldest_outstanding().is_none(),
+        "the aborted row is not outstanding"
+    );
+    assert!(
+        s.poisoned().is_none(),
+        "a page write refused before any I/O poisons nothing"
+    );
+    // The row is usable again (depth 1: the retry needs the aborted row).
+    let buf = sub.take_buf(4096).unwrap();
+    sub.write(&pages, pages.pos(0).unwrap(), buf, WriteMode::Plain, 2)
+        .map_err(|r| r.error)
+        .unwrap();
+    let done: Vec<_> = sub.wait(1).unwrap().collect();
+    assert_eq!(done.len(), 1);
+    assert!(done[0].outcome.is_ok());
+    drop(done);
+    // The table's count was restored: dropping the submitter finds every
+    // row accounted for and poisons nothing.
+    drop(sub);
+    assert!(
+        s.poisoned().is_none(),
+        "an aborted row left the table inconsistent"
+    );
+}

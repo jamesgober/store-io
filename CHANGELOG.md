@@ -353,6 +353,22 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 
 ### Changed
 
+- `store-io-engine`: the blocking calls are built on the engine layer
+  (PLANNING R3.3): every operation of a blocking call lives in a row of the
+  same op table a `Submitter` uses, matched to its completion by row and
+  generation, and every write and read verdict (ticket, append reservation,
+  poison, read classification) comes from one place for both.
+  - An append whose write the platform refused after its space was reserved
+    now poisons the store once, so `Store::poisoned` reports the OS code
+    (before, its first cause had none).
+  - `Store::oldest_outstanding` reports a queue as busy while an operation is
+    in flight on it (before: while it was held), from before the operation is
+    submitted (a queue that performs it inside `submit` included); the age
+    restarts when the queue's oldest operation completes, so one stuck
+    behind newer completions keeps aging.
+  - The observer's `Reads` and `ReadBytes` count reads that completed
+    successfully and the bytes they returned (before: some paths counted
+    every read whose buffer came back, with the requested length).
 - **Linux stores use io_uring by default** (`linux_tier: Auto`). Each
   ring holds two file descriptors (a store's parallel lanes, created on
   first use, and each submitter); a queue whose ring the kernel cannot set

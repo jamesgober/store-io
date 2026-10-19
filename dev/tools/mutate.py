@@ -78,7 +78,7 @@ M = [
  ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
  ("crates/store-io-engine/src/open.rs", "            io: platform.io_path(),\n            unavailable,\n        };", "            io: platform.io_path(),\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
  # Read errors are classified and media errors name the exact range
- ("crates/store-io-engine/src/io.rs", "                    if !store_io_core::errno::is_media_error(raw) {", "                    if false {"),
+ ('crates/store-io-engine/src/settle.rs', '        Err(raw) if is_media_error(raw) => {', '        Err(raw) if true || is_media_error(raw) => {'),
  ("crates/store-io-engine/src/io.rs", "self.first_unreadable(r, start, end).unwrap_or((start, end));", "self.first_unreadable(r, start, end).map(|_| (start, end)).unwrap_or((start, end));"),
  # Directory: refuse before any write without directory flushes; fail-stop on set_len
  ("crates/store-io-engine/src/directory.rs", "        let dir_flush = platform.sync_dir(&dir).err();", "        let dir_flush = None;"),
@@ -106,11 +106,8 @@ M = [
  ("crates/store-io-engine/src/open.rs", "store_io_format::meta::MetaError::Field(\"features\") => newer,", "store_io_format::meta::MetaError::Field(\"features\") if false => newer,"),
  ("crates/store-io-engine/src/open.rs", "            media_error |= pair.media_error;", "            media_error |= pair.media_error && false;"),
  ("crates/store-io-engine/src/open.rs", "        Winner::Lost if p.media_error => Err(Error::Corruption {", "        Winner::Lost if p.media_error && false => Err(Error::Corruption {"),
- # D-095: lane marks flip on take and release; a new operation is first seen anew
- ("crates/store-io-engine/src/exec.rs", "        self.0.store(v.wrapping_add(1), Ordering::Relaxed);", "        self.0.store(v, Ordering::Relaxed);"),
- ("crates/store-io-engine/src/exec.rs", "        mark.store(v.wrapping_add(1), Ordering::Relaxed);", "        mark.store(v, Ordering::Relaxed);"),
+ # D-095: a new operation is first seen anew (lane marks: A1 C6, below)
  ("crates/store-io-engine/src/stats.rs", "            if mark % 2 == 0 || entry.0 != mark {", "            if mark % 2 == 0 {"),
- ("crates/store-io-engine/src/exec.rs", "        self.0.store(v.wrapping_add(2), Ordering::Relaxed);", "        self.0.store(v, Ordering::Relaxed);"),
  # D-096: a pooled queue's drop waits for its jobs; its depth bounds the pool
  ("crates/store-io-posix/src/queue.rs", "                p.inbox.settle(p.in_flight);", "                if false { p.inbox.settle(p.in_flight); }", POSIX),
  ("crates/store-io-posix/src/queue.rs", "        if self.in_flight() >= self.depth {", "        if self.ready.len() >= self.depth {", POSIX),
@@ -228,6 +225,11 @@ M = [
  # A1 C5: a lane's operations live in its op table; a refused submission
  # gives its row back
  ('crates/store-io-engine/src/exec.rs', '            .inspect_err(|_| self.core.table.abort(index))', '            .inspect_err(|_| ())'),
+ # A1 C6: a lane's busy mark is its op table's: odd while an operation is in
+ # flight (published when a row starts and when one is freed)
+ ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, seq)) if self.live > 0 => 2 * seq,'),
+ ('crates/store-io-engine/src/optable.rs', '        self.free.push(index as u32);\n        self.live -= 1;\n        while let Some(&(i, s)) = self.order.front() {\n            if is_live(&self.rows, i, s) {\n                break;\n            }\n            let _stale = self.order.pop_front();\n        }\n        self.publish();\n        Some(live.tag)', '        self.free.push(index as u32);\n        self.live -= 1;\n        self.publish();\n        Some(live.tag)'),
+ ('crates/store-io-engine/src/exec.rs', '        self.core.table.start(index, tag, Kind::Raw, None, false);\n        self.core\n            .queue\n            .submit(op, qtag)', '        let r = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, Kind::Raw, None, false);\n        r'),
 ]
 
 def kill_stuck_tests():

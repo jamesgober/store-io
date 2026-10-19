@@ -16,6 +16,7 @@ use crate::exec::{Lane, LaneGuard, Next, Pumped, Ran, Source, clear_stale, pump,
 use crate::frontier::{AppendFrontier, Reservation};
 use crate::receipt::{DurableReceipt, WriteTicket};
 use crate::scan::ScanItem;
+use crate::settle::settle_read;
 use crate::store::{LiveRegion, Store, flush_data};
 
 /// Spare buffers a [`Stream`] keeps in flight for one large write.
@@ -589,31 +590,23 @@ where
                     });
                 }
             };
-            if got.is_some() {
-                self.inner.observer.add(Counter::Reads, 1);
-                self.inner.observer.add(Counter::ReadBytes, piece);
-            }
-            let n = match result {
+            // The verdict, as for a submitter's read (`settle_read`): the
+            // bytes read, a media error only when the device says so (else
+            // the raw code: accuracy), or no bytes back.
+            let start = offset + done as u64;
+            let end = start + piece;
+            let n = match settle_read(self, r, start, end, got.as_ref(), result) {
                 Ok(n) => n,
-                Err(raw) => {
-                    let start = offset + done as u64;
-                    let end = start + piece;
-                    // A failed read is a media error only when the device
-                    // says so; anything else keeps its raw code (accuracy).
-                    if !store_io_core::errno::is_media_error(raw) {
-                        return Err(Error::Io {
-                            op: Op::Read,
-                            raw,
-                            ctx: ctx_range(r, start, end),
-                        });
-                    }
+                Err(Error::Corruption {
+                    kind: CorruptionKind::MediaError,
+                    ..
+                }) => {
                     // Name the exact unreadable range, found by the scan's
                     // bisection, not just the whole read. The queue and the
                     // failed read's buffer are returned first: the scan takes
                     // its own. If the rescan itself fails (a short pool, a
                     // full queue), the media error stands for the whole
                     // piece rather than being replaced by that failure.
-                    self.inner.observer.add(Counter::MediaErrors, 1);
                     drop(got);
                     drop(lane);
                     let (bad_start, bad_end) =
@@ -623,10 +616,11 @@ where
                         ctx: ctx_range(r, bad_start, bad_end),
                     });
                 }
+                Err(e) => return Err(e),
             };
+            // `settle_read` returns the length only when the buffer came
+            // back (else `Interrupted`): this cannot fail.
             let Some(buf) = got else {
-                // A backend that kept the buffer (platform contract 1): the
-                // bytes never came back, so nothing is reported as read.
                 return Err(not_written(NotWrittenCause::Interrupted, c));
             };
             let want = (out.len() - done.min(out.len())).min(n);

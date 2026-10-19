@@ -219,8 +219,6 @@ where
                 };
                 match lane.submit(op, submitted) {
                     Ok(()) => {
-                        self.inner.observer.add(Counter::Reads, 1);
-                        self.inner.observer.add(Counter::ReadBytes, len as u64);
                         ring[(submitted % depth as u64) as usize] = Some(Pending {
                             start: next,
                             len,
@@ -262,6 +260,14 @@ where
                     buf.is_some() || result.is_err(),
                     "a read succeeded without its buffer (platform contract 1)"
                 );
+                // Counted as every read is: completed, with the bytes it
+                // returned.
+                if let (Ok(n), Some(_)) = (&result, &buf) {
+                    self.inner.observer.add(Counter::Reads, 1);
+                    self.inner
+                        .observer
+                        .add(Counter::ReadBytes, (*n).min(len) as u64);
+                }
                 if failure.is_none() && !out.sum.stopped {
                     match result {
                         Ok(n) => match &buf {
@@ -359,11 +365,7 @@ where
             },
         );
         let (result, back) = match done {
-            Ok(Ran::Done { buf, result }) => {
-                self.inner.observer.add(Counter::Reads, 1);
-                self.inner.observer.add(Counter::ReadBytes, len);
-                (result, buf)
-            }
+            Ok(Ran::Done { buf, result }) => (result, buf),
             Ok(Ran::Abandoned(raw)) => return Err(read_error(raw, c)),
             Err((_refused, Some(raw))) => return Err(read_error(raw, c)),
             Err((_refused, None)) => return Err(not_written(NotWrittenCause::QueueFull, c)),
@@ -379,6 +381,8 @@ where
         match result {
             Ok(n) => {
                 let n = (n as u64).min(len);
+                self.inner.observer.add(Counter::Reads, 1);
+                self.inner.observer.add(Counter::ReadBytes, n);
                 out.data(start, &buf.as_slice()[..n as usize]);
                 out.unreadable(start + n, start + len);
                 Ok(buf)
@@ -418,7 +422,6 @@ fn collect_one<Q: Queue>(
     in_flight: &mut usize,
 ) -> Result<(), OsError> {
     let _added = lane.wait(1)?;
-    lane.progress();
     for comp in lane.done.drain() {
         *in_flight = in_flight.saturating_sub(1);
         if let Some(p) = ring[(comp.tag % depth as u64) as usize].as_mut() {

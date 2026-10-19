@@ -48,10 +48,10 @@ pub enum Counter {
     Writes = 0,
     /// Bytes those writes carried.
     WriteBytes,
-    /// Reads accepted by the device (region reads and scans, rescans
-    /// included).
+    /// Reads that completed successfully (region reads, scans and their
+    /// rescans, submitter reads).
     Reads,
-    /// Bytes those reads carried.
+    /// Bytes those reads returned.
     ReadBytes,
     /// Barriers on the data path (every call, power-safe devices included).
     Barriers,

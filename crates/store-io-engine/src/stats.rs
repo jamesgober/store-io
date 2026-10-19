@@ -1,10 +1,11 @@
 //! The oldest operation in flight (D-084, D-095), for a watchdog the caller
 //! owns: store-io keeps no timer.
 //!
-//! The I/O path pays nothing but a lane's busy mark (odd while the lane is
-//! held; see `QueueSet`). The clock is read here, by the query: it remembers
-//! when it first saw each busy mark, so an operation still holding its lane
-//! at a later query has been outstanding at least that long. The age is a
+//! The I/O path pays nothing but a lane's busy mark (odd while an operation
+//! is in flight on the lane, naming the oldest; see `QueueSet`). The clock
+//! is read here, by the query: it remembers when it first saw each busy
+//! mark, so an operation still the lane's oldest at a later query has been
+//! outstanding at least that long. The age is a
 //! lower bound, within one query interval of the truth, and 0 the first time
 //! an operation is seen; a watchdog polls and acts when the age passes its
 //! deadline (for example by calling `Store::poison`).
@@ -99,7 +100,7 @@ where
                 continue;
             }
             if entry.1 == NOT_SEEN {
-                // A new operation (or progress on this lane): first seen now.
+                // A new oldest operation on this lane: first seen now.
                 entry.1 = now;
             }
             let flush = i == flush_at;
@@ -175,13 +176,52 @@ mod tests {
         assert_eq!(s.oldest_outstanding(), None);
     }
 
-    /// The age of a held lane grows with the clock, from the first query
-    /// that saw it; releasing ends it; a new operation on the same lane
-    /// starts again from 0 (it is not mistaken for the old one).
+    /// Puts one operation in flight on `lane` (a data flush the simulator
+    /// holds until the lane next waits): the lane is outstanding (A1 C6: a
+    /// lane is outstanding while an operation is in flight on it, not while
+    /// it is merely held).
+    fn occupy(lane: &mut crate::exec::Lane<store_io_sim::SimQueue>, s: &Store<SimPlatform>) {
+        lane.submit(
+            store_io_platform::IoOp::FlushData {
+                file: &s.inner.file,
+            },
+            0,
+        )
+        .map_err(|_| ())
+        .unwrap();
+    }
+
+    /// Completes the oldest operation in flight on `lane`.
+    fn finish_one(lane: &mut crate::exec::Lane<store_io_sim::SimQueue>) {
+        assert!(lane.wait(1).unwrap() >= 1);
+        lane.done.drain().for_each(drop);
+    }
+
+    /// The busy marks of the store's lanes that are odd.
+    fn busy(s: &Store<SimPlatform>) -> Vec<usize> {
+        s.inner
+            .queues
+            .marks()
+            .enumerate()
+            .filter(|(_, m)| m % 2 == 1)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// An operation in flight ages with the clock, from the first query
+    /// that saw it; its completion ends it; a new operation on the same lane
+    /// starts again from 0 (it is not mistaken for the old one). A lane that
+    /// is merely held is not outstanding.
     #[test]
-    fn test_a_held_queue_ages_from_the_first_query_that_sees_it() {
+    fn test_an_operation_in_flight_ages_from_the_first_query_that_sees_it() {
         let (p, s) = store();
-        let held = s.inner.queues.get(0);
+        let mut held = s.inner.queues.get(0);
+        assert_eq!(
+            s.oldest_outstanding(),
+            None,
+            "a held, idle lane is outstanding"
+        );
+        occupy(&mut held, &s);
         let first = Outstanding {
             age: Duration::ZERO,
             flush: false,
@@ -195,32 +235,36 @@ mod tests {
                 flush: false,
             })
         );
-        drop(held);
+        finish_one(&mut held);
         assert_eq!(s.oldest_outstanding(), None);
-        let again = s.inner.queues.get(0);
+        occupy(&mut held, &s);
         p.with_world(|w| w.advance_clock(1_000));
         assert_eq!(s.oldest_outstanding(), Some(first));
-        drop(again);
+        finish_one(&mut held);
+        drop(held);
     }
 
-    /// The oldest of several held queues wins, and a flush leader blocked
-    /// in a device flush is reported as one.
+    /// The oldest of several operations in flight wins, and a flush leader
+    /// blocked in a device flush is reported as one.
     #[test]
-    fn test_the_oldest_wins_and_a_held_flush_is_reported_as_a_flush() {
+    fn test_the_oldest_wins_and_a_flush_in_flight_is_reported_as_a_flush() {
         let (p, s) = store();
-        let flush = s.inner.queues.flush_lane().unwrap();
+        let mut flush = s.inner.queues.flush_lane().unwrap();
+        occupy(&mut flush, &s);
         assert!(s.oldest_outstanding().unwrap().flush);
         p.with_world(|w| w.advance_clock(3_000));
-        let shared = s.inner.queues.get(0);
+        let mut shared = s.inner.queues.get(0);
+        occupy(&mut shared, &s);
         let o = s.oldest_outstanding().unwrap();
-        assert!(o.flush, "the older flush lost to a newer queue");
+        assert!(o.flush, "the older flush lost to a newer operation");
         assert_eq!(o.age, Duration::from_secs(3));
-        drop(flush);
+        finish_one(&mut flush);
         let o = s.oldest_outstanding().unwrap();
         assert!(!o.flush);
         assert_eq!(o.age, Duration::ZERO);
-        drop(shared);
+        finish_one(&mut shared);
         assert_eq!(s.oldest_outstanding(), None);
+        drop((flush, shared));
     }
 
     /// A lane released and taken again between two queries holds a new
@@ -228,39 +272,66 @@ mod tests {
     #[test]
     fn test_a_lane_retaken_between_queries_is_a_new_operation() {
         let (p, s) = store();
-        let first = s.inner.queues.get(0);
+        let mut first = s.inner.queues.get(0);
+        occupy(&mut first, &s);
         assert_eq!(s.oldest_outstanding().unwrap().age, Duration::ZERO);
         p.with_world(|w| w.advance_clock(4_000));
+        finish_one(&mut first);
         drop(first);
-        let second = s.inner.queues.get(0);
+        let mut second = s.inner.queues.get(0);
+        occupy(&mut second, &s);
         assert_eq!(s.oldest_outstanding().unwrap().age, Duration::ZERO);
-        drop(second);
-    }
-
-    /// Progress on a held lane (a completion) restarts its age: a long
-    /// provisioning that keeps completing writes never looks hung.
-    #[test]
-    fn test_progress_on_a_held_lane_restarts_its_age() {
-        let (p, s) = store();
-        let held = s.inner.queues.get(0);
-        assert_eq!(s.oldest_outstanding().unwrap().age, Duration::ZERO);
-        p.with_world(|w| w.advance_clock(5_000));
-        assert_eq!(s.oldest_outstanding().unwrap().age, Duration::from_secs(5));
-        held.progress();
-        assert_eq!(s.oldest_outstanding().unwrap().age, Duration::ZERO);
-        p.with_world(|w| w.advance_clock(2_000));
-        assert_eq!(s.oldest_outstanding().unwrap().age, Duration::from_secs(2));
-        drop(held);
+        finish_one(&mut second);
     }
 
     /// First seen together, a flush is the one reported.
     #[test]
     fn test_a_tie_reports_the_flush() {
         let (_p, s) = store();
-        let shared = s.inner.queues.get(0);
-        let flush = s.inner.queues.flush_lane().unwrap();
+        let mut shared = s.inner.queues.get(0);
+        let mut flush = s.inner.queues.flush_lane().unwrap();
+        occupy(&mut shared, &s);
+        occupy(&mut flush, &s);
         assert!(s.oldest_outstanding().unwrap().flush);
-        drop((shared, flush));
+        finish_one(&mut shared);
+        finish_one(&mut flush);
+    }
+
+    /// A blocking call's operation is outstanding while it is being
+    /// submitted (A1 C6): a queue that performs it inside `submit` (an inline
+    /// queue, D-104) must not hide a hung device.
+    #[test]
+    fn test_a_lane_operation_is_outstanding_while_it_is_being_submitted() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let (p, s) = store();
+        let pages = s.provision_page_region("pages", 1 << 20).unwrap();
+        let (seen, idle) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+        {
+            let (s, seen, idle) = (s.clone(), Arc::clone(&seen), Arc::clone(&idle));
+            p.with_world(|w| {
+                w.set_submit_probe(Some(Arc::new(move || {
+                    let n = if s.oldest_outstanding().is_some() {
+                        &seen
+                    } else {
+                        &idle
+                    };
+                    n.fetch_add(1, Ordering::Relaxed);
+                })));
+            });
+        }
+        pages.write(pages.pos(0).unwrap(), &[7u8; 4096]).unwrap();
+        p.with_world(|w| w.set_submit_probe(None));
+        assert!(
+            seen.load(Ordering::Relaxed) >= 1,
+            "the write was never seen in flight"
+        );
+        assert_eq!(
+            idle.load(Ordering::Relaxed),
+            0,
+            "an operation was submitted while not outstanding"
+        );
     }
 
     /// Parallel queues for `s`, as the store makes them (D-096); counts calls.
@@ -284,30 +355,23 @@ mod tests {
     }
 
     /// Parallel lanes are created once, by the first call that needs them;
-    /// a held one is outstanding like any lane, in its own mark, never the
-    /// flush lane's.
+    /// an operation on one is outstanding like any lane's, in its own mark,
+    /// never the flush lane's.
     #[test]
-    fn test_parallel_lanes_are_made_once_and_counted_when_held() {
+    fn test_parallel_lanes_are_made_once_and_counted_when_busy() {
         let (p, s) = store();
         let calls = std::cell::Cell::new(0);
         let n = (s.inner.queues.marks().len() - 1) / 2;
-        let held = s
+        let mut held = s
             .inner
             .queues
             .get_parallel(0, make_parallel(&p, &calls, true));
         assert_eq!(calls.get(), 1);
-        let busy: Vec<usize> = s
-            .inner
-            .queues
-            .marks()
-            .enumerate()
-            .filter(|(_, m)| m % 2 == 1)
-            .map(|(i, _)| i)
-            .collect();
+        occupy(&mut held, &s);
         assert_eq!(
-            busy,
+            busy(&s),
             vec![n],
-            "the held parallel lane's mark is not the first parallel one"
+            "the busy parallel lane's mark is not the first parallel one"
         );
         assert_eq!(
             s.oldest_outstanding(),
@@ -318,6 +382,7 @@ mod tests {
         );
         p.with_world(|w| w.advance_clock(2_000));
         assert_eq!(s.oldest_outstanding().unwrap().age, Duration::from_secs(2));
+        finish_one(&mut held);
         drop(held);
         assert_eq!(s.oldest_outstanding(), None);
         let again = s
@@ -336,20 +401,30 @@ mod tests {
     fn test_a_failed_parallel_start_falls_back_to_a_shared_lane() {
         let (p, s) = store();
         let calls = std::cell::Cell::new(0);
-        let lane = s
+        let mut lane = s
             .inner
             .queues
             .get_parallel(0, make_parallel(&p, &calls, false));
-        let first_busy = s.inner.queues.marks().position(|m| m % 2 == 1);
-        assert_eq!(first_busy, Some(0), "the fallback is not a shared lane");
+        occupy(&mut lane, &s);
+        assert_eq!(
+            busy(&s).first(),
+            Some(&0),
+            "the fallback is not a shared lane"
+        );
+        finish_one(&mut lane);
         drop(lane);
-        let lane = s
+        let mut lane = s
             .inner
             .queues
             .get_parallel(0, make_parallel(&p, &calls, true));
         assert_eq!(calls.get(), 1, "a failed start was retried");
-        let first_busy = s.inner.queues.marks().position(|m| m % 2 == 1);
-        assert_eq!(first_busy, Some(0), "a later call left the shared lanes");
+        occupy(&mut lane, &s);
+        assert_eq!(
+            busy(&s).first(),
+            Some(&0),
+            "a later call left the shared lanes"
+        );
+        finish_one(&mut lane);
         drop(lane);
         assert!(!s.inner.queues.has_parallel());
     }
@@ -378,50 +453,48 @@ mod tests {
         let (p, s) = store();
         let calls = std::cell::Cell::new(0);
         let n = (s.inner.queues.marks().len() - 1) / 2;
-        let held: Vec<_> = (0..n)
+        let mut held: Vec<_> = (0..n)
             .map(|i| {
                 s.inner
                     .queues
                     .get_parallel(i, make_parallel(&p, &calls, true))
             })
             .collect();
-        let busy = |s: &Store<SimPlatform>| {
-            s.inner
-                .queues
-                .marks()
-                .enumerate()
-                .filter(|(_, m)| m % 2 == 1)
-                .map(|(i, _)| i)
-                .collect::<Vec<_>>()
-        };
+        for lane in &mut held {
+            occupy(lane, &s);
+        }
         assert_eq!(busy(&s), (n..2 * n).collect::<Vec<_>>());
-        let extra = s
+        let mut extra = s
             .inner
             .queues
             .get_parallel(0, make_parallel(&p, &calls, true));
+        occupy(&mut extra, &s);
         assert!(busy(&s).iter().any(|&i| i < n), "no shared lane was taken");
         drop((extra, held));
     }
 
-    /// Progress on a held parallel lane advances its own mark only: never a
-    /// shared lane's, never the flush lane's.
+    /// The completion of an operation on a parallel lane moves its own mark
+    /// only: never a shared lane's, never the flush lane's.
     #[test]
     fn test_progress_on_a_parallel_lane_moves_only_its_own_mark() {
         let (p, s) = store();
         let calls = std::cell::Cell::new(0);
         let n = (s.inner.queues.marks().len() - 1) / 2;
-        let held = s
+        let mut held = s
             .inner
             .queues
             .get_parallel(0, make_parallel(&p, &calls, true));
+        occupy(&mut held, &s);
+        occupy(&mut held, &s);
         let before: Vec<u64> = s.inner.queues.marks().collect();
-        held.progress();
+        let _n = held.wait(1).unwrap();
+        held.done.drain().for_each(drop);
         let after: Vec<u64> = s.inner.queues.marks().collect();
         for (i, (b, a)) in before.iter().zip(&after).enumerate() {
             if i == n {
-                assert_eq!(*a, b + 2, "its own mark did not advance");
+                assert_ne!(a, b, "its own mark did not move");
             } else {
-                assert_eq!(a, b, "progress moved lane {i}'s mark");
+                assert_eq!(a, b, "a completion moved lane {i}'s mark");
             }
         }
         drop(held);
@@ -467,7 +540,10 @@ mod tests {
                     .collect(),
             )
         });
-        assert_eq!(s.inner.queues.marks().position(|m| m % 2 == 1), Some(0));
+        let mut lane = lane;
+        occupy(&mut lane, &s);
+        assert_eq!(busy(&s).first(), Some(&0));
+        finish_one(&mut lane);
         drop(lane);
         assert!(!s.inner.queues.has_parallel());
     }

@@ -429,3 +429,44 @@ where
 fn region(live: &Live) -> Option<&LiveRegion> {
     live.pass.as_ref().map(|p| &**p.get())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{Kind, Table};
+    use crate::exec::LaneMark;
+
+    fn raw(t: &mut Table, tag: u64) -> u64 {
+        let (index, qtag) = t.claim().unwrap_or_else(|| panic!("a free row"));
+        t.start(index, tag, Kind::Raw, None, false);
+        qtag
+    }
+
+    /// The busy mark names the oldest operation in flight (A1 C6, D-095):
+    /// the oldest completing while a newer one is in flight moves it (the age
+    /// restarts: progress), a newer one completing first does not (the
+    /// oldest keeps aging), and the last one leaves it even.
+    #[test]
+    fn test_the_busy_mark_follows_the_oldest_operation() {
+        let mark = Arc::new(LaneMark::new());
+        let mut t = Table::new(4, Arc::clone(&mark));
+        assert_eq!(mark.get() % 2, 0);
+        let (a, b) = (raw(&mut t, 1), raw(&mut t, 2));
+        assert_eq!(mark.get(), 1, "operation 0 is the oldest");
+        assert_eq!(t.take(a), Some(1));
+        assert_eq!(mark.get(), 3, "operation 1 is the oldest now");
+        assert_eq!(t.take(b), Some(2));
+        assert_eq!(mark.get() % 2, 0, "nothing in flight");
+        let (c, d) = (raw(&mut t, 3), raw(&mut t, 4));
+        let oldest = mark.get();
+        assert_eq!(t.take(d), Some(4));
+        assert_eq!(
+            mark.get(),
+            oldest,
+            "a newer completion moved the oldest's mark"
+        );
+        assert_eq!(t.take(c), Some(3));
+        assert_eq!(mark.get() % 2, 0);
+    }
+}

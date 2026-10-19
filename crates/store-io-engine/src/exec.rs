@@ -56,10 +56,11 @@ pub(crate) struct QueueSet<Q> {
     parallel_off: AtomicBool,
     depth: usize,
     /// One busy mark per shared lane, then one per parallel lane, then one
-    /// for the flush lane (D-095), each alone on its cache line and shared
-    /// with its lane: odd while the lane is held, advanced by 2 at each
-    /// completion. Only the holder writes it; a watchdog reads it without
-    /// the lock. A lane not created yet keeps its mark even.
+    /// for the flush lane (D-095), each alone on its cache line and published
+    /// by its lane's op table: odd while an operation is in flight on the
+    /// lane (`2 * oldest + 1`, so it changes when the oldest completes),
+    /// even otherwise. Only the holder writes it; a watchdog reads it
+    /// without the lock. A lane not created yet keeps its mark even.
     marks: Box<[Arc<LaneMark>]>,
     waiters: AtomicU64,
     wake: Mutex<()>,
@@ -75,7 +76,6 @@ pub(crate) struct Lane<Q> {
     core: Core<Q>,
     /// This holder's completed operations, under the holder's own tags.
     pub(crate) done: CompletionBuf,
-    mark: Arc<LaneMark>,
 }
 
 impl<Q: Queue> Lane<Q> {
@@ -138,25 +138,6 @@ impl<Q: Queue> Lane<Q> {
     }
 }
 
-impl<Q> Lane<Q> {
-    /// An operation on this lane completed: whatever is outstanding now is
-    /// a newer operation, so `oldest_outstanding` ages it from now, not
-    /// from when the lane was taken (D-095). Called by the holder only.
-    #[inline]
-    pub(crate) fn progress(&self) {
-        self.mark.advance();
-    }
-}
-
-impl LaneMark {
-    /// See [`Lane::progress`].
-    #[inline]
-    fn advance(&self) {
-        let v = self.0.load(Ordering::Relaxed);
-        self.0.store(v.wrapping_add(2), Ordering::Relaxed);
-    }
-}
-
 /// A lane's busy mark, alone on its cache line so that lanes used by
 /// different threads never share one. A `Submitter` keeps one too (D-098).
 #[repr(align(128))]
@@ -184,22 +165,19 @@ impl LaneMark {
 ///
 /// Fields drop in declaration order: the queue's lock is released first,
 /// then [`Notify`] wakes a waiter, which therefore always finds it free.
-pub(crate) struct LaneGuard<'a, Q> {
-    // Declared first, so the mark is back to even before the lock is
-    // released: only the holder may write it.
-    _mark: Mark<'a>,
+/// An operation abandoned on the lane (a failed wait) stays in its row, and
+/// outstanding, until the next holder clears it.
+pub(crate) struct LaneGuard<'a, Q: Queue> {
     guard: MutexGuard<'a, Lane<Q>>,
     _notify: Option<Notify<'a, Q>>,
 }
 
 /// The flush lane, borrowed by the flush leader.
-pub(crate) struct FlushGuard<'a, Q> {
-    // As in `LaneGuard`: the mark goes back to even before the unlock.
-    _mark: Mark<'a>,
+pub(crate) struct FlushGuard<'a, Q: Queue> {
     guard: MutexGuard<'a, Lane<Q>>,
 }
 
-impl<Q> Deref for FlushGuard<'_, Q> {
+impl<Q: Queue> Deref for FlushGuard<'_, Q> {
     type Target = Lane<Q>;
 
     fn deref(&self) -> &Lane<Q> {
@@ -207,28 +185,9 @@ impl<Q> Deref for FlushGuard<'_, Q> {
     }
 }
 
-impl<Q> DerefMut for FlushGuard<'_, Q> {
+impl<Q: Queue> DerefMut for FlushGuard<'_, Q> {
     fn deref_mut(&mut self) -> &mut Lane<Q> {
         &mut self.guard
-    }
-}
-
-/// A lane's busy mark while it is held: odd from `take` until dropped.
-struct Mark<'a>(&'a AtomicU64);
-
-impl<'a> Mark<'a> {
-    /// Called with the lane's lock held: no other thread writes the mark.
-    fn take(mark: &'a AtomicU64) -> Self {
-        let v = mark.load(Ordering::Relaxed);
-        mark.store(v.wrapping_add(1), Ordering::Relaxed);
-        Self(mark)
-    }
-}
-
-impl Drop for Mark<'_> {
-    fn drop(&mut self) {
-        let v = self.0.load(Ordering::Relaxed);
-        self.0.store(v.wrapping_add(1), Ordering::Relaxed);
     }
 }
 
@@ -246,7 +205,7 @@ impl<Q> Drop for Notify<'_, Q> {
     }
 }
 
-impl<Q> Deref for LaneGuard<'_, Q> {
+impl<Q: Queue> Deref for LaneGuard<'_, Q> {
     type Target = Lane<Q>;
 
     fn deref(&self) -> &Lane<Q> {
@@ -254,7 +213,7 @@ impl<Q> Deref for LaneGuard<'_, Q> {
     }
 }
 
-impl<Q> DerefMut for LaneGuard<'_, Q> {
+impl<Q: Queue> DerefMut for LaneGuard<'_, Q> {
     fn deref_mut(&mut self) -> &mut Lane<Q> {
         &mut self.guard
     }
@@ -302,10 +261,7 @@ impl<Q: Queue> QueueSet<Q> {
     pub(crate) fn flush_lane(&self) -> Option<FlushGuard<'_, Q>> {
         self.flush.as_ref().map(|m| {
             let guard = m.lock().unwrap_or_else(PoisonError::into_inner);
-            FlushGuard {
-                _mark: Mark::take(&self.marks[2 * self.queues.len()].0),
-                guard,
-            }
+            FlushGuard { guard }
         })
     }
 
@@ -338,13 +294,10 @@ impl<Q: Queue> QueueSet<Q> {
                 Err(TryLockError::WouldBlock) => None,
             }
         });
-        let Some((at, guard)) = found else {
+        let Some((_, guard)) = found else {
             return self.get(hint);
         };
         LaneGuard {
-            // The lane's own `Lane::mark` (used by `progress`) is this same
-            // `marks[n + at]`, bound in `create_parallel`: the two must agree.
-            _mark: Mark::take(&self.marks[n + at].0),
             guard,
             _notify: None,
         }
@@ -395,8 +348,8 @@ impl<Q: Queue> QueueSet<Q> {
     }
 
     /// Every lane's busy mark: the shared lanes in order, the parallel lanes,
-    /// then the flush lane (odd while held; always even for a lane that does
-    /// not exist).
+    /// then the flush lane (odd while an operation is in flight on it;
+    /// always even for a lane that does not exist).
     pub(crate) fn marks(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.marks.iter().map(|m| m.0.load(Ordering::Relaxed))
     }
@@ -416,16 +369,15 @@ impl<Q: Queue> QueueSet<Q> {
     /// Borrows a free queue, starting the search at `hint`; when all are
     /// busy, waits for the first one returned.
     pub(crate) fn get(&self, hint: usize) -> LaneGuard<'_, Q> {
-        if let Some((at, guard)) = self.try_any(hint) {
+        if let Some((_, guard)) = self.try_any(hint) {
             return LaneGuard {
-                _mark: Mark::take(&self.marks[at].0),
                 guard,
                 _notify: Some(Notify { set: self }),
             };
         }
         let _registered = self.waiters.fetch_add(1, Ordering::AcqRel);
         let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
-        let (at, guard) = loop {
+        let (_, guard) = loop {
             if let Some(found) = self.try_any(hint) {
                 break found;
             }
@@ -437,7 +389,6 @@ impl<Q: Queue> QueueSet<Q> {
         drop(wake);
         let _unregistered = self.waiters.fetch_sub(1, Ordering::AcqRel);
         LaneGuard {
-            _mark: Mark::take(&self.marks[at].0),
             guard,
             _notify: Some(Notify { set: self }),
         }
@@ -448,11 +399,9 @@ impl<Q: Queue> QueueSet<Q> {
 fn lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Mutex<Lane<Q>> {
     let depth = depth.max(1);
     Mutex::new(Lane {
-        // The table's own busy mark is not the lane's (D-095's lane marks
-        // stay as they are).
-        core: Core::new(queue, depth, Arc::new(LaneMark::new())),
+        // The table publishes the lane's busy mark (D-095).
+        core: Core::new(queue, depth, Arc::clone(mark)),
         done: CompletionBuf::with_capacity(depth),
-        mark: Arc::clone(mark),
     })
 }
 
@@ -489,8 +438,6 @@ pub(crate) fn clear_stale<Q: Queue>(lane: &mut Lane<Q>) -> Result<(), OsError> {
         let n = lane.core.queue.in_flight();
         let _added = lane.wait(n)?;
         lane.done.drain().for_each(drop);
-        // Clearing is progress, not the holder's own operation aging.
-        lane.progress();
     }
     // Rows whose queue holds nothing can never complete (a backend that lost
     // their completions): freed, so the lane is usable.
@@ -525,15 +472,12 @@ pub(crate) fn run<Q: Queue>(
     }
     slot.submit(op, TAG).map_err(|r| (r.buf, r.raw))?;
     loop {
-        // A borrow of the mark beside the drain of the completions.
-        let mark = &slot.mark;
         for c in slot.done.drain() {
             if c.tag == TAG {
                 debug_assert!(
                     !is_read || c.buf.is_some() || c.result.is_err(),
                     "a read succeeded without its buffer (platform contract 1)"
                 );
-                mark.advance();
                 return Ok(Ran::Done {
                     buf: c.buf,
                     result: c.result,
@@ -670,7 +614,6 @@ pub(crate) fn pump<Q: Queue>(
         if let Err(raw) = lane.wait(1) {
             return Pumped::Failed(Some(raw));
         }
-        lane.progress();
         for c in lane.done.drain() {
             in_flight = in_flight.saturating_sub(1);
             match (c.result, c.buf) {

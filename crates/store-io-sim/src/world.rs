@@ -212,6 +212,7 @@ pub struct World {
     misaligned_reads: u64,
     clock_ms: u64,
     waits: u64,
+    write_submits: u64,
     flushes_completed: u64,
     dir_syncs: u64,
     set_lens: u64,
@@ -238,6 +239,7 @@ impl World {
             misaligned_reads: 0,
             clock_ms: 0,
             waits: 0,
+            write_submits: 0,
             flushes_completed: 0,
             dir_syncs: 0,
             set_lens: 0,
@@ -300,6 +302,25 @@ impl World {
             }),
             _ => None,
         }
+    }
+
+    /// Counts a write submission; the raw error if the fault plan refuses
+    /// this one.
+    pub(crate) fn submit_fails(&mut self) -> Option<OsError> {
+        self.write_submits += 1;
+        match self.cfg.faults.fail_submit {
+            Some((at, code)) if at == self.write_submits => Some(OsError {
+                code,
+                source: OsErrorSource::Sim,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Write submissions so far (see [`FaultPlan::fail_submit`]).
+    #[must_use]
+    pub fn write_submits(&self) -> u64 {
+        self.write_submits
     }
 
     /// Queue waits so far (see [`FaultPlan::fail_wait`]).

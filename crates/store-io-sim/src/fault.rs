@@ -67,4 +67,9 @@ pub struct FaultPlan {
     /// code before completing anything: the operations stay in flight, as
     /// when waiting on an IOCP port fails.
     pub fail_wait: Option<(u64, i32)>,
+    /// The n-th write submission (1-based, over every queue) is refused with
+    /// this raw code before it reaches the device, its buffer given back, as
+    /// when the OS rejects an operation at submission: the media is
+    /// untouched.
+    pub fail_submit: Option<(u64, i32)>,
 }

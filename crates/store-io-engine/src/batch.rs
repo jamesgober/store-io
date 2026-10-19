@@ -14,10 +14,10 @@
 use store_io_core::error::{Error, NotWrittenCause, Op};
 use store_io_platform::{IoBuf, Platform};
 
-use crate::exec::Pumped;
 use crate::io::{Chunks, Placed, ctx, ctx_range, not_written};
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::region::{AppendRegion, PageRegion};
+use crate::settle::{Wrote, settle_pumped};
 use crate::store::Store;
 
 /// Many appends written together and made durable with one barrier.
@@ -273,17 +273,11 @@ where
         drop(src);
         self.bytes = 0;
         self.records = 0;
-        match outcome {
-            Pumped::All => {
-                reserved.complete();
-                let ticket = s.ticket(state, r.start, r.end);
-                Ok((ticket.pos(), ticket))
-            }
-            Pumped::Refused(raw) | Pumped::Failed(raw) => {
-                drop(reserved);
-                Err(s.unknown(Op::Write, raw, ctx_range(state, r.start, r.data_end)))
-            }
-        }
+        // As `AppendRegion::append`: the settle step completes the
+        // reservation or poisons.
+        let r = reserved.disarm();
+        let ticket = settle_pumped(s, state, Wrote::Append(r), outcome)?;
+        Ok((ticket.pos(), ticket))
     }
 
     /// Writes the batch and makes it durable with one barrier. Returns where
@@ -442,7 +436,6 @@ where
         }
         let start = self.writes.first().map_or(0, |(at, _)| *at);
         let end = self.writes.last().map_or(0, |(at, b)| at + b.len() as u64);
-        let c = ctx_range(state, start, end);
         let base = state.data_offset;
         // Several writes run concurrently on a parallel lane; one stays on
         // the caller's thread (D-096).
@@ -456,11 +449,9 @@ where
         };
         let outcome = s.pump(&mut lane, &mut src);
         drop(src);
-        match outcome {
-            Pumped::All => {}
-            Pumped::Refused(raw) => return Err(Store::<P>::refused(raw, c)),
-            Pumped::Failed(raw) => return Err(s.unknown(Op::Write, raw, c)),
-        }
+        // The whole span settles as one write; its receipt follows the
+        // barrier below.
+        let _span = settle_pumped(s, state, Wrote::Page { start, end }, outcome)?;
         drop(lane);
         let (need, synced) = s.barrier_for(state)?;
         Ok(s.receipt(state, start, end, need, false, synced))

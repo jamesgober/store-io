@@ -151,7 +151,7 @@ impl Queue for SimQueue {
             };
             return Err(Rejected { buf, raw: None });
         }
-        let w = lock(&self.world);
+        let mut w = lock(&self.world);
         let pending = match op {
             IoOp::Write {
                 file,
@@ -159,6 +159,12 @@ impl Queue for SimQueue {
                 buf,
                 dsync,
             } => {
+                if let Some(e) = w.submit_fails() {
+                    return Err(Rejected {
+                        buf: Some(buf),
+                        raw: Some(e),
+                    });
+                }
                 if let Err(e) = file.check(&w, true) {
                     return Err(Rejected {
                         buf: Some(buf),

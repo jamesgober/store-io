@@ -144,16 +144,16 @@ impl<I: Iterator<Item = (u64, IoBuf)>> Source for Placed<I> {
     fn recycle(&mut self, _buf: IoBuf) {}
 }
 
-/// An append reservation that poisons the device domain unless its write is
-/// completed: a reserved range left unwritten is a hole no later append may
-/// be acknowledged past. Dropping it uncompleted (an error, or a panic while
-/// it is held) poisons and wakes every waiter.
+/// An append reservation that poisons the device domain unless it is handed
+/// to the settle step ([`Self::disarm`], then [`crate::settle`], which
+/// completes it or poisons): a reserved range left unwritten is a hole no
+/// later append may be acknowledged past. Dropping it before then (an error,
+/// or a panic while it is held) poisons and wakes every waiter.
 pub(crate) struct Reserved<'a, P: Platform>
 where
     P::Queue: Send,
 {
     store: &'a Store<P>,
-    frontier: &'a AppendFrontier,
     r: Option<Reservation>,
 }
 
@@ -162,7 +162,7 @@ where
     P::Queue: Send,
 {
     pub(crate) fn range(&self) -> Reservation {
-        // Always `Some` until `complete` consumes the guard.
+        // Always `Some` until `disarm` consumes the guard.
         self.r.unwrap_or(Reservation {
             start: 0,
             data_end: 0,
@@ -170,11 +170,13 @@ where
         })
     }
 
-    /// Records the completed write.
-    pub(crate) fn complete(mut self) {
-        if let Some(r) = self.r.take() {
-            self.frontier.complete(r);
-        }
+    /// Hands the reservation to the settle step ([`crate::settle`]), which
+    /// completes it or poisons: call it immediately before settling, with
+    /// nothing that can fail in between.
+    pub(crate) fn disarm(mut self) -> Reservation {
+        let r = self.range();
+        self.r = None;
+        r
     }
 }
 
@@ -404,7 +406,6 @@ where
         match f.reserve_wait(len, || domain.poisoned().is_some()) {
             Ok(r) => Ok(Reserved {
                 store: self,
-                frontier: f,
                 r: Some(r),
             }),
             Err(cause) => match domain.poisoned() {

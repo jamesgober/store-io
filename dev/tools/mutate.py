@@ -215,6 +215,11 @@ M = [
  ('crates/store-io-posix/src/uring/queue.rs', '        while !self.lost && (self.kernel > 0 || self.armed) {', '        while false && !self.lost && (self.kernel > 0 || self.armed) {', POSIX),
  # D-100: only a block's one writer may update it without an atomic add
  ('crates/store-io-core/src/observe.rs', '                None => (&self.shared[index & self.mask], false),', '                None => (&self.shared[index & self.mask], true),', OBSERVE),
+ # A1 C2: the blocking writes' one verdict (settle_pumped): an append the
+ # platform refused after its reservation is a hole (poisons, never a plain
+ # refusal), and a pump that failed is never acknowledged
+ ('crates/store-io-engine/src/settle.rs', '        (Pumped::Refused(raw) | Pumped::Failed(raw), _) => {\n', '        (Pumped::Refused(raw) | Pumped::Failed(raw), _) => {\n            if matches!(outcome, Pumped::Refused(_)) {\n                return Err(Store::<P>::refused(raw, ErrorContext::default()));\n            }\n'),
+ ('crates/store-io-engine/src/settle.rs', '            settle_write(store, state, wrote, false, raw, &mut no_prefix)', '            settle_write(store, state, wrote, true, raw, &mut no_prefix)'),
 ]
 
 def kill_stuck_tests():

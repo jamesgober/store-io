@@ -13,12 +13,12 @@ use store_io_format::meta::RegionKind;
 use store_io_platform::Platform;
 
 use crate::batch::{AppendBatch, PageBatch};
-use crate::exec::Pumped;
 use crate::gate::Pass;
 use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::scan::{ScanItem, ScanSummary};
+use crate::settle::{Wrote, settle_pumped};
 use crate::store::{LiveRegion, Store};
 
 pub use crate::slot_handle::Slot;
@@ -252,18 +252,12 @@ where
         let reserved = s.reserve_append(f, data.len() as u64, c)?;
         let r = reserved.range();
         stream.at(self.state.data_offset + r.start);
-        match s.pump(&mut lane, &mut stream) {
-            Pumped::All => {
-                reserved.complete();
-                Ok(s.ticket(&self.state, r.start, r.end))
-            }
-            // Past the reservation every failure leaves a hole: the guard
-            // poisons when dropped, and the write's fate is unknown.
-            Pumped::Refused(raw) | Pumped::Failed(raw) => {
-                drop(reserved);
-                Err(s.unknown(Op::Write, raw, ctx_range(&self.state, r.start, r.data_end)))
-            }
-        }
+        // Until the pump returns the guard poisons on any exit (a panic
+        // included); then the settle step completes the reservation, or
+        // poisons: past it every failure leaves a hole.
+        let outcome = s.pump(&mut lane, &mut stream);
+        let r = reserved.disarm();
+        settle_pumped(s, &self.state, Wrote::Append(r), outcome)
     }
 
     /// Makes everything appended up to and including `ticket` durable.
@@ -592,11 +586,12 @@ where
         let mut stream = s.stage(data, c)?;
         stream.at(self.state.data_offset + pos.offset);
         let mut lane = s.lane(&self.state, Op::Write)?;
-        match s.pump(&mut lane, &mut stream) {
-            Pumped::All => Ok(s.ticket(&self.state, pos.offset, end)),
-            Pumped::Refused(raw) => Err(Store::<P>::refused(raw, c)),
-            Pumped::Failed(raw) => Err(s.unknown(Op::Write, raw, c)),
-        }
+        let outcome = s.pump(&mut lane, &mut stream);
+        let wrote = Wrote::Page {
+            start: pos.offset,
+            end,
+        };
+        settle_pumped(s, &self.state, wrote, outcome)
     }
 
     /// Makes the ticket's write durable, together with every other write to

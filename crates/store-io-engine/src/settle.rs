@@ -11,6 +11,7 @@ use store_io_core::error::{
 use store_io_core::observe::Counter;
 use store_io_platform::{IoBuf, Platform, RawResult};
 
+use crate::exec::Pumped;
 use crate::frontier::Reservation;
 use crate::io::{ctx_range, not_written};
 use crate::receipt::{DurableReceipt, WriteTicket};
@@ -68,6 +69,34 @@ where
             } else {
                 Err(store.unknown(Op::Write, raw, ctx_range(state, start, end)))
             }
+        }
+    }
+}
+
+/// The verdict on a blocking logical write pumped through a lane (one
+/// write issued as however many device writes it needed): [`settle_write`]
+/// over the whole write, with `full` only when every device write
+/// transferred in full. A page write the platform refused before anything
+/// was submitted touched nothing: `Io` (or `QueueFull`), not poisoned. An
+/// append refused at that point still leaves its reserved range as a hole,
+/// so it settles as a write that did not transfer.
+pub(crate) fn settle_pumped<P: Platform>(
+    store: &Store<P>,
+    state: &LiveRegion,
+    wrote: Wrote,
+    outcome: Pumped,
+) -> Result<WriteTicket, Error>
+where
+    P::Queue: Send,
+{
+    let mut no_prefix = None;
+    match (outcome, wrote) {
+        (Pumped::All, _) => settle_write(store, state, wrote, true, None, &mut no_prefix),
+        (Pumped::Refused(raw), Wrote::Page { start, end }) => {
+            Err(Store::<P>::refused(raw, ctx_range(state, start, end)))
+        }
+        (Pumped::Refused(raw) | Pumped::Failed(raw), _) => {
+            settle_write(store, state, wrote, false, raw, &mut no_prefix)
         }
     }
 }

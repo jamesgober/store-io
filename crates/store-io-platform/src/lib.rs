@@ -153,8 +153,10 @@ pub struct QueueConfig {
     /// A hint that the caller submits several independent operations before
     /// it waits. A backend that would otherwise run them one by one inside
     /// `submit` (the Linux synchronous tier) may then run them concurrently
-    /// on worker threads; backends that are already asynchronous ignore it.
-    /// `false` (the default) keeps every operation on the calling thread.
+    /// on worker threads. `false` (the default) keeps every operation on the
+    /// calling thread: the Linux backend then performs each inside `submit`
+    /// on either tier, since a caller that waits for every operation gains
+    /// nothing from a ring (D-104).
     pub parallel: bool,
     /// Worker threads for the backend's shared pool, used only if this queue
     /// is the one that starts it (0 = the backend's default; a backend may

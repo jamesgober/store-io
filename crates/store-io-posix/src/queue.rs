@@ -39,12 +39,14 @@ use crate::uring::ring::Flavour;
 /// In both modes at most `depth` operations are submitted and not yet
 /// reaped; beyond that `submit` refuses the operation and returns its buffer.
 ///
-/// **io_uring** (a platform on [`crate::LinuxTier::Uring`]): each read and
-/// write is submitted to a ring without blocking and completes
-/// asynchronously; `parallel` is not needed and not looked at. A queue for
-/// one thread ([`store_io_platform::Owner::Thread`]) gets a ring only that
-/// thread may use (any other gets `EXDEV`); other queues get a ring any
-/// thread may use, one at a time. Dropping it waits for every operation in
+/// **io_uring** (a platform on [`crate::LinuxTier::Uring`]), for a queue
+/// that keeps several operations in flight (`parallel`, or
+/// [`store_io_platform::Owner::Thread`]): each read and write is submitted
+/// to a ring without blocking and completes asynchronously. A queue for one
+/// thread gets a ring only that thread may use (any other gets `EXDEV`); a
+/// parallel shared queue gets a ring any thread may use, one at a time. A
+/// queue for one operation at a time (neither) is an inline queue on this
+/// tier too (D-104). Dropping it waits for every operation in
 /// flight. What the kernel cannot do without blocking, or transfers short,
 /// is finished by one blocking call in `reap` or `wait` (counted:
 /// [`PosixQueue::fallbacks`]). A durable write uses `RWF_DSYNC` on every

@@ -88,6 +88,7 @@ pub struct Suite<'a, P> {
     root: PathBuf,
     trust: Trust,
     owner: Owner,
+    parallel: bool,
 }
 
 /// What a scenario gets: the platform, a fresh directory, buffers, trust.
@@ -98,6 +99,8 @@ struct Ctx<'a, P> {
     trust: Trust,
     /// Who uses the queues the scenarios make themselves.
     owner: Owner,
+    /// Whether those queues are asked to run operations concurrently.
+    parallel: bool,
 }
 
 type Check = Result<(), String>;
@@ -152,6 +155,7 @@ where
             root: root.as_ref().to_path_buf(),
             trust,
             owner: Owner::Shared,
+            parallel: false,
         }
     }
 
@@ -163,6 +167,17 @@ where
     #[must_use]
     pub fn owner(mut self, owner: Owner) -> Self {
         self.owner = owner;
+        self
+    }
+
+    /// The suite with its own queues asked to run their operations
+    /// concurrently ([`QueueConfig::parallel`]): a backend that sets such
+    /// queues up differently (the Linux backend gives them io_uring rings on
+    /// its io_uring tier, and performs a lone-operation queue's operations
+    /// inline) is checked that way too.
+    #[must_use]
+    pub fn parallel(mut self, parallel: bool) -> Self {
+        self.parallel = parallel;
         self
     }
 
@@ -274,6 +289,7 @@ where
                         pool,
                         trust: self.trust,
                         owner: self.owner,
+                        parallel: self.parallel,
                     })
                     .err(),
                     Err(e) => Some(format!("buffer pool: {e:?}")),
@@ -295,6 +311,7 @@ impl<P: Platform> Ctx<'_, P> {
             self.p.queue(QueueConfig {
                 depth,
                 owner: self.owner,
+                parallel: self.parallel,
                 ..QueueConfig::default()
             }),
             "queue",

@@ -166,6 +166,12 @@ mod platform {
         fell_back: Arc<AtomicU64>,
         /// Queues on rings.
         ringed: Arc<AtomicU64>,
+        /// Rings the kernel refused with an error to the caller (every
+        /// refusal under an explicit `Uring`; under `Auto`, one a
+        /// synchronous queue cannot get around): a submitter is not created,
+        /// a parallel lane's operations run on the store's lone-operation
+        /// lanes. `last_refusal` holds the latest code of either kind.
+        refused: Arc<AtomicU64>,
         last_refusal: Arc<core::sync::atomic::AtomicI32>,
     }
 
@@ -247,6 +253,7 @@ mod platform {
                 reason: Arc::from("synchronous by default (PosixPlatform::new)"),
                 auto: false,
                 fell_back: Arc::new(AtomicU64::new(0)),
+                refused: Arc::new(AtomicU64::new(0)),
                 ringed: Arc::new(AtomicU64::new(0)),
                 last_refusal: Arc::new(core::sync::atomic::AtomicI32::new(0)),
             }
@@ -426,12 +433,19 @@ mod platform {
 
         fn io_path(&self) -> IoPath {
             let fell_back = self.fell_back.load(Ordering::Acquire);
+            let refused = self.refused.load(Ordering::Acquire);
             let ringed = self.ringed.load(Ordering::Relaxed);
             let mut reason = self.reason.to_string();
+            let code = self.last_refusal.load(Ordering::Relaxed);
             if fell_back > 0 {
-                let code = self.last_refusal.load(Ordering::Relaxed);
                 reason.push_str(&format!(
                     "; {fell_back} queue(s) synchronous: the kernel refused a ring ({})",
+                    sys::errno(code)
+                ));
+            }
+            if refused > 0 {
+                reason.push_str(&format!(
+                    "; {refused} ring(s) refused by the kernel ({}): a submitter needing one was not created, a parallel lane's operations ran one at a time",
                     sys::errno(code)
                 ));
             }
@@ -481,7 +495,14 @@ mod platform {
         }
 
         fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {
-            if self.tier == LinuxTier::Uring {
+            // Rings for queues that keep several operations in flight (a
+            // `Submitter`, a parallel lane). A queue whose caller runs one
+            // operation at a time and waits for it (`parallel: false`, a
+            // blocking call's lane) does it inline with one system call on
+            // the io_uring tier too: a ring round trip for a lone operation
+            // costs more than the call (D-104), and buys nothing.
+            let ring = cfg.parallel || cfg.owner == Owner::Thread;
+            if self.tier == LinuxTier::Uring && ring {
                 let owned = cfg.owner == Owner::Thread;
                 match PosixQueue::uring(cfg, owned) {
                     Ok(q) => {
@@ -495,7 +516,11 @@ mod platform {
                         self.last_refusal.store(e.code, Ordering::Relaxed);
                         let _n = self.fell_back.fetch_add(1, Ordering::Release);
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        self.last_refusal.store(e.code, Ordering::Relaxed);
+                        let _n = self.refused.fetch_add(1, Ordering::Release);
+                        return Err(e);
+                    }
                 }
             }
             if cfg.parallel {

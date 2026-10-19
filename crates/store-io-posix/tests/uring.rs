@@ -89,10 +89,13 @@ fn filled(pool: &BufPool, len: usize, byte: u8) -> IoBuf {
     b
 }
 
+/// A ring queue of either flavour: `parallel`, so a shared queue gets a ring
+/// too (a lone-operation queue is synchronous on either tier, D-104).
 fn queue(p: &PosixPlatform, owner: Owner, depth: u32) -> PosixQueue {
     p.queue(QueueConfig {
         depth,
         owner,
+        parallel: true,
         ..QueueConfig::default()
     })
     .unwrap()
@@ -377,4 +380,27 @@ fn test_refusals_return_the_buffer() {
     assert_eq!(refused.raw.map(|e| e.code), Some(libc::EBADF));
     assert!(refused.buf.is_some());
     assert_eq!(q.in_flight(), 0);
+}
+
+/// Which queues get a ring on the io_uring tier (D-104): one that keeps
+/// several operations in flight (`parallel`, or owned by one thread) does;
+/// a queue for one operation at a time performs it inline.
+#[test]
+fn test_only_queues_with_several_operations_in_flight_get_a_ring() {
+    let Some(f) = fixture(1) else { return };
+    let kind = |cfg: QueueConfig| format!("{:?}", f.p.queue(cfg).unwrap().waker());
+    let lone = QueueConfig::default();
+    assert!(kind(lone).contains("inline"), "{}", kind(lone));
+    for cfg in [
+        QueueConfig {
+            parallel: true,
+            ..QueueConfig::default()
+        },
+        QueueConfig {
+            owner: Owner::Thread,
+            ..QueueConfig::default()
+        },
+    ] {
+        assert!(kind(cfg).contains("ring"), "{cfg:?}: {}", kind(cfg));
+    }
 }

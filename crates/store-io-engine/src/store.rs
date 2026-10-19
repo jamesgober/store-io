@@ -63,9 +63,11 @@ pub struct StoreOptions {
     /// pool too large to map fails `create` and `open` with
     /// `NotWritten(PoolExhausted)`.
     pub large_buffers: u32,
-    /// Queues shared by the blocking layers (0 = number of CPUs). On
-    /// io_uring each queue holds two file descriptors (its ring and its
-    /// eventfd), and a store has twice this many queues plus one.
+    /// Queues shared by the blocking layers (0 = number of CPUs). On Linux
+    /// they perform their operations inline on either tier; the parallel
+    /// lanes, as many again and created on first use, are io_uring rings on
+    /// the io_uring tier, each holding two file descriptors (its ring and
+    /// its eventfd), as does each `Submitter`.
     pub queues: usize,
     /// Operations in flight per queue.
     pub queue_depth: u32,
@@ -206,7 +208,9 @@ pub struct StoreReport {
     pub owner_generation: u64,
     /// Whether the store was opened read-only.
     pub read_only: bool,
-    /// The kernel interface the store's I/O uses, and why.
+    /// The kernel interface the store's I/O uses, and why, as of create or
+    /// open. Queues made later (a `Submitter`'s, the parallel lanes, created
+    /// on first use) are counted live in [`Store::io_path`].
     pub io: IoPath,
     /// Regions the region table names that could not be opened, with the
     /// reason (D-090). Empty for a healthy store.
@@ -430,6 +434,15 @@ where
     #[must_use]
     pub fn report(&self) -> &StoreReport {
         &self.inner.report
+    }
+
+    /// The kernel interface the store's I/O uses now, and why: as
+    /// [`StoreReport::io`], with every queue made since counted (a ring the
+    /// kernel refused for a `Submitter` or a parallel lane, and what
+    /// served instead).
+    #[must_use]
+    pub fn io_path(&self) -> IoPath {
+        self.inner.platform.io_path()
     }
 
     /// The volume identity.

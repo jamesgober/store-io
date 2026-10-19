@@ -14,7 +14,8 @@
 //! - ELSEWHERE: measured by another check (cited).
 
 use super::{
-    Ctx, caller_batch, concurrent, gates_extra, gates_scan, lone, page_batch, remove, sequential,
+    Ctx, caller_batch, concurrent, gates_extra, gates_scan, gates_seq, lone, page_batch, remove,
+    sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -262,8 +263,6 @@ pub fn run(ctx: &Ctx) -> Section {
         "--iodepth=128",
         "--norandommap",
     ];
-    let fio_cpu = job(&cpu_args, "read");
-    let fio_cpu2 = job(&cpu_args, "read");
     let fio_dq: Vec<_> = [1u32, 4, 16]
         .iter()
         .map(|qd| {
@@ -285,6 +284,23 @@ pub fn run(ctx: &Ctx) -> Section {
     let mut q8 =
         || job(&[aio, "--rw=read", "--bs=1m", "--iodepth=8"], "read").map(|s| s.bytes_per_s / 1e6);
     let g7 = gates_scan::scan(ctx, &mut q8);
+    // G5: the submitter's QD128 reads alternate with fio's, three times each
+    // (CPU accounting on a virtual machine swings between runs).
+    let (mut g5, mut f5) = (Vec::new(), Vec::new());
+    for _ in 0..3 {
+        f5.push(job(&cpu_args, "read"));
+        g5.push(gates_extra::read_qd128(ctx));
+    }
+    // G6: the Submitter's sequential writer alternates with fio's QD8
+    // sequential write on this file, three times each.
+    let (mut g6, mut f6) = (Vec::new(), Vec::new());
+    for _ in 0..3 {
+        f6.push(job(
+            &[aio, "--rw=write", "--bs=1m", "--iodepth=8", "--end_fsync=1"],
+            "write",
+        ));
+        g6.push(gates_seq::seq_write(ctx));
+    }
     if let Some(e) = remove(&file) {
         sec.anomalies.push(e);
     }
@@ -294,12 +310,22 @@ pub fn run(ctx: &Ctx) -> Section {
         ("fio sequential write (1)", &fio_sw),
         ("fio sequential write (2)", &fio_sw2),
         ("fio sequential read QD1", &fio_sr1),
-        ("fio CPU efficiency (1)", &fio_cpu),
-        ("fio CPU efficiency (2)", &fio_cpu2),
         ("fio durable QD1", &fio_dq[0]),
         ("fio durable QD4", &fio_dq[1]),
         ("fio durable QD16", &fio_dq[2]),
     ];
+    for (i, r) in f5.iter().enumerate() {
+        if let Err(e) = r {
+            sec.anomalies
+                .push(format!("fio CPU efficiency ({}): {e}", i + 1));
+        }
+    }
+    for (i, r) in f6.iter().enumerate() {
+        if let Err(e) = r {
+            sec.anomalies
+                .push(format!("fio sequential write QD8 ({}): {e}", i + 1));
+        }
+    }
     for (what, r) in fio_runs {
         if let Err(e) = r {
             sec.anomalies.push(format!("{what}: {e}"));
@@ -311,7 +337,6 @@ pub fn run(ctx: &Ctx) -> Section {
         .iter()
         .map(|qd| gates_extra::durable_qd(ctx, *qd))
         .collect();
-    let g5 = gates_extra::read_qd128(ctx);
     let g8w = gates_extra::write_qd32(ctx);
     let g8b = gates_extra::blocking_allocs(ctx);
     let g10 = gates_extra::qos(ctx);
@@ -401,46 +426,79 @@ pub fn run(ctx: &Ctx) -> Section {
         measured: parts.join("; "),
         verdict: Verdict::Reported,
     });
-    // G5: operations per CPU-second, at least 90% of fio io_uring.
-    let eff = |r: &Result<fio::Stats, String>| ok(r).map(|s| s.iops * s.runtime_s / s.cpu_s);
-    let (ea, eb) = (eff(&fio_cpu), eff(&fio_cpu2));
-    let fio_eff = mean(ea, eb);
-    let espread = fio_eff.map_or(0.0, |m| spread(ea, eb) / m);
-    let store_eff = val(&g5, "ops_per_cpu_s");
+    // G5: operations per CPU-second, at least 90% of fio's: alternated,
+    // medians, the spread fio's own across its three runs.
+    let theirs: Vec<f64> = f5
+        .iter()
+        .filter_map(|r| ok(r).map(|s| s.iops * s.runtime_s / s.cpu_s))
+        .filter(|e| e.is_finite() && *e > 0.0)
+        .collect();
+    let ours: Vec<f64> = g5.iter().filter_map(|p| val(p, "ops_per_cpu_s")).collect();
+    let (fio_eff, store_eff) = (med(&theirs), med(&ours));
+    let espread = {
+        let (lo, hi) = theirs
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+        fio_eff.filter(|m| *m > 0.0).map_or(0.0, |m| (hi - lo) / m)
+    };
     rows.push(Row {
         id: "G5",
-        gate: "Per-core submit efficiency at least 90% of fio's asynchronous engine (4 KiB random read, QD128; ops per CPU-second; a memory-backed device in CI)",
-        measured: format!("store-io {} ops/CPU-s ({} ops/s), fio {} ops/CPU-s (spread {:.0}%)", f(store_eff, 0), f(val(&g5, "ops_per_s"), 0), f(fio_eff, 0), espread * 100.0),
+        gate: "Per-core submit efficiency at least 90% of fio's asynchronous engine (4 KiB random read, QD128; ops per CPU-second; medians of 3 alternated runs; a memory-backed device in CI)",
+        measured: format!(
+            "store-io {ours:.0?} ops/CPU-s, fio {theirs:.0?} ops/CPU-s (fio's spread {:.0}%)",
+            espread * 100.0
+        ),
         verdict: if !cfg!(any(target_os = "linux", windows)) {
             // CPU time is measured on Linux and Windows only.
             Verdict::Elsewhere
-        } else if ea.is_some() && eb.is_some() { at_least(store_eff, fio_eff, 0.9, espread) } else { Verdict::Fail },
+        } else if ours.len() == 3 && theirs.len() == 3 {
+            at_least(store_eff, fio_eff, 0.9, espread)
+        } else {
+            Verdict::Fail
+        },
     });
-    // G6: sequential write, at least 90% of fio.
-    // store-io's bytes over the wall clock of the whole run (payload
-    // generation included, which can only count against it), as fio's
-    // bandwidth is bytes over its runtime.
-    let w5p = find(&w5, System::StoreIo, "append(1 MiB)", None);
-    let sw = get(w5p, "bytes")
-        .zip(get(w5p, "wall_s"))
-        .and_then(|(b, w)| (w > 0.0).then(|| b / w / 1e6));
+    // G6: sequential write, at least 90% of fio's best: the Submitter's
+    // zero-copy writer and fio's QD8 write alternated (medians), fio's psync
+    // write (two runs) as its other configuration. The simple API's
+    // `append(&[u8])` copies the caller's bytes first (W5, reported).
+    let ours: Vec<f64> = g6.iter().filter_map(|p| val(p, "mb_per_s")).collect();
+    let q8w: Vec<f64> = f6
+        .iter()
+        .filter_map(|r| ok(r).map(|s| s.bytes_per_s / 1e6))
+        .collect();
     let (sa, sb) = (
         ok(&fio_sw).map(|s| s.bytes_per_s / 1e6),
         ok(&fio_sw2).map(|s| s.bytes_per_s / 1e6),
     );
-    let fsw = mean(sa, sb);
-    let wspread = fsw.map_or(0.0, |m| spread(sa, sb) / m);
+    let whole = ours.len() == 3 && q8w.len() == 3 && sa.is_some() && sb.is_some();
+    let (sw, q8m, psm) = (med(&ours), med(&q8w), mean(sa, sb));
+    let best = q8m.zip(psm).map(|(a, b)| a.max(b));
+    let range = |v: &[f64], m: Option<f64>| {
+        let (lo, hi) = v
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+        m.filter(|m| *m > 0.0).map_or(0.0, |m| (hi - lo) / m)
+    };
+    let wspread = if q8m >= psm {
+        range(&q8w, q8m)
+    } else {
+        psm.map_or(0.0, |m| spread(sa, sb) / m)
+    };
+    let simple = get(
+        find(&w5, System::StoreIo, "append(1 MiB)", None),
+        "mb_per_s",
+    );
     rows.push(Row {
         id: "G6",
-        gate: "Sequential write (1 MiB) at least 90% of fio",
+        gate: "Sequential write (1 MiB) at least 90% of fio's best (store-io: Submitter appends 8 deep from pool buffers, no copy; medians of 3 alternated runs)",
         measured: format!(
-            "store-io {} MB/s (wall clock), fio {} MB/s (spread {:.0}%)",
-            f(sw, 0),
-            f(fsw, 0),
-            wspread * 100.0
+            "store-io {ours:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio psync {} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
+            f(psm, 0),
+            wspread * 100.0,
+            f(simple, 0)
         ),
-        verdict: if sa.is_some() && sb.is_some() {
-            at_least(sw, fsw, 0.9, wspread)
+        verdict: if whole {
+            at_least(sw, best, 0.9, wspread)
         } else {
             Verdict::Fail
         },
@@ -474,9 +532,21 @@ pub fn run(ctx: &Ctx) -> Section {
         },
     });
     // G8: allocations on the hot paths after init.
-    let allocs = [&g8b, &g8w, &g5]
+    // The read loop's count: the largest of its three runs.
+    let read_allocs = g5
         .iter()
         .map(|p| val(p, "allocs").unwrap_or(f64::NAN))
+        .fold(0.0_f64, |m, a| {
+            if a.is_nan() || m.is_nan() {
+                f64::NAN
+            } else {
+                m.max(a)
+            }
+        });
+    let allocs = [&g8b, &g8w]
+        .iter()
+        .map(|p| val(p, "allocs").unwrap_or(f64::NAN))
+        .chain(std::iter::once(read_allocs))
         .collect::<Vec<_>>();
     rows.push(Row {
         id: "G8a",
@@ -694,7 +764,9 @@ pub fn run(ctx: &Ctx) -> Section {
         sec.findings
             .push(format!("{} FAIL: {} ({})", r.id, r.gate, r.measured));
     }
-    let mut pts = vec![g5, g7, g8w, g8b, g10];
+    let mut pts = vec![g7, g8w, g8b, g10];
+    pts.extend(g5);
+    pts.extend(g6);
     pts.extend(g4);
     pts.extend(w15);
     sec.points = pts;

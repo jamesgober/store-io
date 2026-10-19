@@ -20,7 +20,9 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   asynchronously, many in flight from one thread; nothing ever runs on the
   kernel's worker threads (what cannot be done without blocking is finished
   by one ordinary system call, and counted). Engine submitters get rings
-  only their thread may use; the blocking API's lanes get shared rings.
+  only their thread may use; the blocking API's parallel lanes get shared
+  rings, and its single operations run inline (one system call), which is
+  faster for an operation the caller waits for at once.
 - `StoreOptions::linux_tier` (`Auto`, `Sync`, `Uring`): `Auto`, the
   default, uses io_uring where the kernel accepts store-io's rings, else
   the synchronous tier. `StoreReport::io` names the interface and why it
@@ -352,9 +354,10 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 ### Changed
 
 - **Linux stores use io_uring by default** (`linux_tier: Auto`). Each
-  io_uring queue holds two file descriptors; a queue whose ring the kernel
-  cannot set up for want of resources is synchronous instead, and the
-  report counts it. `linux_tier: Sync` keeps the 0.3 behaviour.
+  ring holds two file descriptors (a store's parallel lanes, created on
+  first use, and each submitter); a queue whose ring the kernel cannot set
+  up for want of resources is synchronous instead, and the report counts
+  it. `linux_tier: Sync` keeps the 0.3 behaviour.
 - `StoreReport` is `#[non_exhaustive]`; `StoreOptions` and `StoreReport`
   have new fields (`linux_tier`, `io`).
 

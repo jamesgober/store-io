@@ -574,9 +574,11 @@ fn test_the_io_tier_is_chosen_and_reported() {
     use store_io::{IoInterface, LinuxTier, Op};
     let t = TempDir::new("tier");
     let (opts, _) = options_for(t.path());
-    // Two lanes: on io_uring each queue holds two descriptors, and tests
-    // running beside this one could otherwise exhaust the process's limit
-    // and make `Auto` fall back (correctly, but not what is checked here).
+    // Two lanes: on io_uring each ring holds two descriptors (a store's
+    // parallel lanes and submitters; its lone-operation lanes are inline,
+    // D-104), and tests running beside this one could otherwise exhaust the
+    // process's limit and make `Auto` fall back (correctly, but not what is
+    // checked here).
     let at = |tier| StoreOptions {
         linux_tier: tier,
         queues: 2,
@@ -600,7 +602,13 @@ fn test_the_io_tier_is_chosen_and_reported() {
         (IoInterface::Synchronous, "chosen")
     );
     let auto = Store::open_with(&path, at(LinuxTier::Auto)).unwrap();
-    let auto_io = auto.report().io.clone();
+    // A submitter's queue is a ring on the io_uring tier: the live path then
+    // counts it (the report is as of the open, before any ring exists).
+    let sub = auto
+        .submitter(store_io::submit::SubmitterConfig::default())
+        .unwrap();
+    let auto_io = auto.io_path();
+    drop(sub);
     let wal = auto.append_region("wal").unwrap();
     let mut back = vec![0u8; 19];
     wal.read(ticket.pos().offset(), &mut back).unwrap();

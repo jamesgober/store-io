@@ -69,17 +69,20 @@ fn test_auto_falls_back_to_synchronous_queues_without_descriptors() {
     let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 4096, 2)).unwrap();
     let open = std::fs::read_dir("/proc/self/fd").unwrap().count() as u64;
     let limit = Limit::lower_to(open + 4);
+    // Queues that get a ring (several operations in flight); a lone-
+    // operation queue is synchronous on either tier (D-104).
+    let ringed = QueueConfig {
+        parallel: true,
+        ..QueueConfig::default()
+    };
     let mut queues = Vec::new();
     for _ in 0..8 {
-        queues.push(auto.queue(QueueConfig::default()).unwrap());
+        queues.push(auto.queue(ringed).unwrap());
     }
     let reason = auto.io_path().reason;
     assert!(reason.contains("synchronous"), "{reason}");
     assert_eq!(
-        explicit
-            .queue(QueueConfig::default())
-            .map(|_| ())
-            .map_err(|e| e.code),
+        explicit.queue(ringed).map(|_| ()).map_err(|e| e.code),
         Err(libc::EMFILE),
         "an explicit io_uring choice never falls back"
     );

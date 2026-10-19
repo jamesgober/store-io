@@ -152,14 +152,21 @@ where
         flush: bool,
         tag: u64,
     ) -> Result<(), NotWrittenCause> {
-        if self.table.full() {
+        if self.core.table.full() {
             return Err(NotWrittenCause::QueueFull);
         }
-        let Some((index, qtag)) = self.table.claim() else {
+        let Some((index, qtag)) = self.core.table.claim() else {
             return Err(NotWrittenCause::QueueFull);
         };
-        self.table.start(index, tag, kind, None, false);
-        ask(&mut self.table, &self.store, &self.inbox, qtag, need, flush);
+        self.core.table.start(index, tag, kind, None, false);
+        ask(
+            &mut self.core.table,
+            &self.store,
+            &self.inbox,
+            qtag,
+            need,
+            flush,
+        );
         Ok(())
     }
 }

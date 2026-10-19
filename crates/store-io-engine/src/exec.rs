@@ -21,7 +21,8 @@ use store_io_core::observe::{Counter, Observer};
 use store_io_core::error::OsError;
 use store_io_platform::{Completion, CompletionBuf, IoBuf, IoOp, Queue, RawResult, Rejected};
 
-use crate::optable::{Kind, Table};
+use crate::optable::Kind;
+use crate::queue_core::Core;
 use crate::sync::{AtomicBool, AtomicU64, Ordering};
 
 /// A fixed set of queues shared by the blocking layers, plus an optional
@@ -65,18 +66,15 @@ pub(crate) struct QueueSet<Q> {
     returned: Condvar,
 }
 
-/// A queue and its op table (A1, PLANNING R3.3): the `Submitter`'s
-/// [`Table`], one row per operation in flight. Every operation is submitted
-/// under its row's tag (index and generation), so a completion is matched to
-/// exactly the operation that made it, and the next holder of the lane
-/// clears an earlier holder's abandoned operations row by row.
+/// A [`Core`] (a queue and its op table, A1, PLANNING R3.3), as the
+/// `Submitter` is one: one row per operation in flight. Every operation is
+/// submitted under its row's tag (index and generation), so a completion is
+/// matched to exactly the operation that made it, and the next holder of the
+/// lane clears an earlier holder's abandoned operations row by row.
 pub(crate) struct Lane<Q> {
-    pub(crate) queue: Q,
-    /// What the queue hands back, under row tags.
-    raw: CompletionBuf,
+    core: Core<Q>,
     /// This holder's completed operations, under the holder's own tags.
     pub(crate) done: CompletionBuf,
-    rows: Table,
     mark: Arc<LaneMark>,
 }
 
@@ -85,17 +83,18 @@ impl<Q: Queue> Lane<Q> {
     /// `tag`. A lane with no free row refuses it as a full queue (`raw:
     /// None`, the buffer returned).
     pub(crate) fn submit(&mut self, op: IoOp<'_, Q::File>, tag: u64) -> Result<(), Rejected> {
-        let Some((index, qtag)) = self.rows.claim() else {
+        let Some((index, qtag)) = self.core.table.claim() else {
             let buf = match op {
                 IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),
                 IoOp::FlushData { .. } => None,
             };
             return Err(Rejected { buf, raw: None });
         };
-        self.rows.start(index, tag, Kind::Raw, None, false);
-        self.queue
+        self.core.table.start(index, tag, Kind::Raw, None, false);
+        self.core
+            .queue
             .submit(op, qtag)
-            .inspect_err(|_| self.rows.abort(index))
+            .inspect_err(|_| self.core.table.abort(index))
     }
 
     /// Waits until at least `min` of the queue's operations complete, then
@@ -107,22 +106,22 @@ impl<Q: Queue> Lane<Q> {
     /// The raw error if waiting failed: the operations still in flight keep
     /// their rows and their buffers stay with the queue.
     pub(crate) fn wait(&mut self, min: usize) -> Result<usize, OsError> {
-        let waited = self.queue.wait(min, &mut self.raw);
+        let waited = self.core.queue.wait(min, &mut self.core.raw);
         let n = self.collect();
         waited.map(|_| n)
     }
 
     /// Operations of this lane in flight.
     pub(crate) fn in_flight(&self) -> usize {
-        self.rows.live
+        self.core.table.live
     }
 
     fn collect(&mut self) -> usize {
         let mut n = 0;
-        for c in self.raw.drain() {
+        for c in self.core.raw.drain() {
             // A completion names a row in use: the queue is this lane's alone
             // and every tag names one use of one row.
-            let Some(tag) = self.rows.take(c.tag) else {
+            let Some(tag) = self.core.table.take(c.tag) else {
                 debug_assert!(false, "a lane completion matched no row");
                 continue;
             };
@@ -449,12 +448,10 @@ impl<Q: Queue> QueueSet<Q> {
 fn lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Mutex<Lane<Q>> {
     let depth = depth.max(1);
     Mutex::new(Lane {
-        queue,
-        raw: CompletionBuf::with_capacity(depth),
-        done: CompletionBuf::with_capacity(depth),
         // The table's own busy mark is not the lane's (D-095's lane marks
         // stay as they are).
-        rows: Table::new(depth, Arc::new(LaneMark::new())),
+        core: Core::new(queue, depth, Arc::new(LaneMark::new())),
+        done: CompletionBuf::with_capacity(depth),
         mark: Arc::clone(mark),
     })
 }
@@ -488,8 +485,8 @@ pub(crate) enum Ran {
 /// submitted.
 pub(crate) fn clear_stale<Q: Queue>(lane: &mut Lane<Q>) -> Result<(), OsError> {
     lane.done.drain().for_each(drop);
-    while lane.queue.in_flight() > 0 {
-        let n = lane.queue.in_flight();
+    while lane.core.queue.in_flight() > 0 {
+        let n = lane.core.queue.in_flight();
         let _added = lane.wait(n)?;
         lane.done.drain().for_each(drop);
         // Clearing is progress, not the holder's own operation aging.
@@ -499,7 +496,7 @@ pub(crate) fn clear_stale<Q: Queue>(lane: &mut Lane<Q>) -> Result<(), OsError> {
     // their completions): freed, so the lane is usable.
     debug_assert_eq!(lane.in_flight(), 0, "lane rows outlived their operations");
     if lane.in_flight() > 0 {
-        lane.rows.forget();
+        lane.core.table.forget();
     }
     Ok(())
 }

@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use store_io_core::error::{Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError};
 use store_io_core::observe::Counter;
-use store_io_platform::{CompletionBuf, IoBuf, IoOp, Owner, Platform, Queue, QueueConfig};
+use store_io_platform::{IoBuf, IoOp, Owner, Platform, Queue, QueueConfig};
 
 use crate::completion::{Completions, Rejected, SubmitterConfig, WriteMode};
 use crate::exec::LaneMark;
@@ -33,7 +33,8 @@ use crate::flusher::{Inbox, SubmitterWaker, WakerOf};
 use crate::gate::{Gate, Gated, OwnedPass};
 use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
-use crate::optable::{Kind, Table};
+use crate::optable::Kind;
+use crate::queue_core::Core;
 use crate::receipt::RegionPos;
 use crate::region::{AppendRegion, PageRegion};
 use crate::store::{LiveRegion, Store};
@@ -89,11 +90,9 @@ pub struct Submitter<P: Platform>
 where
     P::Queue: Send,
 {
-    // Declared first, so it drops (after `Drop::drop` drained it) before
-    // the table releases the passes and reservations.
-    queue: P::Queue,
-    raw: CompletionBuf,
-    table: Table,
+    // Declared first, so its queue drops (after `Drop::drop` drained it)
+    // before the table releases the passes and reservations.
+    core: Core<P::Queue>,
     /// Where the flush thread answers this submitter's flush requests.
     inbox: Arc<Inbox<<P::Queue as Queue>::Waker>>,
     id: u64,
@@ -107,9 +106,9 @@ where
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Submitter")
-            .field("depth", &self.table.depth())
-            .field("in_flight", &self.table.live)
-            .field("ready", &self.table.ready.len())
+            .field("depth", &self.core.table.depth())
+            .field("in_flight", &self.core.table.live)
+            .field("ready", &self.core.table.ready.len())
             .finish()
     }
 }
@@ -168,9 +167,7 @@ where
         let inbox = Arc::new(Inbox::new(n, queue.waker()));
         let id = self.register_submitter(&mark);
         Ok(Submitter {
-            queue,
-            raw: CompletionBuf::with_capacity(n),
-            table: Table::new(n, mark),
+            core: Core::new(queue, n, mark),
             inbox,
             id,
             store: self.clone(),
@@ -216,9 +213,10 @@ where
     pub fn in_flight(&self) -> usize {
         // Never more than are really pending (an operation lost to a panic
         // in processing is no longer waited for; the store is poisoned then).
-        self.table
+        self.core
+            .table
             .live
-            .min(self.queue.in_flight() + self.table.asked)
+            .min(self.core.queue.in_flight() + self.core.table.asked)
     }
 
     /// Ends this submitter's current or next [`Self::wait`] from another
@@ -246,7 +244,7 @@ where
         if !self.store.inner.pool.owns(buf) {
             return Err(not_written(NotWrittenCause::ForeignBuffer, c));
         }
-        if self.table.full() {
+        if self.core.table.full() {
             return Err(not_written(NotWrittenCause::QueueFull, c));
         }
         OwnedPass::enter(state).map_err(|why| retired_error(why, state))
@@ -471,7 +469,7 @@ where
         durable: bool,
     ) -> Result<(), (Option<OsError>, Option<IoBuf>)> {
         // `admit` checked there is room: a free row always exists here.
-        let Some((index, qtag)) = self.table.claim() else {
+        let Some((index, qtag)) = self.core.table.claim() else {
             let buf = match req {
                 Req::Write { buf, .. } | Req::Read { buf, .. } => buf,
             };
@@ -494,9 +492,9 @@ where
         };
         // Recorded (and the busy mark published) before the submission: a
         // queue may do the I/O inside `submit`.
-        self.table.start(index, tag, kind, Some(pass), durable);
-        if let Err(r) = self.queue.submit(op, qtag) {
-            self.table.abort(index);
+        self.core.table.start(index, tag, kind, Some(pass), durable);
+        if let Err(r) = self.core.queue.submit(op, qtag) {
+            self.core.table.abort(index);
             if r.raw.is_none() {
                 inner.observer.add(Counter::Refused, 1);
             }
@@ -512,10 +510,10 @@ where
     /// Hands back every completion that has arrived, without blocking.
     #[must_use = "completions not taken stay with the submitter and count against its depth"]
     pub fn reap(&mut self) -> Completions<'_> {
-        let _added = self.queue.reap(&mut self.raw);
+        let _added = self.core.queue.reap(&mut self.core.raw);
         self.process();
         Completions {
-            ready: &mut self.table.ready,
+            ready: &mut self.core.table.ready,
         }
     }
 
@@ -530,33 +528,33 @@ where
     /// verdict on the media, D-097).
     #[must_use = "completions not taken stay with the submitter and count against its depth"]
     pub fn wait(&mut self, min: usize) -> Result<Completions<'_>, Error> {
-        let want = min.min(self.table.live + self.table.ready.len());
-        if self.table.ready.len() >= want {
-            let _added = self.queue.reap(&mut self.raw);
+        let want = min.min(self.core.table.live + self.core.table.ready.len());
+        if self.core.table.ready.len() >= want {
+            let _added = self.core.queue.reap(&mut self.core.raw);
             self.process();
         }
-        while self.table.ready.len() < want {
+        while self.core.table.ready.len() < want {
             // Only the caller's waker ends a wait early: a wake left in the
             // queue by the flush thread just loops.
             if self.inbox.take_woken() {
                 break;
             }
-            let in_queue = self.queue.in_flight();
+            let in_queue = self.core.queue.in_flight();
             if in_queue > 0 {
-                let need = (want - self.table.ready.len()).min(in_queue);
+                let need = (want - self.core.table.ready.len()).min(in_queue);
                 let waited = if self.inbox.block_in_queue() {
-                    let waited = self.queue.wait(need, &mut self.raw);
+                    let waited = self.core.queue.wait(need, &mut self.core.raw);
                     self.inbox.unblock();
                     waited
                 } else {
                     // A flush outcome or a wake arrived: no blocking.
-                    Ok(self.queue.reap(&mut self.raw))
+                    Ok(self.core.queue.reap(&mut self.core.raw))
                 };
                 // Whatever arrived is processed, even if the wait then failed.
                 self.process();
                 if let Err(raw) = waited {
                     return Err(Error::Io {
-                        op: if self.table.writes_live() {
+                        op: if self.core.table.writes_live() {
                             Op::Write
                         } else {
                             Op::Read
@@ -565,7 +563,7 @@ where
                         ctx: ErrorContext::default(),
                     });
                 }
-            } else if self.table.asked > 0 {
+            } else if self.core.table.asked > 0 {
                 self.inbox.wait(true);
                 self.process();
             } else {
@@ -573,26 +571,34 @@ where
             }
         }
         Ok(Completions {
-            ready: &mut self.table.ready,
+            ready: &mut self.core.table.ready,
         })
     }
 
     /// Processes every raw completion collected.
     fn process(&mut self) {
         let _unwind = PoisonOnUnwind::new(&self.store);
-        for c in self.raw.drain() {
-            if let Some((qtag, need)) = self.table.finish(&self.store, c.tag, c.buf, c.result) {
+        for c in self.core.raw.drain() {
+            if let Some((qtag, need)) = self.core.table.finish(&self.store, c.tag, c.buf, c.result)
+            {
                 // Only a write needing a flush asks (see `Table::finish`).
-                durable::ask(&mut self.table, &self.store, &self.inbox, qtag, need, true);
+                durable::ask(
+                    &mut self.core.table,
+                    &self.store,
+                    &self.inbox,
+                    qtag,
+                    need,
+                    true,
+                );
             }
         }
         // Flush outcomes too, under the same guard.
-        while self.table.asked > 0 {
+        while self.core.table.asked > 0 {
             let Some((qtag, outcome)) = self.inbox.pop() else {
                 break;
             };
-            self.table.asked -= 1;
-            self.table.flushed(&self.store, qtag, outcome);
+            self.core.table.asked -= 1;
+            self.core.table.flushed(&self.store, qtag, outcome);
         }
     }
 }
@@ -652,26 +658,32 @@ where
         let mut failed = None;
         // First every I/O (a durable write's completion may ask for a
         // flush)...
-        while self.table.live > 0 && self.queue.in_flight() > 0 {
-            match self.queue.wait(self.queue.in_flight(), &mut self.raw) {
+        while self.core.table.live > 0 && self.core.queue.in_flight() > 0 {
+            match self
+                .core
+                .queue
+                .wait(self.core.queue.in_flight(), &mut self.core.raw)
+            {
                 Ok(_) => self.process(),
                 Err(raw) => {
                     failed = Some(raw);
                     break;
                 }
             }
-            self.table.ready.clear();
+            self.core.table.ready.clear();
         }
         // ... with whatever the queue collected before a failed wait...
-        let _added = self.queue.reap(&mut self.raw);
+        let _added = self.core.queue.reap(&mut self.core.raw);
         self.process();
         // ... then every flush asked for: the flush thread answers every
         // request it accepted.
-        while self.table.asked > 0 {
+        while self.core.table.asked > 0 {
             self.inbox.wait(false);
             self.process();
         }
-        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) {
+        if self.core.table.live > 0
+            && (self.core.table.writes_live() || !self.core.table.consistent())
+        {
             self.store.inner.domain.poison(FirstCause {
                 op: Some(Op::Write),
                 raw: failed,

@@ -36,6 +36,7 @@ mod lifecycle;
 mod open;
 mod optable;
 mod provision;
+pub(crate) mod queue_core;
 pub mod receipt;
 mod region;
 mod scan;

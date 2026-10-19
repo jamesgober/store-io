@@ -141,8 +141,8 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '            Some(f) if full => {', '            Some(f) if full || true => {'),
  ('crates/store-io-engine/src/settle.rs', '                f.complete(r);\n', '                let _ = (f, r);\n'),
  ('crates/store-io-engine/src/gate.rs', '        held.gate().admit()?;\n', '        held.gate().admit()?;\n        held.gate().leave();\n'),
- (SUB, '        while self.table.live > 0 && self.queue.in_flight() > 0 {', '        while self.table.live > 0 && self.queue.in_flight() > 0 && false {'),
- (SUB, '        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) {', '        if self.table.live > 0 && (self.table.writes_live() || !self.table.consistent()) && false {'),
+ (SUB, '        while self.core.table.live > 0 && self.core.queue.in_flight() > 0 {', '        while self.core.table.live > 0 && self.core.queue.in_flight() > 0 && false {'),
+ (SUB, '            && (self.core.table.writes_live() || !self.core.table.consistent())\n        {', '            && (self.core.table.writes_live() || !self.core.table.consistent())\n            && false\n        {'),
  (SUB, '        if !Arc::ptr_eq(&store.inner, &self.store.inner) {', '        if !Arc::ptr_eq(&store.inner, &self.store.inner) && false {'),
  (SUB, '        if !self.store.inner.pool.owns(buf) {', '        if !self.store.inner.pool.owns(buf) && false {'),
  ('crates/store-io-engine/src/optable.rs', '        self.live + self.ready.len() >= self.rows.len()', '        self.live >= self.rows.len()'),
@@ -165,7 +165,7 @@ M = [
  ('crates/store-io-engine/src/flusher.rs', '        let need = guard.batch.iter().map(|r| r.need).max().unwrap_or(0);', '        let need = guard.batch.iter().map(|r| r.need).min().unwrap_or(0);'),
  ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live, _)) if g != ticket.generation || !live => {', '            Some((g, live, _)) if (g != ticket.generation || !live) && false => {'),
  ('crates/store-io-engine/src/submitter/durable.rs', '        if ticket.epoch != inner.epoch || ticket.volume != inner.volume {', '        if (ticket.epoch != inner.epoch || ticket.volume != inner.volume) && false {'),
- (SUB, '        while self.table.asked > 0 {\n            self.inbox.wait(false);', '        while self.table.asked > 0 && false {\n            self.inbox.wait(false);'),
+ (SUB, '        while self.core.table.asked > 0 {\n            self.inbox.wait(false);', '        while self.core.table.asked > 0 && false {\n            self.inbox.wait(false);'),
  ('crates/store-io-engine/src/domain.rs', '        let done = self.done.load(Ordering::SeqCst) >= need;', '        let done = self.done.load(Ordering::SeqCst) >= need || true;'),
  ('crates/store-io-engine/src/optable.rs', '                    receipt.need = need;', '                    receipt.need = 0 * need;'),
  ('crates/store-io-engine/src/settle.rs', '                if through >= r.end {', '                if through >= r.end || true {'),
@@ -222,12 +222,12 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '            settle_write(store, state, wrote, false, raw, &mut no_prefix)', '            settle_write(store, state, wrote, true, raw, &mut no_prefix)'),
  # A1 C3: a submitter operation is recorded (busy mark published) before it
  # is submitted, and a refused submission is aborted
- ('crates/store-io-engine/src/submitter/mod.rs', '        self.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = self.queue.submit(op, qtag) {', '        let refused = self.queue.submit(op, qtag);\n        self.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = refused {'),
+ ('crates/store-io-engine/src/submitter/mod.rs', '        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = self.core.queue.submit(op, qtag) {', '        let refused = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = refused {'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n        self.live -= 1;', '        drop(live);\n        self.free.push(index);'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n', '        drop(live);\n'),
  # A1 C5: a lane's operations live in its op table; a refused submission
  # gives its row back
- ('crates/store-io-engine/src/exec.rs', '            .inspect_err(|_| self.rows.abort(index))', '            .inspect_err(|_| ())'),
+ ('crates/store-io-engine/src/exec.rs', '            .inspect_err(|_| self.core.table.abort(index))', '            .inspect_err(|_| ())'),
 ]
 
 def kill_stuck_tests():

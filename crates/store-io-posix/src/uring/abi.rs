@@ -39,6 +39,8 @@ pub(crate) mod op {
     /// Never allowed (D-073): always punts to io-wq. Named for the test that
     /// proves the allowlist refuses it.
     pub(crate) const FSYNC: u8 = 3;
+    /// Never allowed (D-107): hangs on some kernels. Named for the
+    /// compile-time check and the test that keep it out of the allowlist.
     pub(crate) const READ_FIXED: u8 = 4;
     pub(crate) const WRITE_FIXED: u8 = 5;
     pub(crate) const ASYNC_CANCEL: u8 = 14;
@@ -49,16 +51,12 @@ pub(crate) mod op {
 /// `IORING_REGISTER_*`.
 pub(crate) mod reg {
     use libc::c_uint;
-    pub(crate) const BUFFERS: c_uint = 0;
-    pub(crate) const UNREGISTER_BUFFERS: c_uint = 1;
     pub(crate) const FILES: c_uint = 2;
     pub(crate) const FILES_UPDATE: c_uint = 6;
     pub(crate) const PROBE: c_uint = 8;
     pub(crate) const RESTRICTIONS: c_uint = 11;
     pub(crate) const ENABLE_RINGS: c_uint = 12;
     pub(crate) const FILES_UPDATE2: c_uint = 14;
-    pub(crate) const BUFFERS2: c_uint = 15;
-    pub(crate) const BUFFERS_UPDATE: c_uint = 16;
     pub(crate) const IOWQ_MAX_WORKERS: c_uint = 19;
     pub(crate) const RING_FDS: c_uint = 20;
     pub(crate) const UNREGISTER_RING_FDS: c_uint = 21;

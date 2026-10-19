@@ -405,11 +405,12 @@ fn test_only_queues_with_several_operations_in_flight_get_a_ring() {
     }
 }
 
-/// A thread-owned ring with the pool and the file registered (D-078): reads
-/// and writes go through the fixed buffer and the direct descriptor, and the
-/// bytes are exactly where they were aimed.
+/// A thread-owned ring with the file registered (D-078): reads and writes
+/// go through the direct descriptor, and the bytes are exactly where they
+/// were aimed. (No buffer is ever registered: D-107; a read into one never
+/// completes on at least Linux 6.5.0 and 6.6.0.)
 #[test]
-fn test_a_registered_ring_uses_fixed_buffers_and_the_direct_descriptor() {
+fn test_a_registered_ring_uses_the_direct_descriptor() {
     let Some(f) = fixture(4) else { return };
     f.p.allocate(&f.file, 4 * BLOCK as u64).unwrap();
     let cfg = QueueConfig {
@@ -417,17 +418,9 @@ fn test_a_registered_ring_uses_fixed_buffers_and_the_direct_descriptor() {
         owner: Owner::Thread,
         ..QueueConfig::default()
     };
-    let mut q = f.p.queue_registered(cfg, &f.pool, &f.file).unwrap();
+    let mut q = f.p.queue_registered(cfg, &f.file).unwrap();
     let got = q.registered().unwrap();
     assert!(got.file, "the file was not registered: {got:?}");
-    // The arena (about 52 KiB) is below the usual locked-memory limits;
-    // under a smaller one the kernel refuses it (`ENOMEM`), which is
-    // allowed, never anything else.
-    let buffers = got.buffers;
-    assert!(
-        buffers || got.refused.is_some_and(|e| e.code == libc::ENOMEM),
-        "the buffers were not registered: {got:?}"
-    );
     let buf = filled(&f.pool, BLOCK, 0x3C);
     q.submit(
         IoOp::Write {
@@ -454,13 +447,11 @@ fn test_a_registered_ring_uses_fixed_buffers_and_the_direct_descriptor() {
     assert!(c.buf.unwrap().as_slice().iter().all(|&b| b == 0x3C));
     let got = q.registered().unwrap();
     assert_eq!(got.direct_ops, 2, "the direct descriptor was not used");
-    assert_eq!(got.fixed_ops, if buffers { 2 } else { 0 });
 }
 
-/// On a registered ring, a buffer of another pool and an operation on
-/// another file take the ordinary path, and land exactly where aimed: a
-/// fixed buffer or the direct descriptor is never used for what was not
-/// registered (D-078; the direct descriptor on another file's write would
+/// On a registered ring, an operation on another file takes the ordinary
+/// path, and lands exactly where aimed: the direct descriptor is never used
+/// for a file it does not name (D-078; on another file's write it would
 /// write the registered file).
 #[test]
 fn test_a_registered_ring_uses_ordinary_io_for_what_it_did_not_register() {
@@ -476,9 +467,8 @@ fn test_a_registered_ring_uses_ordinary_io_for_what_it_did_not_register() {
         owner: Owner::Thread,
         ..QueueConfig::default()
     };
-    let mut q = f.p.queue_registered(cfg, &f.pool, &f.file).unwrap();
-    // A foreign buffer to the registered file; a registered-pool buffer to
-    // the other file.
+    let mut q = f.p.queue_registered(cfg, &f.file).unwrap();
+    // One write to the registered file, one to the other file.
     q.submit(
         IoOp::Write {
             file: &f.file,
@@ -505,11 +495,6 @@ fn test_a_registered_ring_uses_ordinary_io_for_what_it_did_not_register() {
     assert_eq!(
         got.direct_ops, 1,
         "the direct descriptor served another file"
-    );
-    assert_eq!(
-        got.fixed_ops,
-        u64::from(got.buffers),
-        "a foreign buffer used the fixed buffer"
     );
     for (file, want) in [(&f.file, 0x11u8), (&other, 0x22u8)] {
         q.submit(
@@ -539,14 +524,14 @@ fn test_a_shared_ring_registers_nothing() {
         parallel: true,
         ..QueueConfig::default()
     };
-    let q = f.p.queue_registered(cfg, &f.pool, &f.file).unwrap();
+    let q = f.p.queue_registered(cfg, &f.file).unwrap();
     let got = q.registered().unwrap();
-    assert!(!got.buffers && !got.file, "{got:?}");
+    assert!(!got.file, "{got:?}");
 }
 
-/// On a registered ring, a fixed read that runs past the end of the file is
-/// finished by the ordinary blocking call on the file itself (the NOWAIT
-/// fallback): the bytes before the end come back, exactly.
+/// On a registered ring, a read through the direct descriptor that runs past
+/// the end of the file is finished by the ordinary blocking call on the file
+/// itself (the NOWAIT fallback): the bytes before the end come back, exactly.
 #[test]
 fn test_a_registered_ring_finishes_a_read_past_the_end_by_the_fallback() {
     let Some(f) = fixture(4) else { return };
@@ -556,7 +541,7 @@ fn test_a_registered_ring_finishes_a_read_past_the_end_by_the_fallback() {
         owner: Owner::Thread,
         ..QueueConfig::default()
     };
-    let mut q = f.p.queue_registered(cfg, &f.pool, &f.file).unwrap();
+    let mut q = f.p.queue_registered(cfg, &f.file).unwrap();
     q.submit(
         IoOp::Write {
             file: &f.file,

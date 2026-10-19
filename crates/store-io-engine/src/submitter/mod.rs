@@ -155,12 +155,10 @@ where
             owner: Owner::Thread,
         };
         let inner = &*self.inner;
-        // The pool and the file outlive the queue: a registering backend
-        // keeps its own references to both (`Platform::queue_registered`).
-        let queue = if inner.opts.register_buffers {
-            inner
-                .platform
-                .queue_registered(qcfg, &inner.pool, &inner.file)
+        // The file outlives the queue: a registering backend keeps its own
+        // reference to it (`Platform::queue_registered`).
+        let queue = if inner.opts.register_file {
+            inner.platform.queue_registered(qcfg, &inner.file)
         } else {
             inner.platform.queue(qcfg)
         };

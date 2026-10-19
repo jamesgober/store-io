@@ -29,30 +29,51 @@ pub(crate) enum Flavour {
     Shared,
 }
 
-/// Every opcode a ring accepts (D-073, D-076): reads and writes, fixed and
+/// Every opcode a ring accepts (D-073, D-076): reads and writes, plain and
 /// vectored, NOP and cancel. Nothing that always punts to io-wq (`FSYNC`,
-/// `FALLOCATE`, `OPENAT`, ...) can be submitted.
-const ALLOWED: [u8; 8] = [
+/// `FALLOCATE`, `OPENAT`, ...) can be submitted, nor a read or write on a
+/// registered buffer ([`NEVER`]).
+const ALLOWED: [u8; 6] = [
     op::NOP,
     op::READ,
     op::WRITE,
-    op::READ_FIXED,
-    op::WRITE_FIXED,
     op::READV,
     op::WRITEV,
     op::ASYNC_CANCEL,
 ];
 
+/// Opcodes no ring ever accepts (D-107): a `READ_FIXED` into a registered
+/// buffer never completes on at least Linux 6.5.0 and 6.6.0 (seen fine on
+/// 6.1.0 and from 6.6.15 and 6.7; the versions between were not tested),
+/// and its process then cannot exit; nothing a ring can probe tells the
+/// kernels apart, so registered buffers are not used at all. Checked when
+/// the crate compiles.
+const NEVER: [u8; 2] = [op::READ_FIXED, op::WRITE_FIXED];
+
+const _: () = {
+    let mut i = 0;
+    while i < ALLOWED.len() {
+        let mut j = 0;
+        while j < NEVER.len() {
+            assert!(
+                ALLOWED[i] != NEVER[j],
+                "a registered-buffer opcode is allowed (D-107)"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
 /// Registrations allowed after the ring is enabled (the restrictions are set
-/// once, before; anything registered whole, such as a file table or the
-/// buffers of D-078, is registered while the ring is still disabled): the
-/// file and buffer updates, and releasing the ring descriptor. Oldest first:
-/// a kernel that does not know one refuses the list (`EINVAL`), and the
-/// newest are then dropped in order.
-const ALLOWED_REGISTER: [libc::c_uint; 4] = [
+/// once, before; anything registered whole, such as the file table of
+/// D-078, is registered while the ring is still disabled): the file
+/// updates, and releasing the ring descriptor. Oldest first: a kernel that
+/// does not know one refuses the list (`EINVAL`), and the newest are then
+/// dropped in order.
+const ALLOWED_REGISTER: [libc::c_uint; 3] = [
     reg::FILES_UPDATE,
     reg::FILES_UPDATE2,
-    reg::BUFFERS_UPDATE,
     reg::UNREGISTER_RING_FDS,
 ];
 
@@ -108,24 +129,19 @@ pub(crate) struct Ring {
     fd: OwnedFd,
 }
 
-/// What to register with a new ring (D-078): memory as fixed buffer 0 and
-/// a file as direct descriptor 0.
+/// What to register with a new ring (D-078): a file as direct descriptor 0
+/// (never buffers: D-107).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Want {
-    pub(crate) buffers: Option<(usize, usize)>,
     pub(crate) file: Option<RawFd>,
 }
 
-/// What a ring registered, and the first refusal.
+/// What a ring registered, and the kernel's refusal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Fixed {
-    pub(crate) buffers: bool,
     pub(crate) file: bool,
     pub(crate) refused: Option<OsError>,
 }
-
-/// The largest single fixed buffer the kernel registers.
-const MAX_FIXED: usize = 1 << 30;
 
 impl Ring {
     /// A ring of `entries` submissions (rounded up to a power of two, at
@@ -138,26 +154,15 @@ impl Ring {
     /// other error is returned), or a kernel without `NODROP`, the opcode
     /// probe, or NOP, READ and WRITE (`ENOSYS`).
     pub(crate) fn new(flavour: Flavour, entries: u32) -> RawResult<Self> {
-        // SAFETY: nothing to register.
-        unsafe { Self::with_registration(flavour, entries, Want::default()) }
+        Self::with_registration(flavour, entries, Want::default())
     }
 
     /// As [`Self::new`], registering `want` on an [`Flavour::Owned`] ring
     /// while it is still disabled (a shared ring registers nothing: R3.3).
-    /// Best effort: a registration the kernel refuses (locked-memory limit,
-    /// a kernel without the fixed opcodes) is recorded in [`Self::fixed`],
-    /// never an error.
-    ///
-    /// # Safety
-    ///
-    /// `want.buffers` must be a live mapping of this process that stays
-    /// mapped as long as the ring exists (a fixed read or write addresses
-    /// the pinned pages), and `want.file` an open descriptor.
-    pub(crate) unsafe fn with_registration(
-        flavour: Flavour,
-        entries: u32,
-        want: Want,
-    ) -> RawResult<Self> {
+    /// Best effort: a registration the kernel refuses is recorded in
+    /// [`Self::fixed`], never an error. `want.file` must be an open
+    /// descriptor (the kernel takes its own reference to the file).
+    pub(crate) fn with_registration(flavour: Flavour, entries: u32, want: Want) -> RawResult<Self> {
         let entries = entries.clamp(1, 4096).next_power_of_two();
         let mut last = errno(libc::EINVAL);
         for flags in tiers(flavour) {
@@ -167,8 +172,7 @@ impl Ring {
                 ..Params::default()
             };
             match sys::setup(entries, &mut p) {
-                // SAFETY: the caller's contract.
-                Ok(fd) => return unsafe { Self::finish(flavour, fd, &p, want) },
+                Ok(fd) => return Self::finish(flavour, fd, &p, want),
                 Err(e) if e.code == libc::EINVAL => last = e,
                 Err(e) => return Err(e),
             }
@@ -176,10 +180,7 @@ impl Ring {
         Err(last)
     }
 
-    /// # Safety
-    ///
-    /// As [`Self::with_registration`].
-    unsafe fn finish(flavour: Flavour, fd: OwnedFd, p: &Params, want: Want) -> RawResult<Self> {
+    fn finish(flavour: Flavour, fd: OwnedFd, p: &Params, want: Want) -> RawResult<Self> {
         if p.features & FEAT_NODROP == 0 {
             return Err(errno(libc::ENOSYS));
         }
@@ -207,25 +208,10 @@ impl Ring {
         // the restrictions allow only updates once it is enabled.
         let mut fixed = Fixed::default();
         if flavour == Flavour::Owned {
-            let fixed_ops =
-                supported[usize::from(op::READ_FIXED)] && supported[usize::from(op::WRITE_FIXED)];
-            if let Some((base, len)) = want.buffers.filter(|_| fixed_ops) {
-                if len <= MAX_FIXED {
-                    // SAFETY: the caller's contract (`with_registration`).
-                    match unsafe { sys::register_buffers(&fd, base, len) } {
-                        Ok(()) => fixed.buffers = true,
-                        Err(e) => fixed.refused = Some(e),
-                    }
-                } else {
-                    fixed.refused = Some(errno(libc::E2BIG));
-                }
-            }
             if let Some(file) = want.file {
                 match sys::register_file(&fd, file) {
                     Ok(()) => fixed.file = true,
-                    Err(e) => {
-                        let _first = fixed.refused.get_or_insert(e);
-                    }
+                    Err(e) => fixed.refused = Some(e),
                 }
             }
         }
@@ -558,6 +544,34 @@ mod tests {
             }
             assert_eq!((got[0].user_data, got[0].res), (5, 8));
             assert_eq!(u64::from_ne_bytes(*word), 1);
+        }
+    }
+
+    /// No ring accepts a read or write on a registered buffer (D-107): the
+    /// kernel refuses it at submission, before it can reach the code that
+    /// hangs on some kernels.
+    #[test]
+    fn test_the_allowlist_refuses_registered_buffer_opcodes() {
+        if crate::uring::skip() {
+            return;
+        }
+        for mut r in rings() {
+            for (i, opcode) in NEVER.iter().enumerate() {
+                let sqe = Sqe {
+                    opcode: *opcode,
+                    fd: -1,
+                    user_data: 20 + i as u64,
+                    ..Sqe::default()
+                };
+                // SAFETY: no buffer (the kernel refuses it before reading
+                // the entry's address).
+                assert!(unsafe { r.push(&sqe) });
+                let _taken = r.submit_and_wait(1);
+                let mut got = Vec::new();
+                assert_eq!(r.reap(|c| got.push(c)), Ok(1));
+                assert_eq!(got[0].user_data, 20 + i as u64);
+                assert_eq!(got[0].res, -libc::EACCES, "{opcode} {:?}", r.flavour());
+            }
         }
     }
 

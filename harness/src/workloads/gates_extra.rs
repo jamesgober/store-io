@@ -110,7 +110,7 @@ fn submitter_loop_with(
         Some(_) => format!("Submitter plain random write QD{qd}"),
         None => format!("Submitter random read QD{qd}"),
     };
-    let variant = if opts.register_buffers {
+    let variant = if opts.register_file {
         format!("{variant} (registered)")
     } else {
         variant
@@ -126,7 +126,7 @@ fn submitter_loop_with(
         let mut sub = store
             .submitter(SubmitterConfig::default().with_depth(qd))
             .map_err(|e| sioerr("submitter", &e))?;
-        if opts.register_buffers {
+        if opts.register_file {
             p.notes.push(format!("io: {}", store.io_path().reason));
         }
         let mut rng = Rng::new(7_000_000 + u64::from(qd));
@@ -517,27 +517,18 @@ fn check_qos(
     ))
 }
 
-/// 3d (D-078): submitter random 4 KiB writes and reads 32 deep with the
-/// buffer arena and the file registered and without, alternated three times
-/// each, on stores whose arena fits a usual locked-memory limit (16 KiB
-/// largest ordinary buffer, no large buffers: 64 buffers each of 4, 8 and
-/// 16 KiB, 1.75 MiB; io_uring charges a registered arena to the limit, 8
-/// MiB on a usual Linux account, CI prints it), so the buffers can really
-/// be registered. Returns the points in run order: write off, write on,
+/// 3d (D-078, D-107): submitter random 4 KiB writes and reads 32 deep with
+/// the container registered as a direct descriptor and without, alternated
+/// three times each. Returns the points in run order: write off, write on,
 /// read off, read on, three times.
 pub fn registration(ctx: &Ctx) -> Vec<Point> {
-    let base = StoreOptions {
-        max_io: 16 << 10,
-        large_buffers: 0,
-        buffers_per_class: 64,
-        ..ctx.opts.clone()
-    };
+    let base = ctx.opts.clone();
     let mut pts = Vec::new();
     for _ in 0..3 {
         for mode in [Some(WriteMode::Plain), None] {
             for on in [false, true] {
                 let opts = StoreOptions {
-                    register_buffers: on,
+                    register_file: on,
                     ..base.clone()
                 };
                 pts.push(submitter_loop_with(ctx, &opts, 32, mode, "g3d"));

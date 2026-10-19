@@ -473,25 +473,19 @@ pub trait Platform: Send + Sync + 'static {
     /// `oldest_outstanding`, never on the I/O path.
     fn monotonic_ms(&self) -> u64;
 
-    /// A queue as [`Platform::queue`] makes it, with `pool`'s buffers and
-    /// `file` registered with it where the backend can (D-078: io_uring
-    /// fixed buffers and a direct descriptor on a thread-owned ring), so an
-    /// operation on a buffer of `pool` and on `file` skips per-operation
-    /// setup in the kernel. Best effort: a backend that cannot or will not
-    /// register returns a plain queue (the default), and an operation on any
-    /// other buffer or file works as on a plain queue. The queue keeps what
-    /// it registered alive for as long as it lives.
+    /// A queue as [`Platform::queue`] makes it, with `file` registered with
+    /// it where the backend can (D-078, D-107: an io_uring direct descriptor
+    /// on a thread-owned ring), so an operation on `file` skips the
+    /// per-operation file lookup in the kernel. Best effort: a backend that
+    /// cannot or will not register returns a plain queue (the default), and
+    /// an operation on any other file works as on a plain queue. The queue
+    /// keeps the file it registered open for as long as it lives.
     ///
     /// # Errors
     ///
     /// As [`Platform::queue`] (a refused registration is not an error).
-    fn queue_registered(
-        &self,
-        cfg: QueueConfig,
-        pool: &store_io_buf::BufPool,
-        file: &Self::File,
-    ) -> RawResult<Self::Queue> {
-        let _ = (pool, file);
+    fn queue_registered(&self, cfg: QueueConfig, file: &Self::File) -> RawResult<Self::Queue> {
+        let _ = file;
         self.queue(cfg)
     }
 

@@ -107,7 +107,7 @@ It runs on every backend, and the simple and batch layers are rebuilt on top of 
 
 **Linux.** The io_uring tier, built into the Linux backend with store-io's own private io_uring binding (no third-party io_uring crate; Linux depends on `libc` only):
 - one ring per thread;
-- direct descriptors and registered buffers;
+- direct descriptors and registered buffers (registered buffers dropped, D-107: a read into one never completes on at least Linux 6.5.0 and 6.6.0, which no probe detects; recorded 2026-10-19);
 - no kernel worker threads, ever: every ring read and write is non-blocking, and anything that would block runs on store-io's own path.
 
 Linux also gets a bounded worker pool for the synchronous tier, and the tier (io_uring or synchronous) is chosen at run time and reported.

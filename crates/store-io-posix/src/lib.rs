@@ -177,11 +177,10 @@ mod platform {
         registration: Arc<RegistrationCounts>,
     }
 
-    /// Rings asked to register buffers and a file, and how many got each.
+    /// Rings asked to register the file, and how many got it.
     #[derive(Debug, Default)]
     struct RegistrationCounts {
         asked: AtomicU64,
-        buffers: AtomicU64,
         files: AtomicU64,
         /// The latest refusal's code (0: none).
         refusal: core::sync::atomic::AtomicI32,
@@ -460,18 +459,12 @@ mod platform {
             let asked = r.asked.load(Ordering::Relaxed);
             if asked > 0 {
                 reason.push_str(&format!(
-                    "; registration (D-078) asked on {asked} ring(s): fixed buffers on {}, a direct descriptor on {}",
-                    r.buffers.load(Ordering::Relaxed),
+                    "; registration (D-078) asked on {asked} ring(s): a direct descriptor on {}",
                     r.files.load(Ordering::Relaxed)
                 ));
                 let refusal = r.refusal.load(Ordering::Relaxed);
                 if refusal != 0 {
                     reason.push_str(&format!(" (refused: {})", sys::errno(refusal)));
-                    if refusal == libc::ENOMEM {
-                        reason.push_str(
-                            ": most likely the locked-memory limit (RLIMIT_MEMLOCK), smaller than the arena",
-                        );
-                    }
                 }
             }
             if refused > 0 {
@@ -529,16 +522,9 @@ mod platform {
             self.make_queue(cfg, None)
         }
 
-        fn queue_registered(
-            &self,
-            cfg: QueueConfig,
-            pool: &store_io_buf::BufPool,
-            file: &PosixFile,
-        ) -> RawResult<PosixQueue> {
-            // Only a thread-owned ring registers (R3.3): a shared ring's
-            // registration would be charged once per ring.
+        fn queue_registered(&self, cfg: QueueConfig, file: &PosixFile) -> RawResult<PosixQueue> {
+            // Only a thread-owned ring registers (R3.3).
             let reg = (cfg.owner == Owner::Thread).then(|| crate::uring::queue::Registered {
-                pool: pool.clone(),
                 file: file.share_fd(),
             });
             self.make_queue(cfg, reg)
@@ -597,9 +583,6 @@ mod platform {
             };
             let r = &self.registration;
             let _a = r.asked.fetch_add(1, Ordering::Relaxed);
-            if got.buffers {
-                let _b = r.buffers.fetch_add(1, Ordering::Relaxed);
-            }
             if got.file {
                 let _f = r.files.fetch_add(1, Ordering::Relaxed);
             }

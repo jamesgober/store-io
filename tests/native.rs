@@ -636,23 +636,19 @@ fn test_the_io_tier_is_chosen_and_reported() {
     }
 }
 
-/// A store with `register_buffers` (D-078, Linux io_uring): a submitter's
+/// A store with `register_file` (D-078, Linux io_uring): a submitter's
 /// writes and reads round-trip, and the live path says what its ring
-/// registered (both on an arena below the locked-memory limit).
+/// registered.
 #[cfg(target_os = "linux")]
 #[test]
-fn test_registered_buffers_round_trip_and_are_reported() {
+fn test_a_registered_file_round_trips_and_is_reported() {
     use store_io::LinuxTier;
     use store_io::submit::{Done, SubmitterConfig, WriteMode};
     let t = TempDir::new("registered");
     let (opts, _) = options_for(t.path());
     let opts = StoreOptions {
         linux_tier: LinuxTier::Uring,
-        register_buffers: true,
-        // An arena of a few MiB, below the usual locked-memory limits.
-        max_io: 64 << 10,
-        large_buffers: 0,
-        buffers_per_class: 8,
+        register_file: true,
         ..opts
     };
     let store = match Store::create(t.path().join("s"), opts) {

@@ -2,8 +2,9 @@
 //! system calls and shared-memory protocol (`sys`, the only `unsafe`) and a
 //! safe ring (`ring`), and the `Queue` on it (`queue`, D-103 3b).
 
-// The fixed-buffer and vectored opcodes and the registration wrappers are
-// used from step 3d (D-078).
+// The ABI names more than store-io uses: the vectored opcodes, the
+// fixed-buffer opcodes (named only to be refused, D-107) and some
+// registration codes.
 #![allow(dead_code)]
 
 pub(crate) mod abi;

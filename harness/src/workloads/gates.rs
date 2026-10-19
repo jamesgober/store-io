@@ -622,8 +622,8 @@ pub fn run(ctx: &Ctx) -> Section {
             Verdict::Fail
         },
     });
-    // 3d (D-078): registration on against off, alternated; reported (it
-    // decides `StoreOptions::register_buffers`' default).
+    // 3d (D-078, D-107): the direct descriptor on against off, alternated;
+    // reported (it decides `StoreOptions::register_file`'s default).
     {
         let side = |write: bool, on: bool| -> Vec<f64> {
             g3d.iter()
@@ -643,7 +643,7 @@ pub fn run(ctx: &Ctx) -> Section {
                 .map(|(a, b)| a / b)
         };
         // What the registered points' rings got, from their live path:
-        // "... fixed buffers on B, a direct descriptor on F".
+        // "... a direct descriptor on F".
         let got = g3d
             .iter()
             .flat_map(|p| p.notes.iter())
@@ -657,10 +657,10 @@ pub fn run(ctx: &Ctx) -> Section {
                 .and_then(|d| d.parse::<u64>().ok())
                 .unwrap_or(0)
         };
-        let registered = count("fixed buffers on ") > 0 && count("a direct descriptor on ") > 0;
+        let registered = count("a direct descriptor on ") > 0;
         rows.push(Row {
             id: "G3d",
-            gate: "Registered buffers and a direct descriptor (D-078): submitter QD32 4 KiB ops/s, registered against not, medians of 3 alternated runs (reported; decides the default)",
+            gate: "Direct descriptor (D-078; buffers never registered, D-107): submitter QD32 4 KiB ops/s, registered against not, medians of 3 alternated runs (reported; decides the default)",
             measured: format!(
                 "write {:?} vs {:?} /s ({}x), read {:?} vs {:?} /s ({}x); {got}",
                 side(true, true).iter().map(|x| x.round()).collect::<Vec<_>>(),

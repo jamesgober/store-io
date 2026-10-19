@@ -99,15 +99,10 @@ pub struct PosixQueue {
 /// [`PosixQueue::registered`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Registration {
-    /// The buffer pool's arena is the ring's fixed buffer.
-    pub buffers: bool,
     /// The file is the ring's direct descriptor.
     pub file: bool,
-    /// The first registration the kernel refused (or `E2BIG`: an arena over
-    /// the 1 GiB a fixed buffer may span).
+    /// The kernel's refusal, if it refused.
     pub refused: Option<OsError>,
-    /// Operations submitted with the fixed buffer.
-    pub fixed_ops: u64,
     /// Operations submitted with the direct descriptor.
     pub direct_ops: u64,
 }
@@ -171,12 +166,10 @@ impl PosixQueue {
     #[must_use]
     pub fn registered(&self) -> Option<Registration> {
         self.uring.as_ref().map(|u| {
-            let (f, (fixed_ops, direct_ops)) = u.fixed();
+            let (f, direct_ops) = u.fixed();
             Registration {
-                buffers: f.buffers,
                 file: f.file,
                 refused: f.refused,
-                fixed_ops,
                 direct_ops,
             }
         })

@@ -30,12 +30,15 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 - `store_io::io_uring_fallbacks()` (Linux; also `store_io_posix::`): operations the io_uring tier
   finished with a blocking call (never a failure; a measure of how often
   the asynchronous path was not taken).
-- `StoreOptions::register_buffers` (Linux io_uring, D-078): a `Submitter`'s
-  ring registers the store's buffer arena as a fixed buffer and its
-  container as a direct descriptor. Best effort (the locked-memory limit
-  may refuse the arena; an `ENOMEM` refusal says so); `Store::io_path()`
-  reports what each ring got. Off by default (see the gates' G3d). `Platform::queue_registered` is the
-  backend hook; `store_io_posix::Registration` what a queue registered.
+- `StoreOptions::register_file` (Linux io_uring, D-078): a `Submitter`'s
+  ring registers the store's container as a direct descriptor. Best effort;
+  `Store::io_path()` reports what each ring got. Off by default (see the
+  gates' G3d). `Platform::queue_registered` is the backend hook;
+  `store_io_posix::Registration` what a queue registered. Buffers are never
+  registered, and every ring refuses the fixed-buffer opcodes (D-107): a
+  read into a registered buffer never completes on at least Linux 6.5.0
+  and 6.6.0 (found by the CI kernel matrix), and no probe tells the
+  kernels apart.
 - `Store::io_path()`: the kernel interface in use now, with every queue made
   since create or open counted (`StoreReport::io` is the snapshot at open).
 - `Store::open_readonly_with` (explicit options for a read-only open);

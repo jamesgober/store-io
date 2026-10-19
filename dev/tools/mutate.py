@@ -185,7 +185,7 @@ M = [
  ('crates/store-io-engine/src/io.rs', '            synced: need != u64::MAX && need != 0,', '            synced: (need != u64::MAX && need != 0) || true,'),
  ('crates/store-io-engine/src/lifecycle.rs', '            force_sync: Arc::clone(&r.force_sync),', '            force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),'),
  ('crates/store-io-engine/src/optable.rs', '                    receipt.synced = need != u64::MAX;', '                    receipt.synced = true;'),
- ('crates/store-io-engine/src/region.rs', '        let flushed = s.inner.policy.flush || self.state.forced();', '        let flushed = s.inner.policy.flush;'),
+ ('crates/store-io-engine/src/slot_handle.rs', '        let flushed = s.inner.policy.flush || self.state.forced();', '        let flushed = s.inner.policy.flush;'),
  ('crates/store-io-engine/src/region.rs', '        if synced {\n            f.publish_synced(through);', '        if synced && false {\n            f.publish_synced(through);'),
  ('crates/store-io-engine/src/submitter/durable.rs', '                .any(|r| r.forced());', '                .any(|r| r.forced() && false);'),
  ('crates/store-io-engine/src/optable.rs', '                if synced {\n                    f.publish_synced(through);', '                if synced && false {\n                    f.publish_synced(through);'),

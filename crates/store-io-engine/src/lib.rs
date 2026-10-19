@@ -39,6 +39,7 @@ mod provision;
 pub mod receipt;
 mod region;
 mod scan;
+mod slot_handle;
 mod slots;
 mod space;
 mod stats;

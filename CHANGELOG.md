@@ -33,8 +33,8 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 - `StoreOptions::register_buffers` (Linux io_uring, D-078): a `Submitter`'s
   ring registers the store's buffer arena as a fixed buffer and its
   container as a direct descriptor. Best effort (the locked-memory limit
-  may refuse the arena); `Store::io_path()` reports what each ring got.
-  Off by default (see the gates' G3d). `Platform::queue_registered` is the
+  may refuse the arena; an `ENOMEM` refusal says so); `Store::io_path()`
+  reports what each ring got. Off by default (see the gates' G3d). `Platform::queue_registered` is the
   backend hook; `store_io_posix::Registration` what a queue registered.
 - `Store::io_path()`: the kernel interface in use now, with every queue made
   since create or open counted (`StoreReport::io` is the snapshot at open).
@@ -61,8 +61,10 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   report) or ELSEWHERE (another check measures it). Every store-io,
   raw and fsys measurement reads back a sample of what it wrote and
   compares it; a measurement that failed, or whose check did not pass,
-  never feeds a verdict. A CI job runs the gates
-  on a memory-backed device and fails on any FAIL.
+  never feeds a verdict. CPU efficiency counts each side's whole process
+  (fio's own figure leaves out the completion thread of its Windows
+  engine). A CI job runs the gates on a memory-backed device and fails on
+  any FAIL.
 
 - `store-io-engine`: the engine-layer **`Submitter`** (D-065, D-080, D-098),
   from `Store::submitter(SubmitterConfig)`. One thread keeps many appends,
@@ -394,6 +396,11 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 
 ### Fixed
 
+- `store-io-win`: every data flush allocated (the status block of
+  `NtFlushBuffersFileEx`), so a durable write did too. Each file of a queue
+  now keeps one status block and reuses it: a warm blocking durable write
+  allocates nothing on Windows either (`tests/allocs.rs`, Linux and
+  Windows; gate G8a).
 - `store-io-engine`: `release` waited for the region's operations in flight
   while holding the store's metadata lock, so an operation whose holder
   needed that lock before finishing (a scan visitor provisioning a region;

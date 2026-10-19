@@ -519,13 +519,15 @@ fn check_qos(
 
 /// 3d (D-078): submitter random 4 KiB writes and reads 32 deep with the
 /// buffer arena and the file registered and without, alternated three times
-/// each, on stores whose arena fits a default locked-memory limit (64 KiB
-/// largest ordinary buffer, no large buffers: about 8 MiB), so the
-/// buffers can really be registered. Returns the points in run order:
-/// write off, write on, read off, read on, three times.
+/// each, on stores whose arena fits a usual locked-memory limit (16 KiB
+/// largest ordinary buffer, no large buffers: 64 buffers each of 4, 8 and
+/// 16 KiB, 1.75 MiB; io_uring charges a registered arena to the limit, 8
+/// MiB on a usual Linux account, CI prints it), so the buffers can really
+/// be registered. Returns the points in run order: write off, write on,
+/// read off, read on, three times.
 pub fn registration(ctx: &Ctx) -> Vec<Point> {
     let base = StoreOptions {
-        max_io: 64 << 10,
+        max_io: 16 << 10,
         large_buffers: 0,
         buffers_per_class: 64,
         ..ctx.opts.clone()

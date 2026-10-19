@@ -467,6 +467,11 @@ mod platform {
                 let refusal = r.refusal.load(Ordering::Relaxed);
                 if refusal != 0 {
                     reason.push_str(&format!(" (refused: {})", sys::errno(refusal)));
+                    if refusal == libc::ENOMEM {
+                        reason.push_str(
+                            ": most likely the locked-memory limit (RLIMIT_MEMLOCK), smaller than the arena",
+                        );
+                    }
                 }
             }
             if refused > 0 {

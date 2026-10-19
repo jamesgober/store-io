@@ -342,6 +342,8 @@ jobs:
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/gates"
+          # G3d's registered arena counts against this limit (KiB).
+          ulimit -l
           harness/target/release/store-io-harness gates --secs 3 --tier uring \
             --dir /mnt/gates --out "$RUNNER_TEMP/gates"
           f=$(ls "$RUNNER_TEMP"/gates/*-gates.md)

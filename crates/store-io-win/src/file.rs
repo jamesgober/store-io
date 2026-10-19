@@ -129,13 +129,18 @@ impl WinFile {
 
     /// The data flush, synchronously on the calling thread: `DataSyncOnly`
     /// on NTFS, `FlushFileBuffers` elsewhere. The queue's `FlushData`
-    /// operation performs exactly this.
+    /// operation performs exactly this (and, unlike this call, allocates
+    /// nothing: it reuses its file's status block).
     ///
     /// # Errors
     ///
     /// The raw error; a failed flush is never retried by this crate.
     pub fn flush_data(&self) -> RawResult<()> {
-        flush_data(self.inner.flush.as_deref(), self.inner.flush_mode)
+        flush_data(
+            self.inner.flush.as_deref(),
+            self.inner.flush_mode,
+            &mut sys::FlushStatus::new(),
+        )
     }
 
     /// The synchronous flush handle (`None` for read-only files).
@@ -145,15 +150,20 @@ impl WinFile {
 }
 
 /// Performs a data flush with the given primitive on a synchronous handle;
-/// `None` (a read-only file) is refused.
-pub(crate) fn flush_data(h: Option<&Handle>, mode: FlushMode) -> RawResult<()> {
+/// `None` (a read-only file) is refused. `status` is the reusable status
+/// block of `DataSyncOnly` (no allocation per flush).
+pub(crate) fn flush_data(
+    h: Option<&Handle>,
+    mode: FlushMode,
+    status: &mut sys::FlushStatus,
+) -> RawResult<()> {
     let Some(h) = h else {
         return Err(sys::win32(
             windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED,
         ));
     };
     match mode {
-        FlushMode::DataSyncOnly => sys::flush_data_sync_only(h),
+        FlushMode::DataSyncOnly => sys::flush_data_sync_only(h, status),
         FlushMode::Full => sys::flush_file_buffers(h),
     }
 }

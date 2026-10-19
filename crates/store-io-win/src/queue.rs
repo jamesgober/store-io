@@ -90,6 +90,8 @@ struct FileEntry {
     /// one: see `crate::file`).
     flush: Option<Arc<Handle>>,
     flush_mode: FlushMode,
+    /// The flush's reusable status block (no allocation per flush).
+    flush_status: sys::FlushStatus,
     in_flight: u32,
 }
 
@@ -205,6 +207,7 @@ impl WinQueue {
             handle,
             flush: file.flush_handle().cloned(),
             flush_mode: file.flush_mode(),
+            flush_status: sys::FlushStatus::new(),
             in_flight: 0,
         });
         Ok(slot)
@@ -212,6 +215,10 @@ impl WinQueue {
 
     fn entry(&self, i: usize) -> Option<&FileEntry> {
         self.files.get(i).and_then(Option::as_ref)
+    }
+
+    fn entry_mut(&mut self, i: usize) -> Option<&mut FileEntry> {
+        self.files.get_mut(i).and_then(Option::as_mut)
     }
 
     /// Fills a free slot, or hands the buffer back when the queue is full.
@@ -255,8 +262,11 @@ impl WinQueue {
     fn finish(&mut self, idx: usize, result: RawResult<usize>) {
         let result = match (self.slots[idx].kind, result) {
             (Kind::Write { dsync: true }, Ok(n)) if !self.draining => {
-                match self.entry(self.slots[idx].entry) {
-                    Some(e) => file::flush_data(e.flush.as_deref(), e.flush_mode).map(|()| n),
+                match self.entry_mut(self.slots[idx].entry) {
+                    Some(e) => {
+                        file::flush_data(e.flush.as_deref(), e.flush_mode, &mut e.flush_status)
+                            .map(|()| n)
+                    }
                     None => Err(sys::win32(ERROR_INVALID_PARAMETER)),
                 }
             }
@@ -449,8 +459,11 @@ impl Queue for WinQueue {
                     }
                 };
                 let idx = self.take_slot(tag, Kind::Flush, None, entry, 0)?;
-                let result = match self.entry(entry) {
-                    Some(e) => file::flush_data(e.flush.as_deref(), e.flush_mode).map(|()| 0),
+                let result = match self.entry_mut(entry) {
+                    Some(e) => {
+                        file::flush_data(e.flush.as_deref(), e.flush_mode, &mut e.flush_status)
+                            .map(|()| 0)
+                    }
                     None => Err(sys::win32(ERROR_INVALID_PARAMETER)),
                 };
                 self.finish(idx, result);

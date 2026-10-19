@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use store_io_core::error::{Error, NotWrittenCause};
 use store_io_engine::completion::Done;
-use store_io_engine::{AppendRegion, SubmitterConfig, WriteMode};
+use store_io_engine::{AppendRegion, StoreOptions, SubmitterConfig, WriteMode};
 
 use super::stamp::{self, BLOCK};
-use super::{Ctx, sample, sioerr, with_store};
+use super::{Ctx, sample, sioerr, with_store_using};
 use crate::report::{Point, System, Verify};
 use crate::sio::Plat;
 
@@ -22,6 +22,9 @@ const CHUNK: u64 = 1 << 20;
 const QD: usize = 8;
 /// Appends read back after the run.
 const CHECKS: usize = 256;
+/// The append ring, in blocks: room for QD appends of CHUNK at the
+/// smallest block (512 B), so the depth is never refused as too far ahead.
+const RING: usize = 1 << 16;
 
 /// Fills the region with 1 MiB appends 8 deep from pool buffers until the
 /// window ends, recycling it whenever it fills; MB/s over the measured
@@ -36,7 +39,11 @@ pub fn seq_write(ctx: &Ctx) -> Point {
         System::StoreIo,
         "Submitter append(1 MiB) x QD8 + barrier_all",
     );
-    with_store(ctx, "g6", p, |store, p| {
+    let opts = StoreOptions {
+        append_ring: RING.max(ctx.opts.append_ring),
+        ..ctx.opts.clone()
+    };
+    with_store_using(ctx, "g6", &opts, p, |store, p| {
         let mut wal = store
             .provision_append_region("g6", REGION)
             .map_err(|e| sioerr("provision", &e))?;
@@ -132,6 +139,13 @@ pub fn seq_write(ctx: &Ctx) -> Point {
         let secs = t0.elapsed().as_secs_f64();
         p.metric("mb_per_s", (secs > 0.0).then(|| bytes as f64 / secs / 1e6));
         p.metric("generations", Some(generation as f64));
+        if opts.append_ring != ctx.opts.append_ring {
+            p.notes.push(format!(
+                "append_ring raised to {} blocks (the default, {}, holds less than QD8 x 1 MiB ahead at 512 B blocks)",
+                opts.append_ring,
+                StoreOptions::default().append_ring
+            ));
+        }
         drop(sub);
         p.verify = check(&wal, k, generation, per);
         Ok(())

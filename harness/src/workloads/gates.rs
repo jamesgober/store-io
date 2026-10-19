@@ -128,6 +128,16 @@ fn val(p: &Point, k: &str) -> Option<f64> {
 
 /// The mean of two runs; `None` unless both ran (a verdict never rests on
 /// one run when the method asks for two).
+/// The worse of two PASS / NOT RESOLVABLE / FAIL verdicts.
+fn worse(a: Verdict, b: Verdict) -> Verdict {
+    let rank = |v: Verdict| match v {
+        Verdict::Pass => 0,
+        Verdict::NotResolvable => 1,
+        _ => 2,
+    };
+    if rank(b) > rank(a) { b } else { a }
+}
+
 fn mean(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     a.zip(b).map(|(a, b)| (a + b) / 2.0)
 }
@@ -249,13 +259,16 @@ pub fn run(ctx: &Ctx) -> Section {
     // fio's asynchronous engine here (`fio::engine`).
     let aio = format!("--ioengine={}", fio::engine());
     let aio = aio.as_str();
-    let durable = ["--ioengine=psync", "--rw=write", "--bs=4k", "--fdatasync=1"];
+    // fio's synchronous engine here (`fio::sync_engine`).
+    let sync = format!("--ioengine={}", fio::sync_engine());
+    let sync = sync.as_str();
+    let durable = [sync, "--rw=write", "--bs=4k", "--fdatasync=1"];
     let fio_d1 = job(&durable, "write");
     let fio_d2 = job(&durable, "write");
-    let seq_write = ["--ioengine=psync", "--rw=write", "--bs=1m", "--end_fsync=1"];
+    let seq_write = [sync, "--rw=write", "--bs=1m", "--end_fsync=1"];
     let fio_sw = job(&seq_write, "write");
     let fio_sw2 = job(&seq_write, "write");
-    let fio_sr1 = job(&["--ioengine=psync", "--rw=read", "--bs=1m"], "read");
+    let fio_sr1 = job(&[sync, "--rw=read", "--bs=1m"], "read");
     let cpu_args = [
         aio,
         "--rw=randread",
@@ -285,10 +298,14 @@ pub fn run(ctx: &Ctx) -> Section {
         || job(&[aio, "--rw=read", "--bs=1m", "--iodepth=8"], "read").map(|s| s.bytes_per_s / 1e6);
     let g7 = gates_scan::scan(ctx, &mut q8);
     // G5: the submitter's QD128 reads alternate with fio's, three times each
-    // (CPU accounting on a virtual machine swings between runs).
+    // (CPU accounting on a virtual machine swings between runs). Both sides
+    // count their whole process's CPU time (`fio::cpu_job`).
     let (mut g5, mut f5) = (Vec::new(), Vec::new());
     for _ in 0..3 {
-        f5.push(job(&cpu_args, "read"));
+        f5.push(match &laid {
+            Ok(()) => fio::cpu_job(&file, SPAN, &cpu_args, "read", ctx.secs),
+            Err(e) => Err(e.clone()),
+        });
         g5.push(gates_extra::read_qd128(ctx));
     }
     // G6: the Submitter's sequential writer alternates with fio's QD8
@@ -340,7 +357,12 @@ pub fn run(ctx: &Ctx) -> Section {
     let g8w = gates_extra::write_qd32(ctx);
     let g8b = gates_extra::blocking_allocs(ctx);
     let g10 = gates_extra::qos(ctx);
-    let g3d = gates_extra::registration(ctx);
+    // Registration is io_uring's (Linux).
+    let g3d = if cfg!(target_os = "linux") {
+        gates_extra::registration(ctx)
+    } else {
+        Vec::new()
+    };
 
     let mut rows = Vec::new();
     // G1: QD1 4 KiB durable write p50, against the raw primitive + 2 us.
@@ -393,20 +415,34 @@ pub fn run(ctx: &Ctx) -> Section {
             verdict: at_most(mean(a, b), mean(c, d), margin(us, mean(c, d)), spr),
         });
     }
-    // G3: QD1 durable writes/s, at least 90% of fio write+fdatasync.
+    // G3: QD1 durable writes/s, at least 90% of fio's synchronous write +
+    // fdatasync and at least 90% of the raw primitive, each within its own
+    // spread; the worse verdict stands (on Windows fio's fdatasync is a full
+    // FlushFileBuffers and its engine hands every I/O to a completion
+    // thread: a weaker baseline than store-io's own call).
     let (fa, fb) = (ok(&fio_d1).map(|s| s.iops), ok(&fio_d2).map(|s| s.iops));
-    let fspread = mean(fa, fb).map_or(0.0, |m| spread(fa, fb) / m);
+    let (ra, rb) = (get(raw(&l1), "ops_per_s"), get(raw(&l2), "ops_per_s"));
+    let rel = |a: Option<f64>, b: Option<f64>| mean(a, b).map_or(0.0, |m| spread(a, b) / m);
     let store_rate = mean(get(page(&l1), "ops_per_s"), get(page(&l2), "ops_per_s"));
+    let against_fio = at_least(store_rate, mean(fa, fb), 0.9, rel(fa, fb));
+    let against_raw = at_least(store_rate, mean(ra, rb), 0.9, rel(ra, rb));
     rows.push(Row {
         id: "G3",
-        gate: "QD1 durable writes/s at least 90% of fio (psync write + fdatasync)",
+        gate: "QD1 durable writes/s at least 90% of fio (synchronous write + fdatasync) and at least 90% of the raw primitive",
         measured: format!(
-            "store-io {} /s, fio {} /s (fio's spread {:.0}%)",
+            "store-io {} /s, fio ({}) {} /s (spread {:.0}%), raw {} /s (spread {:.0}%)",
             f(store_rate, 0),
+            fio::sync_engine(),
             f(mean(fa, fb), 0),
-            fspread * 100.0
+            rel(fa, fb) * 100.0,
+            f(mean(ra, rb), 0),
+            rel(ra, rb) * 100.0
         ),
-        verdict: at_least(store_rate, mean(fa, fb), 0.9, fspread),
+        verdict: if [fa, fb, ra, rb].iter().any(Option::is_none) {
+            Verdict::Fail
+        } else {
+            worse(against_fio, against_raw)
+        },
     });
     // G4: durable random writes at QD 1, 4, 16: reported.
     let parts: Vec<String> = [1u32, 4, 16]
@@ -431,7 +467,7 @@ pub fn run(ctx: &Ctx) -> Section {
     // medians, the spread fio's own across its three runs.
     let theirs: Vec<f64> = f5
         .iter()
-        .filter_map(|r| ok(r).map(|s| s.iops * s.runtime_s / s.cpu_s))
+        .filter_map(|r| ok(r).map(|s| s.ios / s.cpu_s))
         .filter(|e| e.is_finite() && *e > 0.0)
         .collect();
     let ours: Vec<f64> = g5.iter().filter_map(|p| val(p, "ops_per_cpu_s")).collect();
@@ -444,7 +480,7 @@ pub fn run(ctx: &Ctx) -> Section {
     };
     rows.push(Row {
         id: "G5",
-        gate: "Per-core submit efficiency at least 90% of fio's asynchronous engine (4 KiB random read, QD128; ops per CPU-second; medians of 3 alternated runs; a memory-backed device in CI)",
+        gate: "Per-core submit efficiency at least 90% of fio's asynchronous engine (4 KiB random read, QD128; ops per CPU-second of the whole process, every thread counted, fio lean (gtod_reduce) with its start-up and exit taken out; medians of 3 alternated runs; a memory-backed device in CI)",
         measured: format!(
             "store-io {ours:.0?} ops/CPU-s, fio {theirs:.0?} ops/CPU-s (fio's spread {:.0}%)",
             espread * 100.0
@@ -459,8 +495,8 @@ pub fn run(ctx: &Ctx) -> Section {
         },
     });
     // G6: sequential write, at least 90% of fio's best: the Submitter's
-    // zero-copy writer and fio's QD8 write alternated (medians), fio's psync
-    // write (two runs) as its other configuration. The simple API's
+    // zero-copy writer and fio's QD8 write alternated (medians), fio's
+    // synchronous write (two runs) as its other configuration. The simple API's
     // `append(&[u8])` copies the caller's bytes first (W5, reported).
     let ours: Vec<f64> = g6.iter().filter_map(|p| val(p, "mb_per_s")).collect();
     let q8w: Vec<f64> = f6
@@ -493,7 +529,8 @@ pub fn run(ctx: &Ctx) -> Section {
         id: "G6",
         gate: "Sequential write (1 MiB) at least 90% of fio's best (store-io: Submitter appends 8 deep from pool buffers, no copy; medians of 3 alternated runs)",
         measured: format!(
-            "store-io {ours:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio psync {} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
+            "store-io {ours:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio {} {} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
+            fio::sync_engine(),
             f(psm, 0),
             wspread * 100.0,
             f(simple, 0)
@@ -634,7 +671,9 @@ pub fn run(ctx: &Ctx) -> Section {
                 f(gain(false), 2),
             ),
             // Fails closed unless the registered runs really registered.
-            verdict: if whole && registered {
+            verdict: if !cfg!(target_os = "linux") {
+                Verdict::Elsewhere
+            } else if whole && registered {
                 Verdict::Reported
             } else {
                 Verdict::Fail

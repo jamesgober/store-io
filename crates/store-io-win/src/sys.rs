@@ -304,6 +304,36 @@ pub fn flush_file_buffers(h: &Handle) -> RawResult<()> {
     }
 }
 
+/// The status block `NtFlushBuffersFileEx` writes, on the heap and reused
+/// from flush to flush, so a flush allocates nothing (G8). Replaced (the old
+/// block leaked) only after a flush the kernel left pending.
+pub struct FlushStatus(Box<IO_STATUS_BLOCK>);
+
+impl core::fmt::Debug for FlushStatus {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("FlushStatus")
+    }
+}
+
+// SAFETY: plain memory owned by its holder; the kernel writes it only
+// during a synchronous call made by that holder (or forever after a pending
+// one, when the block is leaked and never touched again).
+unsafe impl Send for FlushStatus {}
+
+impl FlushStatus {
+    /// A fresh status block.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Box::default())
+    }
+}
+
+impl Default for FlushStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// `NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)`: data plus the
 /// metadata needed to read it back, and a device cache flush. NTFS only.
 ///
@@ -315,25 +345,26 @@ pub fn flush_file_buffers(h: &Handle) -> RawResult<()> {
 /// completes before it returns. If it ever reports `STATUS_PENDING` anyway,
 /// the flush is not known to have finished: that is an error, and the status
 /// block (which the kernel may still write) is deliberately leaked rather
-/// than freed.
-pub fn flush_data_sync_only(h: &Handle) -> RawResult<()> {
+/// than freed or reused; `status` gets a fresh one.
+pub fn flush_data_sync_only(h: &Handle, status_block: &mut FlushStatus) -> RawResult<()> {
     /// `STATUS_PENDING`: a success code that means "not finished yet".
     const STATUS_PENDING: i32 = 0x103;
-    let mut iosb = Box::new(IO_STATUS_BLOCK::default());
     // SAFETY: no parameters are passed (null, 0) as the ntifs contract allows;
-    // `iosb` is a heap block writable for the call and, if the call returns
-    // pending, for as long as the kernel may write it (it is leaked below).
+    // the status block is a heap block writable for the call and, if the
+    // call returns pending, for as long as the kernel may write it (it is
+    // leaked below, never reused).
     let status = unsafe {
         NtFlushBuffersFileEx(
             h.raw(),
             FLUSH_FLAGS_FILE_DATA_SYNC_ONLY,
             ptr::null(),
             0,
-            &mut *iosb,
+            &mut *status_block.0,
         )
     };
     if status == STATUS_PENDING {
-        let _kernel_may_still_write = Box::leak(iosb);
+        let pending = core::mem::take(&mut status_block.0);
+        let _kernel_may_still_write = Box::leak(pending);
         return Err(nt(status));
     }
     if status >= 0 { Ok(()) } else { Err(nt(status)) }

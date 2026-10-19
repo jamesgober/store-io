@@ -31,9 +31,14 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   finished with a blocking call (never a failure; a measure of how often
   the asynchronous path was not taken).
 - `StoreOptions::register_file` (Linux io_uring, D-078): a `Submitter`'s
-  ring registers the store's container as a direct descriptor. Best effort;
-  `Store::io_path()` reports what each ring got. Off by default (see the
-  gates' G3d). `Platform::queue_registered` is the backend hook;
+  ring registers a read-only twin of the store's container (a second open
+  file description) as a direct descriptor, and reads use it. Writes stay
+  on the store's own description, so a dead owner's write in flight keeps
+  the store locked until it lands (lock fencing), while the ring's own
+  reference never holds the lock. Best effort;
+  `Store::io_path()` reports what each ring got. On by default (G3d, CI on
+  a memory-backed device: reads 1.03x to 1.08x of an unregistered ring;
+  writes take the unregistered path). `Platform::queue_registered` is the backend hook;
   `store_io_posix::Registration` what a queue registered. Buffers are never
   registered, and every ring refuses the fixed-buffer opcodes (D-107): a
   read into a registered buffer never completes on at least Linux 6.5.0
@@ -399,6 +404,11 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 
 ### Fixed
 
+- `store-io-engine`: a flush that panicked left its leader's place taken,
+  so every later barrier on the store waited forever. The leader now
+  poisons the store (the flush's outcome is unknown) and gives leadership
+  back, so later barriers fail at once with `Poisoned`. Test with a
+  panicking flush.
 - `store-io-win`: every data flush allocated (the status block of
   `NtFlushBuffersFileEx`), so a durable write did too. Each file of a queue
   now keeps one status block and reuses it: a warm blocking durable write

@@ -523,7 +523,8 @@ mod platform {
         }
 
         fn queue_registered(&self, cfg: QueueConfig, file: &PosixFile) -> RawResult<PosixQueue> {
-            // Only a thread-owned ring registers (R3.3).
+            // Only a thread-owned ring registers (R3.3): a read-only twin of
+            // the file, opened only once a ring is made (`file::read_only_twin`).
             let reg = (cfg.owner == Owner::Thread).then(|| crate::uring::queue::Registered {
                 file: file.share_fd(),
             });

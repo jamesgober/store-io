@@ -103,8 +103,9 @@ pub(crate) struct UringQueue {
     /// Operations NOWAIT refused or cut short, finished by a blocking call
     /// (reads that met the end of the file included).
     fallbacks: u64,
-    /// The file the ring registered as direct descriptor 0 (kept open, so
-    /// its identity is exact). An operation uses it only on that very file.
+    /// The file whose read-only twin the ring registered as direct
+    /// descriptor 0 (kept open, so its identity is exact). A read uses the
+    /// slot only on that very file; a write never does (D-107).
     fixed_file: Option<Arc<OwnedFd>>,
     /// Operations submitted with the direct descriptor.
     direct_ops: u64,
@@ -112,6 +113,7 @@ pub(crate) struct UringQueue {
 
 /// What a thread-owned ring may register (D-078, D-107: the file only).
 pub(crate) struct Registered {
+    /// The file operations name; its read-only twin is what registers.
     pub(crate) file: Arc<OwnedFd>,
 }
 
@@ -136,13 +138,18 @@ impl UringQueue {
         // Room for every operation and the wake read, should the kernel not
         // take entries at once; at most 4096 (more in flight is fine).
         let entries = u32::try_from(depth + 1).unwrap_or(u32::MAX);
+        // The twin is opened by the ring's setup, after the ring exists, and
+        // closed once registered (the kernel keeps its own reference): a
+        // failed open only refuses the registration.
+        let open = reg
+            .as_ref()
+            .map(|r| move || crate::file::read_only_twin(&r.file));
         let want = Want {
-            file: reg.as_ref().map(|r| r.file.as_raw_fd()),
+            file: open.as_ref().map(|o| o as &dyn Fn() -> RawResult<OwnedFd>),
         };
         // The eventfd first: nothing after the ring can fail, so what the
         // ring registered is always kept as long as the ring lives.
         let wake = Arc::new(sys::eventfd()?);
-        // The file is open (`reg.file`, kept by the queue).
         let ring = Ring::with_registration(flavour, entries, want)?;
         let fixed_file = reg.and_then(|r| ring.fixed().file.then_some(r.file));
         let word = NonNull::from(Box::leak(Box::new(0u64)));
@@ -258,9 +265,11 @@ impl UringQueue {
             offset,
             buf,
         });
-        // The direct descriptor only for the registered file itself (D-078).
-        // Never a fixed buffer (D-107).
-        let fixed_file = self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));
+        // The direct descriptor only for a read of the registered file itself
+        // (D-078): a write stays on the file's own descriptor, whose lock it
+        // then holds until it completes (D-107). Never a fixed buffer.
+        let fixed_file =
+            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));
         let (opcode, addr) = match write {
             Some(_) => (op::WRITE, op.buf.as_ptr() as u64),
             None => (op::READ, op.buf.as_mut_ptr() as u64),

@@ -131,3 +131,99 @@ pub(crate) fn open_confined(
         p.retry_open(|| sys::openat(dirfd, &c, flags, mode))
     }
 }
+
+/// A read-only twin of the open file `fd`: a second open file description
+/// of the very same file (`O_RDONLY|O_DIRECT|O_CLOEXEC`, opened through
+/// `/proc/thread-self/fd`, checked to be the same inode), for the kernel to
+/// hold as an io_uring direct descriptor that serves reads (D-078, D-107).
+///
+/// Why a twin: the store's lock lives on the store's own description and is
+/// released at that description's last reference, so a ring holding that
+/// description would keep the store locked after a killed process, until
+/// the ring's teardown. Why read-only, and reads only: a write in flight
+/// holds a reference to the description it was issued on; issued on the
+/// store's own, it keeps the store locked until it completes (lock fencing:
+/// no successor writes before a dead owner's last write has landed). On the
+/// twin it would not, so writes never use it, and the twin cannot write.
+///
+/// # Errors
+///
+/// The open's failure (no `/proc`, say), or `ESTALE` if what opened is not
+/// this file.
+pub(crate) fn read_only_twin(fd: &OwnedFd) -> RawResult<OwnedFd> {
+    let path = std::ffi::CString::new(format!("/proc/thread-self/fd/{}", fd.as_raw_fd()))
+        .map_err(|_| sys::errno(libc::EINVAL))?;
+    let twin = sys::openat(
+        libc::AT_FDCWD,
+        &path,
+        libc::O_RDONLY | libc::O_DIRECT | libc::O_CLOEXEC,
+        0,
+    )?;
+    let (mine, other) = (sys::fstat(fd.as_raw_fd())?, sys::fstat(twin.as_raw_fd())?);
+    if (mine.st_dev, mine.st_ino) != (other.st_dev, other.st_ino) {
+        return Err(sys::errno(libc::ESTALE));
+    }
+    Ok(twin)
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
+    use std::os::fd::{AsRawFd, OwnedFd};
+
+    use super::read_only_twin;
+    use crate::sys;
+
+    /// The twin is a separate open file description of the same file: a
+    /// read lock through it conflicts with a write lock on the original
+    /// (locks of one description never conflict with each other); it cannot
+    /// write; and it reads the file's bytes.
+    #[test]
+    fn test_the_read_only_twin_is_a_separate_description_of_the_same_file() {
+        let dir = std::env::var_os("STORE_IO_TEST_DIR")
+            .or_else(|| std::env::var_os("HOME"))
+            .map_or_else(std::env::temp_dir, std::path::PathBuf::from)
+            .join(format!(".store-io-twin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        std::fs::write(&path, vec![0x5Au8; 4096]).unwrap();
+        let fd: OwnedFd = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .into();
+        let twin = read_only_twin(&fd).unwrap();
+        assert_ne!(twin.as_raw_fd(), fd.as_raw_fd());
+        sys::ofd_setlk(fd.as_raw_fd(), libc::F_WRLCK).unwrap();
+        assert!(
+            sys::ofd_setlk(twin.as_raw_fd(), libc::F_RDLCK).is_err(),
+            "the twin shares the original's description"
+        );
+        // An aligned block, as O_DIRECT requires.
+        let layout = Layout::from_size_align(4096, 4096).unwrap();
+        // SAFETY: a non-zero-sized layout; freed below.
+        let p = unsafe { alloc_zeroed(layout) };
+        assert!(!p.is_null());
+        // SAFETY: pread(2) into the 4096-byte block just allocated.
+        let n = unsafe { libc::pread(twin.as_raw_fd(), p.cast(), 4096, 0) };
+        // SAFETY: `p` holds 4096 initialised bytes.
+        let same = unsafe { core::slice::from_raw_parts(p, 4096) }
+            .iter()
+            .all(|&b| b == 0x5A);
+        // An aligned whole-block write, which O_DIRECT would take on a
+        // writable descriptor: the twin refuses it for its access mode.
+        // SAFETY: pwrite(2) from the same live 4096-byte block.
+        let w = unsafe { libc::pwrite(twin.as_raw_fd(), p.cast(), 4096, 0) };
+        let werr = std::io::Error::last_os_error().raw_os_error();
+        // SAFETY: allocated above with this layout.
+        unsafe { dealloc(p, layout) };
+        assert_eq!(n, 4096);
+        assert!(same, "the twin read other bytes");
+        assert_eq!((w, werr), (-1, Some(libc::EBADF)), "the twin can write");
+        drop((twin, fd));
+        let _cleanup = std::fs::remove_dir_all(&dir);
+    }
+}

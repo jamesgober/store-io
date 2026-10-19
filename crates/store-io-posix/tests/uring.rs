@@ -405,10 +405,10 @@ fn test_only_queues_with_several_operations_in_flight_get_a_ring() {
     }
 }
 
-/// A thread-owned ring with the file registered (D-078): reads and writes
-/// go through the direct descriptor, and the bytes are exactly where they
-/// were aimed. (No buffer is ever registered: D-107; a read into one never
-/// completes on at least Linux 6.5.0 and 6.6.0.)
+/// A thread-owned ring with the file registered (D-078): a read goes through
+/// the direct descriptor (the file's read-only twin), a write never does (it
+/// stays on the file's own descriptor, D-107), and the bytes are exactly
+/// where they were aimed. (No buffer is ever registered: D-107.)
 #[test]
 fn test_a_registered_ring_uses_the_direct_descriptor() {
     let Some(f) = fixture(4) else { return };
@@ -446,7 +446,10 @@ fn test_a_registered_ring_uses_the_direct_descriptor() {
     assert_eq!(c.result, Ok(BLOCK));
     assert!(c.buf.unwrap().as_slice().iter().all(|&b| b == 0x3C));
     let got = q.registered().unwrap();
-    assert_eq!(got.direct_ops, 2, "the direct descriptor was not used");
+    assert_eq!(
+        got.direct_ops, 1,
+        "not exactly the read used the direct descriptor"
+    );
 }
 
 /// On a registered ring, an operation on another file takes the ordinary
@@ -492,10 +495,7 @@ fn test_a_registered_ring_uses_ordinary_io_for_what_it_did_not_register() {
     .unwrap();
     assert_eq!(one(&mut q).result, Ok(BLOCK));
     let got = q.registered().unwrap();
-    assert_eq!(
-        got.direct_ops, 1,
-        "the direct descriptor served another file"
-    );
+    assert_eq!(got.direct_ops, 0, "a write used the direct descriptor");
     for (file, want) in [(&f.file, 0x11u8), (&other, 0x22u8)] {
         q.submit(
             IoOp::Read {
@@ -510,9 +510,14 @@ fn test_a_registered_ring_uses_ordinary_io_for_what_it_did_not_register() {
         assert_eq!(c.result, Ok(BLOCK));
         assert!(
             c.buf.unwrap().as_slice().iter().all(|&b| b == want),
-            "a write landed in the wrong file"
+            "a write landed in the wrong file, or a read read the wrong one"
         );
     }
+    let got = q.registered().unwrap();
+    assert_eq!(
+        got.direct_ops, 1,
+        "the direct descriptor served another file"
+    );
 }
 
 /// A shared ring registers nothing (R3.3: a registration would be charged

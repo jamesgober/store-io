@@ -475,8 +475,9 @@ pub trait Platform: Send + Sync + 'static {
 
     /// A queue as [`Platform::queue`] makes it, with `file` registered with
     /// it where the backend can (D-078, D-107: an io_uring direct descriptor
-    /// on a thread-owned ring), so an operation on `file` skips the
-    /// per-operation file lookup in the kernel. Best effort: a backend that
+    /// on a thread-owned ring, used by reads only), so an operation on `file`
+    /// may skip the per-operation file lookup in the kernel. Best effort: a
+    /// backend that
     /// cannot or will not register returns a plain queue (the default), and
     /// an operation on any other file works as on a plain queue. The queue
     /// keeps the file it registered open for as long as it lives.

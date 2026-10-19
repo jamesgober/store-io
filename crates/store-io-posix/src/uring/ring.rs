@@ -3,7 +3,7 @@
 //! of an entry or a completion.
 
 use std::cell::Cell;
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::thread::ThreadId;
 
 use libc::c_int;
@@ -129,11 +129,11 @@ pub(crate) struct Ring {
     fd: OwnedFd,
 }
 
-/// What to register with a new ring (D-078): a file as direct descriptor 0
-/// (never buffers: D-107).
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Want {
-    pub(crate) file: Option<RawFd>,
+/// What to register with a new ring (D-078): a file as direct descriptor 0,
+/// opened by the given function once the ring exists (never buffers: D-107).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Want<'a> {
+    pub(crate) file: Option<&'a dyn Fn() -> RawResult<OwnedFd>>,
 }
 
 /// What a ring registered, and the kernel's refusal.
@@ -160,9 +160,14 @@ impl Ring {
     /// As [`Self::new`], registering `want` on an [`Flavour::Owned`] ring
     /// while it is still disabled (a shared ring registers nothing: R3.3).
     /// Best effort: a registration the kernel refuses is recorded in
-    /// [`Self::fixed`], never an error. `want.file` must be an open
-    /// descriptor (the kernel takes its own reference to the file).
-    pub(crate) fn with_registration(flavour: Flavour, entries: u32, want: Want) -> RawResult<Self> {
+    /// [`Self::fixed`], never an error (a failure of `want.file` too); the
+    /// file it opens is closed once registered, the kernel keeping its own
+    /// reference.
+    pub(crate) fn with_registration(
+        flavour: Flavour,
+        entries: u32,
+        want: Want<'_>,
+    ) -> RawResult<Self> {
         let entries = entries.clamp(1, 4096).next_power_of_two();
         let mut last = errno(libc::EINVAL);
         for flags in tiers(flavour) {
@@ -180,7 +185,7 @@ impl Ring {
         Err(last)
     }
 
-    fn finish(flavour: Flavour, fd: OwnedFd, p: &Params, want: Want) -> RawResult<Self> {
+    fn finish(flavour: Flavour, fd: OwnedFd, p: &Params, want: Want<'_>) -> RawResult<Self> {
         if p.features & FEAT_NODROP == 0 {
             return Err(errno(libc::ENOSYS));
         }
@@ -208,8 +213,8 @@ impl Ring {
         // the restrictions allow only updates once it is enabled.
         let mut fixed = Fixed::default();
         if flavour == Flavour::Owned {
-            if let Some(file) = want.file {
-                match sys::register_file(&fd, file) {
+            if let Some(open) = want.file {
+                match open().and_then(|file| sys::register_file(&fd, file.as_raw_fd())) {
                     Ok(()) => fixed.file = true,
                     Err(e) => fixed.refused = Some(e),
                 }

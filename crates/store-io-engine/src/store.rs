@@ -90,10 +90,14 @@ pub struct StoreOptions {
     pub linux_tier: LinuxTier,
     /// Register the store's container file with each `Submitter`'s queue
     /// where the backend can (D-078, D-107: on Linux's io_uring tier, a
-    /// direct descriptor on the submitter's ring), so its operations skip
-    /// the per-operation file lookup in the kernel. Best effort: a
+    /// read-only twin of it as a direct descriptor on the submitter's ring),
+    /// so its reads skip the per-operation file lookup in the kernel; writes
+    /// stay on the store's own descriptor, so a write in flight keeps the
+    /// store locked until it completes. Best effort: a
     /// registration the kernel refuses is counted in `Store::io_path`, never
-    /// an error. Off by default until the gates measure a gain (3d). Buffers
+    /// an error. On by default: the gates measured reads 1.03x to 1.08x of
+    /// an unregistered ring (G3d, CI); writes take the unregistered path.
+    /// Buffers
     /// are never registered: reads into registered buffers hang forever on
     /// some kernels (at least Linux 6.5.0 and 6.6.0), which no probe
     /// detects (D-107).
@@ -116,7 +120,7 @@ impl Default for StoreOptions {
             append_ring: 4096,
             keyed_fill: false,
             linux_tier: LinuxTier::Auto,
-            register_file: false,
+            register_file: true,
         }
     }
 }

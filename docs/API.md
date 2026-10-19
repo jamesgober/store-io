@@ -71,7 +71,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `t3_pool_threads: u32` | CPU count, at most 32 (0) | Worker threads of the submit pool that runs a page batch's writes and a large read's pieces concurrently on the Linux synchronous tier. Shared by every store on one platform and sized by the first of them that uses it, at most 256; each store opened through the simple API has a platform, and so a pool, of its own. Other backends ignore it. |
 | `append_ring: usize` | 4096 | Blocks an append may start ahead of the oldest incomplete one. |
 | `keyed_fill: bool` | `false` | Fill new regions with a keyed incompressible pattern instead of zeros. |
-| `register_file: bool` | `false` | Linux io_uring: register the container with each `Submitter`'s ring as a direct descriptor (D-078). Best effort; what registered is in `Store::io_path()`. Buffers are never registered (D-107). |
+| `register_file: bool` | `true` | Linux io_uring: register a read-only twin of the container with each `Submitter`'s ring as a direct descriptor, used by reads (D-078, D-107). Best effort; what registered is in `Store::io_path()`. Buffers are never registered (D-107). |
 | `linux_tier: LinuxTier` | `Auto` | Linux only. `Auto`: io_uring where the kernel accepts store-io's rings, else the synchronous tier. `Uring`: io_uring or the store is not created. `Sync`: one blocking system call per operation. The choice and its reason are `StoreReport::io` ([PLATFORMS](PLATFORMS.md#the-io-queue)). |
 
 ---

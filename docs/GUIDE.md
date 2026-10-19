@@ -305,7 +305,7 @@ These run only when you call them; store-io never reclaims space on its own.
 | `append_ring` | 4096 | Blocks an append may run ahead of the oldest incomplete one. |
 | `keyed_fill` | off | Fill new regions with an incompressible pattern instead of zeros (thin, deduplicating or compressing storage). |
 | `log2_table_slot` | 14 | Region-table size: 16 KiB holds 253 regions. |
-| `register_file` | off | Linux io_uring: register the container with each submitter's ring as a direct descriptor, so its reads and writes skip the kernel's per-operation file lookup. |
+| `register_file` | on | Linux io_uring: register a read-only twin of the container with each submitter's ring as a direct descriptor, so its reads skip the kernel's per-operation file lookup (writes stay on the store's own descriptor, D-107). |
 | `linux_tier` | `Auto` | Linux only: `Auto` uses io_uring where the kernel accepts store-io's rings, else the synchronous tier; `Uring` requires io_uring; `Sync` never uses it. `store.report().io` names the interface chosen and why ([PLATFORMS](PLATFORMS.md#the-io-queue)). |
 
 The engine layer, a per-thread submitter with owned buffers and completion tags for full asynchronous control, is `Store::submitter` ([section 13](#13-many-operations-from-one-thread-the-submitter)).

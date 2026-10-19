@@ -217,7 +217,7 @@ where
                     offset: r.data_offset + next,
                     buf,
                 };
-                match lane.queue.submit(op, submitted) {
+                match lane.submit(op, submitted) {
                     Ok(()) => {
                         self.inner.observer.add(Counter::Reads, 1);
                         self.inner.observer.add(Counter::ReadBytes, len as u64);
@@ -417,7 +417,7 @@ fn collect_one<Q: Queue>(
     depth: usize,
     in_flight: &mut usize,
 ) -> Result<(), OsError> {
-    let _added = lane.queue.wait(1, &mut lane.done)?;
+    let _added = lane.wait(1)?;
     lane.progress();
     for comp in lane.done.drain() {
         *in_flight = in_flight.saturating_sub(1);

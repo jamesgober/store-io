@@ -34,6 +34,9 @@ pub(crate) enum Kind {
     Sync(DurableReceipt),
     /// A barrier for the whole store.
     All,
+    /// A blocking layer's operation on a lane (A1): no region bookkeeping in
+    /// the row; its caller settles it ([`crate::settle`]) or discards it.
+    Raw,
 }
 
 /// An operation in flight: everything its completion needs.
@@ -117,6 +120,44 @@ impl Table {
         let index = self.free.pop()?;
         let generation = self.rows[index as usize].generation;
         Some((index, u64::from(index) | (u64::from(generation) << 32)))
+    }
+
+    /// Frees the row a lane operation's completion names (`Kind::Raw`,
+    /// never settled here) and returns the caller's tag; `None` if the
+    /// completion names no row in use (a backend breaking its contract).
+    pub(crate) fn take(&mut self, qtag: u64) -> Option<u64> {
+        let index = (qtag & 0xFFFF_FFFF) as usize;
+        let row = self.row(qtag)?;
+        let live = row.live.take()?;
+        row.generation = row.generation.wrapping_add(1);
+        debug_assert!(
+            matches!(live.kind, Kind::Raw),
+            "a settled row freed unsettled"
+        );
+        self.free.push(index as u32);
+        self.live -= 1;
+        while let Some(&(i, s)) = self.order.front() {
+            if is_live(&self.rows, i, s) {
+                break;
+            }
+            let _stale = self.order.pop_front();
+        }
+        self.publish();
+        Some(live.tag)
+    }
+
+    /// Frees every row in use without settling it: a lane whose queue
+    /// holds nothing in flight can never see their completions.
+    pub(crate) fn forget(&mut self) {
+        for (i, row) in self.rows.iter_mut().enumerate() {
+            if row.live.take().is_some() {
+                row.generation = row.generation.wrapping_add(1);
+                self.free.push(i as u32);
+                self.live -= 1;
+            }
+        }
+        self.order.clear();
+        self.publish();
     }
 
     /// Undoes [`Self::start`] for an operation the queue refused: the row is
@@ -369,7 +410,7 @@ where
             return settle_read(store, state, start, end, buf, result)
                 .map(|len| Done::Read { len });
         }
-        Kind::Sync(_) | Kind::All => {
+        Kind::Sync(_) | Kind::All | Kind::Raw => {
             return Err(not_written(
                 NotWrittenCause::Interrupted,
                 ErrorContext::default(),

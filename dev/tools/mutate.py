@@ -225,6 +225,9 @@ M = [
  ('crates/store-io-engine/src/submitter/mod.rs', '        self.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = self.queue.submit(op, qtag) {', '        let refused = self.queue.submit(op, qtag);\n        self.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = refused {'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n        self.live -= 1;', '        drop(live);\n        self.free.push(index);'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n', '        drop(live);\n'),
+ # A1 C5: a lane's operations live in its op table; a refused submission
+ # gives its row back
+ ('crates/store-io-engine/src/exec.rs', '            .inspect_err(|_| self.rows.abort(index))', '            .inspect_err(|_| ())'),
 ]
 
 def kill_stuck_tests():

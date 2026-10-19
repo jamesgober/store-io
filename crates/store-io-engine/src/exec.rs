@@ -19,8 +19,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockE
 use store_io_core::observe::{Counter, Observer};
 
 use store_io_core::error::OsError;
-use store_io_platform::{CompletionBuf, IoBuf, IoOp, Queue, RawResult};
+use store_io_platform::{Completion, CompletionBuf, IoBuf, IoOp, Queue, RawResult, Rejected};
 
+use crate::optable::{Kind, Table};
 use crate::sync::{AtomicBool, AtomicU64, Ordering};
 
 /// A fixed set of queues shared by the blocking layers, plus an optional
@@ -64,11 +65,78 @@ pub(crate) struct QueueSet<Q> {
     returned: Condvar,
 }
 
-/// A queue and its completion buffer.
+/// A queue and its op table (A1, PLANNING R3.3): the `Submitter`'s
+/// [`Table`], one row per operation in flight. Every operation is submitted
+/// under its row's tag (index and generation), so a completion is matched to
+/// exactly the operation that made it, and the next holder of the lane
+/// clears an earlier holder's abandoned operations row by row.
 pub(crate) struct Lane<Q> {
     pub(crate) queue: Q,
+    /// What the queue hands back, under row tags.
+    raw: CompletionBuf,
+    /// This holder's completed operations, under the holder's own tags.
     pub(crate) done: CompletionBuf,
+    rows: Table,
     mark: Arc<LaneMark>,
+}
+
+impl<Q: Queue> Lane<Q> {
+    /// Submits `op` in a free row; the completion comes back in `done` with
+    /// `tag`. A lane with no free row refuses it as a full queue (`raw:
+    /// None`, the buffer returned).
+    pub(crate) fn submit(&mut self, op: IoOp<'_, Q::File>, tag: u64) -> Result<(), Rejected> {
+        let Some((index, qtag)) = self.rows.claim() else {
+            let buf = match op {
+                IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),
+                IoOp::FlushData { .. } => None,
+            };
+            return Err(Rejected { buf, raw: None });
+        };
+        self.rows.start(index, tag, Kind::Raw, None, false);
+        self.queue
+            .submit(op, qtag)
+            .inspect_err(|_| self.rows.abort(index))
+    }
+
+    /// Waits until at least `min` of the queue's operations complete, then
+    /// moves every completion that arrived into `done` under its caller's
+    /// tag (also when the wait then failed). Returns how many arrived.
+    ///
+    /// # Errors
+    ///
+    /// The raw error if waiting failed: the operations still in flight keep
+    /// their rows and their buffers stay with the queue.
+    pub(crate) fn wait(&mut self, min: usize) -> Result<usize, OsError> {
+        let waited = self.queue.wait(min, &mut self.raw);
+        let n = self.collect();
+        waited.map(|_| n)
+    }
+
+    /// Operations of this lane in flight.
+    pub(crate) fn in_flight(&self) -> usize {
+        self.rows.live
+    }
+
+    fn collect(&mut self) -> usize {
+        let mut n = 0;
+        for c in self.raw.drain() {
+            // A completion names a row in use: the queue is this lane's alone
+            // and every tag names one use of one row.
+            let Some(tag) = self.rows.take(c.tag) else {
+                debug_assert!(false, "a lane completion matched no row");
+                continue;
+            };
+            n += 1;
+            // `done` holds at most one completion per row (depth) and every
+            // holder drains it before waiting again: a completion that did
+            // not fit would be a result lost, so this stops instead.
+            assert!(
+                self.done.push(Completion { tag, ..c }).is_ok(),
+                "a lane's completions overflowed"
+            );
+        }
+        n
+    }
 }
 
 impl<Q> Lane<Q> {
@@ -379,9 +447,14 @@ impl<Q: Queue> QueueSet<Q> {
 
 /// A lane over `queue` with its completion buffer and busy mark.
 fn lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Mutex<Lane<Q>> {
+    let depth = depth.max(1);
     Mutex::new(Lane {
         queue,
-        done: CompletionBuf::with_capacity(depth.max(1)),
+        raw: CompletionBuf::with_capacity(depth),
+        done: CompletionBuf::with_capacity(depth),
+        // The table's own busy mark is not the lane's (D-095's lane marks
+        // stay as they are).
+        rows: Table::new(depth, Arc::new(LaneMark::new())),
         mark: Arc::clone(mark),
     })
 }
@@ -403,11 +476,11 @@ pub(crate) enum Ran {
 }
 
 /// Collects and discards what an earlier holder of this lane left in flight
-/// when its wait failed, so that every holder starts on an empty queue and
-/// no completion can ever be taken for another operation's. A completion
-/// means the device is done with its buffer, so dropping one is safe. One
-/// `in_flight` call when the queue is clean (every time, unless a wait has
-/// failed).
+/// when its wait failed, row by row, so that every holder starts with no
+/// operation in flight and no completion can ever be taken for another
+/// operation's. A completion means the device is done with its buffer, so
+/// dropping one is safe. One `in_flight` call when the queue is clean
+/// (every time, unless a wait has failed).
 ///
 /// # Errors
 ///
@@ -417,10 +490,16 @@ pub(crate) fn clear_stale<Q: Queue>(lane: &mut Lane<Q>) -> Result<(), OsError> {
     lane.done.drain().for_each(drop);
     while lane.queue.in_flight() > 0 {
         let n = lane.queue.in_flight();
-        let _added = lane.queue.wait(n, &mut lane.done)?;
+        let _added = lane.wait(n)?;
         lane.done.drain().for_each(drop);
         // Clearing is progress, not the holder's own operation aging.
         lane.progress();
+    }
+    // Rows whose queue holds nothing can never complete (a backend that lost
+    // their completions): freed, so the lane is usable.
+    debug_assert_eq!(lane.in_flight(), 0, "lane rows outlived their operations");
+    if lane.in_flight() > 0 {
+        lane.rows.forget();
     }
     Ok(())
 }
@@ -447,7 +526,7 @@ pub(crate) fn run<Q: Queue>(
         drop(op);
         return Ok(Ran::Abandoned(raw));
     }
-    slot.queue.submit(op, TAG).map_err(|r| (r.buf, r.raw))?;
+    slot.submit(op, TAG).map_err(|r| (r.buf, r.raw))?;
     loop {
         // A borrow of the mark beside the drain of the completions.
         let mark = &slot.mark;
@@ -464,9 +543,10 @@ pub(crate) fn run<Q: Queue>(
                 });
             }
         }
-        if let Err(raw) = slot.queue.wait(1, &mut slot.done) {
+        if let Err(raw) = slot.wait(1) {
             // Waiting failed but the operation is in flight: its buffer is
-            // still owned by the kernel and must not be released.
+            // still owned by the kernel and must not be released (its row
+            // stays, for the next holder to clear).
             return Ok(Ran::Abandoned(raw));
         }
     }
@@ -544,7 +624,7 @@ pub(crate) fn pump<Q: Queue>(
                 },
             };
             let bytes = buf.len() as u64;
-            match lane.queue.submit(
+            match lane.submit(
                 IoOp::Write {
                     file,
                     offset,
@@ -590,7 +670,7 @@ pub(crate) fn pump<Q: Queue>(
             }
             break;
         }
-        if let Err(raw) = lane.queue.wait(1, &mut lane.done) {
+        if let Err(raw) = lane.wait(1) {
             return Pumped::Failed(Some(raw));
         }
         lane.progress();
@@ -609,5 +689,44 @@ pub(crate) fn pump<Q: Queue>(
     match failure {
         None => Pumped::All,
         Some(raw) => Pumped::Failed(raw),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::path::Path;
+
+    use store_io_core::error::ErrorContext;
+    use store_io_platform::IoOp;
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use crate::{Store, StoreOptions};
+
+    /// A refused submission gives its row back at once, within the same
+    /// hold of the lane (A1 C5): nothing is left in flight for a later
+    /// holder to clear.
+    #[test]
+    fn test_a_refused_lane_submission_leaves_nothing_in_flight() {
+        let p = SimPlatform::new(SimConfig::volatile(40));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let mut lane = s.inner.queues.get(0);
+        for _ in 0..3 {
+            p.with_world(|w| {
+                let next = w.write_submits() + 1;
+                w.faults_mut().fail_submit = Some((next, 5));
+            });
+            let buf = s.take(4096, ErrorContext::default()).unwrap();
+            let op = IoOp::Write {
+                file: &s.inner.file,
+                offset: 0,
+                buf,
+                dsync: false,
+            };
+            let refused = lane.submit(op, 7).unwrap_err();
+            assert!(refused.buf.is_some() && refused.raw.is_some());
+            assert_eq!(lane.in_flight(), 0, "the refused row was not given back");
+        }
     }
 }

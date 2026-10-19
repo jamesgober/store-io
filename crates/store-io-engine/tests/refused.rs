@@ -117,3 +117,27 @@ fn test_a_page_batch_refused_at_its_first_write_touches_nothing() {
     );
     assert!(s.poisoned().is_none());
 }
+
+/// A lane's refused submission gives its row back (A1 C5): on a store whose
+/// lanes hold one operation, a write after a refusal still finds its row.
+#[test]
+fn test_a_refused_lane_submission_frees_its_row() {
+    let p = SimPlatform::new(SimConfig::volatile(704));
+    let opts = StoreOptions {
+        queues: 1,
+        queue_depth: 1,
+        ..StoreOptions::default()
+    };
+    let s = Store::create(p.clone(), Path::new("/db"), opts).unwrap();
+    let pages = s.provision_page_region("pages", MIB).unwrap();
+    let bs = pages.block_size() as usize;
+    for round in 0..3u8 {
+        refuse_next_write(&p);
+        let r = pages.write(pages.pos(0).unwrap(), &vec![round; bs]);
+        assert!(matches!(r, Err(Error::Io { .. })), "round {round}: {r:?}");
+        pages
+            .write(pages.pos(0).unwrap(), &vec![round + 1; bs])
+            .unwrap_or_else(|e| panic!("round {round}: the lane's row leaked: {e:?}"));
+    }
+    assert!(s.poisoned().is_none());
+}

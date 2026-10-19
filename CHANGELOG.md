@@ -38,12 +38,12 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   reference never holds the lock. Best effort;
   `Store::io_path()` reports what each ring got. On by default (G3d, CI on
   a memory-backed device: reads 1.03x to 1.08x of an unregistered ring;
-  writes take the unregistered path). `Platform::queue_registered` is the backend hook;
-  `store_io_posix::Registration` what a queue registered. Buffers are never
-  registered, and every ring refuses the fixed-buffer opcodes (D-107): a
-  read into a registered buffer never completes on at least Linux 6.5.0
-  and 6.6.0 (found by the CI kernel matrix), and no probe tells the
-  kernels apart.
+  writes take the unregistered path). `Platform::queue_registered` is the
+  backend hook; `store_io_posix::Registration` what a queue registered.
+  Buffers are never registered, and every ring refuses the fixed-buffer
+  opcodes (D-107): a read into a registered buffer never completes on at
+  least Linux 6.5.0 and 6.6.0 (found by the CI kernel matrix), and no
+  probe tells the kernels apart.
 - `Store::io_path()`: the kernel interface in use now, with every queue made
   since create or open counted (`StoreReport::io` is the snapshot at open).
 - `Store::open_readonly_with` (explicit options for a read-only open);
@@ -71,8 +71,11 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   compares it; a measurement that failed, or whose check did not pass,
   never feeds a verdict. CPU efficiency counts each side's whole process
   (fio's own figure leaves out the completion thread of its Windows
-  engine). A CI job runs the gates on a memory-backed device and fails on
-  any FAIL.
+  engine). G1 alternates store-io and the raw primitive in short rounds
+  and judges the worse of the median per-round difference and the pooled
+  one (a virtual machine's flush latency drifts by more than the gate
+  between long windows). A CI job runs the gates on a memory-backed device
+  and fails on any FAIL.
 
 - `store-io-engine`: the engine-layer **`Submitter`** (D-065, D-080, D-098),
   from `Store::submitter(SubmitterConfig)`. One thread keeps many appends,

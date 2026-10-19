@@ -14,8 +14,8 @@
 //! - ELSEWHERE: measured by another check (cited).
 
 use super::{
-    Ctx, caller_batch, concurrent, gates_extra, gates_scan, gates_seq, lone, page_batch, remove,
-    sequential,
+    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_scan, gates_seq, lone, page_batch,
+    remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -126,8 +126,6 @@ fn val(p: &Point, k: &str) -> Option<f64> {
     if p.usable() { p.get(k) } else { None }
 }
 
-/// The mean of two runs; `None` unless both ran (a verdict never rests on
-/// one run when the method asks for two).
 /// The worse of two PASS / NOT RESOLVABLE / FAIL verdicts.
 fn worse(a: Verdict, b: Verdict) -> Verdict {
     let rank = |v: Verdict| match v {
@@ -138,6 +136,8 @@ fn worse(a: Verdict, b: Verdict) -> Verdict {
     if rank(b) > rank(a) { b } else { a }
 }
 
+/// The mean of two runs; `None` unless both ran (a verdict never rests on
+/// one run when the method asks for two).
 fn mean(a: Option<f64>, b: Option<f64>) -> Option<f64> {
     a.zip(b).map(|(a, b)| (a + b) / 2.0)
 }
@@ -239,8 +239,9 @@ pub fn run(ctx: &Ctx) -> Section {
         "Performance gates (flush-required device; relative, Unverified per D-066)",
     );
     sec.method = vec![
-        "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS).".to_owned(),
+        "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS) and `gates_g1` (G1, alternated rounds).".to_owned(),
         "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (W1 run twice for the raw primitive; each fio control a gate uses run twice); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
+        "G1 is measured in 20 alternated rounds (`gates_g1`): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate.".to_owned(),
         "The latency gates (+2 µs, +5 µs) are far below the spread of a virtual disk's flush (milliseconds): on such a disk they are expected to be NOT RESOLVABLE; certified results need bare metal (dev/TODO.md).".to_owned(),
     ];
     let l1 = lone::run(ctx);
@@ -357,6 +358,7 @@ pub fn run(ctx: &Ctx) -> Section {
     let g8w = gates_extra::write_qd32(ctx);
     let g8b = gates_extra::blocking_allocs(ctx);
     let g10 = gates_extra::qos(ctx);
+    let (g1, g1_rounds) = gates_g1::alternated(ctx);
     // Registration is io_uring's (Linux).
     let g3d = if cfg!(target_os = "linux") {
         gates_extra::registration(ctx)
@@ -365,31 +367,51 @@ pub fn run(ctx: &Ctx) -> Section {
     };
 
     let mut rows = Vec::new();
-    // G1: QD1 4 KiB durable write p50, against the raw primitive + 2 us.
+    // G1: QD1 4 KiB durable write p50, against the raw primitive + 2 us:
+    // alternated rounds (`gates_g1`); the worse of the median per-round
+    // difference and the pooled one against the gate, the median's interval
+    // deciding between NOT RESOLVABLE and FAIL.
     fn page(s: &Section) -> Option<&Point> {
         find(s, System::StoreIo, "PageRegion::write_durable", None)
     }
     fn raw(s: &Section) -> Option<&Point> {
         find(s, System::Raw, "write + data flush", None)
     }
-    let (s1, s2) = (get(page(&l1), "p50_us"), get(page(&l2), "p50_us"));
-    let (r1, r2) = (get(raw(&l1), "p50_us"), get(raw(&l2), "p50_us"));
-    // The baseline's own spread only: a noisy store-io never widens its
-    // own tolerance.
-    let spr = spread(r1, r2);
+    let g1r = val(&g1, "raw_p50_us");
+    // Finite or nothing: a NaN never stands in for a measurement.
+    let fin = |k| val(&g1, k).filter(|v: &f64| v.is_finite());
+    let (g1m, g1lo, g1hi, g1p) = (
+        fin("diff_p50_us"),
+        fin("diff_lo_us"),
+        fin("diff_hi_us"),
+        fin("pooled_diff_us"),
+    );
+    let g1margin = margin(2.0, g1r);
+    // The worse of the median per-round difference and the pooled one.
+    let g1d = g1m.zip(g1p).map(|(m, p)| m.max(p));
+    let over = g1_rounds.iter().filter(|d| **d > g1margin).count();
     rows.push(Row {
         id: "G1",
         gate: if cfg!(target_os = "linux") {
-            "QD1 4 KiB durable write p50 within the raw primitive (pwritev2 + fdatasync) + 2 µs"
+            "QD1 4 KiB durable write p50 within the raw primitive (pwritev2 + fdatasync) + 2 µs (20 alternated rounds; PASS: the worse of the median per-round difference and the pooled difference within the gate; NOT RESOLVABLE: not, but the median's ~96% interval reaches the gate; FAIL: the interval is over it)"
         } else {
-            "QD1 4 KiB durable write p50 within the raw primitive (write + data flush) + 3%"
+            "QD1 4 KiB durable write p50 within the raw primitive (write + data flush) + 3% (20 alternated rounds; PASS: the worse of the median per-round difference and the pooled difference within the gate; NOT RESOLVABLE: not, but the median's ~96% interval reaches the gate; FAIL: the interval is over it)"
         },
         measured: format!(
-            "store-io {} µs, raw {} µs (spread between runs {spr:.0} µs)",
-            f(mean(s1, s2), 1),
-            f(mean(r1, r2), 1)
+            "store-io - raw: median {} µs (interval {} to {}), pooled {} µs; gate {} µs; raw p50 {} µs; {over} of {} rounds over the gate",
+            f(g1m, 2),
+            f(g1lo, 2),
+            f(g1hi, 2),
+            f(g1p, 2),
+            f(Some(g1margin), 2),
+            f(g1r, 1),
+            g1_rounds.len()
         ),
-        verdict: at_most(mean(s1, s2), mean(r1, r2), margin(2.0, mean(r1, r2)), spr),
+        verdict: match (g1d, g1lo, g1r) {
+            (Some(d), Some(_), Some(r)) if r > 0.0 && d <= g1margin => Verdict::Pass,
+            (Some(_), Some(lo), Some(r)) if r > 0.0 && lo <= g1margin => Verdict::NotResolvable,
+            _ => Verdict::Fail,
+        },
     });
     // G2: barrier alone, against the raw flush alone.
     fn split(s: &Section) -> Option<&Point> {
@@ -860,7 +882,7 @@ pub fn run(ctx: &Ctx) -> Section {
         sec.findings
             .push(format!("{} FAIL: {} ({})", r.id, r.gate, r.measured));
     }
-    let mut pts = vec![g7, g8w, g8b, g10];
+    let mut pts = vec![g1, g7, g8w, g8b, g10];
     pts.extend(g3d);
     pts.extend(g5);
     pts.extend(g6);

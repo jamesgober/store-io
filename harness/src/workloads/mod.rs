@@ -4,9 +4,13 @@
 
 pub mod caller_batch;
 pub mod concurrent;
+pub mod gates;
+pub mod gates_extra;
+pub mod gates_scan;
 pub mod lone;
 pub mod page_batch;
 pub mod sequential;
+pub mod stamp;
 pub mod submitter;
 
 use std::path::{Path, PathBuf};

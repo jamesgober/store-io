@@ -15,7 +15,6 @@
 //! first; the median repetition is reported, with the spread.
 
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use store_io_engine::completion::Done;
@@ -23,6 +22,7 @@ use store_io_engine::{SubmitterConfig, WriteMode};
 
 use super::{Ctx, KIB4, fallbacks, remove, sioerr, with_store};
 use crate::data::Rng;
+use crate::fio;
 use crate::json::Json;
 use crate::report::{Better, Comparison, Point, Section, System, Table, Verify};
 use crate::stats::Samples;
@@ -361,146 +361,35 @@ fn store_point(ctx: &Ctx, rw: Rw, qd: u32) -> Result<(Rep, Option<String>), Stri
 
 /// fio's asynchronous engine on this system.
 fn fio_engine() -> &'static str {
-    if cfg!(windows) {
-        "windowsaio"
-    } else {
-        "io_uring"
-    }
+    fio::engine()
 }
 
-/// Writes fio's file in full (1 MiB direct writes, then fsync), so random
-/// writes overwrite allocated, written blocks, as store-io's do.
+/// Writes fio's file in full, so random writes overwrite allocated, written
+/// blocks, as store-io's do.
 fn lay_out(file: &Path) -> Result<(), String> {
-    let o = Command::new("fio")
-        .arg("--name=w6-layout")
-        .arg(format!("--filename={}", fio_path(file)))
-        .arg(format!("--size={SPAN}"))
-        .args(["--rw=write", "--bs=1m", "--direct=1", "--end_fsync=1"])
-        .arg(format!("--ioengine={}", fio_engine()))
-        .output()
-        .map_err(|e| format!("fio did not run: {e}"))?;
-    if o.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "fio layout failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ))
-    }
+    fio::lay_out(file, SPAN)
 }
 
 fn fio_point(ctx: &Ctx, file: &Path, rw: Rw, qd: u32) -> Result<Rep, String> {
-    let o = Command::new("fio")
-        .arg("--name=w6")
-        .arg(format!("--filename={}", fio_path(file)))
-        .arg(format!("--size={SPAN}"))
-        .arg(format!("--ioengine={}", fio_engine()))
-        .arg("--direct=1")
-        .arg(format!("--rw={}", rw.name()))
-        .arg("--bs=4k")
-        .arg(format!("--iodepth={qd}"))
-        .arg("--numjobs=1")
-        .arg("--norandommap")
-        .arg("--randrepeat=0")
-        .arg("--lat_percentiles=1")
-        .arg("--time_based")
-        .arg(format!("--runtime={}ms", (ctx.secs * 1000.0) as u64))
-        .arg(format!("--ramp_time={}ms", (ctx.warmup * 1000.0) as u64))
-        .arg("--output-format=json")
-        .output()
-        .map_err(|e| format!("fio did not run: {e}"))?;
-    if !o.status.success() {
-        return Err(format!(
-            "fio failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&o.stdout);
+    let rwarg = format!("--rw={}", rw.name());
+    let depth = format!("--iodepth={qd}");
+    let engine = format!("--ioengine={}", fio::engine());
     let side = match rw {
         Rw::Write => "write",
         Rw::Read => "read",
     };
-    let (ops, p50, p99, p999) =
-        fio_stats(&text, side).ok_or_else(|| "fio output not understood".to_owned())?;
+    let st = fio::job(
+        file,
+        SPAN,
+        &[&engine, &rwarg, "--bs=4k", &depth, "--norandommap"],
+        side,
+        ctx.secs,
+        ctx.warmup,
+    )?;
     Ok(Rep {
-        ops,
-        p50: Some(p50),
-        p99: Some(p99),
-        p999: Some(p999),
+        ops: st.iops,
+        p50: Some(st.p50_us),
+        p99: Some(st.p99_us),
+        p999: Some(st.p999_us),
     })
-}
-
-/// fio's `--filename`: on Windows a `:` must be escaped.
-fn fio_path(path: &Path) -> String {
-    let s = path.display().to_string();
-    if cfg!(windows) {
-        s.replace(':', "\\:")
-    } else {
-        s
-    }
-}
-
-/// The object that follows `key` in `s` (from its `{` to the matching
-/// `}`), so a search inside it cannot run into a later section.
-fn object_after<'a>(s: &'a str, key: &str) -> Option<&'a str> {
-    let start = s.find(key)? + key.len();
-    let open = start + s[start..].find('{')?;
-    let mut depth = 0usize;
-    for (i, ch) in s[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[open..=open + i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// IOPS and total-latency p50 / p99 / p99.9 (µs) of the first job's `side`
-/// ("read" or "write") in fio's JSON output, each searched only inside its
-/// own object.
-fn fio_stats(json: &str, side: &str) -> Option<(f64, f64, f64, f64)> {
-    let jobs = &json[json.find("\"jobs\"")?..];
-    let sect = object_after(jobs, &format!("\"{side}\" :"))?;
-    let iops = number_after(sect, "\"iops\" :")?;
-    let lat = object_after(sect, "\"lat_ns\" :")?;
-    let pct = object_after(lat, "\"percentile\" :")?;
-    let at = |k: &str| number_after(pct, &format!("\"{k}\" :")).map(|ns| ns / 1000.0);
-    Some((iops, at("50.000000")?, at("99.000000")?, at("99.900000")?))
-}
-
-fn number_after(s: &str, key: &str) -> Option<f64> {
-    let i = s.find(key)? + key.len();
-    let rest = s[i..].trim_start();
-    let end = rest
-        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == '+'))
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fio_stats_reads_each_side_inside_its_own_object() {
-        let j = r#"{ "jobs" : [ { "job options" : { "rw" : "randwrite" },
-            "read" : { "iops" : 0.0, "lat_ns" : { "min" : 0 } },
-            "write" : { "iops" : 12345.5, "clat_ns" : { "percentile" : { "50.000000" : 1 } },
-                "lat_ns" : { "percentile" : { "50.000000" : 41984, "99.000000" : 70144, "99.900000" : 90112 } } } } ] }"#;
-        let w = fio_stats(j, "write").unwrap_or_else(|| panic!("parsed"));
-        assert!((w.0 - 12345.5).abs() < 1e-9);
-        assert!(
-            (w.1 - 41.984).abs() < 1e-9
-                && (w.2 - 70.144).abs() < 1e-9
-                && (w.3 - 90.112).abs() < 1e-9
-        );
-        // The read side has no percentiles: nothing is taken from "write".
-        assert!(fio_stats(j, "read").is_none());
-    }
 }

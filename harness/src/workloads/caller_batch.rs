@@ -132,6 +132,7 @@ pub fn run(ctx: &Ctx) -> Section {
                             && p.get("n") == Some(n as f64)
                             && p.get("record_bytes") == Some(size as f64)
                     })
+                    .filter(|p| p.usable())
                     .and_then(|p| p.get("records_per_s"))
             };
             sec.comparisons.push(Comparison {

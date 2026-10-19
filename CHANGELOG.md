@@ -25,142 +25,34 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   default, uses io_uring where the kernel accepts store-io's rings, else
   the synchronous tier. `StoreReport::io` names the interface and why it
   was chosen. Other systems ignore the option.
-- `store_io_posix::io_uring_fallbacks()`: operations the io_uring tier
+- `store_io::io_uring_fallbacks()` (Linux; also `store_io_posix::`): operations the io_uring tier
   finished with a blocking call (never a failure; a measure of how often
   the asynchronous path was not taken).
 - `Store::open_readonly_with` (explicit options for a read-only open);
   `Op::Queue` for a failed queue setup (it was reported as `Open`).
-
-### Changed
-
-- **Linux stores use io_uring by default** (`linux_tier: Auto`). Each
-  io_uring queue holds two file descriptors; a queue whose ring the kernel
-  cannot set up for want of resources is synchronous instead, and the
-  report counts it. `linux_tier: Sync` keeps the 0.3 behaviour.
-- `StoreReport` is `#[non_exhaustive]`; `StoreOptions` and `StoreReport`
-  have new fields (`linux_tier`, `io`).
-
-### Fixed
-
-- `store-io-engine`: `release` waited for the region's operations in flight
-  while holding the store's metadata lock, so an operation whose holder
-  needed that lock before finishing (a scan visitor provisioning a region;
-  now also a `Submitter` thread provisioning before it reaps) deadlocked
-  with it. It now waits first and takes the lock after. Test with a
-  submitter; found in review.
-- `store-io-engine`: **operations abandoned on a queue could affect the next
-  operation on it.** An operation is abandoned when the wait for it fails (a
-  Windows IOCP port can fail a wait; the Linux synchronous queues never do)
-  or when a scan's visitor panics with reads in flight (any platform).
-  - **Before.** The queue went back to the store with those operations still
-    in flight. The next user could take their completions for its own: a
-    read could return another read's bytes, a large read could deliver wrong
-    ranges, a batch could be acknowledged before its own writes completed,
-    and a queue full of abandoned operations refused everything forever.
-  - **Now.** Every user of a queue first collects and discards what an
-    earlier user abandoned (a completion means the device is done with its
-    buffer), so it always starts on an empty queue; on a clean queue that
-    is one length check each time a call takes the queue. A queue that
-    cannot even be cleared fails the call: with `Io` before any space is
-    reserved, or fail-stop inside a metadata update. Tests reproduce each case on the simulator with
-    out-of-order completions; each failed before the fix.
-- `store-io-engine`: a write refused by a full queue that did not return its
-  buffer (a backend breaking its contract) fails the call; before, it was
-  skipped and the call could still report every write done.
-- `store-io-engine`: a failed wait is a failure of the queue, never a verdict
-  on the media.
-  - **Before.** Its error code went through the media-error path. A single
-    read was reported as `Corruption(MediaError)` and rescanned; at open, a
-    slot whose read was abandoned was weighed as unreadable, so the open
-    could use the older region table, and a later provisioning overwrote the
-    newer one, losing a region. On the shipped backends a wait error has
-    never carried a media-class code, so this was seen on the simulator.
-  - **Now.** An abandoned operation is its own outcome: a read fails with
-    `Io` and its raw code, a write or flush is `DurabilityUnknown` and
-    poisons (no receipt), and `create` never reclaims a container it could
-    not read. Clearing an earlier caller's abandoned operations happens
-    before a call reserves space or submits anything; if it fails, the call
-    fails with `Io` and nothing of it happens.
-- `store-io-engine`: open no longer drops a region silently when it cannot use it.
-  - **Which regions.** A ready table entry whose container is too short, whose header has no valid copy, or whose header holds impossible values, names another region or kind, or says released.
-  - **Before.** Such a region was skipped, and a lookup of its name returned `NotFound`, the same answer as for a name that never existed. A caller could take that for a fresh start while the data was still on disk.
-  - **Now.** Such regions are reported with the reason, and a lookup returns `Corruption` naming the region.
-- `store-io-engine`: a failed region read is reported accurately.
-  - **Before.** Every failure was reported as `Corruption(MediaError)` and the raw code was dropped, so an invalid argument, an exhausted resource or a bad handle looked like a failing disk.
-  - **Now.** A media error names the exact unreadable range, found by the scan's bisection. Any other failure is `Io` with its raw code and the byte range.
-- `store-io-engine`: a read-only open needs no write rights, and readers share the store.
-  - **Before.** `open_readonly` opened the container read-write to take the exclusive ownership lock. It failed on a read-only mount, a write-protected file or a backup copy, which is where a recovery tool most needs it, and two readers excluded each other.
-  - **Now.** It opens one read-only handle and takes a shared lock on it. Any number of readers can open a store at once; readers and the writer still exclude each other.
-- `store-io-engine`: **growing the container could bring a truncated region
-  back as healthy.**
-  - **Before.** A region cut off by a short container was reported at open,
-    but provisioning or reserving afterwards grew the container over its
-    missing tail, zero-filled. The next open found the region whole and
-    ready, its lost bytes read as zeros; an append region silently ended
-    early.
-  - **Now.** While such a region exists, growth is refused with
-    `Corruption(Truncated)` naming it, and it stays reported.
-- `store-io-engine`: **a transient read error at open could roll back
-  committed metadata.**
-  - **Before.** Any failed slot read (a bad handle, an exhausted resource,
-    an invalid request) counted as an unreadable slot. On the region table,
-    one such error made the open choose the older table copy, so a region
-    provisioned since then was missing (`NotFound`) with no error. On a
-    region header, a healthy region was marked unavailable for the session.
-  - **Now.** A slot is unreadable only on a media error, a short read or a
-    read past the end of the file. Any other failure fails the open with
-    `Io` and its code.
-- `store-io-engine`: **opening a store could report a healthy store as
-  corrupt.** A transient read error (not a media error) while looking for the
-  volume record made open skip that location; on a store that had only been
-  created, the second copy is still blank, so open returned
-  `Corruption(HeaderCrc)`. A caller that recreates a store on corruption
-  would have destroyed it. Such an error now fails the open with `Io`.
-- `store-io-engine`: when open finds no valid copy of a metadata pair (the
-  volume record, the region table) and a read met a media error, it reports
-  `Corruption(MediaError)`, not `Corruption(HeaderCrc)`: the error may be
-  transient, and "corrupt" invites a caller to recreate the store. This
-  covers the search's probe reads and the full slot reads.
-- `store-io-engine`: a volume record from a newer format (a payload longer
-  than 48 bytes, or a non-zero `features` field) is refused with
-  `Unsupported(FormatVersion)` instead of being reported as corruption or
-  accepted and rewritten without its extra bytes.
-- `store-io-engine`: the bisection of a failed read halves in whole blocks
-  while a piece spans several, so every read of a block or more stays
-  block-aligned. Before, an odd number of blocks could be split mid-block,
-  which a device with large sectors refuses, aborting the scan.
-- `store-io-engine`: splitting a failed read below the store block now
-  happens only where the probe reported the direct-I/O alignment. A device
-  that refuses smaller reads (for example dm-crypt with 4 KiB sectors over a
-  512e disk, on a kernel without `STATX_DIOALIGN`) made the scan abort with
-  `Io(EINVAL)`; a refused sub-block read is now reported unreadable and the
-  scan continues.
-- `store-io-engine`: when the rescan that locates a media error fails (a
-  short buffer pool, a full queue), the media error is still reported over
-  the whole read, not replaced by that failure. The failed read's buffer is
-  released before the rescan.
-- `store-io-engine`: the flush domain's statistics counters sit on a cache
-  line of their own, so counting no longer evicts the line every barrier
-  reads.
-- `store-io-core`: `errno::is_unsupported` matches each operating system's
-  own errno numbers (Linux and macOS number them differently) and is
-  documented as valid for flush and sync results only. New
-  `errno::is_end_of_file`.
-- `store-io-posix`: a malformed `uevent` device name (one ending in `/`) gave
-  the probe an empty device name, so it looked up the wrong ext4 options file
-  and skipped its fallback to the mount source. The mount options were then
-  reported missing (a more cautious class, never a wrong one). Such a name is
-  now no answer, and the fallback runs. Found by the new probe fuzz target.
-- `store-io-engine`: a media error names the exact failing sector.
-  - **Before.** Bisection stopped at the 4 KiB store block, so one bad 512-byte sector cost the caller seven readable ones. A read larger than one buffer named only the whole requested range.
-  - **Now.** Scans and reads bisect down to the device's logical block (or the direct-I/O alignment, if larger) where the probe reports it, and every read names the exact unreadable range.
-- `store-io-engine`: `Directory` refuses a change it could never make durable before writing anything.
-  - **Before.** On a file system that cannot flush directories, `replace` wrote the temporary file and renamed it over the target, then failed on the directory flush. The target had already changed, with no durability.
-  - **Now.** `Directory::open` tries a directory flush. If it is unsupported, every `replace` and `remove` returns `Unsupported(DirectoryFlush)`; if it failed otherwise, `Io(SyncDir)`. In both cases nothing is written.
-- `store-io-engine`: a failed `set_len` during a `Directory` replace is fail-stop. It returns `DurabilityUnknown` and poisons the handle, as a failed write does; before, the handle stayed usable. The target keeps its old contents.
-- `store-io-engine`: the test that a flush leader never waits for a shared queue is now deterministic. It holds the only queue and requires the flush to finish anyway; the old test depended on timing and could pass without the flush lane.
-
-### Added
+- CI checks of the io_uring tier, each failing closed when it cannot run:
+  - **Crash replay.** `dm-log-writes` records every write, flush and FUA
+    of a workload on ext4 and XFS. The log is replayed to every prefix and
+    to sampled reorderings of the writes since the last flush, and store-io
+    must recover a consistent store with every receipted record intact.
+  - **Kernel matrix.** The test suites run under virtme-ng on Linux 5.15,
+    6.1 and 6.6.
+  - **No kernel worker threads.** A gate samples io-wq workers under load
+    (`dev/tools/iowq-gate.sh`), with a fio control that must create them.
+  - **Idle.** For 60 s an idle store makes no system calls, no I/O and no
+    timer wakeups, on both tiers (`tests/idle.rs`).
+  - **Hot path.** A submitter's steady-state loop makes no futex call and
+    no timed wait, checked with `strace` (`tests/hotpath.rs`,
+    `dev/tools/hotpath-check.py`).
+- Harness: `gates` runs the ROADMAP's performance gate table: the
+  workloads, fio controls, CPU efficiency, allocation counts and QoS under
+  a background writer. Each row is judged PASS, NOT RESOLVABLE (inside the
+  machine's own run-to-run spread), FAIL, REPORTED (the table asks for a
+  report) or ELSEWHERE (another check measures it). Every store-io,
+  raw and fsys measurement reads back a sample of what it wrote and
+  compares it; a measurement that failed, or whose check did not pass,
+  never feeds a verdict. A CI job runs the gates
+  on a memory-backed null_blk device and fails on any FAIL.
 
 - `store-io-engine`: the engine-layer **`Submitter`** (D-065, D-080, D-098),
   from `Store::submitter(SubmitterConfig)`. One thread keeps many appends,
@@ -459,10 +351,137 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 
 ### Changed
 
+- **Linux stores use io_uring by default** (`linux_tier: Auto`). Each
+  io_uring queue holds two file descriptors; a queue whose ring the kernel
+  cannot set up for want of resources is synchronous instead, and the
+  report counts it. `linux_tier: Sync` keeps the 0.3 behaviour.
+- `StoreReport` is `#[non_exhaustive]`; `StoreOptions` and `StoreReport`
+  have new fields (`linux_tier`, `io`).
+
 - `dev/ROADMAP.md`: the v0.4 section describes the approved scope (the engine
   layer, the io_uring backend with no kernel worker threads, the synchronous
   tier's worker pool, runtime tier selection, IoRing evaluated and not
   adopted) and its exit criteria.
+
+### Fixed
+
+- `store-io-engine`: `release` waited for the region's operations in flight
+  while holding the store's metadata lock, so an operation whose holder
+  needed that lock before finishing (a scan visitor provisioning a region;
+  now also a `Submitter` thread provisioning before it reaps) deadlocked
+  with it. It now waits first and takes the lock after. Test with a
+  submitter; found in review.
+- `store-io-engine`: **operations abandoned on a queue could affect the next
+  operation on it.** An operation is abandoned when the wait for it fails (a
+  Windows IOCP port can fail a wait; the Linux synchronous queues never do)
+  or when a scan's visitor panics with reads in flight (any platform).
+  - **Before.** The queue went back to the store with those operations still
+    in flight. The next user could take their completions for its own: a
+    read could return another read's bytes, a large read could deliver wrong
+    ranges, a batch could be acknowledged before its own writes completed,
+    and a queue full of abandoned operations refused everything forever.
+  - **Now.** Every user of a queue first collects and discards what an
+    earlier user abandoned (a completion means the device is done with its
+    buffer), so it always starts on an empty queue; on a clean queue that
+    is one length check each time a call takes the queue. A queue that
+    cannot even be cleared fails the call: with `Io` before any space is
+    reserved, or fail-stop inside a metadata update. Tests reproduce each case on the simulator with
+    out-of-order completions; each failed before the fix.
+- `store-io-engine`: a write refused by a full queue that did not return its
+  buffer (a backend breaking its contract) fails the call; before, it was
+  skipped and the call could still report every write done.
+- `store-io-engine`: a failed wait is a failure of the queue, never a verdict
+  on the media.
+  - **Before.** Its error code went through the media-error path. A single
+    read was reported as `Corruption(MediaError)` and rescanned; at open, a
+    slot whose read was abandoned was weighed as unreadable, so the open
+    could use the older region table, and a later provisioning overwrote the
+    newer one, losing a region. On the shipped backends a wait error has
+    never carried a media-class code, so this was seen on the simulator.
+  - **Now.** An abandoned operation is its own outcome: a read fails with
+    `Io` and its raw code, a write or flush is `DurabilityUnknown` and
+    poisons (no receipt), and `create` never reclaims a container it could
+    not read. Clearing an earlier caller's abandoned operations happens
+    before a call reserves space or submits anything; if it fails, the call
+    fails with `Io` and nothing of it happens.
+- `store-io-engine`: open no longer drops a region silently when it cannot use it.
+  - **Which regions.** A ready table entry whose container is too short, whose header has no valid copy, or whose header holds impossible values, names another region or kind, or says released.
+  - **Before.** Such a region was skipped, and a lookup of its name returned `NotFound`, the same answer as for a name that never existed. A caller could take that for a fresh start while the data was still on disk.
+  - **Now.** Such regions are reported with the reason, and a lookup returns `Corruption` naming the region.
+- `store-io-engine`: a failed region read is reported accurately.
+  - **Before.** Every failure was reported as `Corruption(MediaError)` and the raw code was dropped, so an invalid argument, an exhausted resource or a bad handle looked like a failing disk.
+  - **Now.** A media error names the exact unreadable range, found by the scan's bisection. Any other failure is `Io` with its raw code and the byte range.
+- `store-io-engine`: a read-only open needs no write rights, and readers share the store.
+  - **Before.** `open_readonly` opened the container read-write to take the exclusive ownership lock. It failed on a read-only mount, a write-protected file or a backup copy, which is where a recovery tool most needs it, and two readers excluded each other.
+  - **Now.** It opens one read-only handle and takes a shared lock on it. Any number of readers can open a store at once; readers and the writer still exclude each other.
+- `store-io-engine`: **growing the container could bring a truncated region
+  back as healthy.**
+  - **Before.** A region cut off by a short container was reported at open,
+    but provisioning or reserving afterwards grew the container over its
+    missing tail, zero-filled. The next open found the region whole and
+    ready, its lost bytes read as zeros; an append region silently ended
+    early.
+  - **Now.** While such a region exists, growth is refused with
+    `Corruption(Truncated)` naming it, and it stays reported.
+- `store-io-engine`: **a transient read error at open could roll back
+  committed metadata.**
+  - **Before.** Any failed slot read (a bad handle, an exhausted resource,
+    an invalid request) counted as an unreadable slot. On the region table,
+    one such error made the open choose the older table copy, so a region
+    provisioned since then was missing (`NotFound`) with no error. On a
+    region header, a healthy region was marked unavailable for the session.
+  - **Now.** A slot is unreadable only on a media error, a short read or a
+    read past the end of the file. Any other failure fails the open with
+    `Io` and its code.
+- `store-io-engine`: **opening a store could report a healthy store as
+  corrupt.** A transient read error (not a media error) while looking for the
+  volume record made open skip that location; on a store that had only been
+  created, the second copy is still blank, so open returned
+  `Corruption(HeaderCrc)`. A caller that recreates a store on corruption
+  would have destroyed it. Such an error now fails the open with `Io`.
+- `store-io-engine`: when open finds no valid copy of a metadata pair (the
+  volume record, the region table) and a read met a media error, it reports
+  `Corruption(MediaError)`, not `Corruption(HeaderCrc)`: the error may be
+  transient, and "corrupt" invites a caller to recreate the store. This
+  covers the search's probe reads and the full slot reads.
+- `store-io-engine`: a volume record from a newer format (a payload longer
+  than 48 bytes, or a non-zero `features` field) is refused with
+  `Unsupported(FormatVersion)` instead of being reported as corruption or
+  accepted and rewritten without its extra bytes.
+- `store-io-engine`: the bisection of a failed read halves in whole blocks
+  while a piece spans several, so every read of a block or more stays
+  block-aligned. Before, an odd number of blocks could be split mid-block,
+  which a device with large sectors refuses, aborting the scan.
+- `store-io-engine`: splitting a failed read below the store block now
+  happens only where the probe reported the direct-I/O alignment. A device
+  that refuses smaller reads (for example dm-crypt with 4 KiB sectors over a
+  512e disk, on a kernel without `STATX_DIOALIGN`) made the scan abort with
+  `Io(EINVAL)`; a refused sub-block read is now reported unreadable and the
+  scan continues.
+- `store-io-engine`: when the rescan that locates a media error fails (a
+  short buffer pool, a full queue), the media error is still reported over
+  the whole read, not replaced by that failure. The failed read's buffer is
+  released before the rescan.
+- `store-io-engine`: the flush domain's statistics counters sit on a cache
+  line of their own, so counting no longer evicts the line every barrier
+  reads.
+- `store-io-core`: `errno::is_unsupported` matches each operating system's
+  own errno numbers (Linux and macOS number them differently) and is
+  documented as valid for flush and sync results only. New
+  `errno::is_end_of_file`.
+- `store-io-posix`: a malformed `uevent` device name (one ending in `/`) gave
+  the probe an empty device name, so it looked up the wrong ext4 options file
+  and skipped its fallback to the mount source. The mount options were then
+  reported missing (a more cautious class, never a wrong one). Such a name is
+  now no answer, and the fallback runs. Found by the new probe fuzz target.
+- `store-io-engine`: a media error names the exact failing sector.
+  - **Before.** Bisection stopped at the 4 KiB store block, so one bad 512-byte sector cost the caller seven readable ones. A read larger than one buffer named only the whole requested range.
+  - **Now.** Scans and reads bisect down to the device's logical block (or the direct-I/O alignment, if larger) where the probe reports it, and every read names the exact unreadable range.
+- `store-io-engine`: `Directory` refuses a change it could never make durable before writing anything.
+  - **Before.** On a file system that cannot flush directories, `replace` wrote the temporary file and renamed it over the target, then failed on the directory flush. The target had already changed, with no durability.
+  - **Now.** `Directory::open` tries a directory flush. If it is unsupported, every `replace` and `remove` returns `Unsupported(DirectoryFlush)`; if it failed otherwise, `Io(SyncDir)`. In both cases nothing is written.
+- `store-io-engine`: a failed `set_len` during a `Directory` replace is fail-stop. It returns `DurabilityUnknown` and poisons the handle, as a failed write does; before, the handle stayed usable. The target keeps its old contents.
+- `store-io-engine`: the test that a flush leader never waits for a shared queue is now deterministic. It holds the only queue and requires the flush to finish anyway; the old test depended on timing and could pass without the flush lane.
 
 ---
 

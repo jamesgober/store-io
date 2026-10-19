@@ -136,7 +136,28 @@ Source: [`crates/store-io-win/src/`](../crates/store-io-win/src/) (`lib.rs`, `fi
 
 ### The I/O queue
 
-The Linux backend is synchronous: `submit` performs the operation with one system call (`pwritev2`, `preadv2` or `fdatasync`) and stores its completion in a fixed ring sized by the queue depth, so there is no thread hop, no timer and no allocation. `wait` never waits, since everything completed inside `submit`. A short transfer is returned as such and never retried (the engine treats it as durability unknown); `EINTR` from a data call is returned as the result.
+Linux has two tiers, chosen by `StoreOptions::linux_tier` and named in `StoreReport::io` with the reason:
+
+- **`Auto`** (the default) uses io_uring when the kernel accepts both of store-io's ring flavours, so Linux 6.1 or later. The probe's lasting answers are kept for the process; a refusal for want of resources is probed again next time. Otherwise it uses the synchronous tier: on a kernel without the needed setup flags, with `kernel.io_uring_disabled` set, under a seccomp or container policy that refuses `io_uring_setup`, or when the process is short of descriptors or locked memory. Under `Auto`, a queue whose ring is refused later is synchronous too, and the report counts it. This covers a lack of descriptors or memory (`EMFILE`, `ENFILE`, `ENOMEM`, `EAGAIN`) and a filter installed since the probe (`EPERM`, `EACCES`, `ENOSYS`). Any other refusal fails the call that needed the queue.
+- **`Uring`** asks for io_uring and fails the store's creation where the kernel refuses it.
+- **`Sync`** keeps the 0.3 behaviour.
+
+**io_uring tier.** store-io binds io_uring itself (no third-party crate):
+
+- **Setup.**
+  - Every ring starts disabled. It is restricted to reads, writes, NOP and cancel, then enabled. Nothing that always runs on the kernel's worker threads (`FSYNC`, `FALLOCATE`, `OPENAT`, ...) can be submitted to it.
+  - A `Submitter`'s ring belongs to its thread: `SINGLE_ISSUER | DEFER_TASKRUN` (Linux 6.1 and later), and its completions run only when that thread asks.
+  - The blocking API's lanes use shared rings (`SUBMIT_ALL`, Linux 5.18 and later), which any thread may borrow for one call.
+  - Each queue holds two descriptors, the ring and an eventfd for its waker.
+- **Never on io-wq.** Every read and write carries `RWF_NOWAIT`, so nothing ever runs on io-wq. When the kernel would block (`EAGAIN`), cannot honour NOWAIT for the file (`EOPNOTSUPP`), or transfers short, the rest is finished by one ordinary `pwritev2` or `preadv2` call on the thread that collects the completion. These fallbacks are counted (`store_io::io_uring_fallbacks()`); they are never failures.
+- **Lost completions.** A completion the queue does not expect, or one the kernel could not keep (`EBADR`, the overflow counter), ends the queue. Everything in flight fails, and the engine treats a write among them as durability unknown and poisons the store. Their buffers are never freed, since the kernel may still write to them.
+- **Durable writes.** A durable write on a power-safe store is a `RWF_DSYNC` write, which on the asynchronous path is a FUA write. A data flush is the synchronous `fdatasync`, completed inside `submit`.
+- **Drop.** Dropping a queue waits for every operation it holds.
+- **Idle.** An idle store makes no system calls and has no timers (checked in CI).
+
+**Synchronous tier.** `submit` performs the operation with one system call (`pwritev2`, `preadv2` or `fdatasync`) and stores its completion in a fixed ring sized by the queue depth: no thread hop, no timer, no allocation, and `wait` never waits. Queues asked to run operations concurrently (a `Submitter`'s, and the blocking API's parallel lanes for multi-buffer calls) hand them to a small worker pool (`StoreOptions::t3_pool_threads`) instead.
+
+On both tiers a short transfer is never retried by the engine (it is durability unknown), and `EINTR` from a data call is returned as the result.
 
 **Misaligned direct writes.** The backend does not check alignment; the kernel does. Older kernels refuse a misaligned `O_DIRECT` write with `EINVAL`. Newer kernels may instead complete it through the page cache, write it back and drop those pages, as a CI runner on kernel 6.17 does. The engine only ever issues block-aligned transfers from aligned buffers, so neither path is taken in normal use; the backend's tests accept both answers and check that the bytes land exactly where they were aimed.
 
@@ -178,7 +199,7 @@ How the evidence maps: the OS is taken to pass flushes when the leaf's `queue/wr
 
 ### Known limitations
 
-- **Synchronous only.** Each operation is one blocking system call in the caller's thread; queue depth only bounds completions. The io_uring backend is planned for 0.4.
+- **io_uring needs Linux 6.1 or later.** Both ring flavours must be accepted (a `Submitter`'s needs 6.1, the shared ones 5.18), so on older kernels every queue is synchronous under `Auto`, and `Uring` is refused. Registered buffers and descriptors are not used yet.
 - **Trim in place is unsupported** on files (`EOPNOTSUPP`).
 - **Device facts need the device node.** The volatile-cache presence, its enabled state, the atomic-write fields and the health log come only from NVMe admin commands, through a device node an unprivileged user usually cannot open. Without them a device can be at most `FlushRequired`; power-safe needs readable Identify and SMART data, or a certificate. SATA and SAS cache presence is not read at all.
 - **One leaf.** Only the first leaf device of a stack is inspected; the other members of a mirror or array are not.

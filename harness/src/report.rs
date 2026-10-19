@@ -108,6 +108,13 @@ impl Point {
         self.metric("mean_us", s.map(|s| s.mean));
     }
 
+    /// Whether the measurement completed and its data check passed: only
+    /// such a point may feed a verdict.
+    #[must_use]
+    pub fn usable(&self) -> bool {
+        self.error.is_none() && matches!(self.verify, Verify::Passed(_))
+    }
+
     /// A metric's value, or else a numeric parameter's.
     #[must_use]
     pub fn get(&self, k: &str) -> Option<f64> {

@@ -18,6 +18,7 @@
 10. [Space: reservations and caps](#10-space-reservations-and-caps)
 11. [Recycling and releasing regions](#11-recycling-and-releasing-regions)
 12. [Tuning](#12-tuning)
+13. [Many operations from one thread: the Submitter](#13-many-operations-from-one-thread-the-submitter)
 
 ---
 
@@ -304,8 +305,65 @@ These run only when you call them; store-io never reclaims space on its own.
 | `append_ring` | 4096 | Blocks an append may run ahead of the oldest incomplete one. |
 | `keyed_fill` | off | Fill new regions with an incompressible pattern instead of zeros (thin, deduplicating or compressing storage). |
 | `log2_table_slot` | 14 | Region-table size: 16 KiB holds 253 regions. |
+| `linux_tier` | `Auto` | Linux only: `Auto` uses io_uring where the kernel accepts store-io's rings, else the synchronous tier; `Uring` requires io_uring; `Sync` never uses it. `store.report().io` names the interface chosen and why ([PLATFORMS](PLATFORMS.md#the-io-queue)). |
 
-The engine layer, a per-thread submitter with owned buffers and completion tags for full asynchronous control, is `Store::submitter` (see `store_io::submit`).
+The engine layer, a per-thread submitter with owned buffers and completion tags for full asynchronous control, is `Store::submitter` ([section 13](#13-many-operations-from-one-thread-the-submitter)).
+
+---
+
+## 13. Many operations from one thread: the Submitter
+
+The blocking calls finish one operation before they return. A `Submitter` keeps many in flight from one thread and never blocks on submission. Use it when one thread drives the I/O: a log writer, a page cache flusher, a compaction loop.
+
+```rust
+use store_io::submit::{Done, SubmitterConfig, WriteMode};
+
+const DEPTH: usize = 32;
+let mut sub = store.submitter(SubmitterConfig::default().with_depth(DEPTH as u32))?;
+let mut todo = dirty_pages.iter().enumerate();
+let mut in_flight = 0;
+loop {
+    // Keep at most DEPTH in flight: one more is refused (`QueueFull`).
+    while in_flight < DEPTH {
+        let Some((tag, page)) = todo.next() else { break };
+        let mut buf = sub.take_buf(page.bytes.len())?; // whole blocks, from the pool
+        buf.as_mut_slice().copy_from_slice(&page.bytes);
+        // On refusal (`Rejected`), the error and the buffer come back.
+        sub.write(&pages, page.pos, buf, WriteMode::Durable, tag as u64)
+            .map_err(|r| r.error)?;
+        in_flight += 1;
+    }
+    if in_flight == 0 {
+        break;
+    }
+    for c in sub.wait(1)? {
+        in_flight -= 1;
+        match c.outcome? {
+            Done::Written(w) => record(c.tag, w.receipt), // durable: a receipt
+            other => unreachable!("{other:?}"),
+        }
+    }
+}
+```
+
+If an error returns early, dropping the submitter waits for the writes still in flight.
+
+- **Submitting.**
+  - `append`, `write`, `read_append` and `read_page` take a buffer from `take_buf` and a tag you choose.
+  - An append's position is returned at once.
+  - A full submitter refuses the operation (`NotWritten(QueueFull)`) and gives the buffer back.
+- **Completions.**
+  - `reap()` hands back what has finished, without blocking; `wait(n)` blocks for at least `n`.
+  - Each completion carries its tag, its buffer, and the outcome. A write's outcome is a `WriteTicket`, plus a `DurableReceipt` with `WriteMode::Durable`, and only after every byte transferred. A read's outcome is the length read.
+  - Another thread can end a `wait` with `sub.waker()`.
+- **The blocking calls' rules hold per operation.**
+  - A write that fails after it was issued is `DurabilityUnknown`, and the store is poisoned.
+  - An append counts as written only once its completion is collected. Reap your own appends before you `sync_through`, recycle or release that region from the same thread, or the thread waits for itself.
+- **Durable writes and barriers don't block.** On a flush-required device, a durable write's completion is handed back once a flush covering it succeeds. Flushes are shared with every other writer on the device. `barrier(&ticket, tag)` and `barrier_all(tag)` submit a barrier that completes the same way.
+- **Belonging to one thread.** A submitter is not `Send`. On Linux's io_uring tier its ring belongs to its thread and is never touched by another.
+- **Drop.** Dropping a submitter waits for everything in flight; nothing the device may still write is released early.
+- **Buffers.** Buffers are shared with the blocking calls. The largest is `sub.max_buf()` (`StoreOptions::max_write`, 4 MiB by default).
+
 
 ---
 

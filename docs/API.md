@@ -71,6 +71,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `t3_pool_threads: u32` | CPU count, at most 32 (0) | Worker threads of the submit pool that runs a page batch's writes and a large read's pieces concurrently on the Linux synchronous tier. Shared by every store on one platform and sized by the first of them that uses it, at most 256; each store opened through the simple API has a platform, and so a pool, of its own. Other backends ignore it. |
 | `append_ring: usize` | 4096 | Blocks an append may start ahead of the oldest incomplete one. |
 | `keyed_fill: bool` | `false` | Fill new regions with a keyed incompressible pattern instead of zeros. |
+| `linux_tier: LinuxTier` | `Auto` | Linux only. `Auto`: io_uring where the kernel accepts store-io's rings, else the synchronous tier. `Uring`: io_uring or the store is not created. `Sync`: one blocking system call per operation. The choice and its reason are `StoreReport::io` ([PLATFORMS](PLATFORMS.md#the-io-queue)). |
 
 ---
 
@@ -246,7 +247,16 @@ None of these can be constructed outside store-io.
 
 - `store_io::engine` is the generic engine (`engine::Store<P>` and friends) over any `Platform`, including the deterministic simulator used by store-io's own tests.
 - `NativePlatform` is `store_io_win::WinPlatform` on Windows and `store_io_posix::PosixPlatform` on Linux. macOS is planned for 0.5; on other targets only the shared types compile.
-- The engine layer: `Store::submitter`, a per-thread submitter with owned buffers and completion tags (see `store_io::submit`).
+- The engine layer: `Store::submitter(SubmitterConfig)` returns a `Submitter`, which keeps many operations in flight from one thread with owned buffers and completion tags ([GUIDE section 13](GUIDE.md#13-many-operations-from-one-thread-the-submitter)). Its types are in `store_io::submit`:
+  - `SubmitterConfig`, `MAX_DEPTH`;
+  - `WriteMode` (`Plain`, `Durable`);
+  - `Completion` (tag, buffer, outcome), `Completions`, `Done` (`Written`, `Read`, `Synced`, `Flushed`), `Written` (ticket and receipt), `Rejected` (error and buffer);
+  - `IoBuf`, `Wake`, `Waker`.
+- Methods:
+  - Submission: `take_buf`, `max_buf`, `append`, `write`, `read_append`, `read_page`.
+  - Barriers: `barrier(&ticket, tag)`, `barrier_all(tag)`.
+  - Completions: `reap`, `wait(min)`, `in_flight`, `waker`.
+- `LinuxTier`, `IoPath` and `IoInterface` (`IoUring`, `Synchronous`, `Iocp`, `Simulator`, `Other`) describe the kernel interface a store uses; `store_io::io_uring_fallbacks()` (Linux) counts operations the io_uring tier finished with a blocking call.
 
 ---
 

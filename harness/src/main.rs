@@ -13,10 +13,12 @@
 //! workload under [`workloads`].
 
 mod aligned;
+mod alloc_count;
 mod cli;
 mod data;
 mod diag;
 mod env;
+mod fio;
 mod fsys_cmp;
 mod json;
 mod observe_cost;
@@ -28,6 +30,10 @@ mod watchdog;
 mod workloads;
 
 use std::path::{Path, PathBuf};
+
+/// Counts allocations for the hot-path gate (G8).
+#[global_allocator]
+static ALLOC: alloc_count::Counting = alloc_count::Counting;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -44,11 +50,11 @@ struct Workload {
     points: usize,
 }
 
-const WORKLOADS: [Workload; 6] = [
+const WORKLOADS: [Workload; 7] = [
     Workload {
         command: Command::Lone,
         run: workloads::lone::run,
-        points: 7,
+        points: 8,
     },
     Workload {
         command: Command::Concurrent,
@@ -74,6 +80,13 @@ const WORKLOADS: [Workload; 6] = [
         command: Command::Submitter,
         run: workloads::submitter::run,
         points: 16,
+    },
+    Workload {
+        command: Command::Gates,
+        run: workloads::gates::run,
+        // W1 twice, W2-W5, G13's reruns (Windows: W2 and W3 twice more),
+        // G15's six points, the gate-only measurements and fio.
+        points: 400,
     },
 ];
 
@@ -221,7 +234,11 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
 
     let selected: Vec<&Workload> = WORKLOADS
         .iter()
-        .filter(|w| args.command == Command::All || w.command == args.command)
+        // `gates` reruns the workloads itself: not part of `all`.
+        .filter(|w| {
+            (args.command == Command::All && w.command != Command::Gates)
+                || w.command == args.command
+        })
         .collect();
     let est: f64 = selected
         .iter()

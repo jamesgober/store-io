@@ -104,6 +104,7 @@ pub fn run(ctx: &Ctx) -> Section {
                 .find(|p| {
                     p.system == sys && p.variant.contains(v) && p.get("threads") == Some(n as f64)
                 })
+                .filter(|p| p.usable())
                 .and_then(|p| p.get(k))
         };
         for (k, metric, better) in [
@@ -199,7 +200,9 @@ struct StoreThread {
     short_receipts: u64,
 }
 
-fn store_point(ctx: &Ctx, n: usize) -> Point {
+/// One W2 store-io point: `n` threads each looping a durable 4 KiB
+/// append (also run on its own by the gates, alternated).
+pub fn store_point(ctx: &Ctx, n: usize) -> Point {
     let p = Point::new(
         System::StoreIo,
         "AppendRegion::append_durable (shared region)",

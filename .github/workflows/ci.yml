@@ -141,6 +141,16 @@ jobs:
           bash dev/tools/iowq-gate.sh
         env:
           STORE_IO_TEST_DIR: /mnt/sio
+      - name: Hot path makes no futex call and no timed wait (strace)
+        run: |
+          sudo apt-get install -y -qq strace
+          cargo test --test hotpath --no-run
+          strace -f -qq -o "$RUNNER_TEMP/hot.trace" \
+            -e 'trace=/^futex,nanosleep,clock_nanosleep,timerfd_create,timerfd_settime,setitimer,statx,newfstatat,io_uring_enter' \
+            cargo test --test hotpath -- --ignored --exact hotpath_window
+          python3 dev/tools/hotpath-check.py "$RUNNER_TEMP/hot.trace"
+        env:
+          STORE_IO_TEST_DIR: /mnt/sio
 
   # The CI kernel matrix (v0.4): conformance, the end-to-end tests and the
   # Linux backend's tests on older kernels, each booted in a virtme-ng VM
@@ -280,6 +290,56 @@ jobs:
             ${{ runner.temp }}/acks
             ${{ runner.temp }}/state-*.img
             ${{ runner.temp }}/subset.img
+          if-no-files-found: ignore
+
+  # The performance gates on the CI kernel (D-066: relative, Unverified):
+  # the harness's `gates` on ext4 over a memory-backed null_blk device with
+  # a volatile write cache (a flush-required device whose flushes cost
+  # nothing, so the microsecond gates are resolvable), against fio on the
+  # same file system. Fails on any FAIL verdict, anomaly or integrity
+  # failure; the report is kept either way.
+  gates:
+    name: Performance gates (null_blk, io_uring)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: harness
+      - name: Build the harness
+        run: cargo build --release --manifest-path harness/Cargo.toml
+      - name: A flush-required null_blk device
+        run: |
+          set -eux
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fio
+          load() { sudo modprobe null_blk nr_devices=1 gb=3 bs=4096 memory_backed=1 cache_size=1024 queue_mode=2 irqmode=0 completion_nsec=0; }
+          load || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"; load; }
+          cat /sys/block/nullb0/queue/write_cache
+          grep -qx "write back" /sys/block/nullb0/queue/write_cache
+          sudo mkfs.ext4 -q -b 4096 /dev/nullb0
+          sudo mkdir -p /mnt/gates
+          sudo mount /dev/nullb0 /mnt/gates
+          sudo chown "$(id -u):$(id -g)" /mnt/gates
+          uname -r
+          findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/gates
+      - name: Gates
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/gates"
+          harness/target/release/store-io-harness gates --secs 3 --tier uring \
+            --dir /mnt/gates --out "$RUNNER_TEMP/gates"
+          f=$(ls "$RUNNER_TEMP"/gates/*-gates.md)
+          sed -n '/^| gate |/,/^$/p' "$f"
+          grep -q "every measurement completed and every integrity check passed" "$f"
+          if grep -E '^\| G[0-9a-z]+ \|.*\| FAIL \|$' "$f"; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gates-report
+          path: ${{ runner.temp }}/gates/
           if-no-files-found: ignore
 
   # Fail-stop on a real kernel: the file system sits on a device-mapper

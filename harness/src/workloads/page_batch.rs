@@ -118,6 +118,7 @@ pub fn run(ctx: &Ctx) -> Section {
         let get = |sys: System, v: &str, k: &str| {
             pts.iter()
                 .find(|p| p.system == sys && p.variant.contains(v) && p.get("n") == Some(n as f64))
+                .filter(|p| p.usable())
                 .and_then(|p| p.get(k))
         };
         for (k, metric, better) in [

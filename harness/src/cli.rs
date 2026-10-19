@@ -17,6 +17,7 @@ COMMANDS:
     page-batch     W4  N random 4 KiB pages + one barrier
     sequential     W5  1 MiB sequential writes, 1/8 MiB sequential reads
     submitter      W6  N in flight from one thread, random 4 KiB, vs fio
+    gates          the performance gate table (W1-W5, fio controls, extras)
     probe          create a store, print the device report and exit
     observe-cost   what the observer adds per durable write (build with
                    --features observe; without it, the compiled-out cost)
@@ -48,6 +49,8 @@ pub enum Command {
     Sequential,
     /// W6.
     Submitter,
+    /// The performance gates.
+    Gates,
     /// Device report only.
     Probe,
     /// The observer's cost per durable write.
@@ -68,6 +71,7 @@ impl Command {
             Self::PageBatch => "page-batch",
             Self::Sequential => "sequential",
             Self::Submitter => "submitter",
+            Self::Gates => "gates",
             Self::Probe => "probe",
             Self::ObserveCost => "observe-cost",
             Self::Help => "help",
@@ -83,6 +87,7 @@ impl Command {
             Self::PageBatch,
             Self::Sequential,
             Self::Submitter,
+            Self::Gates,
             Self::Probe,
             Self::ObserveCost,
             Self::Help,

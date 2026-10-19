@@ -132,6 +132,12 @@ pub type NativePlatform = store_io_win::WinPlatform;
 #[cfg(target_os = "linux")]
 pub type NativePlatform = store_io_posix::PosixPlatform;
 
+/// Operations, process-wide, that the io_uring tier finished with a
+/// blocking system call because the kernel would have blocked or cut them
+/// short (never a failure; how often the asynchronous path was not taken).
+#[cfg(target_os = "linux")]
+pub use store_io_posix::io_uring_fallbacks;
+
 #[cfg(any(windows, target_os = "linux"))]
 mod native;
 

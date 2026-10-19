@@ -1,10 +1,15 @@
 //! # store-io-posix
 //!
-//! The Linux synchronous backend (tier T3) of store-io. `PosixPlatform`
-//! implements `store_io_platform::Platform` over `O_DIRECT` file descriptors,
-//! and `PosixQueue` performs every data operation inside `submit` with one
-//! system call, completing it in the same call: no thread hop, no timer, no
-//! allocation.
+//! The Linux backend of store-io. `PosixPlatform` implements
+//! `store_io_platform::Platform` over `O_DIRECT` file descriptors, on one of
+//! two tiers chosen at run time (`LinuxTier`, D-082): io_uring through
+//! store-io's own binding (`uring`: rings restricted to reads, writes, NOP
+//! and cancel, every read and write `RWF_NOWAIT`, what the kernel would block
+//! on finished by one ordinary system call; nothing ever runs on io-wq), or
+//! the synchronous tier (T3), where `PosixQueue` performs every data
+//! operation inside `submit` with one system call. A queue whose operations
+//! the caller waits for one at a time runs inline on either tier: no thread
+//! hop, no timer, no allocation.
 //!
 //! What this backend does:
 //!
@@ -42,8 +47,10 @@
 //!
 //! Every module is gated on `target_os = "linux"`; on other operating systems
 //! the crate compiles to an empty shell so a workspace build succeeds
-//! everywhere. Every `unsafe` block lives in `sys.rs`, each preceded by a
-//! `SAFETY` comment citing the system-call contract it relies on.
+//! everywhere. Every `unsafe` block lives in `sys.rs` and the io_uring
+//! binding (`uring/sys.rs`: its system calls and shared memory; `ring.rs`
+//! and `queue.rs`: pushing entries and the wake read's target), each preceded
+//! by a `SAFETY` comment citing the contract it relies on; tests aside.
 
 #![deny(warnings)]
 

@@ -140,7 +140,7 @@ Linux has two tiers, chosen by `StoreOptions::linux_tier` and named in `StoreRep
 
 - **`Auto`** (the default) uses io_uring when the kernel accepts both of store-io's ring flavours, so Linux 6.1 or later. The probe's lasting answers are kept for the process; a refusal for want of resources is probed again next time. Otherwise it uses the synchronous tier: on a kernel without the needed setup flags, with `kernel.io_uring_disabled` set, under a seccomp or container policy that refuses `io_uring_setup`, or when the process is short of descriptors or locked memory. Under `Auto`, a queue whose ring is refused later is synchronous too, and `Store::io_path()` counts it (`StoreReport::io` is as of create or open). This covers a lack of descriptors or memory (`EMFILE`, `ENFILE`, `ENOMEM`, `EAGAIN`) and a filter installed since the probe (`EPERM`, `EACCES`, `ENOSYS`). Any other refusal fails the call that needed the queue.
 - **`Uring`** asks for io_uring and fails the store's creation where the kernel refuses its rings. A ring refused later (a `Submitter`'s, a parallel lane's) is an error for what needed it (a parallel lane's operations then run one at a time), and `Store::io_path()` counts it.
-- **`Sync`** keeps the 0.3 behaviour.
+- **`Sync`** uses no io_uring: one synchronous system call per operation, as in 0.3 (calls with several buffers run on the submit pool's threads).
 
 **io_uring tier.** store-io binds io_uring itself (no third-party crate):
 

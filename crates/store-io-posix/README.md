@@ -1,7 +1,9 @@
 # store-io-posix
 
-The Linux synchronous backend of [store-io](https://github.com/jamesgober/store-io):
-`O_DIRECT` files opened relative to a confined directory descriptor, OFD
+The Linux backend of [store-io](https://github.com/jamesgober/store-io): io_uring
+through store-io's own binding (every read and write non-blocking, nothing
+ever on the kernel's io-wq workers) or synchronous system calls, chosen at
+run time; `O_DIRECT` files opened relative to a confined directory descriptor, OFD
 ownership locks on the I/O descriptor, `fallocate` provisioning, FIEMAP and
 `cachestat` range checks, `pwritev2(RWF_DSYNC)` durable writes, and an
 unprivileged evidence probe over statfs, statx, `/proc/self/mountinfo`, inode

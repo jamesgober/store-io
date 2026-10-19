@@ -18,6 +18,7 @@
 - [ ] Linux: flush sharing between concurrent writers (bare metal).
 - [ ] Linux: lock release vs a crashed owner's in-flight writes, across kernels (bare metal or VMs).
 - [ ] Linux: io_uring wake-up and reap costs; null_blk per-core ceilings (bare metal).
+- [ ] Linux: G1 (QD1 4 KiB durable write p50 within the raw primitive + 2 us) on bare metal. On CI's VM it is NOT RESOLVABLE: 20 alternated rounds drift +-5 us against each other. store-io's own cost is 0.1-0.35 us per write (simulator; CI A/B against the raw call on the store's own container, 2026-10-19).
 - [ ] Probe golden captures from real drives (bare metal + PLP drive).
 - [ ] macOS: flush costs per model, directory flush support (Mac).
 - [ ] Windows: does a flush stall writes in the driver or the drive? (ETW timeline; can run on the dev box later).
@@ -59,6 +60,13 @@
 - [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
 - [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
 - [ ] A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).
+
+## Found in v0.4 (2026-10-19), not yet done
+
+- [ ] Harness: G2 (barrier p50 + 2 us, p99 + 5 us) compares two consecutive W1 windows, the drift G1 was moved off (gates_g1.rs); give it the same alternation.
+- [ ] `StoreOptions::append_ring` is counted in blocks, so its default (4096) holds only 2 MiB ahead at 512-byte blocks: a `Submitter` appending 1 MiB eight deep there gets `TooManyInFlight` (G6 raises it). A ring sized in bytes, or a default scaled by the block size.
+- [ ] Registered io_uring buffers were dropped (D-107: `READ_FIXED` never completes on Linux 6.5.0 and 6.6.0, and no probe tells kernels apart). Bringing them back needs a safe way to tell a fixed kernel from a broken one and a measured gain; a new roadmap item for the maintainer.
+- [ ] Windows: the gates on the dev box are noise-bound (a consumer NVMe whose flush swings 1-4 ms); G2, G6 and one G13b point failed in one run (the G13b point measured at the device floor, three times, when rerun alone; the earlier full run passed G13b 12 of 12). A quieter Windows box (or ETW-timed runs) for a Windows gate of record.
 
 ## Performance follow-ups from the harness (2026-10-09)
 

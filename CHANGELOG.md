@@ -11,7 +11,16 @@
 
 ## [Unreleased]
 
-Version 0.4.0 in development (`0.4.0-dev` on the development branch).
+---
+
+## [0.4.0] - 2026-10-19
+
+io_uring on Linux, through store-io's own binding, and the engine layer: a
+`Submitter` keeps many reads and writes in flight from one thread with the
+same integrity rules as the blocking calls, which are now built on it. A
+0.3.1 store opens with 0.4.0 (the on-disk format is unchanged; one check is
+stricter: the volume record's reserved bytes must be zero). See
+`docs/release/v0.4.0.md`.
 
 ### Added
 
@@ -50,11 +59,12 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   `Op::Queue` for a failed queue setup (it was reported as `Open`).
 - CI checks of the io_uring tier, each failing closed when it cannot run:
   - **Crash replay.** `dm-log-writes` records every write, flush and FUA
-    of a workload on ext4 and XFS. The log is replayed to every prefix and
-    to sampled reorderings of the writes since the last flush, and store-io
-    must recover a consistent store with every receipted record intact.
-  - **Kernel matrix.** The test suites run under virtme-ng on Linux 5.15,
-    6.1 and 6.6.
+    of a workload on ext4 and XFS. The log is replayed to every prefix, and
+    to subsets of the writes cached before each flush (all of them for runs
+    of up to six writes, sampled beyond), and store-io must recover a
+    consistent store with every receipted record intact.
+  - **Kernel matrix.** The test suites run in VMs on Linux 5.15, 6.1 and
+    6.6.
   - **No kernel worker threads.** A gate samples io-wq workers under load
     (`dev/tools/iowq-gate.sh`), with a fio control that must create them.
   - **Idle.** For 60 s an idle store makes no system calls, no I/O and no
@@ -76,7 +86,6 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   one (a virtual machine's flush latency drifts by more than the gate
   between long windows). A CI job runs the gates on a memory-backed device
   and fails on any FAIL.
-
 - `store-io-engine`: the engine-layer **`Submitter`** (D-065, D-080, D-098),
   from `Store::submitter(SubmitterConfig)`. One thread keeps many appends,
   page writes and reads in flight without blocking, from the store's pooled
@@ -393,13 +402,15 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
     successfully and the bytes they returned (before: some paths counted
     every read whose buffer came back, with the requested length).
 - **Linux stores use io_uring by default** (`linux_tier: Auto`). Each
-  ring holds two file descriptors (a store's parallel lanes, created on
-  first use, and each submitter); a queue whose ring the kernel cannot set
-  up for want of resources is synchronous instead, and the report counts
-  it. `linux_tier: Sync` keeps the 0.3 behaviour.
-- `StoreReport` is `#[non_exhaustive]`; `StoreOptions` and `StoreReport`
-  have new fields (`linux_tier`, `io`).
-
+  io_uring queue (a store's parallel lanes, created on first use, and each
+  submitter) holds two file descriptors, the ring and an eventfd; a queue
+  whose ring the kernel cannot set up for want of resources is synchronous
+  instead, and the report counts it. `linux_tier: Sync` uses no io_uring
+  (one synchronous system call per operation, as in 0.3; calls with several
+  buffers run on the submit pool's threads).
+- `StoreReport` is `#[non_exhaustive]`; `StoreOptions` gains `max_write`,
+  `large_buffers`, `linux_tier` and `register_file`, and `StoreReport`
+  gains `io` and `unavailable`.
 - `dev/ROADMAP.md`: the v0.4 section describes the approved scope (the engine
   layer, the io_uring backend with no kernel worker threads, the synchronous
   tier's worker pool, runtime tier selection, IoRing evaluated and not
@@ -954,7 +965,8 @@ The project scaffold. Reserves the crate name; no public API.
   `.gitattributes`, `.github/FUNDING.yml`.
 - `docs/API.md` and `docs/release/v0.1.0.md`.
 
-[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamesgober/store-io/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/jamesgober/store-io/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jamesgober/store-io/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/jamesgober/store-io/releases/tag/v0.1.0

@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use store_io_engine::completion::Done;
-use store_io_engine::{PageRegion, SubmitterConfig, WriteMode};
+use store_io_engine::{PageRegion, StoreOptions, SubmitterConfig, WriteMode};
 
-use super::{Ctx, KIB4, sample, sioerr, stamp, with_store};
+use super::{Ctx, KIB4, sample, sioerr, stamp, with_store, with_store_using};
 use crate::alloc_count;
 use crate::data::Rng;
 use crate::report::{Point, System, Verify};
@@ -94,13 +94,29 @@ fn cpu_s() -> f64 {
 /// return the whole page with its page's first word (the whole page during
 /// warm-up). Stamping costs the measured window one multiply-xor per word.
 fn submitter_loop(ctx: &Ctx, qd: u32, mode: Option<WriteMode>, name: &str) -> Point {
+    submitter_loop_with(ctx, &ctx.opts, qd, mode, name)
+}
+
+/// As [`submitter_loop`], on a store made with `opts`.
+fn submitter_loop_with(
+    ctx: &Ctx,
+    opts: &StoreOptions,
+    qd: u32,
+    mode: Option<WriteMode>,
+    name: &str,
+) -> Point {
     let variant = match mode {
         Some(WriteMode::Durable) => format!("Submitter durable random write QD{qd}"),
         Some(_) => format!("Submitter plain random write QD{qd}"),
         None => format!("Submitter random read QD{qd}"),
     };
+    let variant = if opts.register_buffers {
+        format!("{variant} (registered)")
+    } else {
+        variant
+    };
     let p = Point::new(System::StoreIo, variant);
-    with_store(ctx, name, p, |store, p| {
+    with_store_using(ctx, name, opts, p, |store, p| {
         let pages = store
             .provision_page_region(name, SPAN)
             .map_err(|e| sioerr("provision", &e))?;
@@ -110,6 +126,9 @@ fn submitter_loop(ctx: &Ctx, qd: u32, mode: Option<WriteMode>, name: &str) -> Po
         let mut sub = store
             .submitter(SubmitterConfig::default().with_depth(qd))
             .map_err(|e| sioerr("submitter", &e))?;
+        if opts.register_buffers {
+            p.notes.push(format!("io: {}", store.io_path().reason));
+        }
         let mut rng = Rng::new(7_000_000 + u64::from(qd));
         let n = qd as usize;
         let mut free: Vec<usize> = (0..n).collect();
@@ -496,4 +515,32 @@ fn check_qos(
         idx.len(),
         appended.len()
     ))
+}
+
+/// 3d (D-078): submitter random 4 KiB writes and reads 32 deep with the
+/// buffer arena and the file registered and without, alternated three times
+/// each, on stores whose arena fits a default locked-memory limit (64 KiB
+/// largest ordinary buffer, no large buffers: about 8 MiB), so the
+/// buffers can really be registered. Returns the points in run order:
+/// write off, write on, read off, read on, three times.
+pub fn registration(ctx: &Ctx) -> Vec<Point> {
+    let base = StoreOptions {
+        max_io: 64 << 10,
+        large_buffers: 0,
+        buffers_per_class: 64,
+        ..ctx.opts.clone()
+    };
+    let mut pts = Vec::new();
+    for _ in 0..3 {
+        for mode in [Some(WriteMode::Plain), None] {
+            for on in [false, true] {
+                let opts = StoreOptions {
+                    register_buffers: on,
+                    ..base.clone()
+                };
+                pts.push(submitter_loop_with(ctx, &opts, 32, mode, "g3d"));
+            }
+        }
+    }
+    pts
 }

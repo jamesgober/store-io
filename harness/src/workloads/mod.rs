@@ -542,10 +542,22 @@ pub fn record_delta(p: &mut Point, d: &Delta, ops: u64) {
 pub fn with_store(
     ctx: &Ctx,
     name: &str,
+    p: Point,
+    f: impl FnOnce(&SioStore, &mut Point) -> Result<(), String>,
+) -> Point {
+    with_store_using(ctx, name, &ctx.opts, p, f)
+}
+
+/// As [`with_store`], with the store made with `opts` instead of the run's.
+pub fn with_store_using(
+    ctx: &Ctx,
+    name: &str,
+    opts: &StoreOptions,
     mut p: Point,
     f: impl FnOnce(&SioStore, &mut Point) -> Result<(), String>,
 ) -> Point {
-    match ctx.store(name) {
+    let dir = ctx.path(name);
+    match sio::create(&dir, opts).map(|s| (s, dir)) {
         Ok((store, dir)) => {
             if let Err(e) = f(&store, &mut p) {
                 p.error = Some(e);

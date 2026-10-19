@@ -88,6 +88,14 @@ pub struct StoreOptions {
     /// it makes the platform; the choice is in [`StoreReport::io`]. Other
     /// systems ignore it.
     pub linux_tier: LinuxTier,
+    /// Register the store's buffer arena and its container file with each
+    /// `Submitter`'s queue where the backend can (D-078: on Linux's io_uring
+    /// tier, fixed buffers and a direct descriptor on the submitter's ring),
+    /// so its operations skip per-operation setup in the kernel. Best
+    /// effort: a registration the kernel refuses (the locked-memory limit,
+    /// say) is counted in `Store::io_path`, never an error. Off by default
+    /// until the gates measure a gain (3d).
+    pub register_buffers: bool,
 }
 
 impl Default for StoreOptions {
@@ -106,6 +114,7 @@ impl Default for StoreOptions {
             append_ring: 4096,
             keyed_fill: false,
             linux_tier: LinuxTier::Auto,
+            register_buffers: false,
         }
     }
 }

@@ -340,6 +340,7 @@ pub fn run(ctx: &Ctx) -> Section {
     let g8w = gates_extra::write_qd32(ctx);
     let g8b = gates_extra::blocking_allocs(ctx);
     let g10 = gates_extra::qos(ctx);
+    let g3d = gates_extra::registration(ctx);
 
     let mut rows = Vec::new();
     // G1: QD1 4 KiB durable write p50, against the raw primitive + 2 us.
@@ -584,6 +585,62 @@ pub fn run(ctx: &Ctx) -> Section {
             Verdict::Fail
         },
     });
+    // 3d (D-078): registration on against off, alternated; reported (it
+    // decides `StoreOptions::register_buffers`' default).
+    {
+        let side = |write: bool, on: bool| -> Vec<f64> {
+            g3d.iter()
+                .filter(|p| {
+                    p.variant.contains(if write { "write" } else { "read" })
+                        && p.variant.contains("(registered)") == on
+                })
+                .filter_map(|p| val(p, "ops_per_s"))
+                .collect()
+        };
+        let whole = [true, false]
+            .iter()
+            .all(|w| side(*w, false).len() == 3 && side(*w, true).len() == 3);
+        let gain = |w: bool| {
+            med(&side(w, true))
+                .zip(med(&side(w, false)))
+                .map(|(a, b)| a / b)
+        };
+        // What the registered points' rings got, from their live path:
+        // "... fixed buffers on B, a direct descriptor on F".
+        let got = g3d
+            .iter()
+            .flat_map(|p| p.notes.iter())
+            .find(|n| n.contains("registration (D-078)"))
+            .cloned()
+            .unwrap_or_else(|| "no registration reported".to_owned());
+        let count = |key: &str| {
+            got.split(key)
+                .nth(1)
+                .and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|d| d.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        let registered = count("fixed buffers on ") > 0 && count("a direct descriptor on ") > 0;
+        rows.push(Row {
+            id: "G3d",
+            gate: "Registered buffers and a direct descriptor (D-078): submitter QD32 4 KiB ops/s, registered against not, medians of 3 alternated runs (reported; decides the default)",
+            measured: format!(
+                "write {:?} vs {:?} /s ({}x), read {:?} vs {:?} /s ({}x); {got}",
+                side(true, true).iter().map(|x| x.round()).collect::<Vec<_>>(),
+                side(true, false).iter().map(|x| x.round()).collect::<Vec<_>>(),
+                f(gain(true), 2),
+                side(false, true).iter().map(|x| x.round()).collect::<Vec<_>>(),
+                side(false, false).iter().map(|x| x.round()).collect::<Vec<_>>(),
+                f(gain(false), 2),
+            ),
+            // Fails closed unless the registered runs really registered.
+            verdict: if whole && registered {
+                Verdict::Reported
+            } else {
+                Verdict::Fail
+            },
+        });
+    }
     rows.push(Row {
         id: "G11",
         gate: "Observer: compiled out when off; at most 20 ns/op when on",
@@ -765,6 +822,7 @@ pub fn run(ctx: &Ctx) -> Section {
             .push(format!("{} FAIL: {} ({})", r.id, r.gate, r.measured));
     }
     let mut pts = vec![g7, g8w, g8b, g10];
+    pts.extend(g3d);
     pts.extend(g5);
     pts.extend(g6);
     pts.extend(g4);

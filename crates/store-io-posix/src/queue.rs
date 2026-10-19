@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 
 use store_io_platform::{
-    Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected, Wake,
+    Completion, CompletionBuf, IoBuf, IoOp, OsError, Queue, QueueConfig, RawResult, Rejected, Wake,
 };
 
 use crate::file::PosixFile;
@@ -95,6 +95,23 @@ pub struct PosixQueue {
     uring: Option<UringQueue>,
 }
 
+/// What an io_uring queue registered (D-078), from
+/// [`PosixQueue::registered`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Registration {
+    /// The buffer pool's arena is the ring's fixed buffer.
+    pub buffers: bool,
+    /// The file is the ring's direct descriptor.
+    pub file: bool,
+    /// The first registration the kernel refused (or `E2BIG`: an arena over
+    /// the 1 GiB a fixed buffer may span).
+    pub refused: Option<OsError>,
+    /// Operations submitted with the fixed buffer.
+    pub fixed_ops: u64,
+    /// Operations submitted with the direct descriptor.
+    pub direct_ops: u64,
+}
+
 /// The pooled mode's state.
 struct Pooled {
     pool: Arc<SubmitPool>,
@@ -128,8 +145,13 @@ impl PosixQueue {
         }
     }
 
-    /// A queue on an io_uring ring, thread-owned if `owned`.
-    pub(crate) fn uring(cfg: QueueConfig, owned: bool) -> RawResult<Self> {
+    /// A queue on an io_uring ring, thread-owned if `owned`, registering
+    /// `reg` on an owned ring (D-078, best effort).
+    pub(crate) fn uring(
+        cfg: QueueConfig,
+        owned: bool,
+        reg: Option<crate::uring::queue::Registered>,
+    ) -> RawResult<Self> {
         let depth = depth_of(cfg);
         let flavour = if owned {
             Flavour::Owned
@@ -140,7 +162,23 @@ impl PosixQueue {
             ready: Vec::new(),
             depth,
             pooled: None,
-            uring: Some(UringQueue::new(flavour, depth)?),
+            uring: Some(UringQueue::registered(flavour, depth, reg)?),
+        })
+    }
+
+    /// What this queue's ring registered (D-078), and how many operations
+    /// used it; `None` off a ring.
+    #[must_use]
+    pub fn registered(&self) -> Option<Registration> {
+        self.uring.as_ref().map(|u| {
+            let (f, (fixed_ops, direct_ops)) = u.fixed();
+            Registration {
+                buffers: f.buffers,
+                file: f.file,
+                refused: f.refused,
+                fixed_ops,
+                direct_ops,
+            }
         })
     }
 

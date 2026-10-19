@@ -230,6 +230,13 @@ M = [
  ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, seq)) if self.live > 0 => 2 * seq,'),
  ('crates/store-io-engine/src/optable.rs', '        self.free.push(index as u32);\n        self.live -= 1;\n        while let Some(&(i, s)) = self.order.front() {\n            if is_live(&self.rows, i, s) {\n                break;\n            }\n            let _stale = self.order.pop_front();\n        }\n        self.publish();\n        Some(live.tag)', '        self.free.push(index as u32);\n        self.live -= 1;\n        self.publish();\n        Some(live.tag)'),
  ('crates/store-io-engine/src/exec.rs', '        self.core.table.start(index, tag, Kind::Raw, None, false);\n        self.core\n            .queue\n            .submit(op, qtag)', '        let r = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, Kind::Raw, None, false);\n        r'),
+ # 3d (D-078): a fixed buffer only for a buffer of the registered pool, the
+ # direct descriptor only for the registered file itself
+ ('crates/store-io-posix/src/uring/queue.rs', '        let fixed_buf = self.fixed_pool.as_ref().is_some_and(|p| p.owns(&op.buf));', '        let fixed_buf = self.fixed_pool.is_some();', POSIX),
+ ('crates/store-io-posix/src/uring/queue.rs', '        let fixed_file = self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', '        let fixed_file = self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f) || true);', POSIX),
+ # G1: a flush leader notifies only when a follower is registered
+ ('crates/store-io-engine/src/domain.rs', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 0 {', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 1 {'),
+ ('crates/store-io-engine/src/domain.rs', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = self.poison.set(FirstCause {', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = Some(FirstCause {'),
 ]
 
 def kill_stuck_tests():

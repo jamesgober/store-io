@@ -635,3 +635,65 @@ fn test_the_io_tier_is_chosen_and_reported() {
         Err(e) => panic!("{e}"),
     }
 }
+
+/// A store with `register_buffers` (D-078, Linux io_uring): a submitter's
+/// writes and reads round-trip, and the live path says what its ring
+/// registered (both on an arena below the locked-memory limit).
+#[cfg(target_os = "linux")]
+#[test]
+fn test_registered_buffers_round_trip_and_are_reported() {
+    use store_io::LinuxTier;
+    use store_io::submit::{Done, SubmitterConfig, WriteMode};
+    let t = TempDir::new("registered");
+    let (opts, _) = options_for(t.path());
+    let opts = StoreOptions {
+        linux_tier: LinuxTier::Uring,
+        register_buffers: true,
+        // An arena of a few MiB, below the usual locked-memory limits.
+        max_io: 64 << 10,
+        large_buffers: 0,
+        buffers_per_class: 8,
+        ..opts
+    };
+    let store = match Store::create(t.path().join("s"), opts) {
+        Ok(s) => s,
+        Err(e) => {
+            assert!(
+                std::env::var_os("STORE_IO_EXPECT_URING").is_none(),
+                "io_uring refused ({e}) where STORE_IO_EXPECT_URING says it works"
+            );
+            return;
+        }
+    };
+    let pages = store.provision_page_region("p", 1 << 20).unwrap();
+    let mut sub = store
+        .submitter(SubmitterConfig::default().with_depth(4))
+        .unwrap();
+    let path = store.io_path();
+    assert!(
+        path.reason.contains("asked on 1 ring(s)")
+            && path.reason.contains("a direct descriptor on 1"),
+        "{path:?}"
+    );
+    let mut buf = sub.take_buf(4096).unwrap();
+    buf.as_mut_slice().fill(0x6B);
+    sub.write(&pages, pages.pos(8192).unwrap(), buf, WriteMode::Plain, 1)
+        .map_err(|r| r.error)
+        .unwrap();
+    for c in sub.wait(1).unwrap() {
+        assert!(matches!(c.outcome, Ok(Done::Written(_))));
+    }
+    let buf = sub.take_buf(4096).unwrap();
+    sub.read_page(&pages, pages.pos(8192).unwrap(), buf, 2)
+        .map_err(|r| r.error)
+        .unwrap();
+    let c = sub.wait(1).unwrap().next().unwrap();
+    assert!(matches!(c.outcome, Ok(Done::Read { len: 4096 })));
+    assert!(c.buf.unwrap().as_slice().iter().all(|&b| b == 0x6B));
+    let mut out = vec![0u8; 4096];
+    pages.read(pages.pos(8192).unwrap(), &mut out).unwrap();
+    assert!(
+        out.iter().all(|&b| b == 0x6B),
+        "the blocking read disagrees"
+    );
+}

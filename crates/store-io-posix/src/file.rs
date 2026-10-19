@@ -92,6 +92,13 @@ impl PosixFile {
     pub(crate) fn share_fd(&self) -> Arc<OwnedFd> {
         Arc::clone(&self.fd)
     }
+
+    /// Whether this is the open file `fd` names (exact: the same
+    /// descriptor, kept open by its holder).
+    #[inline]
+    pub(crate) fn same_fd(&self, fd: &Arc<OwnedFd>) -> bool {
+        Arc::ptr_eq(&self.fd, fd)
+    }
 }
 
 impl AsFd for PosixFile {

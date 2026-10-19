@@ -51,6 +51,7 @@ pub(crate) mod reg {
     use libc::c_uint;
     pub(crate) const BUFFERS: c_uint = 0;
     pub(crate) const UNREGISTER_BUFFERS: c_uint = 1;
+    pub(crate) const FILES: c_uint = 2;
     pub(crate) const FILES_UPDATE: c_uint = 6;
     pub(crate) const PROBE: c_uint = 8;
     pub(crate) const RESTRICTIONS: c_uint = 11;

@@ -148,20 +148,27 @@ where
     /// `Io` if the platform could not create the queue.
     pub fn submitter(&self, cfg: SubmitterConfig) -> Result<Submitter<P>, Error> {
         let depth = cfg.depth.clamp(1, MAX_DEPTH);
-        let queue = self
-            .inner
-            .platform
-            .queue(QueueConfig {
-                depth,
-                parallel: true,
-                pool_threads: self.inner.opts.t3_pool_threads,
-                owner: Owner::Thread,
-            })
-            .map_err(|raw| Error::Io {
-                op: Op::Queue,
-                raw,
-                ctx: ErrorContext::default(),
-            })?;
+        let qcfg = QueueConfig {
+            depth,
+            parallel: true,
+            pool_threads: self.inner.opts.t3_pool_threads,
+            owner: Owner::Thread,
+        };
+        let inner = &*self.inner;
+        // The pool and the file outlive the queue: a registering backend
+        // keeps its own references to both (`Platform::queue_registered`).
+        let queue = if inner.opts.register_buffers {
+            inner
+                .platform
+                .queue_registered(qcfg, &inner.pool, &inner.file)
+        } else {
+            inner.platform.queue(qcfg)
+        };
+        let queue = queue.map_err(|raw| Error::Io {
+            op: Op::Queue,
+            raw,
+            ctx: ErrorContext::default(),
+        })?;
         let n = depth as usize;
         let mark = Arc::new(LaneMark::new());
         let inbox = Arc::new(Inbox::new(n, queue.waker()));

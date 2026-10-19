@@ -199,7 +199,8 @@ How the evidence maps: the OS is taken to pass flushes when the leaf's `queue/wr
 
 ### Known limitations
 
-- **io_uring needs Linux 6.1 or later.** Both ring flavours must be accepted (a `Submitter`'s needs 6.1, the shared ones 5.18), so on older kernels every queue is synchronous under `Auto`, and `Uring` is refused. Registered buffers and descriptors are not used yet.
+- **io_uring needs Linux 6.1 or later.** Both ring flavours must be accepted (a `Submitter`'s needs 6.1, the shared ones 5.18), so on older kernels every queue is synchronous under `Auto`, and `Uring` is refused.
+- **Registered buffers and a direct descriptor** (`StoreOptions::register_buffers`, off by default): a `Submitter`'s ring registers the store's whole buffer arena as one fixed buffer and the container as a direct descriptor, while the ring is still disabled. An operation uses them only for a buffer of that arena and for that file. The kernel charges the pinned arena to the locked-memory limit once per ring (below Linux 6.12), so a large arena under a small limit stays unregistered; refusals are counted in `Store::io_path()`, never an error.
 - **Trim in place is unsupported** on files (`EOPNOTSUPP`).
 - **Device facts need the device node.** The volatile-cache presence, its enabled state, the atomic-write fields and the health log come only from NVMe admin commands, through a device node an unprivileged user usually cannot open. Without them a device can be at most `FlushRequired`; power-safe needs readable Identify and SMART data, or a certificate. SATA and SAS cache presence is not read at all.
 - **One leaf.** Only the first leaf device of a stack is inspected; the other members of a mirror or array are not.

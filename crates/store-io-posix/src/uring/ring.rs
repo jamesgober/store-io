@@ -3,7 +3,7 @@
 //! of an entry or a completion.
 
 use std::cell::Cell;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::thread::ThreadId;
 
 use libc::c_int;
@@ -102,9 +102,30 @@ pub(crate) struct Ring {
     /// Opcodes the kernel supports (`REGISTER_PROBE`).
     supported: [bool; 256],
     flavour: Flavour,
+    /// What `with_registration` registered (D-078).
+    fixed: Fixed,
     // Declared last: closed after the rings are unmapped.
     fd: OwnedFd,
 }
+
+/// What to register with a new ring (D-078): memory as fixed buffer 0 and
+/// a file as direct descriptor 0.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Want {
+    pub(crate) buffers: Option<(usize, usize)>,
+    pub(crate) file: Option<RawFd>,
+}
+
+/// What a ring registered, and the first refusal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Fixed {
+    pub(crate) buffers: bool,
+    pub(crate) file: bool,
+    pub(crate) refused: Option<OsError>,
+}
+
+/// The largest single fixed buffer the kernel registers.
+const MAX_FIXED: usize = 1 << 30;
 
 impl Ring {
     /// A ring of `entries` submissions (rounded up to a power of two, at
@@ -117,6 +138,26 @@ impl Ring {
     /// other error is returned), or a kernel without `NODROP`, the opcode
     /// probe, or NOP, READ and WRITE (`ENOSYS`).
     pub(crate) fn new(flavour: Flavour, entries: u32) -> RawResult<Self> {
+        // SAFETY: nothing to register.
+        unsafe { Self::with_registration(flavour, entries, Want::default()) }
+    }
+
+    /// As [`Self::new`], registering `want` on an [`Flavour::Owned`] ring
+    /// while it is still disabled (a shared ring registers nothing: R3.3).
+    /// Best effort: a registration the kernel refuses (locked-memory limit,
+    /// a kernel without the fixed opcodes) is recorded in [`Self::fixed`],
+    /// never an error.
+    ///
+    /// # Safety
+    ///
+    /// `want.buffers` must be a live mapping of this process that stays
+    /// mapped as long as the ring exists (a fixed read or write addresses
+    /// the pinned pages), and `want.file` an open descriptor.
+    pub(crate) unsafe fn with_registration(
+        flavour: Flavour,
+        entries: u32,
+        want: Want,
+    ) -> RawResult<Self> {
         let entries = entries.clamp(1, 4096).next_power_of_two();
         let mut last = errno(libc::EINVAL);
         for flags in tiers(flavour) {
@@ -126,7 +167,8 @@ impl Ring {
                 ..Params::default()
             };
             match sys::setup(entries, &mut p) {
-                Ok(fd) => return Self::finish(flavour, fd, &p),
+                // SAFETY: the caller's contract.
+                Ok(fd) => return unsafe { Self::finish(flavour, fd, &p, want) },
                 Err(e) if e.code == libc::EINVAL => last = e,
                 Err(e) => return Err(e),
             }
@@ -134,7 +176,10 @@ impl Ring {
         Err(last)
     }
 
-    fn finish(flavour: Flavour, fd: OwnedFd, p: &Params) -> RawResult<Self> {
+    /// # Safety
+    ///
+    /// As [`Self::with_registration`].
+    unsafe fn finish(flavour: Flavour, fd: OwnedFd, p: &Params, want: Want) -> RawResult<Self> {
         if p.features & FEAT_NODROP == 0 {
             return Err(errno(libc::ENOSYS));
         }
@@ -158,9 +203,32 @@ impl Ring {
             return Err(errno(libc::ENOSYS));
         }
         let can_release = restrict(&fd, &supported)?;
-        // Whole registrations (D-078's sparse file table and fixed buffers,
-        // step 3d) go here, while the ring is disabled: the restrictions
-        // allow only updates once it is enabled.
+        // Whole registrations (D-078) go here, while the ring is disabled:
+        // the restrictions allow only updates once it is enabled.
+        let mut fixed = Fixed::default();
+        if flavour == Flavour::Owned {
+            let fixed_ops =
+                supported[usize::from(op::READ_FIXED)] && supported[usize::from(op::WRITE_FIXED)];
+            if let Some((base, len)) = want.buffers.filter(|_| fixed_ops) {
+                if len <= MAX_FIXED {
+                    // SAFETY: the caller's contract (`with_registration`).
+                    match unsafe { sys::register_buffers(&fd, base, len) } {
+                        Ok(()) => fixed.buffers = true,
+                        Err(e) => fixed.refused = Some(e),
+                    }
+                } else {
+                    fixed.refused = Some(errno(libc::E2BIG));
+                }
+            }
+            if let Some(file) = want.file {
+                match sys::register_file(&fd, file) {
+                    Ok(()) => fixed.file = true,
+                    Err(e) => {
+                        let _first = fixed.refused.get_or_insert(e);
+                    }
+                }
+            }
+        }
         // Registered only if it can be released again (else the thread's
         // table would keep the ring alive until the thread exits).
         let registered = if flavour == Flavour::Owned && can_release {
@@ -184,8 +252,14 @@ impl Ring {
             flags: p.flags,
             supported,
             flavour,
+            fixed,
             fd,
         })
+    }
+
+    /// What this ring registered (D-078).
+    pub(crate) fn fixed(&self) -> Fixed {
+        self.fixed
     }
 
     /// Whether the kernel supports `opcode`.

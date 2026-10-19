@@ -74,6 +74,9 @@ pub struct Domain {
     leader: AtomicBool,
     counters: Counters,
     poison: OnceLock<FirstCause>,
+    /// Followers inside `follow` (registered under `wait`): a leader
+    /// notifies only when there is one, so a lone flush makes no futex call.
+    waiters: AtomicU64,
     wait: Mutex<()>,
     wake: Condvar,
 }
@@ -98,6 +101,7 @@ impl Domain {
                 already_durable: AtomicU64::new(0),
             },
             poison: OnceLock::new(),
+            waiters: AtomicU64::new(0),
             wait: Mutex::new(()),
             wake: Condvar::new(),
         }
@@ -197,7 +201,12 @@ impl Domain {
                 let k = self.issued.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
                 led_flush = true;
                 let _count = self.counters.led.fetch_add(1, Ordering::Relaxed);
+                // A flush that panics leaves the device's state unknown:
+                // the guard poisons the domain and gives leadership back, so
+                // no later barrier waits for a leader that is gone.
+                let unwinding = LeaderGuard { domain: self };
                 let outcome = flush();
+                core::mem::forget(unwinding);
                 match outcome {
                     Ok(()) => {
                         if self.poison.get().is_none() {
@@ -239,9 +248,32 @@ impl Domain {
         self.release_leadership();
     }
 
-    fn release_leadership(&self) {
-        self.leader.store(false, Ordering::SeqCst);
+    /// Gives leadership back and wakes the followers, if any. Lost-wake
+    /// free without relying on sequentially consistent loads (as
+    /// `QueueSet`'s waiters): a follower registers (`waiters` read-modify-
+    /// write) and then reads `leader` with a read-modify-write, all under
+    /// `wait`; the leader clears `leader` (read-modify-write) and then reads
+    /// `waiters` (read-modify-write). Read-modify-writes of one location are
+    /// totally ordered and synchronise, so either the follower's read sees
+    /// the leader gone (it does not wait), or the leader's read sees the
+    /// follower and notifies under `wait`, which the follower holds until
+    /// it is waiting.
+    /// Poisons the domain (a flush whose outcome is unknown) and wakes
+    /// every waiter.
+    fn poison_unknown_flush(&self) {
+        let _first_cause_kept = self.poison.set(FirstCause {
+            op: Some(Op::FlushData),
+            raw: None,
+        });
+        self.release_leadership();
         self.notify();
+    }
+
+    fn release_leadership(&self) {
+        let _was = self.leader.swap(false, Ordering::AcqRel);
+        if self.waiters.fetch_add(0, Ordering::AcqRel) > 0 {
+            self.notify();
+        }
     }
 
     fn notify(&self) {
@@ -260,7 +292,8 @@ impl Domain {
             .wait
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while self.leader.load(Ordering::SeqCst)
+        let _registered = self.waiters.fetch_add(1, Ordering::AcqRel);
+        while self.leader.fetch_or(false, Ordering::AcqRel)
             && self.done.load(Ordering::SeqCst) < need
             && self.poison.get().is_none()
         {
@@ -269,6 +302,20 @@ impl Domain {
                 .wait(guard)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        let _unregistered = self.waiters.fetch_sub(1, Ordering::AcqRel);
+        drop(guard);
+    }
+}
+
+/// Held by a flush leader while its flush runs; dropped only if the flush
+/// panics (the leader forgets it otherwise).
+struct LeaderGuard<'a> {
+    domain: &'a Domain,
+}
+
+impl Drop for LeaderGuard<'_> {
+    fn drop(&mut self) {
+        self.domain.poison_unknown_flush();
     }
 }
 
@@ -284,6 +331,75 @@ mod tests {
         code: 5,
         source: OsErrorSource::Sim,
     };
+
+    /// A follower waiting behind a leader is woken when leadership is given
+    /// back (the leader notifies only when a follower is registered), and a
+    /// lone barrier registers nobody.
+    #[test]
+    fn test_a_waiting_follower_is_woken_when_the_leader_returns() {
+        let d = Arc::new(Domain::new());
+        assert!(d.hold_leadership());
+        let need = d.ticket();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let follower = {
+            let d = Arc::clone(&d);
+            std::thread::spawn(move || {
+                let r = d.barrier(need, || Ok(()));
+                let _sent = tx.send(r.is_ok());
+            })
+        };
+        // Until the follower is registered and waiting.
+        let start = std::time::Instant::now();
+        while d.waiters.load(Ordering::SeqCst) == 0 {
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "never registered"
+            );
+            std::thread::yield_now();
+        }
+        // The follower holds `wait` from registering until it is parked in
+        // the condvar (it cannot leave while leadership is held): taking it
+        // proves the follower is waiting, so only a notify can wake it.
+        drop(
+            d.wait
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        d.drop_leadership();
+        assert_eq!(
+            rx.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(true),
+            "the follower was never woken"
+        );
+        assert!(follower.join().is_ok(), "the follower panicked");
+        assert_eq!(d.waiters.load(Ordering::SeqCst), 0);
+        // A lone barrier leads and registers nobody.
+        let need = d.ticket();
+        assert!(d.barrier(need, || Ok(())).is_ok());
+        assert_eq!(d.waiters.load(Ordering::SeqCst), 0);
+    }
+
+    /// A flush that panics poisons the domain and gives leadership back:
+    /// later barriers fail at once instead of waiting for a leader that is
+    /// gone.
+    #[test]
+    fn test_a_panicking_flush_poisons_and_releases_leadership() {
+        let d = Domain::new();
+        let need = d.ticket();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _r = d.barrier(need, || panic!("the flush panicked"));
+        }));
+        assert!(r.is_err());
+        assert!(
+            d.poisoned().is_some(),
+            "a flush of unknown outcome did not poison"
+        );
+        let need = d.ticket();
+        assert!(matches!(
+            d.barrier(need, || Ok(())),
+            Err(Error::Poisoned { .. })
+        ));
+    }
 
     #[test]
     fn test_lone_barrier_issues_exactly_one_flush() {

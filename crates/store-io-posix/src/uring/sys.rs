@@ -10,7 +10,7 @@
 //! head. Functions whose misuse could make the kernel or this process touch
 //! memory wrongly are `unsafe fn`, each with its contract.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -134,6 +134,32 @@ pub(crate) fn unregister_ring_fd(fd: &OwnedFd, index: u32) -> RawResult<()> {
     };
     // SAFETY: one update entry naming the index to remove.
     unsafe { register(fd, reg::UNREGISTER_RING_FDS, (&raw mut u).cast(), 1) }.map(|_| ())
+}
+
+/// Registers `[base, base + len)` as the ring's fixed buffer 0
+/// (`REGISTER_BUFFERS`, one `iovec`). The kernel pins the pages; they stay
+/// pinned until the ring is closed.
+///
+/// # Safety
+///
+/// The memory must be a live mapping of this process, and stay mapped as
+/// long as the ring exists: a fixed read or write addresses the pinned
+/// pages, not whatever is mapped at that address later.
+pub(crate) unsafe fn register_buffers(fd: &OwnedFd, base: usize, len: usize) -> RawResult<()> {
+    let mut v = libc::iovec {
+        iov_base: base as *mut c_void,
+        iov_len: len,
+    };
+    // SAFETY: one iovec, valid for the call; the caller's contract above.
+    unsafe { register(fd, reg::BUFFERS, (&raw mut v).cast(), 1) }.map(|_| ())
+}
+
+/// Registers `file` as the ring's direct descriptor 0 (`REGISTER_FILES`, a
+/// table of one). The kernel holds its own reference to the open file.
+pub(crate) fn register_file(fd: &OwnedFd, file: RawFd) -> RawResult<()> {
+    let mut f: i32 = file;
+    // SAFETY: an array of one descriptor, valid for the call.
+    unsafe { register(fd, reg::FILES, (&raw mut f).cast(), 1) }.map(|_| ())
 }
 
 /// Enables a ring created with `R_DISABLED` (on the calling thread: an

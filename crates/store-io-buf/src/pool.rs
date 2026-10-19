@@ -244,6 +244,15 @@ impl BufPool {
         Arc::ptr_eq(&self.inner, &buf.pool)
     }
 
+    /// The memory every buffer of this pool lies in, as `(base, length)`:
+    /// for a backend that registers it with the kernel (io_uring fixed
+    /// buffers). The memory stays mapped as long as any clone of the pool
+    /// lives.
+    #[must_use]
+    pub fn arena_range(&self) -> (core::ptr::NonNull<u8>, usize) {
+        (self.inner.arena.base(), self.inner.arena.len())
+    }
+
     /// The smallest buffer the pool can hand out.
     #[must_use]
     pub fn min_len(&self) -> usize {

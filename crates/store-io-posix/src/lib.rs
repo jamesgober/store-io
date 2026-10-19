@@ -79,7 +79,7 @@ pub use file::PosixFile;
 #[cfg(target_os = "linux")]
 pub use lock::PosixLock;
 #[cfg(target_os = "linux")]
-pub use queue::{PosixQueue, PosixWaker};
+pub use queue::{PosixQueue, PosixWaker, Registration};
 
 #[cfg(target_os = "linux")]
 pub use store_io_platform::LinuxTier;
@@ -173,6 +173,18 @@ mod platform {
         /// lanes. `last_refusal` holds the latest code of either kind.
         refused: Arc<AtomicU64>,
         last_refusal: Arc<core::sync::atomic::AtomicI32>,
+        /// Rings asked to register (D-078) and what they got.
+        registration: Arc<RegistrationCounts>,
+    }
+
+    /// Rings asked to register buffers and a file, and how many got each.
+    #[derive(Debug, Default)]
+    struct RegistrationCounts {
+        asked: AtomicU64,
+        buffers: AtomicU64,
+        files: AtomicU64,
+        /// The latest refusal's code (0: none).
+        refusal: core::sync::atomic::AtomicI32,
     }
 
     /// Whether this kernel accepts store-io's rings of both flavours; `Err`
@@ -254,6 +266,7 @@ mod platform {
                 auto: false,
                 fell_back: Arc::new(AtomicU64::new(0)),
                 refused: Arc::new(AtomicU64::new(0)),
+                registration: Arc::default(),
                 ringed: Arc::new(AtomicU64::new(0)),
                 last_refusal: Arc::new(core::sync::atomic::AtomicI32::new(0)),
             }
@@ -443,6 +456,19 @@ mod platform {
                     sys::errno(code)
                 ));
             }
+            let r = &self.registration;
+            let asked = r.asked.load(Ordering::Relaxed);
+            if asked > 0 {
+                reason.push_str(&format!(
+                    "; registration (D-078) asked on {asked} ring(s): fixed buffers on {}, a direct descriptor on {}",
+                    r.buffers.load(Ordering::Relaxed),
+                    r.files.load(Ordering::Relaxed)
+                ));
+                let refusal = r.refusal.load(Ordering::Relaxed);
+                if refusal != 0 {
+                    reason.push_str(&format!(" (refused: {})", sys::errno(refusal)));
+                }
+            }
             if refused > 0 {
                 reason.push_str(&format!(
                     "; {refused} ring(s) refused by the kernel ({}): a submitter needing one was not created, a parallel lane's operations ran one at a time",
@@ -495,6 +521,31 @@ mod platform {
         }
 
         fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {
+            self.make_queue(cfg, None)
+        }
+
+        fn queue_registered(
+            &self,
+            cfg: QueueConfig,
+            pool: &store_io_buf::BufPool,
+            file: &PosixFile,
+        ) -> RawResult<PosixQueue> {
+            // Only a thread-owned ring registers (R3.3): a shared ring's
+            // registration would be charged once per ring.
+            let reg = (cfg.owner == Owner::Thread).then(|| crate::uring::queue::Registered {
+                pool: pool.clone(),
+                file: file.share_fd(),
+            });
+            self.make_queue(cfg, reg)
+        }
+    }
+
+    impl PosixPlatform {
+        fn make_queue(
+            &self,
+            cfg: QueueConfig,
+            reg: Option<crate::uring::queue::Registered>,
+        ) -> RawResult<PosixQueue> {
             // Rings for queues that keep several operations in flight (a
             // `Submitter`, a parallel lane). A queue whose caller runs one
             // operation at a time and waits for it (`parallel: false`, a
@@ -504,9 +555,13 @@ mod platform {
             let ring = cfg.parallel || cfg.owner == Owner::Thread;
             if self.tier == LinuxTier::Uring && ring {
                 let owned = cfg.owner == Owner::Thread;
-                match PosixQueue::uring(cfg, owned) {
+                let asked = reg.is_some();
+                match PosixQueue::uring(cfg, owned, reg) {
                     Ok(q) => {
                         let _n = self.ringed.fetch_add(1, Ordering::Relaxed);
+                        if asked {
+                            self.count_registration(&q);
+                        }
                         return Ok(q);
                     }
                     // `Auto` chose rings; this one was refused: a synchronous
@@ -527,6 +582,24 @@ mod platform {
                 Ok(PosixQueue::pooled(cfg, self.submit_pool(cfg.pool_threads)?))
             } else {
                 Ok(PosixQueue::new(cfg))
+            }
+        }
+
+        /// Counts what a ring asked to register got (D-078), for `io_path`.
+        fn count_registration(&self, q: &PosixQueue) {
+            let Some(got) = q.registered() else {
+                return;
+            };
+            let r = &self.registration;
+            let _a = r.asked.fetch_add(1, Ordering::Relaxed);
+            if got.buffers {
+                let _b = r.buffers.fetch_add(1, Ordering::Relaxed);
+            }
+            if got.file {
+                let _f = r.files.fetch_add(1, Ordering::Relaxed);
+            }
+            if let Some(e) = got.refused {
+                r.refusal.store(e.code, Ordering::Relaxed);
             }
         }
     }

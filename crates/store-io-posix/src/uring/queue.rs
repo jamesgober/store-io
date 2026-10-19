@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use store_io_platform::{Completion, CompletionBuf, IoBuf, IoOp, OsError, RawResult, Rejected};
 
-use super::abi::{Cqe, Sqe, op};
-use super::ring::{Flavour, Reap, Ring};
+use super::abi::{Cqe, SQE_FIXED_FILE, Sqe, op};
+use super::ring::{Fixed, Flavour, Reap, Ring, Want};
 use super::sys;
 use crate::file::PosixFile;
 use crate::sys::{errno, fdatasync, preadv2, pwritev2};
@@ -103,6 +103,21 @@ pub(crate) struct UringQueue {
     /// Operations NOWAIT refused or cut short, finished by a blocking call
     /// (reads that met the end of the file included).
     fallbacks: u64,
+    /// The pool whose arena the ring registered as fixed buffer 0 (kept so
+    /// the arena stays mapped while the ring lives; dropped after it), and
+    /// the file it registered as direct descriptor 0 (kept open, so its
+    /// identity is exact). An operation uses them only on a buffer of that
+    /// pool and on that very file.
+    fixed_pool: Option<store_io_buf::BufPool>,
+    fixed_file: Option<Arc<OwnedFd>>,
+    /// Operations submitted with a fixed buffer, with the direct descriptor.
+    fixed_ops: (u64, u64),
+}
+
+/// What a thread-owned ring may register (D-078).
+pub(crate) struct Registered {
+    pub(crate) pool: store_io_buf::BufPool,
+    pub(crate) file: Arc<OwnedFd>,
 }
 
 // SAFETY: `word` is owned by the queue alone (the kernel aside, which never
@@ -112,12 +127,39 @@ unsafe impl Send for UringQueue {}
 impl UringQueue {
     /// A queue of `depth` operations on a new ring of `flavour`.
     pub(crate) fn new(flavour: Flavour, depth: usize) -> RawResult<Self> {
+        Self::registered(flavour, depth, None)
+    }
+
+    /// As [`Self::new`], registering `reg`'s arena and file on an owned
+    /// ring (best effort: see [`Self::fixed`]).
+    pub(crate) fn registered(
+        flavour: Flavour,
+        depth: usize,
+        reg: Option<Registered>,
+    ) -> RawResult<Self> {
         let depth = depth.clamp(1, MAX_DEPTH);
         // Room for every operation and the wake read, should the kernel not
         // take entries at once; at most 4096 (more in flight is fine).
         let entries = u32::try_from(depth + 1).unwrap_or(u32::MAX);
-        let ring = Ring::new(flavour, entries)?;
+        let want = Want {
+            buffers: reg.as_ref().map(|r| {
+                let (base, len) = r.pool.arena_range();
+                (base.as_ptr() as usize, len)
+            }),
+            file: reg.as_ref().map(|r| r.file.as_raw_fd()),
+        };
+        // The eventfd first: nothing after the ring can fail, so what the
+        // ring registered is always kept as long as the ring lives.
         let wake = Arc::new(sys::eventfd()?);
+        // SAFETY: the arena belongs to `reg.pool`, which the queue keeps
+        // (`fixed_pool`) until after the ring is closed (field order), so it
+        // stays mapped for the ring's life; the file is open (`reg.file`).
+        let ring = unsafe { Ring::with_registration(flavour, entries, want)? };
+        let got = ring.fixed();
+        let (fixed_pool, fixed_file) = match reg {
+            Some(r) => (got.buffers.then_some(r.pool), got.file.then_some(r.file)),
+            None => (None, None),
+        };
         let word = NonNull::from(Box::leak(Box::new(0u64)));
         Ok(Self {
             ring,
@@ -135,7 +177,16 @@ impl UringQueue {
             lost: false,
             failed: None,
             fallbacks: 0,
+            fixed_pool,
+            fixed_file,
+            fixed_ops: (0, 0),
         })
+    }
+
+    /// What the ring registered (D-078), and how many operations used it
+    /// (fixed buffers, the direct descriptor).
+    pub(crate) fn fixed(&self) -> (Fixed, (u64, u64)) {
+        (self.ring.fixed(), self.fixed_ops)
     }
 
     /// Operations finished by a blocking call after NOWAIT refused them.
@@ -223,20 +274,31 @@ impl UringQueue {
             offset,
             buf,
         });
-        let (opcode, addr) = match write {
-            Some(_) => (op::WRITE, op.buf.as_ptr() as u64),
-            None => (op::READ, op.buf.as_mut_ptr() as u64),
+        // A fixed buffer only for a buffer of the registered pool (its
+        // arena is fixed buffer 0); the direct descriptor only for the
+        // registered file itself (D-078).
+        let fixed_buf = self.fixed_pool.as_ref().is_some_and(|p| p.owns(&op.buf));
+        let fixed_file = self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));
+        let (opcode, addr) = match (write, fixed_buf) {
+            (Some(_), false) => (op::WRITE, op.buf.as_ptr() as u64),
+            (Some(_), true) => (op::WRITE_FIXED, op.buf.as_ptr() as u64),
+            (None, false) => (op::READ, op.buf.as_mut_ptr() as u64),
+            (None, true) => (op::READ_FIXED, op.buf.as_mut_ptr() as u64),
         };
         let sqe = Sqe {
             opcode,
-            fd: op.fd,
+            flags: if fixed_file { SQE_FIXED_FILE } else { 0 },
+            fd: if fixed_file { 0 } else { op.fd },
             off: offset as u64,
             addr,
             len,
             rw_flags: rw_flags(write, true),
             user_data,
+            buf_index: 0,
             ..Sqe::default()
         };
+        self.fixed_ops.0 += u64::from(fixed_buf);
+        self.fixed_ops.1 += u64::from(fixed_file);
         // SAFETY: the buffer lives in the slot, untouched, until this
         // entry's completion is observed (`observe`), or forever if it never
         // is (`lose`, `Drop`); the queue drains the ring before it drops it.

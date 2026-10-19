@@ -30,6 +30,14 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
 - `store_io::io_uring_fallbacks()` (Linux; also `store_io_posix::`): operations the io_uring tier
   finished with a blocking call (never a failure; a measure of how often
   the asynchronous path was not taken).
+- `StoreOptions::register_buffers` (Linux io_uring, D-078): a `Submitter`'s
+  ring registers the store's buffer arena as a fixed buffer and its
+  container as a direct descriptor. Best effort (the locked-memory limit
+  may refuse the arena); `Store::io_path()` reports what each ring got.
+  Off by default (see the gates' G3d). `Platform::queue_registered` is the
+  backend hook; `store_io_posix::Registration` what a queue registered.
+- `Store::io_path()`: the kernel interface in use now, with every queue made
+  since create or open counted (`StoreReport::io` is the snapshot at open).
 - `Store::open_readonly_with` (explicit options for a read-only open);
   `Op::Queue` for a failed queue setup (it was reported as `Open`).
 - CI checks of the io_uring tier, each failing closed when it cannot run:
@@ -366,6 +374,8 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
     submitted (a queue that performs it inside `submit` included); the age
     restarts when the queue's oldest operation completes, so one stuck
     behind newer completions keeps aging.
+  - A flush leader wakes waiting followers only when one is registered: a
+    lone durable write no longer pays a futex system call per barrier.
   - The observer's `Reads` and `ReadBytes` count reads that completed
     successfully and the bytes they returned (before: some paths counted
     every read whose buffer came back, with the requested length).

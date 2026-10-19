@@ -293,13 +293,13 @@ jobs:
           if-no-files-found: ignore
 
   # The performance gates on the CI kernel (D-066: relative, Unverified):
-  # the harness's `gates` on ext4 over a memory-backed null_blk device with
-  # a volatile write cache (a flush-required device whose flushes cost
-  # nothing, so the microsecond gates are resolvable), against fio on the
-  # same file system. Fails on any FAIL verdict, anomaly or integrity
-  # failure; the report is kept either way.
+  # the harness's `gates` on ext4 over a memory-backed device with a
+  # write-back cache (null_blk, or a loop device on tmpfs: a flush-required
+  # device whose flushes cost nothing, so the microsecond gates are
+  # resolvable), against fio on the same file system. Fails on any FAIL
+  # verdict, anomaly or integrity failure; the report is kept either way.
   gates:
-    name: Performance gates (null_blk, io_uring)
+    name: Performance gates (memory-backed device, io_uring)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -310,21 +310,34 @@ jobs:
           workspaces: harness
       - name: Build the harness
         run: cargo build --release --manifest-path harness/Cargo.toml
-      - name: A flush-required null_blk device
+      - name: A flush-required memory-backed device
         run: |
           set -eux
           sudo apt-get update -qq
           sudo apt-get install -y -qq fio
-          load() { sudo modprobe null_blk nr_devices=1 gb=3 bs=4096 memory_backed=1 cache_size=1024 queue_mode=2 irqmode=0 completion_nsec=0; }
-          load || { sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"; load; }
-          cat /sys/block/nullb0/queue/write_cache
-          grep -qx "write back" /sys/block/nullb0/queue/write_cache
-          sudo mkfs.ext4 -q -b 4096 /dev/nullb0
+          # null_blk (memory-backed, volatile cache) where the kernel ships
+          # it; the runner's Azure kernel does not, so else a loop device
+          # over a file on tmpfs: memory-backed too, and flush-required
+          # (loop reports a write-back cache when its backing file can be
+          # fsynced), with flushes that cost nothing.
+          if sudo modprobe null_blk nr_devices=1 gb=6 bs=4096 memory_backed=1 cache_size=1024 queue_mode=2 irqmode=0 completion_nsec=0; then
+            DEV=/dev/nullb0
+          else
+            sudo truncate -s 6G /dev/shm/gates.img
+            DEV=$(sudo losetup --show -f -b 4096 /dev/shm/gates.img)
+          fi
+          Q=/sys/block/$(basename "$DEV")/queue/write_cache
+          cat "$Q"
+          grep -qx "write back" "$Q"
+          # 6 GiB: caller-batch points hold two regions of up to 2 GiB at
+          # once; no reserve, and no lazy init writing during measurements.
+          sudo mkfs.ext4 -q -m 0 -b 4096 -E lazy_itable_init=0,lazy_journal_init=0 "$DEV"
           sudo mkdir -p /mnt/gates
-          sudo mount /dev/nullb0 /mnt/gates
+          sudo mount "$DEV" /mnt/gates
           sudo chown "$(id -u):$(id -g)" /mnt/gates
           uname -r
           findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/gates
+          df -h /dev/shm /mnt/gates
       - name: Gates
         run: |
           set -eux

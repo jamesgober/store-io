@@ -409,7 +409,7 @@ pub fn run(ctx: &Ctx) -> Section {
     let store_eff = val(&g5, "ops_per_cpu_s");
     rows.push(Row {
         id: "G5",
-        gate: "Per-core submit efficiency at least 90% of fio's asynchronous engine (4 KiB random read, QD128; ops per CPU-second; null_blk in CI)",
+        gate: "Per-core submit efficiency at least 90% of fio's asynchronous engine (4 KiB random read, QD128; ops per CPU-second; a memory-backed device in CI)",
         measured: format!("store-io {} ops/CPU-s ({} ops/s), fio {} ops/CPU-s (spread {:.0}%)", f(store_eff, 0), f(val(&g5, "ops_per_s"), 0), f(fio_eff, 0), espread * 100.0),
         verdict: if !cfg!(any(target_os = "linux", windows)) {
             // CPU time is measured on Linux and Windows only.

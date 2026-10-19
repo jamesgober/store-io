@@ -52,7 +52,7 @@ Version 0.4.0 in development (`0.4.0-dev` on the development branch).
   raw and fsys measurement reads back a sample of what it wrote and
   compares it; a measurement that failed, or whose check did not pass,
   never feeds a verdict. A CI job runs the gates
-  on a memory-backed null_blk device and fails on any FAIL.
+  on a memory-backed device and fails on any FAIL.
 
 - `store-io-engine`: the engine-layer **`Submitter`** (D-065, D-080, D-098),
   from `Store::submitter(SubmitterConfig)`. One thread keeps many appends,

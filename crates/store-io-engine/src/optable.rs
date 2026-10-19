@@ -7,9 +7,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use store_io_core::errno::is_media_error;
-use store_io_core::error::{ByteRange, CorruptionKind, Error, ErrorContext, NotWrittenCause, Op};
-use store_io_core::observe::Counter;
+use store_io_core::error::{Error, ErrorContext, NotWrittenCause};
 use store_io_platform::{IoBuf, Platform, RawResult};
 
 use crate::completion::{Completion, Done, Written};
@@ -17,8 +15,9 @@ use crate::exec::LaneMark;
 use crate::flusher::Flushed;
 use crate::frontier::Reservation;
 use crate::gate::OwnedPass;
-use crate::io::{ctx_range, not_written};
+use crate::io::not_written;
 use crate::receipt::{DurableReceipt, WriteTicket};
+use crate::settle::{Wrote, durable_receipt, in_range, settle_read, settle_write};
 use crate::store::{LiveRegion, Store};
 
 /// What an operation in flight is, in region bytes.
@@ -233,7 +232,13 @@ impl Table {
                     Some(first) => outcome = Err(Error::Poisoned { first }),
                     // Power-safe: the write itself was durable at completion.
                     None => {
-                        w.receipt = Some(durable_receipt(store, live, &w.ticket, prefix, u64::MAX));
+                        w.receipt = Some(durable_receipt(
+                            store,
+                            region(live),
+                            &w.ticket,
+                            prefix,
+                            u64::MAX,
+                        ));
                     }
                 }
             }
@@ -260,7 +265,7 @@ impl Table {
             (Some((buf, ticket, prefix)), _) => {
                 let done = match outcome {
                     Ok(need) => {
-                        let receipt = durable_receipt(store, live, &ticket, prefix, need);
+                        let receipt = durable_receipt(store, region(live), &ticket, prefix, need);
                         Ok(Done::Written(Written {
                             ticket,
                             receipt: Some(receipt),
@@ -314,12 +319,9 @@ fn is_live(rows: &[Row], index: u32, seq: u64) -> bool {
         .is_some_and(|l| l.seq == seq)
 }
 
-/// The verdict on one operation, with its integrity bookkeeping: an append
-/// that transferred every byte completes its reservation; any write that did
-/// not poisons the store (`DurabilityUnknown`).
-/// For an append, `prefix` is set to how far the region is complete when
-/// that reaches the append's end, read before the ticket's need is taken (so
-/// a flush that far covers every byte of it).
+/// The verdict on one row's I/O completion, through the shared verdicts
+/// ([`crate::settle`]): a write is full when it transferred its whole
+/// buffer; `prefix` as [`settle_write`].
 fn settle<P: Platform>(
     store: &Store<P>,
     live: &Live,
@@ -330,7 +332,7 @@ fn settle<P: Platform>(
 where
     P::Queue: Send,
 {
-    let Some(state) = live.pass.as_ref().map(OwnedPass::get) else {
+    let Some(state) = region(live) else {
         // Barriers have no I/O completion.
         return Err(not_written(
             NotWrittenCause::Interrupted,
@@ -338,112 +340,29 @@ where
         ));
     };
     let full = matches!((result, buf), (Ok(n), Some(b)) if n == b.len());
-    match live.kind {
-        Kind::Append(r) => match state.frontier.as_ref() {
-            Some(f) if full => {
-                f.complete(r);
-                let through = f.completed();
-                if through >= r.end {
-                    *prefix = Some(through);
-                }
-                Ok(written(store.ticket(state, r.start, r.end)))
-            }
-            _ => Err(store.unknown(
-                Op::Write,
-                result.err(),
-                ctx_range(state, r.start, r.data_end),
-            )),
-        },
-        Kind::Page { start, end } => {
-            if full {
-                Ok(written(store.ticket(state, start, end)))
-            } else {
-                Err(store.unknown(Op::Write, result.err(), ctx_range(state, start, end)))
-            }
-        }
+    let wrote = match live.kind {
+        Kind::Append(r) => Wrote::Append(r),
+        Kind::Page { start, end } => Wrote::Page { start, end },
         Kind::Read { start, end } => {
-            let c = ctx_range(state, start, end);
-            let obs = &store.inner.observer;
-            match result {
-                // A backend that kept the buffer: the bytes never came back.
-                Ok(_) if buf.is_none() => Err(not_written(NotWrittenCause::Interrupted, c)),
-                Ok(n) => {
-                    obs.add(Counter::Reads, 1);
-                    obs.add(Counter::ReadBytes, n as u64);
-                    Ok(Done::Read { len: n })
-                }
-                Err(raw) if is_media_error(raw) => {
-                    obs.add(Counter::MediaErrors, 1);
-                    Err(Error::Corruption {
-                        kind: CorruptionKind::MediaError,
-                        ctx: c,
-                    })
-                }
-                Err(raw) => Err(Error::Io {
-                    op: Op::Read,
-                    raw,
-                    ctx: c,
-                }),
-            }
+            return settle_read(store, state, start, end, buf, result)
+                .map(|len| Done::Read { len });
         }
-        Kind::Sync(_) | Kind::All => Err(not_written(
-            NotWrittenCause::Interrupted,
-            ErrorContext::default(),
-        )),
-    }
-}
-
-/// A durable write's receipt, backed by flush `need` (`u64::MAX` on a
-/// power-safe store): a prefix receipt through `prefix` for an append whose
-/// region was complete that far (published as the region's durable
-/// frontier), else one for the write's own range.
-fn durable_receipt<P: Platform>(
-    store: &Store<P>,
-    live: &Live,
-    t: &WriteTicket,
-    prefix: Option<u64>,
-    need: u64,
-) -> DurableReceipt
-where
-    P::Queue: Send,
-{
-    match (prefix, live.pass.as_ref().map(OwnedPass::get)) {
-        (Some(through), Some(state)) => {
-            let synced = need != u64::MAX;
-            if let Some(f) = state.frontier.as_ref() {
-                if synced {
-                    f.publish_synced(through);
-                } else {
-                    f.publish_durable(through);
-                }
-            }
-            store.receipt(state, 0, through, need, true, synced)
+        Kind::Sync(_) | Kind::All => {
+            return Err(not_written(
+                NotWrittenCause::Interrupted,
+                ErrorContext::default(),
+            ));
         }
-        _ => store.receipt_for(t, need),
-    }
-}
-
-/// A failed flush's error, located at the write it was for.
-fn in_range(e: Error, t: &WriteTicket) -> Error {
-    match e {
-        Error::DurabilityUnknown { op, raw, .. } => Error::DurabilityUnknown {
-            op,
-            raw,
-            ctx: ErrorContext {
-                region: Some(t.region),
-                range: Some(ByteRange {
-                    start: t.start,
-                    end: t.end,
-                }),
-            },
-        },
-        other => other,
-    }
-}
-
-fn written(ticket: WriteTicket) -> Done {
-    Done::Written(Written {
-        ticket,
-        receipt: None,
+    };
+    settle_write(store, state, wrote, full, result.err(), prefix).map(|ticket| {
+        Done::Written(Written {
+            ticket,
+            receipt: None,
+        })
     })
+}
+
+/// The region a row's pass was admitted to (`None` for barriers).
+fn region(live: &Live) -> Option<&LiveRegion> {
+    live.pass.as_ref().map(|p| &**p.get())
 }

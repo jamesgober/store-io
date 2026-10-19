@@ -53,7 +53,7 @@ fn stream_of(n: usize, size: usize) -> u64 {
 pub fn run(ctx: &Ctx) -> Section {
     let mut sec = Section::new("caller-batch", "W3: caller batch (N records, one barrier)");
     sec.method = vec![
-        format!("N in {COUNTS:?}, record sizes {SIZES:?} bytes; one commit = N records made durable by one barrier; commits run back to back on one thread. Each point ends at the time box or after {MAX_COMMITS} measured commits, whichever comes first."),
+        format!("N in {COUNTS:?}, record sizes {SIZES:?} bytes; one commit = N records made durable by one barrier; commits run back to back on one thread. Each point ends at the time box or after {MAX_COMMITS} measured commits, whichever comes first; fsys's journal also at {} GiB of records, warm-up included, where store-io's region ends (the journal grows without bound).", REGION_CAP >> 30),
         "store-io (a) `N x append + sync_through`: each append is its own write, padded to a block (documented behaviour). (b) `AppendBatch`: records packed back to back into pooled buffers, `commit()` = one reservation, the fewest writes (largest pooled buffer 1 MiB), one barrier. A fresh store per (N, size).".to_owned(),
         format!("raw (a') N writes of one zero-padded block each, then one flush; (b') the N records packed into one aligned buffer padded to a block, one write, one flush. Primitive: {}. A ready 1 GiB file, offsets cycling.", crate::raw::PRIMITIVE),
         "fsys: `append` x N + `sync_through(last lsn)`, and `append_batch(&records)` + `sync_through`, on a fresh journal per point, window off.".to_owned(),
@@ -439,7 +439,14 @@ fn fsys_point(ctx: &Ctx, n: usize, size: usize, batch: bool) -> Point {
             .journal_with(&path, Journal::WindowOff.options())
             .map_err(|e| fserr("journal_with", &e))?;
         let mut bufs: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; size]).collect();
+        // The journal grows with every commit: it ends, warm-up included,
+        // at store-io's region capacity (where store-io's own window is
+        // cut), so a fast machine cannot fill the device.
+        let cap = (REGION_CAP / (n * size) as u64).max(1);
         let run = time_boxed_capped(ctx, MAX_COMMITS, &Snap::os, |c| {
+            if c >= cap {
+                return Ok(Step::Full);
+            }
             for (k, b) in bufs.iter_mut().enumerate() {
                 ctx.pool.fill(stream, c * n as u64 + k as u64, b);
             }

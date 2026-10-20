@@ -7,6 +7,7 @@ pub mod concurrent;
 pub mod gates;
 pub mod gates_extra;
 pub mod gates_g1;
+pub mod gates_g15;
 pub mod gates_scan;
 pub mod gates_seq;
 pub mod lone;

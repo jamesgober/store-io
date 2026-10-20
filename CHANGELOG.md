@@ -11,6 +11,27 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `store-io-buf`: **the buffer pool hands out the most recently returned
+  buffer first.** Each size class's free list is now a lock-free stack
+  (`IndexStack`, new and public) in place of a first-in-first-out queue,
+  so the next operation reuses a buffer that is still in the CPU's caches.
+  First-in-first-out rotated through every buffer of a class: 1 MiB appends
+  kept 8 deep at memory speed ran 7-10% slower that way (64 buffers
+  rotating against 9, measured on CI). It also keeps fewer buffers
+  resident: only about as many as are in use at once are ever touched.
+  Allocation-free and blocking-free as before; `IndexQueue` stays public. A class now holds at most 16,777,215
+  buffers (`IndexStack::MAX_CAPACITY`; the head word keeps a 40-bit tag
+  against ABA), and a larger count is a configuration error.
+- Tests: the loom models of `store-io-buf` no longer yield in their retry
+  loops. Loom never offers a thread a value it read before yielding, so a
+  stale read on a retry was never tried: without a preemption bound, a
+  missing release on the stack's push survived. Mutation entries can now
+  run under loom (`dev/tools/mutate.py`, bounded as the CI loom job is);
+  five new ones cover the stack's tag and memory orders and the queue's
+  publish. `store-io-buf` changes now trigger the mutation workflow.
+
 ---
 
 ## [0.4.1] - 2026-10-20

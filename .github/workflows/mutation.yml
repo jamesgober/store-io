@@ -15,6 +15,7 @@ on:
       - "crates/store-io-core/**"
       - "crates/store-io-platform/**"
       - "crates/store-io-posix/**"
+      - "crates/store-io-buf/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
   pull_request:
@@ -26,6 +27,7 @@ on:
       - "crates/store-io-core/**"
       - "crates/store-io-platform/**"
       - "crates/store-io-posix/**"
+      - "crates/store-io-buf/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
   workflow_dispatch:

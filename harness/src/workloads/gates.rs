@@ -14,8 +14,8 @@
 //! - ELSEWHERE: measured by another check (cited).
 
 use super::{
-    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_scan, gates_seq, lone, page_batch,
-    remove, sequential,
+    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g15, gates_scan, gates_seq, lone,
+    page_batch, remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -318,9 +318,6 @@ pub fn run(ctx: &Ctx) -> Section {
             "write",
         ));
         g6.push(gates_seq::seq_write(ctx));
-    }
-    if let Some(e) = remove(&file) {
-        sec.anomalies.push(e);
     }
     let fio_runs = [
         ("fio durable (1)", &fio_d1),
@@ -795,35 +792,26 @@ pub fn run(ctx: &Ctx) -> Section {
         },
     });
     // G15: concurrent writers share flushes: one and eight writers
-    // alternated three times (medians), W2's own points for reference.
-    let w15: Vec<Point> = (0..3)
-        .flat_map(|_| {
-            [
-                concurrent::store_point(ctx, 1),
-                concurrent::store_point(ctx, 8),
-            ]
-        })
-        .collect();
-    let side = |k: usize, m: &str| -> Vec<f64> {
-        w15.iter()
-            .skip(k)
-            .step_by(2)
-            .filter_map(|p| val(p, m))
-            .collect()
-    };
-    let (one, eight, f8s) = (
-        side(0, "ops_per_s"),
-        side(1, "ops_per_s"),
-        side(1, "flushes_per_op"),
-    );
-    let whole = one.len() == 3 && eight.len() == 3 && f8s.len() == 3;
-    let (o1, o8, f8) = (med(&one), med(&eight), med(&f8s));
+    // alternated three times (medians), then fio's eight-writer controls on
+    // the laid-out file (`gates_g15`), W2's own points for reference. Last,
+    // as before, so its fio load precedes no other gate.
+    let g15 = gates_g15::measure(ctx, &mut |a: &[&str]| job(a, "write"), val);
+    sec.anomalies.extend(g15.fio_errors.iter().cloned());
+    if let Some(e) = remove(&file) {
+        sec.anomalies.push(e);
+    }
+    let (one, eight) = (&g15.one, &g15.eight);
+    let whole = g15.whole();
+    let (o1, o8, f8) = (med(one), med(eight), med(&g15.flushes_at_eight));
     rows.push(Row {
         id: "G15",
         gate: "Concurrent writers: durable ops/s rises with writers through flush sharing (8 writers at least 1.5x one, under 0.9 flushes per op; medians of 3 alternated runs)",
         measured: format!(
-            "1 writer {one:.0?} /s, 8 writers {eight:.0?} /s, {} flushes per op at 8",
-            f(f8, 2)
+            "1 writer {one:.0?} /s, 8 writers {eight:.0?} /s, {} flushes per op at 8; fio 8 writers ({}): writes alone {:.0?} /s, each flushed {:.0?} /s",
+            f(f8, 2),
+            fio::sync_engine(),
+            g15.fio_writes,
+            g15.fio_durable
         ),
         verdict: match (whole, o1, o8, f8) {
             (true, Some(a), Some(b), Some(x)) if b >= 1.5 * a && x < 0.9 => Verdict::Pass,
@@ -887,7 +875,7 @@ pub fn run(ctx: &Ctx) -> Section {
     pts.extend(g5);
     pts.extend(g6);
     pts.extend(g4);
-    pts.extend(w15);
+    pts.extend(g15.points);
     sec.points = pts;
     for s in [&l1, &l2, &w2, &w3, &w4, &w5] {
         sec.anomalies.extend(s.anomalies.iter().cloned());

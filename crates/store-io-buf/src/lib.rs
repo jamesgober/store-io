@@ -18,10 +18,12 @@ pub mod arena;
 mod pad;
 pub mod pool;
 mod queue;
+mod stack;
 mod sync;
 mod wipe;
 
 pub use pad::CachePadded;
 pub use pool::{BufPool, ClassSpec, Exhausted, IoBuf, PoolConfig, PoolError};
 pub use queue::IndexQueue;
+pub use stack::IndexStack;
 pub use wipe::wipe;

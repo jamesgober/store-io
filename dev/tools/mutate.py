@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Mutation check for store-io's durability call sites (Directives section 4.7, D-086).
 
-Each entry is (file, pattern, replacement[, packages]): a plausible bug at a
+Each entry is (file, pattern, replacement[, packages[, env]]): a plausible bug at a
 flush, barrier, poison, directory-sync, generation-bump, accounting or
 buffer-ownership site. For each one the pattern is replaced (it must occur
 exactly once), the tests of `packages` run (default: the engine and the
-simulator), and the source is restored. A mutation the tests do not kill is a
+simulator) with `env` added to the environment, and the source is restored.
+A mutation the tests do not kill is a
 survivor, and one that does not compile is invalid; either fails the run.
 Entries whose packages are Linux-only are skipped on other systems, and
 reported as skipped.
@@ -27,6 +28,13 @@ LINUX_ONLY = {"store-io-posix"}
 # The observer's own tests (feature `observe`).
 OBSERVE = ["-p", "store-io-core", "--features", "store-io-core/observe"]
 SUB = "crates/store-io-engine/src/submitter/mod.rs"
+# The buffer crate's loom models, bounded as the CI loom job runs them
+# (loom's bounded and unbounded searches each find bugs the other misses),
+# in a target directory of their own so the normal build stays cached.
+LOOM_BUF = ["-p", "store-io-buf", "--lib", "--release", "loom"]
+LOOM = {"RUSTFLAGS": "--cfg loom", "LOOM_MAX_PREEMPTIONS": "3",
+        "CARGO_TARGET_DIR": os.path.join(ROOT, "target", "loom")}
+STACK = "crates/store-io-buf/src/stack.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -244,6 +252,19 @@ M = [
  # G1: a flush leader notifies only when a follower is registered
  ('crates/store-io-engine/src/domain.rs', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 0 {', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 1 {'),
  ('crates/store-io-engine/src/domain.rs', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = self.poison.set(FirstCause {', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = Some(FirstCause {'),
+ # The pool's LIFO free list: a head without its tag lets a pop install a
+ # stale `next` after another thread popped and pushed back (ABA), handing
+ # out a buffer that is still held; a push that publishes its value without
+ # release lets a popper read its `next` before it was written
+ (STACK, '    (tag << TOP_BITS) | u64::from(top_plus_one)', '    let _ = tag;\n    u64::from(top_plus_one)', LOOM_BUF, LOOM),
+ (STACK, '                pack(tag.wrapping_add(1), value + 1),\n                Ordering::Release,', '                pack(tag.wrapping_add(1), value + 1),\n                Ordering::Relaxed,', LOOM_BUF, LOOM),
+ # a pop that reads the head without acquiring it can read the `next` of
+ # an entry from before that entry was pushed
+ (STACK, '        let mut head = self.head.load(Ordering::Acquire);\n        loop {\n            let (tag, top) = unpack(head);\n            let index', '        let mut head = self.head.load(Ordering::Relaxed);\n        loop {\n            let (tag, top) = unpack(head);\n            let index', LOOM_BUF, LOOM),
+ (STACK, '                pack(tag.wrapping_add(1), below),\n                Ordering::Acquire,\n                Ordering::Acquire,', '                pack(tag.wrapping_add(1), below),\n                Ordering::Acquire,\n                Ordering::Relaxed,', LOOM_BUF, LOOM),
+ # The bounded queue (public): a push that publishes its slot without
+ # release lets a popper read the value before it was written
+ ('crates/store-io-buf/src/queue.rs', '                        cell.seq.store(pos.wrapping_add(1), Ordering::Release);', '                        cell.seq.store(pos.wrapping_add(1), Ordering::Relaxed);', LOOM_BUF, LOOM),
 ]
 
 def kill_stuck_tests():
@@ -262,6 +283,7 @@ def main():
     for i, entry in enumerate(M):
         f, a, b = entry[:3]
         pkgs = list(entry[3]) if len(entry) > 3 else ENGINE
+        env = {**os.environ, **entry[4]} if len(entry) > 4 else None
         if only and i not in only:
             continue
         p = os.path.join(ROOT, *f.split("/"))
@@ -286,8 +308,8 @@ def main():
                 # still locked by the previous run can fail a good build); a
                 # second failure means the mutation never ran: invalid.
                 for attempt in range(2):
-                    built = subprocess.run(["cargo", "test", "-q", "--no-run"] + pkgs,
-                                       cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
+                    built = subprocess.run(["cargo", "test", "-q", "--no-run"] + pkgs, cwd=ROOT,
+                                           env=env, capture_output=True, text=True, timeout=TIMEOUT)
                     if built.returncode == 0:
                         break
                     kill_stuck_tests()
@@ -298,8 +320,8 @@ def main():
                     why = f"compile error ({first[:120]})"
                     killed = False
                 else:
-                    r = subprocess.run(["cargo", "test", "-q"] + pkgs,
-                                       cwd=ROOT, capture_output=True, text=True, timeout=TIMEOUT)
+                    r = subprocess.run(["cargo", "test", "-q"] + pkgs, cwd=ROOT,
+                                       env=env, capture_output=True, text=True, timeout=TIMEOUT)
                     killed = r.returncode != 0
                     why = "tests failed" if killed else "SURVIVED"
             except subprocess.TimeoutExpired:

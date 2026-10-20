@@ -64,8 +64,8 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `log2_table_slot: u8` | 14 | Region-table slot size as a power of two (16 KiB holds 253 regions). |
 | `max_io: usize` | 1 MiB | Largest single I/O of the blocking calls, and the batch buffer size. |
 | `max_write: usize` | 4 MiB | Largest single submitter operation: one buffer, one OS write or read (rounded up to a power of two, at most 1 GiB). |
-| `large_buffers: u32` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`). |
-| `buffers_per_class: u32` | 64 | Pooled buffers per size class. |
+| `large_buffers: u32` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`; at most 16,777,215). |
+| `buffers_per_class: u32` | 64 | Pooled buffers per size class (at most 16,777,215). |
 | `queues: usize` | CPU count (0) | I/O queues shared by blocking calls. |
 | `queue_depth: u32` | 64 | Operations in flight per queue. |
 | `t3_pool_threads: u32` | CPU count, at most 32 (0) | Worker threads of the submit pool that runs a page batch's writes and a large read's pieces concurrently on the Linux synchronous tier. Shared by every store on one platform and sized by the first of them that uses it, at most 256; each store opened through the simple API has a platform, and so a pool, of its own. Other backends ignore it. |

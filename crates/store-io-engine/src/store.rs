@@ -48,7 +48,9 @@ pub struct StoreOptions {
     /// Largest single I/O of the blocking layers, and the batch buffer size
     /// (bytes; rounded up to a power of two, 128 KiB to 1 GiB).
     pub max_io: usize,
-    /// Buffers per size class in the pool, up to `max_io`.
+    /// Buffers per size class in the pool, up to `max_io` (at most
+    /// 16,777,215; more fails `create` and `open` with
+    /// `NotWritten(PoolExhausted)`).
     pub buffers_per_class: u32,
     /// Largest single write or read a `Submitter` takes, from one buffer, as
     /// one OS write or read operation (bytes; rounded up to a power of two,
@@ -56,12 +58,13 @@ pub struct StoreOptions {
     /// used by submitters only (D-101). Ignored when not above `max_io`.
     pub max_write: usize,
     /// Buffers of `max_write` bytes in the pool (0: none, so a submitter's
-    /// largest operation is `max_io`). The defaults add 32 MiB on top of
-    /// about 128 MiB of ordinary buffers per store: Windows charges the
-    /// whole pool to the commit limit at creation; on both systems a buffer
-    /// becomes resident when first used, and buffers are used in turn. A
-    /// pool too large to map fails `create` and `open` with
-    /// `NotWritten(PoolExhausted)`.
+    /// largest operation is `max_io`; at most 16,777,215). The defaults add
+    /// 32 MiB on top of about 128 MiB of ordinary buffers per store: Windows
+    /// charges the whole pool to the commit limit at creation; on both
+    /// systems a buffer becomes resident when first used, and the most
+    /// recently returned buffer of a size is reused first, so only about as
+    /// many as are in use at once become resident. A pool too large to map
+    /// fails `create` and `open` with `NotWritten(PoolExhausted)`.
     pub large_buffers: u32,
     /// Queues shared by the blocking layers (0 = number of CPUs). On Linux
     /// they perform their operations inline on either tier; the parallel

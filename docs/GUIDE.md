@@ -297,8 +297,8 @@ These run only when you call them; store-io never reclaims space on its own.
 | `block_size` | device's | Minimum block size; the device may require more. |
 | `max_io` | 1 MiB | Largest single I/O of the blocking calls, and the batch buffer size. |
 | `max_write` | 4 MiB | Largest single submitter operation: one buffer, one OS write or read (rounded up to a power of two, at most 1 GiB). |
-| `large_buffers` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`). |
-| `buffers_per_class` | 64 | Pooled buffers per size class; bounds how much a batch can stage. |
+| `large_buffers` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`; at most 16,777,215). |
+| `buffers_per_class` | 64 | Pooled buffers per size class (at most 16,777,215); bounds how much a batch can stage. |
 | `queues` | CPU count | I/O queues shared by blocking calls. |
 | `queue_depth` | 64 | Operations in flight per queue. |
 | `t3_pool_threads` | CPU count, at most 32 | Linux synchronous tier: worker threads that run a page batch's writes and a large read's pieces concurrently, started by the first such call; one pool per platform, sized by the first store on it (each simple-API store has its own). A single write or read never uses them. |

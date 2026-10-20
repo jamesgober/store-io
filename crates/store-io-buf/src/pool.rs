@@ -6,7 +6,7 @@ use core::ptr::NonNull;
 use std::sync::Arc;
 
 use crate::arena::{Arena, ArenaError, Protection};
-use crate::queue::IndexQueue;
+use crate::stack::IndexStack;
 use crate::wipe::wipe;
 
 /// One size class: `count` buffers of `size` bytes.
@@ -14,7 +14,7 @@ use crate::wipe::wipe;
 pub struct ClassSpec {
     /// Buffer size in bytes (a power of two, at least the pool alignment).
     pub size: usize,
-    /// Number of buffers.
+    /// Number of buffers (1 to [`IndexStack::MAX_CAPACITY`], 16,777,215).
     pub count: u32,
 }
 
@@ -58,8 +58,8 @@ impl PoolConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolError {
     /// The configuration is invalid (alignment or a class size is not a
-    /// power of two, a class is smaller than the alignment, a count is zero,
-    /// or the total size overflows).
+    /// power of two, a class is smaller than the alignment, a count is zero
+    /// or above [`IndexStack::MAX_CAPACITY`], or the total size overflows).
     Config(&'static str),
     /// Mapping the arena failed.
     Arena(ArenaError),
@@ -84,7 +84,8 @@ struct Class {
     size: usize,
     base: usize,
     count: u32,
-    free: IndexQueue,
+    /// Free buffers, most recently returned first (warm in the caches).
+    free: IndexStack,
 }
 
 struct Inner {
@@ -140,6 +141,9 @@ impl BufPool {
             if c.count == 0 {
                 return Err(PoolError::Config("class count must be at least 1"));
             }
+            if c.count > IndexStack::MAX_CAPACITY {
+                return Err(PoolError::Config("class count must be at most 16,777,215"));
+            }
             let bytes = c
                 .size
                 .checked_mul(c.count as usize)
@@ -160,9 +164,9 @@ impl BufPool {
         let mut base = 0usize;
         let mut classes = Vec::with_capacity(specs.len());
         for c in &specs {
-            let free = IndexQueue::with_capacity(c.count as usize);
+            let free = IndexStack::with_capacity(c.count);
             for i in 0..c.count {
-                // Capacity ≥ count, so every push succeeds.
+                // Every index is below the capacity, so every push succeeds.
                 let _initial_push = free.push(i);
             }
             classes.push(Class {
@@ -257,7 +261,9 @@ impl BufPool {
     }
 
     /// Buffers currently free in each class, as `(size, free, total)`.
-    /// Approximate under concurrency.
+    /// A diagnostic: it takes each class's free buffers off its list to
+    /// count them, so a concurrent `take` can find the class empty, and the
+    /// count is approximate under concurrency.
     #[must_use]
     pub fn occupancy(&self) -> Vec<(usize, usize, u32)> {
         self.inner
@@ -270,7 +276,9 @@ impl BufPool {
                     held.push(i);
                     n += 1;
                 }
-                for i in held {
+                // Back in the order they came off, so the most recently
+                // returned buffer is on top again.
+                for &i in held.iter().rev() {
                     let _return_push = c.free.push(i);
                 }
                 (c.size, n, c.count)
@@ -397,7 +405,7 @@ impl Drop for IoBuf {
             wipe(self.as_mut_capacity());
         }
         if let Some(class) = self.pool.classes.get(usize::from(self.class)) {
-            // The queue holds every index of the class, so this always fits.
+            // The stack has room for every index of the class.
             let _returned = class.free.push(self.index);
         }
     }
@@ -536,6 +544,39 @@ mod tests {
             sensitive: false,
         };
         assert!(BufPool::new(&zero).is_err());
+        let huge = PoolConfig {
+            align: 4096,
+            classes: vec![ClassSpec {
+                size: 4096,
+                count: IndexStack::MAX_CAPACITY + 1,
+            }],
+            sensitive: false,
+        };
+        assert!(BufPool::new(&huge).is_err());
+    }
+
+    /// The most recently returned buffer is the next one handed out, and
+    /// still is after `occupancy` has counted the free list.
+    #[test]
+    fn test_take_reuses_the_most_recently_returned_buffer() {
+        let p = pool(4);
+        let a = p.take(4096).unwrap_or_else(|_| panic!("exhausted"));
+        let b = p.take(4096).unwrap_or_else(|_| panic!("exhausted"));
+        let (pa, pb) = (a.as_ptr(), b.as_ptr());
+        drop(a);
+        drop(b);
+        let again = p.take(4096).unwrap_or_else(|_| panic!("exhausted"));
+        assert_eq!(
+            again.as_ptr(),
+            pb,
+            "the last buffer returned comes back first"
+        );
+        drop(again);
+        let _counted = p.occupancy();
+        let first = p.take(4096).unwrap_or_else(|_| panic!("exhausted"));
+        let second = p.take(4096).unwrap_or_else(|_| panic!("exhausted"));
+        assert_eq!(first.as_ptr(), pb, "occupancy keeps the order");
+        assert_eq!(second.as_ptr(), pa);
     }
 
     #[test]

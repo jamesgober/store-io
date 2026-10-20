@@ -66,6 +66,13 @@ doc   = false
 bench = false
 
 [[bin]]
+name  = "judge"
+path  = "fuzz_targets/judge.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
 name  = "table_decode"
 path  = "fuzz_targets/table_decode.rs"
 test  = false

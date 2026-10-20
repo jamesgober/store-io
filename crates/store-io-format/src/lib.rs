@@ -19,6 +19,7 @@
 pub mod codec;
 pub mod crc32c;
 pub mod fill;
+pub mod judge;
 pub mod meta;
 pub mod meta2;
 pub mod pair;

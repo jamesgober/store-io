@@ -35,6 +35,22 @@
   slot object. Payload lengths are exact. Tests for every rule and every
   truncation, a fuzz target (`meta2_decode`, canonical round trips), and 21
   mutation entries.
+- `store-io-format`: **the format-2 tear judgement** (`judge`): given both
+  slots of the volume record and every table page (status and header
+  facts), it decides each pair's standing (Confirmed, Unconfirmed, Lost,
+  Refused for a newer format, which fails the open),
+  which failed copy is the one metadata write a crash can leave torn (to be
+  healed), and whether the open may write. A failed copy is that write only
+  if it is the next generation chained to the winner, its `meta_seq` is one
+  above every other numbered slot (or its header is unreadable), it is the
+  only such copy, and the store was not closed cleanly; a page's torn
+  write is healed only when nothing else is damaged, the volume record's
+  whenever it is the one candidate; an unreadable copy is always damage; a
+  damaged or lost volume record disables page healing (and, with a page
+  candidate, writing). Pure and allocation-free. 29 tests on slots written
+  by a small store model, a fuzz target (`judge`) that checks heal,
+  refusal, writability and every pair's standing against a brute-force
+  reference written from the specification, and 25 mutation entries.
 
 ### Changed
 

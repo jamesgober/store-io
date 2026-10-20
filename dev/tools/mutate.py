@@ -39,6 +39,7 @@ STACK = "crates/store-io-buf/src/stack.rs"
 FORMAT = ["-p", "store-io-format"]
 SLOT = "crates/store-io-format/src/slot.rs"
 META2 = "crates/store-io-format/src/meta2.rs"
+JUDGE = "crates/store-io-format/src/judge.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -308,6 +309,45 @@ M = [
  (META2, '        if self.capacity % block != 0 || self.data_size % unit != 0 {', '        if self.capacity % unit != 0 || self.data_size % unit != 0 {', FORMAT),
  (META2, '            if self.extent_count != 0 || self.capacity != 0 || self.data_size != 0 {', '            if self.extent_count != 0 || self.data_size != 0 {', FORMAT),
  (META2, '        let more = if self.kind == RegionKind::Slot { 0 } else { 1 };', '        let more = if self.kind == RegionKind::Slot { 1 } else { 1 };', FORMAT),
+ # The format-2 tear judgement: blank opposite a later generation is
+ # damage; a candidate is the next generation chained to the winner; an
+ # older copy and the predecessor are only reported; a candidate's number
+ # is one above every other numbered slot (damaged ones included); refused
+ # and forked pairs are lost; a clean close, two candidates or a damaged
+ # volume record leave nothing in flight; a damaged volume record with a
+ # page candidate makes the open read-only
+ (JUDGE, '                && n.prev_header_crc32c == winner.header_crc32c', '                && true', FORMAT),
+ (JUDGE, '            Some(n) if n.generation < g => Opposite::OlderDamaged,', '            Some(n) if n.generation <= g + 1 => Opposite::OlderDamaged,', FORMAT),
+ (JUDGE, '            Some(f) if g >= 2 && f.stored_header_crc32c == winner.prev_header_crc32c => {', '            Some(f) if f.stored_header_crc32c == winner.prev_header_crc32c => {', FORMAT),
+ (JUDGE, '                            Some(m) => others_max(Some(m)).checked_add(1) == Some(m),', '                            Some(m) => others_max(Some(m)).checked_add(1) != Some(0),', FORMAT),
+ (JUDGE, '        Some(v) if v == max1 && max1_count == 1 => max2,', '        Some(v) if v == max1 => max2,', FORMAT),
+ (JUDGE, '        SlotStatus::BadPayloadCrc => s.facts.and_then(|f| f.numbered).map(|n| n.meta_seq),', '        SlotStatus::BadPayloadCrc => None,', FORMAT),
+ (JUDGE, '        if refused(&p.a.status) || refused(&p.b.status) {', '        if refused(&p.a.status) && refused(&p.b.status) {', FORMAT),
+ (JUDGE, '                if a.generation == b.generation {', '                if a.generation == b.generation && false {', FORMAT),
+ (JUDGE, '                        page_had_candidate |= i > 0;', '                        page_had_candidate |= i > 99;', FORMAT),
+ # (judgement, after its review) only slot B may be blank opposite a
+ # first write; a header-torn copy with no facts is damage; a refused pair
+ # is refused, not lost; damage anywhere blocks healing; clean needs a
+ # confirmed volume record with no candidate; refused, lost and damaged
+ # volume records forbid writing
+ (JUDGE, '        SlotStatus::Blank if g == 1 && o_is_b => Opposite::Nothing,', '        SlotStatus::Blank if g == 1 && (o_is_b || true) => Opposite::Nothing,', FORMAT),
+ (JUDGE, '        SlotStatus::Blank if g == 1 && o_is_b => Opposite::Nothing,', '        SlotStatus::Blank if o_is_b => Opposite::Nothing,', FORMAT),
+ (JUDGE, '            None => Opposite::Damage,', '            None => Opposite::Candidate(None),', FORMAT),
+ (JUDGE, '            *o = PairVerdict::REFUSED;', '            *o = PairVerdict { standing: Standing::Lost, ..PairVerdict::REFUSED };', FORMAT),
+ (JUDGE, '    let troubled = out.iter().any(|v| v.standing != Standing::Confirmed);', '    let troubled = out.iter().any(|v| v.standing == Standing::Refused);', FORMAT),
+ (JUDGE, '    let clean = out[0].standing == Standing::Confirmed && !volume_has_candidate && clean_close;', '    let clean = out[0].standing == Standing::Confirmed && (!volume_has_candidate || true) && clean_close;', FORMAT),
+ (JUDGE, '    let clean = out[0].standing == Standing::Confirmed && !volume_has_candidate && clean_close;', '    let clean = !volume_has_candidate && clean_close;', FORMAT),
+ (JUDGE, '    let writable = !refused\n        && !volume_lost\n', '    let writable = !volume_lost\n', FORMAT),
+ (JUDGE, '        && !volume_lost\n        && (out[0].standing', '        && (!volume_lost || true)\n        && (out[0].standing', FORMAT),
+ (JUDGE, '        && (out[0].standing != Standing::Unconfirmed || !page_had_candidate);', '        && (out[0].standing != Standing::Unconfirmed || !page_had_candidate || true);', FORMAT),
+ # the trouble rule applies to page candidates only; a volume candidate
+ # heals unless another candidate or a refused pair exists
+ (JUDGE, '    let page_demote = clean || candidates != 1 || troubled;', '    let page_demote = candidates != 1 || troubled;', FORMAT),
+ (JUDGE, '    let page_demote = clean || candidates != 1 || troubled;', '    let page_demote = clean || candidates > 99 || troubled;', FORMAT),
+ (JUDGE, '    let page_demote = clean || candidates != 1 || troubled;', '    let page_demote = clean || candidates != 1 || troubled && false;', FORMAT),
+ (JUDGE, '    let volume_demote = candidates != 1 || refused;', '    let volume_demote = candidates > 99 || refused;', FORMAT),
+ (JUDGE, '    let volume_demote = candidates != 1 || refused;', '    let volume_demote = candidates != 1 || refused && false;', FORMAT),
+ (JUDGE, '                let demote = if i == 0 { volume_demote } else { page_demote };', '                let demote = if i == 0 { page_demote || volume_demote } else { page_demote };', FORMAT),
 ]
 
 def kill_stuck_tests():

@@ -11,6 +11,15 @@
 
 ## [Unreleased]
 
+---
+
+## [0.4.1] - 2026-10-20
+
+A patch release for one defect, present since 0.3.0: a region release
+running at the same time as a provisioning on another thread could destroy
+the new region's data. The on-disk format and the public API are
+unchanged. See `docs/release/v0.4.1.md`.
+
 ### Fixed
 
 - `store-io-engine`: **a release could destroy a region provisioned during
@@ -29,6 +38,10 @@
   deallocated (deterministic, through a simulator hook); a region placed in
   just-released space keeps its durable bytes across a reopen. Mutation
   entry killed. Found in the v0.5 design review.
+- Harness: G6 stamps only the ends of each block inside its timed loop (a
+  full stamp was a memory pass per MiB that fio never makes, which a fast
+  runner exposed), and W3's store-io regions are sized for 100,000 commits
+  a second (a fast device's warm-up exhausted them).
 
 ---
 
@@ -984,7 +997,8 @@ The project scaffold. Reserves the crate name; no public API.
   `.gitattributes`, `.github/FUNDING.yml`.
 - `docs/API.md` and `docs/release/v0.1.0.md`.
 
-[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jamesgober/store-io/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jamesgober/store-io/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/jamesgober/store-io/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jamesgober/store-io/compare/v0.1.0...v0.3.0

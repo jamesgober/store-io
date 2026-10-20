@@ -212,7 +212,7 @@ checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
 
 [[package]]
 name = "store-io-buf"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "loom",
@@ -222,11 +222,11 @@ dependencies = [
 
 [[package]]
 name = "store-io-core"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "store-io-format"
-version = "0.4.0"
+version = "0.4.1"
 
 [[package]]
 name = "store-io-fuzz"
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-platform"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "store-io-buf",
  "store-io-core",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-posix"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "loom",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-win"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "store-io-buf",
  "store-io-core",

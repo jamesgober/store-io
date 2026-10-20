@@ -13,6 +13,15 @@
 
 ### Changed
 
+- **Breaking:** `StoreOptions::append_ring` (blocks) is now
+  `StoreOptions::append_window` (bytes, default 16 MiB, the same reach as
+  before at 4 KiB blocks). In blocks, the reach shrank with the block size:
+  at 512 B blocks the old default held only 2 MiB ahead. Renamed rather
+  than reinterpreted, so old settings fail to compile instead of silently
+  meaning something else. The window is rounded down to a power of two
+  blocks, so it never exceeds what was asked; a region smaller than the
+  window gets a ring of its own size rounded up, so it never pays for a
+  large ring and never limits its own appends.
 - `store-io-buf`: **the buffer pool hands out the most recently returned
   buffer first.** Each size class's free list is now a lock-free stack
   (`IndexStack`, new and public) in place of a first-in-first-out queue,
@@ -21,8 +30,8 @@
   kept 8 deep at memory speed ran 7-10% slower that way (64 buffers
   rotating against 9, measured on CI). It also keeps fewer buffers
   resident: only about as many as are in use at once are ever touched.
-  Allocation-free and blocking-free as before; `IndexQueue` stays public. A class now holds at most 16,777,215
-  buffers (`IndexStack::MAX_CAPACITY`; the head word keeps a 40-bit tag
+  Allocation-free and blocking-free as before; `IndexQueue` stays public.
+  A class now holds at most 16,777,215 buffers (`IndexStack::MAX_CAPACITY`; the head word keeps a 40-bit tag
   against ABA), and a larger count is a configuration error.
 - Tests: the loom models of `store-io-buf` no longer yield in their retry
   loops. Loom never offers a thread a value it read before yielding, so a
@@ -31,6 +40,23 @@
   run under loom (`dev/tools/mutate.py`, bounded as the CI loom job is);
   five new ones cover the stack's tag and memory orders and the queue's
   publish. `store-io-buf` changes now trigger the mutation workflow.
+- Harness: G2 (the barrier alone against the raw flush alone, p50 and
+  p99) is measured in 20 alternated rounds and judged as G1 is, instead of
+  comparing two windows measured one after the other (a virtual machine's
+  flush drifts between windows by more than the gate).
+- Roadmap: 1.0 is the stable API and container format, proven on the
+  hardware available; power-cut certification and the power-safe
+  reference measurements move to 1.x (they add evidence without changing
+  the API or the format).
+
+### Fixed
+
+- `store-io-core`: the out-of-space and media-error checks matched Linux
+  error numbers on every system. On macOS, 61 and 74 (ECONNREFUSED,
+  EPROGUNAVAIL) would have counted as media errors, EBADMSG (94) would
+  not, and EDQUOT is 69, not 122. Each system's numbers are now matched
+  against its own; on systems other than Linux and macOS only the numbers
+  every Unix shares count (no change on Linux or Windows).
 
 ---
 

@@ -236,7 +236,11 @@ where
                     0,
                     data_size,
                     u32::from(inner.layout.log2_block),
-                    inner.opts.append_ring,
+                    crate::frontier::ring_for(
+                        inner.opts.append_window,
+                        data_size,
+                        u32::from(inner.layout.log2_block),
+                    ),
                 )
             }),
             positioned: std::sync::atomic::AtomicBool::new(true),

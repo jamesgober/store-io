@@ -26,7 +26,7 @@ fn opts() -> StoreOptions {
     StoreOptions {
         queues: 2,
         buffers_per_class: 8,
-        append_ring: 256,
+        append_window: 256 << 12,
         max_io: CHUNK,
         ..StoreOptions::default()
     }
@@ -124,13 +124,13 @@ fn test_padding_and_lent_bytes_are_zero_even_in_reused_buffers() {
 
 #[test]
 fn test_appends_wait_rather_than_fail_when_the_ring_is_full() {
-    // A ring of 4 blocks with appends of up to 40 blocks from 4 threads:
+    // A window of 4 blocks with appends of up to 40 blocks from 4 threads:
     // reservations routinely run past the ring, and must wait, not fail.
     let p = SimPlatform::new(SimConfig::volatile(12));
     let s = create_with(
         &p,
         StoreOptions {
-            append_ring: 4,
+            append_window: 4 << 12,
             ..opts()
         },
     );

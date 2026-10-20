@@ -64,7 +64,7 @@ impl Gated for LiveRegion {
 ///   but it counts as written only once its completion is processed by
 ///   this submitter's `reap` or `wait`. Until then, on that region, from
 ///   any thread: `sync_through` of any later append waits for it, and an
-///   append starting more than `StoreOptions::append_ring` blocks past it
+///   append starting more than `StoreOptions::append_window` bytes past it
 ///   waits (blocking calls) or is refused `NotWritten(TooManyInFlight)`
 ///   (submitters). Reap your own appends before syncing or appending far
 ///   past them, or the thread waits for itself.

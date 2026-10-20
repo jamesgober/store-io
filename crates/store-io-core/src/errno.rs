@@ -60,8 +60,7 @@ pub fn classify(stage: Stage, raw: OsError) -> ErrorKind {
 #[must_use]
 pub fn is_no_space(raw: OsError) -> bool {
     match raw.source {
-        // ENOSPC = 28, EDQUOT = 122 (Linux) / 69 (macOS).
-        OsErrorSource::Errno => matches!(raw.code, 28 | 122 | 69),
+        OsErrorSource::Errno => errno_no_space(raw.code),
         // ERROR_HANDLE_DISK_FULL = 39, ERROR_DISK_FULL = 112,
         // ERROR_DISK_QUOTA_EXCEEDED = 1295.
         OsErrorSource::Win32 => matches!(raw.code, 39 | 112 | 1295),
@@ -104,9 +103,7 @@ pub fn is_not_found(raw: OsError) -> bool {
 #[must_use]
 pub fn is_media_error(raw: OsError) -> bool {
     match raw.source {
-        // EIO = 5, ENODATA = 61, EBADMSG = 74 (checksum failures on some
-        // file systems), EUCLEAN = 117 (structure needs cleaning).
-        OsErrorSource::Errno => matches!(raw.code, 5 | 61 | 74 | 117),
+        OsErrorSource::Errno => errno_media(raw.code),
         // ERROR_CRC = 23, ERROR_SECTOR_NOT_FOUND = 27, ERROR_READ_FAULT = 30,
         // ERROR_DATA_CHECKSUM_ERROR = 323, ERROR_DEVICE_HARDWARE_ERROR = 483,
         // ERROR_IO_DEVICE = 1117, ERROR_FILE_CORRUPT = 1392,
@@ -151,11 +148,60 @@ pub fn is_unsupported(raw: OsError) -> bool {
     }
 }
 
+// Errno numbers differ between systems (and between Linux architectures:
+// these are the asm-generic numbers of x86, Arm and RISC-V), so each table
+// is compiled for its own system. Elsewhere only the numbers every Unix
+// shares are matched, and anything else counts as a plain failure.
+
+/// Linux: ENOSPC = 28, EDQUOT = 122.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn errno_no_space(code: i32) -> bool {
+    matches!(code, 28 | 122)
+}
+
+/// macOS: ENOSPC = 28, EDQUOT = 69.
+#[cfg(target_vendor = "apple")]
+fn errno_no_space(code: i32) -> bool {
+    matches!(code, 28 | 69)
+}
+
+/// Elsewhere: ENOSPC = 28.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn errno_no_space(code: i32) -> bool {
+    code == 28
+}
+
+/// Linux: EIO = 5, ENODATA = 61, EBADMSG = 74 (checksum failures on some
+/// file systems), EUCLEAN = 117 (structure needs cleaning).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn errno_media(code: i32) -> bool {
+    matches!(code, 5 | 61 | 74 | 117)
+}
+
+/// macOS: EIO = 5, EBADMSG = 94. (61, 74 and 97 are ECONNREFUSED,
+/// EPROGUNAVAIL and ENOLINK there; 117 does not exist.)
+#[cfg(target_vendor = "apple")]
+fn errno_media(code: i32) -> bool {
+    matches!(code, 5 | 94)
+}
+
+/// Elsewhere: EIO = 5.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn errno_media(code: i32) -> bool {
+    code == 5
+}
+
 /// Linux: EINVAL = 22 (fsync on an object without synchronisation), ENOSYS =
 /// 38, EOPNOTSUPP / ENOTSUP = 95.
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn errno_unsupported(code: i32) -> bool {
     matches!(code, 22 | 38 | 95)
+}
+
+/// Elsewhere: nothing counts as unsupported (every error is a failure).
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn errno_unsupported(_code: i32) -> bool {
+    false
 }
 
 /// macOS: EINVAL = 22, ENOTSUP = 45, ENOSYS = 78, EOPNOTSUPP = 102.
@@ -227,7 +273,17 @@ mod tests {
     #[test]
     fn test_space_stage_separates_no_space_from_other_errors() {
         assert_eq!(classify(Stage::Space, errno(28)), ErrorKind::NoSpace);
-        assert_eq!(classify(Stage::Space, errno(122)), ErrorKind::NoSpace);
+        if cfg!(target_vendor = "apple") {
+            assert_eq!(classify(Stage::Space, errno(69)), ErrorKind::NoSpace);
+            assert_eq!(classify(Stage::Space, errno(122)), ErrorKind::Io);
+        } else if cfg!(any(target_os = "linux", target_os = "android")) {
+            assert_eq!(classify(Stage::Space, errno(122)), ErrorKind::NoSpace);
+            assert_eq!(
+                classify(Stage::Space, errno(69)),
+                ErrorKind::Io,
+                "ESRMNT on Linux"
+            );
+        }
         assert_eq!(classify(Stage::Space, win(112)), ErrorKind::NoSpace);
         assert_eq!(classify(Stage::Space, win(1295)), ErrorKind::NoSpace);
         let nt = OsError {
@@ -279,7 +335,13 @@ mod tests {
             code,
             source: OsErrorSource::Errno,
         };
-        assert!(is_unsupported(errno(22)));
+        if cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_vendor = "apple"
+        )) {
+            assert!(is_unsupported(errno(22)));
+        }
         assert!(
             !is_unsupported(errno(5)),
             "EIO is a failure, not unsupported"
@@ -291,7 +353,7 @@ mod tests {
         if cfg!(target_vendor = "apple") {
             assert!(is_unsupported(errno(45)) && is_unsupported(errno(78)));
             assert!(!is_unsupported(errno(38)), "ENOTSOCK on macOS");
-        } else {
+        } else if cfg!(any(target_os = "linux", target_os = "android")) {
             assert!(is_unsupported(errno(38)) && is_unsupported(errno(95)));
             assert!(!is_unsupported(errno(45)), "EL2NSYNC on Linux");
             assert!(!is_unsupported(errno(102)), "ENETRESET on Linux");
@@ -327,7 +389,21 @@ mod tests {
     #[test]
     fn test_media_errors_are_told_apart_from_bad_requests() {
         assert!(is_media_error(errno(5)));
-        assert!(is_media_error(errno(74)));
+        if cfg!(target_vendor = "apple") {
+            assert!(is_media_error(errno(94)));
+            for code in [61, 74, 97, 117] {
+                assert!(
+                    !is_media_error(errno(code)),
+                    "{code} is not a media error on macOS"
+                );
+            }
+        } else if cfg!(any(target_os = "linux", target_os = "android")) {
+            for code in [61, 74, 117] {
+                assert!(is_media_error(errno(code)));
+            }
+            assert!(!is_media_error(errno(94)), "ESOCKTNOSUPPORT on Linux");
+            assert!(!is_media_error(errno(97)), "EAFNOSUPPORT on Linux");
+        }
         assert!(!is_media_error(errno(22)));
         assert!(!is_media_error(errno(9)));
         let win = |code| OsError {

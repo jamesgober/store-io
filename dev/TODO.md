@@ -1,15 +1,21 @@
 # store-io &mdash; Later List
 
-> Work that is parked, not dropped. Nothing here blocks a usable store-io release; everything here blocks the *certified* 1.0. Each item says what it unlocks. Tick it when done and note the date.
+> Work that is parked, not dropped. Nothing here blocks a usable store-io release or the 1.0 API and format freeze; the hardware items are the 1.x certification (ROADMAP, D-120). Each item says what it unlocks. Tick it when done and note the date.
 
 ---
 
 ## Hardware we do not have yet
 
-- [ ] **Power-loss-protected enterprise NVMe** (for example a used Samsung PM9A3, ~$100-200). Unlocks: the power-safe performance gates (durable write in ~6-12 us) and every "power-safe" measurement.
-- [ ] **Bare-metal Linux box** (any machine that boots Linux directly, not WSL). Unlocks: real Linux latency numbers, kernel-version matrix (5.15, 6.1, 6.6, 6.12, mainline), `blktrace`/`nvme` traces, null_blk CPU ceilings.
-- [ ] **Power-cut rig** (relay that cuts the drive's own power + a second controller logging acknowledgements; ~$300-600 in parts, design in the research notes). Unlocks: proof that acknowledged writes survive real power loss, 500 / 3,000-cycle certification, and certifying (or ruling out) the fast write-through path on Windows.
-- [ ] **A Mac** (one Apple-silicon machine, plus an external Thunderbolt NVMe if possible). Unlocks: macOS flush costs and macOS gates.
+A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux machine (8+ cores, 64 GB ECC, PCIe 4.0) with a consumer NVMe boot drive and a separate power-loss-protected NVMe, "power on after AC loss" in its firmware, a smart plug that cuts its power, and the maintainer's workstation as the power-cut controller. When it arrives it covers the first three items below.
+
+- [ ] **Power-loss-protected enterprise NVMe** (for example a used Samsung PM9A3). Unlocks: the power-safe performance gates (durable write in ~6-12 us) and every "power-safe" measurement.
+- [ ] **Bare-metal Linux box** (the test box). Unlocks: real Linux latency numbers, kernel-version matrix (5.15, 6.1, 6.6, 6.12, mainline), `blktrace`/`nvme` traces, null_blk CPU ceilings.
+- [ ] **Power-cut rig** (the test box, a smart plug cutting its power, the workstation logging acknowledgements over the network and checking them after each reboot). Unlocks: proof that acknowledged writes survive real power loss, 500 / 3,000-cycle certification, and certifying (or ruling out) the fast write-through path on Windows (Windows on a second partition of the test box's boot drive).
+- [ ] **Mac measurements** (the maintainer's MacBook, when offered; an external Thunderbolt NVMe if possible). Unlocks: macOS flush costs per model, beyond the CI runners.
+
+## Later opt-ins (need approval when designed)
+
+- [ ] **Evidence attestation for unprivileged stores** (1.x, D-120): a one-time privileged `store-io probe --attest` records the device evidence (SMART capacitor health, identify data) in a root-owned file; an unprivileged store verifies it at open (device identity, age limit) and may then be classed power-safe. Unlocks: the power-safe fast path without the database holding disk privileges.
 
 ## Measurements waiting on that hardware
 
@@ -36,7 +42,7 @@
 
 ## Found in review (2026-10-12), not yet fixed
 
-- [ ] `errno::is_media_error` matches Linux errno numbers only (61, 74 and 117 mean other things on macOS). Harmless while the posix backend is Linux-only; make it per-OS like `is_unsupported` before the macOS backend (v0.5).
+- [x] (2026-10-20, v0.5) `errno::is_media_error` matches Linux errno numbers only (61, 74 and 117 mean other things on macOS). Harmless while the posix backend is Linux-only; make it per-OS like `is_unsupported` before the macOS backend (v0.5).
 - [ ] A region found unavailable (for example cut off by a short container) has no handle, so it can never be released, and while a truncated one exists the store refuses all growth. The store stays safe but cannot provision again. An explicit, logged repair operation needs a design and James's approval.
 - [ ] The `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` reasons are tested only through their error mapping, never by damaging a real store.
 
@@ -66,8 +72,8 @@
 - [ ] A release whose table update is durable but whose header rewrite then fails (pool exhausted, a lane that cannot be cleared) returns an error for a release that is committed (since 0.3.0). Report it as done with the header write's failure noted, or retry the header write.
 - [ ] A scan visitor that provisions holds a shared lane while it waits for the metadata lock; with every shared lane so held (one is enough with `queues: 1`), provisioning and release, which need a lane under the lock, wait forever (since the visitor-provisioning case existed). Give metadata changes a lane of their own, as the flush leader has.
 
-- [ ] Harness: G2 (barrier p50 + 2 us, p99 + 5 us) compares two consecutive W1 windows, the drift G1 was moved off (gates_g1.rs); give it the same alternation.
-- [ ] `StoreOptions::append_ring` is counted in blocks, so its default (4096) holds only 2 MiB ahead at 512-byte blocks: a `Submitter` appending 1 MiB eight deep there gets `TooManyInFlight` (G6 raises it). A ring sized in bytes, or a default scaled by the block size.
+- [x] (2026-10-20, v0.5) Harness: G2 (barrier p50 + 2 us, p99 + 5 us) compares two consecutive W1 windows, the drift G1 was moved off (gates_g1.rs); give it the same alternation.
+- [x] (2026-10-20, v0.5: `append_window`, in bytes) `StoreOptions::append_ring` is counted in blocks, so its default (4096) holds only 2 MiB ahead at 512-byte blocks: a `Submitter` appending 1 MiB eight deep there gets `TooManyInFlight` (G6 raises it). A ring sized in bytes, or a default scaled by the block size.
 - [ ] Registered io_uring buffers were dropped (D-107: `READ_FIXED` never completes on Linux 6.5.0 and 6.6.0, and no probe tells kernels apart). Bringing them back needs a safe way to tell a fixed kernel from a broken one and a measured gain; a new roadmap item for the maintainer.
 - [ ] Windows: the gates on the dev box are noise-bound (a consumer NVMe whose flush swings 1-4 ms); G2, G6 and one G13b point failed in one run (the G13b point measured at the device floor, three times, when rerun alone; the earlier full run passed G13b 12 of 12). A quieter Windows box (or ETW-timed runs) for a Windows gate of record.
 

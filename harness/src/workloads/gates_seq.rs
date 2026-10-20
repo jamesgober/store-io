@@ -22,9 +22,11 @@ const CHUNK: u64 = 1 << 20;
 const QD: usize = 8;
 /// Appends read back after the run.
 const CHECKS: usize = 256;
-/// The append ring, in blocks: room for QD appends of CHUNK at the
-/// smallest block (512 B), so the depth is never refused as too far ahead.
-const RING: usize = 1 << 16;
+/// The append window, in bytes: far more than QD appends of CHUNK, since on
+/// the synchronous tier the pool completes appends out of order and the
+/// completed prefix can lag well behind the newest one; the depth is then
+/// never refused as too far ahead (as before the window was in bytes).
+const WINDOW: u64 = 256 << 20;
 
 /// Fills the region with 1 MiB appends 8 deep from pool buffers until the
 /// window ends, recycling it whenever it fills; MB/s over the measured
@@ -41,7 +43,7 @@ pub fn seq_write(ctx: &Ctx) -> Point {
         "Submitter append(1 MiB) x QD8 + barrier_all",
     );
     let opts = StoreOptions {
-        append_ring: RING.max(ctx.opts.append_ring),
+        append_window: WINDOW.max(ctx.opts.append_window),
         ..ctx.opts.clone()
     };
     with_store_using(ctx, "g6", &opts, p, |store, p| {
@@ -142,11 +144,10 @@ pub fn seq_write(ctx: &Ctx) -> Point {
         let secs = t0.elapsed().as_secs_f64();
         p.metric("mb_per_s", (secs > 0.0).then(|| bytes as f64 / secs / 1e6));
         p.metric("generations", Some(generation as f64));
-        if opts.append_ring != ctx.opts.append_ring {
+        if opts.append_window != ctx.opts.append_window {
             p.notes.push(format!(
-                "append_ring raised to {} blocks (the default, {}, holds less than QD8 x 1 MiB ahead at 512 B blocks)",
-                opts.append_ring,
-                StoreOptions::default().append_ring
+                "append_window raised to {} bytes (the configured {} leaves QD8 x 1 MiB little slack for out-of-order completions)",
+                opts.append_window, ctx.opts.append_window
             ));
         }
         drop(sub);

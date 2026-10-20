@@ -14,8 +14,8 @@
 //! - ELSEWHERE: measured by another check (cited).
 
 use super::{
-    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g15, gates_scan, gates_seq, lone,
-    page_batch, remove, sequential,
+    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_scan,
+    gates_seq, lone, page_batch, remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -52,8 +52,6 @@ struct Row {
     verdict: Verdict,
 }
 
-/// `store` against `base + margin` (lower is better), with the baseline's
-/// spread deciding what this machine can resolve.
 /// A latency gate's margin over `base`: on Linux `us` microseconds, on
 /// Windows and macOS 3% (dev/ROADMAP.md, flush-required devices).
 fn margin(us: f64, base: Option<f64>) -> f64 {
@@ -61,18 +59,6 @@ fn margin(us: f64, base: Option<f64>) -> f64 {
         us
     } else {
         base.map_or(0.0, |b| 0.03 * b)
-    }
-}
-
-fn at_most(store: Option<f64>, base: Option<f64>, margin: f64, spread: f64) -> Verdict {
-    // A baseline that is not a positive, finite number judges nothing.
-    let base = base.filter(|b| b.is_finite() && *b > 0.0);
-    let spread = if spread.is_finite() { spread } else { 0.0 };
-    match (store, base) {
-        (Some(s), Some(b)) if s <= b + margin => Verdict::Pass,
-        (Some(s), Some(b)) if s <= b + margin + spread => Verdict::NotResolvable,
-        (Some(_), Some(_)) => Verdict::Fail,
-        _ => Verdict::Fail,
     }
 }
 
@@ -239,9 +225,9 @@ pub fn run(ctx: &Ctx) -> Section {
         "Performance gates (flush-required device; relative, Unverified per D-066)",
     );
     sec.method = vec![
-        "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS) and `gates_g1` (G1, alternated rounds).".to_owned(),
+        "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS), and `gates_g1` and `gates_g2` (G1 and G2, alternated rounds).".to_owned(),
         "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (W1 run twice for the raw primitive; each fio control a gate uses run twice); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
-        "G1 is measured in 20 alternated rounds (`gates_g1`): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate.".to_owned(),
+        "G1 and G2 are measured in 20 alternated rounds (`gates_g1`, `gates_g2`, G2 at p50 and p99): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate.".to_owned(),
         "The latency gates (+2 µs, +5 µs) are far below the spread of a virtual disk's flush (milliseconds): on such a disk they are expected to be NOT RESOLVABLE; certified results need bare metal (dev/TODO.md).".to_owned(),
     ];
     let l1 = lone::run(ctx);
@@ -356,6 +342,7 @@ pub fn run(ctx: &Ctx) -> Section {
     let g8b = gates_extra::blocking_allocs(ctx);
     let g10 = gates_extra::qos(ctx);
     let (g1, g1_rounds) = gates_g1::alternated(ctx);
+    let g2 = gates_g2::alternated(ctx);
     // Registration is io_uring's (Linux).
     let g3d = if cfg!(target_os = "linux") {
         gates_extra::registration(ctx)
@@ -410,28 +397,43 @@ pub fn run(ctx: &Ctx) -> Section {
             _ => Verdict::Fail,
         },
     });
-    // G2: barrier alone, against the raw flush alone.
-    fn split(s: &Section) -> Option<&Point> {
-        find(s, System::StoreIo, "halves timed separately", None)
-    }
-    for (q, k, us) in [("p50", "sync_p50_us", 2.0), ("p99", "sync_p99_us", 5.0)] {
-        let (a, b) = (get(split(&l1), k), get(split(&l2), k));
-        let (c, d) = (get(raw(&l1), k), get(raw(&l2), k));
-        let spr = spread(c, d);
+    // G2: barrier alone, against the raw flush alone, at p50 and p99:
+    // alternated rounds (`gates_g2`), judged as G1 is.
+    for (q, us) in [("p50", 2.0), ("p99", 5.0)] {
+        let fin = |k: String| val(&g2, &k).filter(|v: &f64| v.is_finite());
+        let raw_q = fin(format!("raw_{q}_us"));
+        let (m, lo, hi, pooled) = (
+            fin(format!("diff_{q}_us")),
+            fin(format!("diff_{q}_lo_us")),
+            fin(format!("diff_{q}_hi_us")),
+            fin(format!("pooled_{q}_us")),
+        );
+        let gate_margin = margin(us, raw_q);
+        let d = m.zip(pooled).map(|(m, p)| m.max(p));
         rows.push(Row {
             id: "G2",
             gate: match (q, cfg!(target_os = "linux")) {
-                ("p50", true) => "Barrier, one writer: p50 within the raw flush + 2 µs",
-                (_, true) => "Barrier, one writer: p99 within the raw flush + 5 µs",
-                ("p50", false) => "Barrier, one writer: p50 within the raw flush + 3%",
-                (_, false) => "Barrier, one writer: p99 within the raw flush + 3%",
+                ("p50", true) => "Barrier, one writer: p50 within the raw flush + 2 µs (20 alternated rounds, judged as G1)",
+                (_, true) => "Barrier, one writer: p99 within the raw flush + 5 µs (20 alternated rounds, judged as G1)",
+                ("p50", false) => "Barrier, one writer: p50 within the raw flush + 3% (20 alternated rounds, judged as G1)",
+                (_, false) => "Barrier, one writer: p99 within the raw flush + 3% (20 alternated rounds, judged as G1)",
             },
             measured: format!(
-                "store-io {} µs, raw {} µs (spread {spr:.0} µs)",
-                f(mean(a, b), 1),
-                f(mean(c, d), 1)
+                "store-io - raw: median {} µs (interval {} to {}), pooled {} µs; gate {} µs; raw {q} {} µs",
+                f(m, 2),
+                f(lo, 2),
+                f(hi, 2),
+                f(pooled, 2),
+                f(Some(gate_margin), 2),
+                f(raw_q, 1)
             ),
-            verdict: at_most(mean(a, b), mean(c, d), margin(us, mean(c, d)), spr),
+            verdict: match (d, lo, raw_q) {
+                (Some(d), Some(_), Some(r)) if r > 0.0 && d <= gate_margin => Verdict::Pass,
+                (Some(_), Some(lo), Some(r)) if r > 0.0 && lo <= gate_margin => {
+                    Verdict::NotResolvable
+                }
+                _ => Verdict::Fail,
+            },
         });
     }
     // G3: QD1 durable writes/s, at least 90% of fio's synchronous write +
@@ -870,7 +872,7 @@ pub fn run(ctx: &Ctx) -> Section {
         sec.findings
             .push(format!("{} FAIL: {} ({})", r.id, r.gate, r.measured));
     }
-    let mut pts = vec![g1, g7, g8w, g8b, g10];
+    let mut pts = vec![g1, g2, g7, g8w, g8b, g10];
     pts.extend(g3d);
     pts.extend(g5);
     pts.extend(g6);

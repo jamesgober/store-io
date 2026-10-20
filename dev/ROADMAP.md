@@ -1,6 +1,6 @@
 # store-io &mdash; Roadmap
 
-> Path from scaffold to a certified 1.0. Hard parts are front-loaded; each phase has hard exit criteria, and every exit gate needs the maintainer's approval.
+> Path from scaffold to 1.0 (the stable API and container format), then power-cut certification in 1.x. Hard parts are front-loaded; each phase has hard exit criteria, and every exit gate needs the maintainer's approval.
 >
 > **Anti-deferral rule:** no listed task moves to a later phase unless this file records the move and the reason.
 
@@ -44,7 +44,7 @@ Exit criteria:
 - [x] Every requirement mapped to a chosen mechanism per platform and device class, with the rejected alternatives and the labelled fallback for each cell (64 fully, 28 pending a measurement, 3 design gaps carried into phase 1).
 - [x] Critic findings resolved (dispositions recorded; two overridden by measurement).
 - [x] Requirement amendments approved (37, 2026-10-09).
-- [x] Baseline measurement plan written, and run where hardware exists (Windows dev box and WSL2). **Moved:** measurements that need bare-metal Linux, a power-loss-protected NVMe, a Mac or the power-cut rig move to [`dev/TODO.md`](./TODO.md). Reason: the maintainer wants a usable release before that hardware exists; those measurements gate the certified 1.0, not usable 0.x releases. Durability claims stay honest in the meantime because every receipt names its device class and evidence.
+- [x] Baseline measurement plan written, and run where hardware exists (Windows dev box and WSL2). **Moved:** measurements that need bare-metal Linux, a power-loss-protected NVMe, a Mac or the power-cut rig move to [`dev/TODO.md`](./TODO.md). Reason: the maintainer wants a usable release before that hardware exists; those measurements gate the 1.x certification, not usable 0.x releases or the 1.0 API and format freeze. Durability claims stay honest in the meantime because every receipt names its device class and evidence.
 - Measurement items (all bound to the hardware above): a fio matrix (4 and 16 KiB; write+fdatasync, write+fsync, DSYNC, FUA; O_DIRECT; 1/4/16 jobs) per device class, a null_blk per-core ceiling, idle versus loaded flush cost, and the fsys baseline for every comparable operation.
 
 ---
@@ -140,12 +140,13 @@ Exit criteria (dispositions recorded 2026-10-19, at the v0.4.0 release):
 
 ## v0.5 &mdash; macOS and the single-file container
 
-F_FULLFSYNC backend; portable container format; unprivileged mode.
+macOS backend (`F_FULLFSYNC` for every flush; never classed power-safe); container format 2 (a paged region table, 65,536 regions by default; regions that grow in place, fixed size by default, or reserved and capped with `max_size`; any freed space reused; a damaged region made unavailable without closing the store); format-1 stores read-only, with a copy tool; one portable format on every system; unprivileged mode as a tested guarantee.
 
 Exit criteria:
 - [ ] Conformance on APFS (CI runner), NTFS and ext4.
-- [ ] Container byte-identical across operating systems.
+- [ ] Containers made by the same operations on Linux, Windows and macOS identical in structure and data (field by field and byte for byte, except the fields that differ between any two creates: ids, times, fill keys), and each opens on every system.
 - [ ] Zero idle wakeups.
+- [ ] Every new integrity guard has a mutation entry; the simulator enumerates every crash point of every format-2 change.
 
 ---
 
@@ -170,13 +171,25 @@ Exit criteria:
 
 ---
 
-## 1.0 &mdash; Certification
+## 1.0 &mdash; Stable API and format
 
-Everything in [`dev/TODO.md`](./TODO.md): power-cut rig (at least 500 cycles per device class, 3,000 per certified model and firmware), power-safe reference box, bare-metal Linux kernel matrix, macOS measurements; fuzz campaigns; SemVer and MSRV policy; supply-chain checks.
+The SemVer promise starts here: the API and the container format are stable. Proven with the hardware available (CI's Linux kernel matrix, Windows and macOS runners, WSL, the dev box): fuzz campaigns; SemVer and MSRV policy; supply-chain checks. The 1.0 documentation states plainly that no receipt has yet been checked against a real power cut.
 
 Exit criteria:
-- [ ] Every MUST requirement green.
+- [ ] Every MUST requirement green, except those that need the certification hardware, which are listed in 1.x.
+- [ ] The durability documentation names what is proven and what waits for 1.x.
+
+**Moved to 1.x (2026-10-20, D-120):** the power-cut rig, the power-safe reference measurements, the bare-metal Linux kernel matrix and the per-model Mac measurements. Reason: the maintainer wants a stable 1.0 on the hardware available; the certification hardware (a local test box) is approved but not yet bought, and certification adds evidence without changing the API or the format, so it fits minor releases. A 2.0 follows only if that testing forces a format or API break.
+
+---
+
+## 1.x &mdash; Certification
+
+Everything in [`dev/TODO.md`](./TODO.md) that needs hardware: power-cut rig (the local test box, a smart plug cutting its power and the maintainer's workstation as controller; at least 500 cycles per device class, 3,000 per certified model and firmware), power-safe reference measurements, bare-metal Linux kernel matrix, macOS measurements per model.
+
+Exit criteria:
 - [ ] Rig logs published with the release.
+- [ ] The power-safe gates measured on a power-loss-protected drive.
 
 ---
 

@@ -114,7 +114,7 @@ The write-cache property query makes the class driver send one device cache flus
 - **NVMe namespace 1 only.** Identify Namespace is always asked for namespace 1. On a drive whose volume lives in another namespace, the atomic-write fields, LBA size and write granularity come from the wrong namespace.
 - **No storage-stack walk.** The layers below the volume (BitLocker, Storage Spaces, other filter drivers) are not inspected, and `Stack` is always reported missing. A Storage Spaces disk reports a virtual bus and is therefore classed `Unverified` with the reason `Hypervisor`.
 - **Fencing after a killed process is unverified.** Whether the ownership lock can be released before a killed owner's in-flight writes have landed has not been tested; a kill test is planned ([later list](../dev/TODO.md)). The device report does not show this yet.
-- **No certified fast write path.** Write-through (FUA) writes are not used until a power-cut rig can certify or rule them out (1.0).
+- **No certified fast write path.** Write-through (FUA) writes are not used until a power-cut rig can certify or rule them out (1.x).
 - **Released space is not returned to the file system.** It stays in the container and is reused by later regions of the same size (see [the format](./FORMAT.md)).
 - **Page cache, unwritten and shared extents are unknown** (`PageCache` always missing).
 - **Direct I/O and copy-on-write are known only on NTFS.** ReFS is `Unverified` (`FsUnqualified`); FAT and exFAT are `Unsafe`.

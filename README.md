@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: 0.4 &mdash; io_uring and the engine layer.</strong> The simple and batch APIs on Windows and Linux, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>, after power-cut certification. macOS arrives in 0.5. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: 0.4 &mdash; io_uring and the engine layer.</strong> The simple and batch APIs on Windows and Linux, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>; power-cut certification follows in <code>1.x</code>. macOS arrives in 0.5. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 

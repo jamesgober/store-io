@@ -62,6 +62,30 @@ fn unpack(v: u64) -> (u64, u64) {
     (v >> 32, v & 0xFFFF_FFFF)
 }
 
+/// The most ring slots a frontier allocates (8 MiB of slots): a window that
+/// asks for more is cut to it.
+const MAX_RING: u64 = 1 << 20;
+
+/// Ring slots for a window of `window` bytes in a region of `limit` bytes at
+/// blocks of `1 << shift`, at least 2 and at most [`MAX_RING`]. When the
+/// window is the bound, its blocks rounded down to a power of two, so the
+/// window never holds more than was asked; when the region is no larger, the
+/// region's blocks rounded up, so a region never limits its own appends and
+/// a small region never pays for a large ring.
+#[must_use]
+pub(crate) fn ring_for(window: u64, limit: u64, shift: u32) -> usize {
+    let (w, r) = (window >> shift, limit.div_ceil(1 << shift));
+    let blocks = if r <= w {
+        r.max(2).next_power_of_two()
+    } else {
+        1u64 << (63 - w.max(1).leading_zeros())
+    };
+    // At most MAX_RING, so the cast is lossless.
+    #[allow(clippy::cast_possible_truncation)]
+    let slots = blocks.clamp(2, MAX_RING) as usize;
+    slots
+}
+
 impl AppendFrontier {
     /// A frontier starting at `resume` (block aligned) in a region of `limit`
     /// bytes, with `block = 1 << shift`, allowing at most `ring` (a power of
@@ -321,6 +345,56 @@ mod tests {
 
     fn f() -> AppendFrontier {
         AppendFrontier::new(0, 1 << 20, 12, 64)
+    }
+
+    /// The window is bytes: the same reach at every block size, within
+    /// bounds.
+    #[test]
+    fn test_ring_for_counts_the_window_in_blocks_of_the_region() {
+        let big = 1 << 40;
+        assert_eq!(ring_for(16 << 20, big, 12), 4096);
+        assert_eq!(
+            ring_for(16 << 20, big, 9),
+            32_768,
+            "512 B blocks hold the same bytes"
+        );
+        assert_eq!(ring_for(0, big, 12), 2);
+        assert_eq!(ring_for(4096, big, 12), 2);
+        assert_eq!(ring_for(u64::MAX, u64::MAX, 9), 1 << 20);
+        assert_eq!(
+            ring_for(10 << 20, big, 12),
+            2048,
+            "rounded down, never more"
+        );
+        assert_eq!(
+            ring_for(16 << 20, 64 << 10, 12),
+            16,
+            "bounded by the region"
+        );
+        assert_eq!(
+            ring_for(16 << 20, 12 << 20, 12),
+            4096,
+            "a region below the window never limits itself"
+        );
+        assert_eq!(
+            ring_for(12 << 20, 12 << 20, 12),
+            4096,
+            "nor one the window's size"
+        );
+    }
+
+    /// The default window at 512 B blocks still holds eight 1 MiB appends in
+    /// flight, none completed (counted in blocks, it held only 2 MiB there:
+    /// the third was refused as too far ahead).
+    #[test]
+    fn test_the_default_window_holds_eight_mib_in_flight_at_512_byte_blocks() {
+        let limit = 64 << 20;
+        let window = crate::StoreOptions::default().append_window;
+        let fr = AppendFrontier::new(0, limit, 9, ring_for(window, limit, 9));
+        for i in 0..8 {
+            let r = fr.reserve(1 << 20);
+            assert!(r.is_ok(), "append {i} refused: {r:?}");
+        }
     }
 
     #[test]

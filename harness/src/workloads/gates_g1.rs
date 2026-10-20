@@ -25,7 +25,7 @@ pub const ROUNDS: usize = 20;
 /// The order statistic (1-based, from either end) bounding the median's
 /// interval: the 6th of 20 holds the true median about 96% of the time
 /// (1 - 2 P(Binomial(20, 1/2) <= 5)).
-const BOUND: usize = 6;
+pub(super) const BOUND: usize = 6;
 /// The page region and the raw file.
 const SPAN: u64 = 256 << 20;
 /// Read-back checks per side.
@@ -33,7 +33,7 @@ const CHECKS: usize = 1024;
 
 /// The median of `v` (the mean of the middle two for an even count; NaN
 /// when empty).
-fn median(v: &mut [f64]) -> f64 {
+pub(super) fn median(v: &mut [f64]) -> f64 {
     if v.is_empty() {
         return f64::NAN;
     }

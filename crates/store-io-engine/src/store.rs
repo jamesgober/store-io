@@ -80,9 +80,13 @@ pub struct StoreOptions {
     /// 32. The pool is shared by every store on the platform and sized by the
     /// first store that uses it (at most 256); other backends ignore this.
     pub t3_pool_threads: u32,
-    /// Append-frontier ring size in blocks (bounds how far concurrent appends
-    /// may run ahead of the oldest incomplete one).
-    pub append_ring: usize,
+    /// How far, in bytes, a new append may start ahead of the oldest
+    /// incomplete one on the same region, in blocks: rounded down to a power
+    /// of two, or, on a region smaller than the window, the region rounded
+    /// up (so a region never limits its own appends); at least 2 and at most
+    /// 2^20 blocks. Each append region holds 8 bytes of memory per block of it.
+    /// Default 16 MiB.
+    pub append_window: u64,
     /// Fill new regions with the keyed incompressible pattern instead of
     /// zeros (for thin, virtual, deduplicating or zero-detecting stacks).
     pub keyed_fill: bool,
@@ -120,7 +124,7 @@ impl Default for StoreOptions {
             queues: 0,
             queue_depth: 64,
             t3_pool_threads: 0,
-            append_ring: 4096,
+            append_window: 16 << 20,
             keyed_fill: false,
             linux_tier: LinuxTier::Auto,
             register_file: true,

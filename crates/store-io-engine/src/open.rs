@@ -175,7 +175,11 @@ where
                     0,
                     e.data_size,
                     u32::from(layout.log2_block),
-                    opts.append_ring,
+                    crate::frontier::ring_for(
+                        opts.append_window,
+                        e.data_size,
+                        u32::from(layout.log2_block),
+                    ),
                 )
             });
             regions.push(Arc::new(LiveRegion {

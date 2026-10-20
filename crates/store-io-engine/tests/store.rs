@@ -23,7 +23,7 @@ fn opts() -> StoreOptions {
     StoreOptions {
         queues: 2,
         buffers_per_class: 8,
-        append_ring: 256,
+        append_window: 256 << 12,
         ..StoreOptions::default()
     }
 }

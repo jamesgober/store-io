@@ -73,6 +73,8 @@ fn version(
         slot_index: i,
         log2_slot_size: log2,
         prev_header_crc32c: prev,
+        format_major: store_io_format::slot::FORMAT_1,
+        meta_seq: 0,
     };
     let crc = slot::encode(&mut s, &f, payload).expect("valid fields encode");
     (s, crc)
@@ -123,6 +125,8 @@ fuzz_target!(|data: &[u8]| {
         slot_offset: offset(base, len, i),
         slot_index: i,
         log2_slot_size: log2,
+        format_major: store_io_format::slot::FORMAT_1,
+        numbered: false,
     };
     let (a, b) = match current {
         SlotIndex::A => (&cur, &torn),

@@ -180,6 +180,8 @@ mod tests {
             slot_index: SlotIndex::A,
             log2_slot_size: 12,
             prev_header_crc32c: prev,
+            format_major: crate::slot::FORMAT_1,
+            meta_seq: 0,
         };
         let mut buf = vec![0u8; 4096];
         assert!(encode(&mut buf, &fields, b"p").is_ok());
@@ -191,6 +193,8 @@ mod tests {
                 slot_offset: 0,
                 slot_index: SlotIndex::A,
                 log2_slot_size: 12,
+                format_major: crate::slot::FORMAT_1,
+                numbered: false,
             },
         )
     }

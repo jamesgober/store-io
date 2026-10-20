@@ -15,8 +15,8 @@
 //! |---|---|---|---|
 //! | 0 | 8 | `magic` | `b"SIOSLOT\0"` |
 //! | 8 | 4 | `header_crc32c` | CRC-32C over `[0, header_len)` with this field read as 0 |
-//! | 12 | 2 | `header_len` | 128 in format 1; `128 ≤ len ≤ slot size` |
-//! | 14 | 2 | `format_major` | 1; anything else is refused |
+//! | 12 | 2 | `header_len` | 128 as written; `128 ≤ len ≤ slot size` (exactly 128 in format 2) |
+//! | 14 | 2 | `format_major` | 1 or 2, as the reader expects; anything else is refused |
 //! | 16 | 4 | `incompat_flags` | any unknown bit: refuse to read |
 //! | 20 | 4 | `ro_compat_flags` | any unknown bit: readable, never rewritten |
 //! | 24 | 4 | `compat_flags` | unknown bits ignored |
@@ -32,8 +32,10 @@
 //! | 79 | 1 | reserved | 0 |
 //! | 80 | 4 | `prev_header_crc32c` | header CRC of the previous generation |
 //! | 84 | 4 | reserved | 0 |
-//! | 88 | 8 | `owner_generation` | owner generation of the writer (fencing) |
-//! | 96 | 32 | reserved | 0 |
+//! | 88 | 8 | `owner_generation` | owner generation of the writer (forensic) |
+//! | 96 | 32 | reserved | format 1: 0 |
+//! | 96 | 8 | `meta_seq` | format 2: the store-wide metadata sequence number (at least 1 for a numbered object, 0 otherwise) |
+//! | 104 | 24 | reserved | format 2: 0 |
 //!
 //! The payload starts at `header_len`; the rest of the slot is zero.
 
@@ -44,10 +46,12 @@ use crate::crc32c::{crc32c, crc32c_append};
 
 /// Magic bytes at offset 0 of every slot.
 pub const MAGIC: [u8; 8] = *b"SIOSLOT\0";
-/// Header length written by format 1.
+/// Header length written by every format.
 pub const HEADER_LEN: usize = 128;
-/// The only on-disk format this crate reads and writes.
-pub const FORMAT_MAJOR: u16 = 1;
+/// On-disk format 1 (`docs/FORMAT.md`).
+pub const FORMAT_1: u16 = 1;
+/// On-disk format 2 (the paged region table; `meta_seq` in the header).
+pub const FORMAT_2: u16 = 2;
 /// Number of slots in a pair.
 pub const SLOT_COUNT: u8 = 2;
 /// Smallest supported slot size, as a power of two (512 bytes).
@@ -111,6 +115,11 @@ pub struct SlotFields {
     pub log2_slot_size: u8,
     /// Header CRC of the version this one replaces (0 for generation 1).
     pub prev_header_crc32c: u32,
+    /// [`FORMAT_1`] or [`FORMAT_2`].
+    pub format_major: u16,
+    /// Format 2: the store-wide metadata sequence number of this write (0 for
+    /// an object that is not numbered). Format 1: must be 0.
+    pub meta_seq: u64,
 }
 
 /// Why a slot could not be encoded. These are caller bugs, never media errors.
@@ -124,6 +133,8 @@ pub enum EncodeError {
     PayloadTooLarge,
     /// Generation 0 is never written.
     ZeroGeneration,
+    /// `format_major` is not 1 or 2, or format 1 was given a `meta_seq`.
+    Format,
 }
 
 impl fmt::Display for EncodeError {
@@ -133,6 +144,7 @@ impl fmt::Display for EncodeError {
             Self::BufferLength => "output buffer length must equal the slot size",
             Self::PayloadTooLarge => "payload does not fit in the slot after the header",
             Self::ZeroGeneration => "generation 0 is never written",
+            Self::Format => "format must be 1 or 2, and format 1 has no meta_seq",
         })
     }
 }
@@ -156,14 +168,14 @@ impl std::error::Error for EncodeError {}
 /// let fields = SlotFields {
 ///     volume_uuid: [7; 16], object_id: 1, generation: 1, owner_generation: 1,
 ///     slot_offset: 8192, slot_index: SlotIndex::A, log2_slot_size: 12,
-///     prev_header_crc32c: 0,
+///     prev_header_crc32c: 0, format_major: 2, meta_seq: 1,
 /// };
 /// let mut slot = vec![0u8; 4096];
 /// encode(&mut slot, &fields, b"payload")?;
 ///
 /// let expect = Expect {
 ///     volume_uuid: [7; 16], object_id: 1, slot_offset: 8192,
-///     slot_index: SlotIndex::A, log2_slot_size: 12,
+///     slot_index: SlotIndex::A, log2_slot_size: 12, format_major: 2, numbered: true,
 /// };
 /// match validate(&slot, &expect) {
 ///     SlotStatus::Valid(info) => assert_eq!(info.payload(&slot), b"payload"),
@@ -183,6 +195,9 @@ pub fn encode(out: &mut [u8], f: &SlotFields, payload: &[u8]) -> Result<u32, Enc
     }
     if f.generation == 0 {
         return Err(EncodeError::ZeroGeneration);
+    }
+    if !(f.format_major == FORMAT_2 || (f.format_major == FORMAT_1 && f.meta_seq == 0)) {
+        return Err(EncodeError::Format);
     }
     out.fill(0);
     let (header, body) = out.split_at_mut(HEADER_LEN);
@@ -204,7 +219,7 @@ fn write_header(
     w.bytes(&MAGIC)?;
     w.u32(0)?; // header_crc32c, filled in after the CRC is computed
     w.u16(HEADER_LEN as u16)?;
-    w.u16(FORMAT_MAJOR)?;
+    w.u16(f.format_major)?;
     w.u32(0)?; // incompat_flags
     w.u32(0)?; // ro_compat_flags
     w.u32(0)?; // compat_flags
@@ -221,7 +236,8 @@ fn write_header(
     w.u32(f.prev_header_crc32c)?;
     w.u32(0)?;
     w.u64(f.owner_generation)?;
-    w.zeros(32)
+    w.u64(f.meta_seq)?; // zero in format 1 (checked by `encode`)
+    w.zeros(24)
 }
 
 /// What the reader expects of a slot at a given location.
@@ -237,6 +253,13 @@ pub struct Expect {
     pub slot_index: SlotIndex,
     /// Configured slot size as a power of two.
     pub log2_slot_size: u8,
+    /// The format the container was found to be ([`FORMAT_1`] or
+    /// [`FORMAT_2`]); a slot of any other format is
+    /// [`SlotStatus::UnsupportedVersion`].
+    pub format_major: u16,
+    /// Format 2: whether this object carries `meta_seq` (the volume record
+    /// and the table pages: at least 1) or not (region headers: 0).
+    pub numbered: bool,
 }
 
 /// Facts about a slot that passed every check.
@@ -254,6 +277,8 @@ pub struct SlotInfo {
     pub ro_compat_flags: u32,
     /// Compatible feature flags.
     pub compat_flags: u32,
+    /// Format 2: the metadata sequence number (0 in format 1).
+    pub meta_seq: u64,
     payload_start: u16,
     payload_len: u32,
 }
@@ -343,9 +368,24 @@ pub fn validate(slot: &[u8], e: &Expect) -> SlotStatus {
     }
 }
 
-/// Field-by-field validation after the blank check. `Err` carries the first
-/// failing status so `?` reads in the documented order.
-fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
+/// A header that passed every check up to the payload CRC.
+struct Header {
+    generation: u64,
+    owner_generation: u64,
+    meta_seq: u64,
+    stored_crc: u32,
+    prev_header_crc32c: u32,
+    ro_compat_flags: u32,
+    compat_flags: u32,
+    payload_crc: u32,
+    header_len: usize,
+    payload_len: u32,
+}
+
+/// Field-by-field validation after the blank check, through every check but
+/// the payload CRC. `Err` carries the first failing status so `?` reads in
+/// the documented order.
+fn parse_header(slot: &[u8], e: &Expect) -> Result<Header, SlotStatus> {
     let mut r = Reader::new(slot);
     let bad = |_| SlotStatus::BadLength;
     if r.array::<8>().map_err(bad)? != MAGIC {
@@ -363,7 +403,7 @@ fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
         return Err(SlotStatus::BadHeaderCrc);
     }
     let major = r.u16().map_err(bad)?;
-    if major != FORMAT_MAJOR {
+    if major != e.format_major || !(major == FORMAT_1 || major == FORMAT_2) {
         return Err(SlotStatus::UnsupportedVersion { major });
     }
     let incompat = r.u32().map_err(bad)?;
@@ -387,13 +427,20 @@ fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
     let prev_header_crc32c = r.u32().map_err(bad)?;
     let reserved1 = r.u32().map_err(bad)?;
     let owner_generation = r.u64().map_err(bad)?;
-    let reserved2 = r.bytes(32).map_err(bad)?;
+    let meta_seq = r.u64().map_err(bad)?;
+    let reserved2 = r.bytes(24).map_err(bad)?;
+    let seq_ok = match (major, e.numbered) {
+        (FORMAT_2, true) => meta_seq >= 1,
+        _ => meta_seq == 0,
+    };
     if generation == 0
         || slot_count != SLOT_COUNT
         || slot_index > 1
         || reserved0 != 0
         || reserved1 != 0
         || reserved2.iter().any(|&b| b != 0)
+        || !seq_ok
+        || (major == FORMAT_2 && header_len != HEADER_LEN)
     {
         return Err(SlotStatus::Malformed);
     }
@@ -409,26 +456,93 @@ fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
     {
         return Err(SlotStatus::Misplaced);
     }
-    let room = slot.len() - header_len;
-    let len = payload_len as usize;
-    if len > room {
+    if payload_len as usize > slot.len() - header_len {
         return Err(SlotStatus::Malformed);
     }
-    let payload = &slot[header_len..header_len + len];
-    if crc32c(payload) != payload_crc {
-        return Err(SlotStatus::BadPayloadCrc);
-    }
-    let payload_start = u16::try_from(header_len).map_err(|_| SlotStatus::Malformed)?;
-    Ok(SlotStatus::Valid(SlotInfo {
+    Ok(Header {
         generation,
         owner_generation,
-        header_crc32c: stored_crc,
+        meta_seq,
+        stored_crc,
         prev_header_crc32c,
         ro_compat_flags,
         compat_flags,
-        payload_start,
+        payload_crc,
+        header_len,
         payload_len,
+    })
+}
+
+/// Field-by-field validation after the blank check.
+fn parse(slot: &[u8], e: &Expect) -> Result<SlotStatus, SlotStatus> {
+    let h = parse_header(slot, e)?;
+    let payload = &slot[h.header_len..h.header_len + h.payload_len as usize];
+    if crc32c(payload) != h.payload_crc {
+        return Err(SlotStatus::BadPayloadCrc);
+    }
+    let payload_start = u16::try_from(h.header_len).map_err(|_| SlotStatus::Malformed)?;
+    Ok(SlotStatus::Valid(SlotInfo {
+        generation: h.generation,
+        owner_generation: h.owner_generation,
+        header_crc32c: h.stored_crc,
+        prev_header_crc32c: h.prev_header_crc32c,
+        ro_compat_flags: h.ro_compat_flags,
+        compat_flags: h.compat_flags,
+        meta_seq: h.meta_seq,
+        payload_start,
+        payload_len: h.payload_len,
     }))
+}
+
+/// What a slot's header shows, whether or not the slot is valid: what the
+/// format-2 tear judgement reads from a slot that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderFacts {
+    /// The `header_crc32c` field as stored (it may not verify): compared with
+    /// the winner's `prev_header_crc32c` to recognise a damaged predecessor.
+    pub stored_header_crc32c: u32,
+    /// Present when the header passes every check before the payload CRC
+    /// (through the `payload_len` bound) for this volume, object and place:
+    /// the slot is `Valid` or `BadPayloadCrc`. Format 2 calls such a slot of
+    /// the volume record or a table page *numbered* (its `meta_seq` counts);
+    /// for other slots the fields are reported as they are (`meta_seq` 0).
+    pub numbered: Option<NumberedHeader>,
+}
+
+/// The header fields of a numbered slot (see [`HeaderFacts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NumberedHeader {
+    /// Generation of the version the slot holds or was meant to hold.
+    pub generation: u64,
+    /// Its metadata sequence number (format 2; 0 in format 1).
+    pub meta_seq: u64,
+    /// The header CRC of the version it replaced.
+    pub prev_header_crc32c: u32,
+}
+
+/// What `slot`'s header shows, or `None` when it shows nothing (wrong length,
+/// blank, or not a slot at all).
+///
+/// Never panics and never allocates, whatever the input bytes.
+#[must_use]
+pub fn header_facts(slot: &[u8], e: &Expect) -> Option<HeaderFacts> {
+    if !(MIN_LOG2_SLOT_SIZE..=MAX_LOG2_SLOT_SIZE).contains(&e.log2_slot_size)
+        || slot.len() != 1usize << e.log2_slot_size
+        || slot[..HEADER_LEN].iter().all(|&b| b == 0)
+        || slot[..8] != MAGIC[..]
+    {
+        return None;
+    }
+    let stored_header_crc32c = u32::from_le_bytes([slot[8], slot[9], slot[10], slot[11]]);
+    let numbered = parse_header(slot, e).ok().map(|h| NumberedHeader {
+        generation: h.generation,
+        meta_seq: h.meta_seq,
+        prev_header_crc32c: h.prev_header_crc32c,
+    });
+    Some(HeaderFacts {
+        stored_header_crc32c,
+        numbered,
+    })
 }
 
 #[cfg(test)]
@@ -445,6 +559,8 @@ mod tests {
             slot_index: index,
             log2_slot_size: 12,
             prev_header_crc32c: 0,
+            format_major: FORMAT_1,
+            meta_seq: 0,
         }
     }
 
@@ -456,6 +572,8 @@ mod tests {
             slot_offset: f.slot_offset,
             slot_index: index,
             log2_slot_size: 12,
+            format_major: FORMAT_1,
+            numbered: false,
         }
     }
 

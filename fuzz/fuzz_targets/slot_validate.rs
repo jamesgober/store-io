@@ -9,8 +9,10 @@
 //!
 //! Properties, beyond never panicking:
 //! - validation is deterministic;
+//! - `header_facts` finds a numbered header exactly when the slot is `Valid`
+//!   or `BadPayloadCrc`, with the same generation;
 //! - an accepted slot's payload lies inside the slot;
-//! - an accepted slot with no feature flags and the format-1 header length
+//! - an accepted slot with no feature flags and a 128-byte header
 //!   is exactly what `encode` writes for the same fields and payload (the
 //!   format has one encoding per value), and its header CRC is the one
 //!   `encode` returns.
@@ -19,7 +21,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use store_io_format::crc32c::crc32c;
-use store_io_format::slot::{self, Expect, SlotFields, SlotIndex, SlotStatus};
+use store_io_format::slot::{self, Expect, FORMAT_1, FORMAT_2, SlotFields, SlotIndex, SlotStatus};
 
 const MAGIC: &[u8; 8] = b"SIOSLOT\0";
 
@@ -86,6 +88,9 @@ fuzz_target!(|data: &[u8]| {
             SlotIndex::A
         },
         log2_slot_size: if mode & 4 == 4 { log2 } else { mode >> 3 },
+        // Formats 1 and 2, numbered or not, from the size byte's high bits.
+        format_major: if size & 0x10 == 0 { FORMAT_1 } else { FORMAT_2 },
+        numbered: size & 0x20 != 0,
     };
     let status = slot::validate(&s, &e);
     assert_eq!(
@@ -93,9 +98,36 @@ fuzz_target!(|data: &[u8]| {
         status,
         "validation is not deterministic"
     );
+    let facts = slot::header_facts(&s, &e);
+    assert_eq!(
+        facts.is_none(),
+        matches!(
+            status,
+            SlotStatus::BadLength | SlotStatus::Blank | SlotStatus::BadMagic
+        ),
+        "header facts present exactly when the slot shows a header: {status:?}"
+    );
+    if let Some(f) = facts {
+        assert_eq!(f.stored_header_crc32c, u32_at(&s, 8), "stored CRC");
+    }
+    let numbered = facts.and_then(|f| f.numbered);
+    assert_eq!(
+        numbered.is_some(),
+        matches!(status, SlotStatus::Valid(_) | SlotStatus::BadPayloadCrc),
+        "header facts disagree with validation: {status:?}"
+    );
     let SlotStatus::Valid(info) = status else {
         return;
     };
+    assert_eq!(
+        numbered.map(|n| (n.generation, n.meta_seq, n.prev_header_crc32c)),
+        Some((info.generation, info.meta_seq, info.prev_header_crc32c)),
+        "header facts disagree with the valid slot"
+    );
+    assert_eq!(
+        facts.map(|f| f.stored_header_crc32c),
+        Some(info.header_crc32c)
+    );
     let payload = info.payload(&s);
     assert!(
         payload.len() <= len - 128,
@@ -113,6 +145,8 @@ fuzz_target!(|data: &[u8]| {
         slot_index: e.slot_index,
         log2_slot_size: e.log2_slot_size,
         prev_header_crc32c: info.prev_header_crc32c,
+        format_major: e.format_major,
+        meta_seq: info.meta_seq,
     };
     let mut out = vec![0u8; len];
     let crc = slot::encode(&mut out, &fields, payload).expect("an accepted slot re-encodes");

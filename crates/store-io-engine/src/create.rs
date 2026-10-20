@@ -270,6 +270,8 @@ fn holds_slot_header<Q: Queue>(
             slot_offset: at,
             slot_index: SlotIndex::A,
             log2_slot_size: 12,
+            format_major: store_io_format::slot::FORMAT_1,
+            numbered: false,
         };
         match validate(b.as_slice(), &expect) {
             SlotStatus::Blank

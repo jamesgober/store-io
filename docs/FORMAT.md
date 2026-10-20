@@ -169,7 +169,7 @@ Note that an out-of-range `header_len` reports as `BadHeaderCrc`, not `Malformed
 
 A valid slot whose `ro_compat_flags` has an unknown bit is still `Valid`; such a slot is readable but must not be overwritten with a newer generation (see section 12 for what store-io does today).
 
-Source: [`crates/store-io-format/src/slot.rs`](../crates/store-io-format/src/slot.rs) (`validate`, `parse`), [`crates/store-io-engine/src/slots.rs`](../crates/store-io-engine/src/slots.rs) (`read_one`)
+Source: [`crates/store-io-format/src/slot.rs`](../crates/store-io-format/src/slot.rs) (`validate`, `parse_header`, `parse`), [`crates/store-io-engine/src/slots.rs`](../crates/store-io-engine/src/slots.rs) (`read_one`)
 
 ---
 

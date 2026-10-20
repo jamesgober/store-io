@@ -346,6 +346,8 @@ fn test_a_newer_volume_record_is_refused_as_unsupported() {
                 slot_offset: 0,
                 slot_index: SlotIndex::A,
                 log2_slot_size: 12,
+                format_major: store_io_format::slot::FORMAT_1,
+                numbered: false,
             },
         ) else {
             panic!("slot A is not a valid volume record");
@@ -377,6 +379,8 @@ fn test_a_newer_volume_record_is_refused_as_unsupported() {
                 slot_index: SlotIndex::B,
                 log2_slot_size: 12,
                 prev_header_crc32c: info.header_crc32c,
+                format_major: store_io_format::slot::FORMAT_1,
+                meta_seq: 0,
             },
             &payload,
         )

@@ -11,8 +11,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- `store-io-format`: **container format 2, first step: the slot header.**
+  `SlotFields` and `Expect` name the format (`FORMAT_1` or `FORMAT_2`); a
+  format-2 slot carries `meta_seq`, the store-wide metadata sequence number,
+  at byte 96 (at least 1 for the volume record and table pages, 0 for
+  region headers), and its header is exactly 128 bytes. A reader refuses a
+  slot of any format but the container's. `header_facts` reports what a
+  failed slot's header still shows (its stored header CRC, and for a slot
+  whose header passes every check but the payload CRC, its generation and
+  `meta_seq`): what the format-2 open uses to tell a torn write from
+  damage. The engine still writes format 1; format 2 is specified ahead of
+  the code. Tests, a fuzz target extended to both formats, and four
+  mutation entries.
+
 ### Changed
 
+- **Breaking** (`store-io-format`): `slot::FORMAT_MAJOR` is gone (now
+  `FORMAT_1` and `FORMAT_2`); `SlotFields` gains `format_major` and
+  `meta_seq`, `Expect` gains `format_major` and `numbered`, and
+  `EncodeError` gains `Format`.
 - **Breaking:** `StoreOptions::append_ring` (blocks) is now
   `StoreOptions::append_window` (bytes, default 16 MiB, the same reach as
   before at 4 KiB blocks). In blocks, the reach shrank with the block size:

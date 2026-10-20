@@ -35,6 +35,9 @@ LOOM_BUF = ["-p", "store-io-buf", "--lib", "--release", "loom"]
 LOOM = {"RUSTFLAGS": "--cfg loom", "LOOM_MAX_PREEMPTIONS": "3",
         "CARGO_TARGET_DIR": os.path.join(ROOT, "target", "loom")}
 STACK = "crates/store-io-buf/src/stack.rs"
+# The format crate's own tests (slot, pair and payload codecs).
+FORMAT = ["-p", "store-io-format"]
+SLOT = "crates/store-io-format/src/slot.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -265,6 +268,14 @@ M = [
  # The bounded queue (public): a push that publishes its slot without
  # release lets a popper read the value before it was written
  ('crates/store-io-buf/src/queue.rs', '                        cell.seq.store(pos.wrapping_add(1), Ordering::Release);', '                        cell.seq.store(pos.wrapping_add(1), Ordering::Relaxed);', LOOM_BUF, LOOM),
+ # Format 2 slots (v0.5): a slot of another format than the container's
+ # is refused; a numbered object needs meta_seq >= 1 and any other 0; a
+ # format-2 header is exactly 128 bytes
+ (SLOT, '    if major != e.format_major || !(major == FORMAT_1 || major == FORMAT_2) {', '    if !(major == FORMAT_1 || major == FORMAT_2) {', FORMAT),
+ (SLOT, '        (FORMAT_2, true) => meta_seq >= 1,', '        (FORMAT_2, true) => true,', FORMAT),
+ (SLOT, '        _ => meta_seq == 0,', '        _ => true,', FORMAT),
+ (SLOT, '        || (major == FORMAT_2 && header_len != HEADER_LEN)', '        || false', FORMAT),
+ (SLOT, '    if major != e.format_major || !(major == FORMAT_1 || major == FORMAT_2) {', '    if major != e.format_major {', FORMAT),
 ]
 
 def kill_stuck_tests():

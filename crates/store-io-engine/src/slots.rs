@@ -154,6 +154,8 @@ fn read_one<Q: Queue>(
         slot_offset: offset,
         slot_index: i,
         log2_slot_size: at.log2,
+        format_major: store_io_format::slot::FORMAT_1,
+        numbered: false,
     };
     let status = validate(buf.as_slice(), &expect);
     let payload = match status {
@@ -223,10 +225,17 @@ pub(crate) fn write_slot<Q: Queue>(
         slot_index: next.index,
         log2_slot_size: at.log2,
         prev_header_crc32c: next.prev_header_crc,
+        format_major: store_io_format::slot::FORMAT_1,
+        meta_seq: 0,
     };
-    let crc = encode(buf.as_mut_slice(), &fields, next.payload).map_err(|_| Error::NotWritten {
-        cause: NotWrittenCause::TooLarge,
-        ctx,
+    let crc = encode(buf.as_mut_slice(), &fields, next.payload).map_err(|e| match e {
+        store_io_format::slot::EncodeError::Format => Error::Unsupported {
+            what: store_io_core::error::Capability::FormatVersion,
+        },
+        _ => Error::NotWritten {
+            cause: NotWrittenCause::TooLarge,
+            ctx,
+        },
     })?;
     let offset = at.offset(next.index);
     let expect = Expect {
@@ -235,6 +244,8 @@ pub(crate) fn write_slot<Q: Queue>(
         slot_offset: offset,
         slot_index: next.index,
         log2_slot_size: at.log2,
+        format_major: store_io_format::slot::FORMAT_1,
+        numbered: false,
     };
     let status = validate(buf.as_slice(), &expect);
     let SlotStatus::Valid(info) = status else {

@@ -42,6 +42,34 @@ pub fn holds(buf: &[u8], first: u64, seq: u64) -> bool {
         })
 }
 
+/// Stamps only the first and last word of each block (the block number and
+/// write, as [`stamp`] would write them there): for a measured window at
+/// memory speed, where writing every word would cost store-io a memory pass
+/// per write that fio never makes. The words between are left as they were,
+/// so a tear inside a block (on a device with smaller sectors) is not
+/// caught: G6 measures bandwidth, not crash safety.
+pub fn stamp_ends(buf: &mut [u8], first: u64, seq: u64) {
+    let last = (BLOCK / 8 - 1) as u64;
+    for (b, blk) in buf.chunks_exact_mut(BLOCK).enumerate() {
+        let n = first + b as u64;
+        blk[..8].copy_from_slice(&word(n, seq, 0).to_le_bytes());
+        blk[BLOCK - 8..].copy_from_slice(&word(n, seq, last).to_le_bytes());
+    }
+}
+
+/// Whether every block of `buf` carries write `seq`'s first and last word
+/// for its block number (what [`stamp_ends`] wrote).
+#[must_use]
+pub fn ends_hold(buf: &[u8], first: u64, seq: u64) -> bool {
+    let last = (BLOCK / 8 - 1) as u64;
+    buf.len() % BLOCK == 0
+        && buf.chunks_exact(BLOCK).enumerate().all(|(b, blk)| {
+            let n = first + b as u64;
+            blk[..8] == word(n, seq, 0).to_le_bytes()
+                && blk[BLOCK - 8..] == word(n, seq, last).to_le_bytes()
+        })
+}
+
 /// The cheap check inside a measured window: the first word of each block.
 #[must_use]
 pub fn heads(buf: &[u8], first: u64, seq: u64) -> bool {
@@ -55,6 +83,24 @@ pub fn heads(buf: &[u8], first: u64, seq: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ends stamp names each block's number and write at both ends, and
+    /// its check refuses another block, another write, or a torn end.
+    #[test]
+    fn test_the_ends_stamp_names_its_block_and_write() {
+        let mut a = vec![0u8; 2 * BLOCK];
+        stamp_ends(&mut a, 10, 3);
+        assert!(ends_hold(&a, 10, 3));
+        assert!(!ends_hold(&a, 11, 3), "another block number");
+        assert!(!ends_hold(&a, 10, 4), "another write");
+        let mut torn = a.clone();
+        torn[2 * BLOCK - 1] ^= 1;
+        assert!(!ends_hold(&torn, 10, 3), "a torn last word");
+        // The same words as the full stamp at those places.
+        let mut full = vec![0u8; 2 * BLOCK];
+        stamp(&mut full, 10, 3);
+        assert!(ends_hold(&full, 10, 3));
+    }
 
     #[test]
     fn test_a_pattern_names_its_block_and_write() {

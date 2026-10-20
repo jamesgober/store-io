@@ -31,9 +31,10 @@ const RING: usize = 1 << 16;
 /// window plus one final `barrier_all` (fio's `--end_fsync`).
 ///
 /// Integrity: append `k` of a generation must land at `k` MiB (one writer,
-/// whole-block appends), every block of it is stamped with its block number
-/// and the generation ([`stamp`]), and afterwards a sample of the last
-/// generation's appends reads back word for word.
+/// whole-block appends), every block of it is stamped at both ends with its
+/// block number and the generation ([`stamp::stamp_ends`]), and afterwards
+/// a sample of the last generation's appends reads back with every block's
+/// ends.
 pub fn seq_write(ctx: &Ctx) -> Point {
     let p = Point::new(
         System::StoreIo,
@@ -69,7 +70,9 @@ pub fn seq_write(ctx: &Ctx) -> Point {
                 let mut b = sub
                     .take_buf(CHUNK as usize)
                     .map_err(|e| sioerr("take_buf", &e))?;
-                stamp::stamp(b.as_mut_slice(), k * per, generation);
+                // The ends of each block only (see `stamp::stamp_ends`): a
+                // full stamp is a memory pass per MiB that fio never makes.
+                stamp::stamp_ends(b.as_mut_slice(), k * per, generation);
                 match sub.append(&wal, b, WriteMode::Plain, k) {
                     Ok(pos) if pos.offset() == k * CHUNK => {
                         k += 1;
@@ -162,7 +165,7 @@ fn check(wal: &AppendRegion<Plat>, k: u64, generation: u64, per: u64) -> Verify 
     for &i in &idx {
         let i = i as u64;
         match wal.read(i * CHUNK, &mut out) {
-            Ok(n) if n == out.len() && stamp::holds(&out, i * per, generation) => {}
+            Ok(n) if n == out.len() && stamp::ends_hold(&out, i * per, generation) => {}
             Ok(_) => {
                 return Verify::Failed(format!(
                     "append {i} of generation {generation} reads back wrong"
@@ -172,7 +175,7 @@ fn check(wal: &AppendRegion<Plat>, k: u64, generation: u64, per: u64) -> Verify 
         }
     }
     Verify::Passed(format!(
-        "every append landed where expected; {} of the last generation's {k} appends read back word for word",
+        "every append landed where expected; {} of the last generation's {k} appends read back with every block's ends",
         idx.len()
     ))
 }

@@ -41,6 +41,10 @@ const CHECKS: usize = 1024;
 pub const MAX_COMMITS: u64 = 3000;
 /// Largest append region a point provisions.
 const REGION_CAP: u64 = 2 << 30;
+/// Commits per second a region is sized for (capped at `REGION_CAP`): a
+/// memory-backed device commits small batches far above 5,000 a second, and
+/// a region the warm-up exhausts measures nothing.
+const MAX_COMMIT_RATE: f64 = 100_000.0;
 /// Block size assumed for sizing (the store's actual block size is used for
 /// every I/O; this only sizes regions).
 const BLOCK: u64 = 4096;
@@ -217,7 +221,7 @@ fn store_unbatched(
 ) -> Result<(), String> {
     let stream = stream_of(n, size);
     let per_commit = n as u64 * size.div_ceil(BLOCK as usize) as u64 * BLOCK;
-    let bytes = region_bytes(ctx, per_commit, 5_000.0, REGION_CAP);
+    let bytes = region_bytes(ctx, per_commit, MAX_COMMIT_RATE, REGION_CAP);
     let wal = super::provision_append(store, "a", bytes, p)?;
     let block = wal.block_size();
     let need = n as u64 * (size as u64).div_ceil(block) * block;
@@ -269,7 +273,7 @@ fn store_batched(
 ) -> Result<(), String> {
     let stream = stream_of(n, size) + 1;
     let per_commit = ((n * size) as u64).div_ceil(BLOCK) * BLOCK;
-    let bytes = region_bytes(ctx, per_commit, 5_000.0, REGION_CAP);
+    let bytes = region_bytes(ctx, per_commit, MAX_COMMIT_RATE, REGION_CAP);
     let wal = super::provision_append(store, "b", bytes, p)?;
     let block = wal.block_size();
     let need = ((n * size) as u64).div_ceil(block) * block;

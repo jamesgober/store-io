@@ -62,6 +62,8 @@ where
             a,
             b,
             log2: l.log2_block,
+            format: store_io_format::slot::FORMAT_1,
+            numbered: false,
         }
     }
 

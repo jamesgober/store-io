@@ -181,14 +181,7 @@ where
         let tlen = encode_table(&mut tbuf, 0, &[]).map_err(|_| meta_err())?;
         let vat = pair_volume(volume, &layout);
         let tat = pair_table(volume, &layout);
-        let empty = PairRead {
-            report: store_io_format::pair::decide(
-                store_io_format::slot::SlotStatus::Blank,
-                store_io_format::slot::SlotStatus::Blank,
-            ),
-            payload: None,
-            media_error: false,
-        };
+        let empty = PairRead::blank();
         let mut q = queues.get(0);
         let next_v = plan_next(&empty, &vbuf, 1)?;
         let volume_slot = write_slot(&mut q, file, &pool, &vat, &next_v, false)?;

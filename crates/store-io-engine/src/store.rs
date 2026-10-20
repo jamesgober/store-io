@@ -747,6 +747,8 @@ pub(crate) fn pair_volume(volume: VolumeId, l: &Layout) -> PairAt {
         a,
         b,
         log2: l.log2_block,
+        format: store_io_format::slot::FORMAT_1,
+        numbered: false,
     }
 }
 
@@ -758,6 +760,8 @@ pub(crate) fn pair_table(volume: VolumeId, l: &Layout) -> PairAt {
         a,
         b,
         log2: l.log2_table,
+        format: store_io_format::slot::FORMAT_1,
+        numbered: false,
     }
 }
 
@@ -768,5 +772,7 @@ pub(crate) fn pair_region(volume: VolumeId, l: &Layout, e: &TableEntry) -> PairA
         a: e.offset,
         b: e.offset + l.block(),
         log2: l.log2_block,
+        format: store_io_format::slot::FORMAT_1,
+        numbered: false,
     }
 }

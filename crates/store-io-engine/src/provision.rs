@@ -184,14 +184,7 @@ where
             tag,
         };
         let at = pair_region(inner.volume, &inner.layout, &entry);
-        let blank = PairRead {
-            report: store_io_format::pair::decide(
-                store_io_format::slot::SlotStatus::Blank,
-                store_io_format::slot::SlotStatus::Blank,
-            ),
-            payload: None,
-            media_error: false,
-        };
+        let blank = PairRead::blank();
         let next = plan_next(&blank, &rbuf, inner.owner_generation)?;
         let header = {
             // `durable_slot` poisons exactly when durability became unknown;

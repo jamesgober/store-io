@@ -10,7 +10,9 @@ use store_io_buf::BufPool;
 use store_io_core::errno::{is_end_of_file, is_media_error};
 use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
 use store_io_format::pair::{PairReport, decide};
-use store_io_format::slot::{Expect, SlotFields, SlotIndex, SlotStatus, encode, validate};
+use store_io_format::slot::{
+    Expect, HeaderFacts, SlotFields, SlotIndex, SlotStatus, encode, header_facts, validate,
+};
 use store_io_platform::{IoOp, Queue};
 
 use crate::exec::{Lane, Ran, run};
@@ -23,9 +25,26 @@ pub(crate) struct PairAt {
     pub(crate) a: u64,
     pub(crate) b: u64,
     pub(crate) log2: u8,
+    /// The container's format (`FORMAT_1` or `FORMAT_2`).
+    pub(crate) format: u16,
+    /// Format 2: the object carries `meta_seq` (the volume record and the
+    /// table pages).
+    pub(crate) numbered: bool,
 }
 
 impl PairAt {
+    fn expect(&self, i: SlotIndex) -> Expect {
+        Expect {
+            volume_uuid: self.volume,
+            object_id: self.object,
+            slot_offset: self.offset(i),
+            slot_index: i,
+            log2_slot_size: self.log2,
+            format_major: self.format,
+            numbered: self.numbered,
+        }
+    }
+
     pub(crate) fn offset(&self, i: SlotIndex) -> u64 {
         match i {
             SlotIndex::A => self.a,
@@ -46,6 +65,9 @@ pub(crate) struct PairRead {
     /// A slot could not be read because of a media error (not a short read
     /// or the end of the file): the pair may be intact on the media.
     pub(crate) media_error: bool,
+    /// What each slot's header shows (A, B): the format-2 tear judgement
+    /// reads them; `None` for a slot that could not be read.
+    pub(crate) facts: [Option<HeaderFacts>; 2],
 }
 
 impl PairRead {
@@ -59,6 +81,8 @@ impl PairRead {
             SlotIndex::A => (w.status, self.report.b),
             SlotIndex::B => (self.report.a, w.status),
         };
+        let mut facts = self.facts;
+        facts[usize::from(w.index.as_u8())] = w.facts;
         let report = decide(a, b);
         let previous_winner = self.report.winner_info().map(|(i, _)| i);
         let payload = match report.winner_info() {
@@ -70,17 +94,29 @@ impl PairRead {
             report,
             payload,
             media_error: false,
+            facts,
+        }
+    }
+
+    /// A pair never written (both slots blank).
+    pub(crate) fn blank() -> PairRead {
+        PairRead {
+            report: decide(SlotStatus::Blank, SlotStatus::Blank),
+            payload: None,
+            media_error: false,
+            facts: [None, None],
         }
     }
 }
 
 /// One slot as written: its index, the status the validator gives the exact
-/// bytes written, and the payload those bytes carry.
+/// bytes written, the payload those bytes carry and what their header shows.
 #[derive(Debug, Clone)]
 pub(crate) struct Written {
     pub(crate) index: SlotIndex,
     pub(crate) status: SlotStatus,
     pub(crate) payload: Option<Vec<u8>>,
+    pub(crate) facts: Option<HeaderFacts>,
 }
 
 fn pool_err(ctx: ErrorContext) -> Error {
@@ -98,6 +134,26 @@ pub(crate) fn unreadable(raw: OsError) -> bool {
     is_media_error(raw) || is_end_of_file(raw)
 }
 
+/// One slot as read.
+struct OneSlot {
+    status: SlotStatus,
+    payload: Option<Vec<u8>>,
+    /// The read failed with a media error.
+    media: bool,
+    facts: Option<HeaderFacts>,
+}
+
+impl OneSlot {
+    fn unreadable(media: bool) -> Self {
+        Self {
+            status: SlotStatus::ReadError,
+            payload: None,
+            media,
+            facts: None,
+        }
+    }
+}
+
 /// Reads one slot. A media error, a short read or end of file makes it
 /// [`SlotStatus::ReadError`]; any other read failure is returned as `Io`.
 fn read_one<Q: Queue>(
@@ -106,7 +162,7 @@ fn read_one<Q: Queue>(
     pool: &BufPool,
     at: &PairAt,
     i: SlotIndex,
-) -> Result<(SlotStatus, Option<Vec<u8>>, bool), Error> {
+) -> Result<OneSlot, Error> {
     // Uncapped on purpose: a metadata read may use a large buffer rather
     // than fail when every ordinary one is in use.
     let buf = pool
@@ -140,29 +196,26 @@ fn read_one<Q: Queue>(
     let Some(buf) = got else {
         return match result {
             Err(raw) if !unreadable(raw) => Err(fail(raw)),
-            _ => Ok((SlotStatus::ReadError, None, media)),
+            _ => Ok(OneSlot::unreadable(media)),
         };
     };
     match result {
         Ok(n) if n == at.size() => {}
         Err(raw) if !unreadable(raw) => return Err(fail(raw)),
-        _ => return Ok((SlotStatus::ReadError, None, media)),
+        _ => return Ok(OneSlot::unreadable(media)),
     }
-    let expect = Expect {
-        volume_uuid: at.volume,
-        object_id: at.object,
-        slot_offset: offset,
-        slot_index: i,
-        log2_slot_size: at.log2,
-        format_major: store_io_format::slot::FORMAT_1,
-        numbered: false,
-    };
+    let expect = at.expect(i);
     let status = validate(buf.as_slice(), &expect);
     let payload = match status {
         SlotStatus::Valid(info) => Some(info.payload(buf.as_slice()).to_vec()),
         _ => None,
     };
-    Ok((status, payload, false))
+    Ok(OneSlot {
+        status,
+        payload,
+        media: false,
+        facts: header_facts(buf.as_slice(), &expect),
+    })
 }
 
 /// Reads and decides a pair. Never writes.
@@ -172,8 +225,18 @@ pub(crate) fn read_pair<Q: Queue>(
     pool: &BufPool,
     at: &PairAt,
 ) -> Result<PairRead, Error> {
-    let (a, pa, ma) = read_one(q, file, pool, at, SlotIndex::A)?;
-    let (b, pb, mb) = read_one(q, file, pool, at, SlotIndex::B)?;
+    let OneSlot {
+        status: a,
+        payload: pa,
+        media: ma,
+        facts: fa,
+    } = read_one(q, file, pool, at, SlotIndex::A)?;
+    let OneSlot {
+        status: b,
+        payload: pb,
+        media: mb,
+        facts: fb,
+    } = read_one(q, file, pool, at, SlotIndex::B)?;
     let report = decide(a, b);
     let payload = match report.winner_info() {
         Some((SlotIndex::A, _)) => pa,
@@ -184,6 +247,7 @@ pub(crate) fn read_pair<Q: Queue>(
         report,
         payload,
         media_error: ma || mb,
+        facts: [fa, fb],
     })
 }
 
@@ -194,6 +258,8 @@ pub(crate) struct NextSlot<'a> {
     pub(crate) owner_generation: u64,
     pub(crate) prev_header_crc: u32,
     pub(crate) payload: &'a [u8],
+    /// Format 2, numbered objects: this write's `meta_seq` (0 otherwise).
+    pub(crate) meta_seq: u64,
 }
 
 /// Writes one complete slot as one device I/O. Returns what was written:
@@ -215,6 +281,12 @@ pub(crate) fn write_slot<Q: Queue>(
     dsync: bool,
 ) -> Result<Written, Error> {
     let ctx = ErrorContext::default();
+    // A numbered format-2 object carries a meta_seq, and nothing else does.
+    debug_assert_eq!(
+        next.meta_seq != 0,
+        at.format == store_io_format::slot::FORMAT_2 && at.numbered,
+        "meta_seq for a numbered format-2 object only"
+    );
     let mut buf = pool.take(at.size()).map_err(|_| pool_err(ctx))?;
     let fields = SlotFields {
         volume_uuid: at.volume,
@@ -225,8 +297,8 @@ pub(crate) fn write_slot<Q: Queue>(
         slot_index: next.index,
         log2_slot_size: at.log2,
         prev_header_crc32c: next.prev_header_crc,
-        format_major: store_io_format::slot::FORMAT_1,
-        meta_seq: 0,
+        format_major: at.format,
+        meta_seq: next.meta_seq,
     };
     let crc = encode(buf.as_mut_slice(), &fields, next.payload).map_err(|e| match e {
         store_io_format::slot::EncodeError::Format => Error::Unsupported {
@@ -238,15 +310,7 @@ pub(crate) fn write_slot<Q: Queue>(
         },
     })?;
     let offset = at.offset(next.index);
-    let expect = Expect {
-        volume_uuid: at.volume,
-        object_id: at.object,
-        slot_offset: offset,
-        slot_index: next.index,
-        log2_slot_size: at.log2,
-        format_major: store_io_format::slot::FORMAT_1,
-        numbered: false,
-    };
+    let expect = at.expect(next.index);
     let status = validate(buf.as_slice(), &expect);
     let SlotStatus::Valid(info) = status else {
         return Err(Error::Corruption {
@@ -264,6 +328,7 @@ pub(crate) fn write_slot<Q: Queue>(
         index: next.index,
         status,
         payload: Some(info.payload(buf.as_slice()).to_vec()),
+        facts: header_facts(buf.as_slice(), &expect),
     };
     let ran = run(
         q,
@@ -337,5 +402,46 @@ pub(crate) fn plan_next<'a>(
         owner_generation,
         prev_header_crc: prev,
         payload,
+        meta_seq: 0,
     })
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::path::Path;
+
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use super::*;
+    use crate::store::{Store, StoreOptions, pair_volume};
+
+    /// The pair state a write computes in memory (`after`) is what a read
+    /// of the device finds: the same statuses and header facts in each
+    /// slot, whichever slot was written.
+    #[test]
+    fn test_after_a_write_matches_a_fresh_read() {
+        let p = SimPlatform::new(SimConfig::volatile(41));
+        let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        let inner = &s.inner;
+        let at = pair_volume(inner.volume, &inner.layout);
+        let mut prev = {
+            let mut q = inner.queues.get(0);
+            read_pair(&mut q, &inner.file, &inner.pool, &at).unwrap()
+        };
+        let payload = prev.payload.clone().unwrap();
+        for _ in 0..2 {
+            let mut q = inner.queues.get(0);
+            let next = plan_next(&prev, &payload, 1).unwrap();
+            let w = write_slot(&mut q, &inner.file, &inner.pool, &at, &next, false).unwrap();
+            let after = prev.after(w);
+            let read = read_pair(&mut q, &inner.file, &inner.pool, &at).unwrap();
+            assert_eq!(after.report.a, read.report.a);
+            assert_eq!(after.report.b, read.report.b);
+            assert_eq!(after.facts, read.facts, "header facts, A then B");
+            assert!(after.facts.iter().all(Option::is_some));
+            prev = read;
+        }
+    }
 }

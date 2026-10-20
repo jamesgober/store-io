@@ -12,6 +12,7 @@ Entries whose packages are Linux-only are skipped on other systems, and
 reported as skipped.
 
 Usage: python3 dev/tools/mutate.py [index ...]
+       python3 dev/tools/mutate.py --check   (every pattern occurs exactly once; nothing built)
 """
 import os
 import subprocess
@@ -77,7 +78,7 @@ M = [
  ("crates/store-io-engine/src/provision.rs", "            .any(|e| e.state == RegionState::Ready && e.name == rname)", "            .any(|e| e.state == RegionState::Ready && e.name == rname && false)"),
  ("crates/store-io-engine/src/provision.rs", "        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {", "        if false {"),
  ("crates/store-io-engine/src/provision.rs", "            let zeros = (2 * block).saturating_sub(at).min(len) as usize;", "            let zeros = if at < 2 * block { len as usize } else { 0 };"),
- ("crates/store-io-engine/src/lifecycle.rs", ".release_range(&inner.file, r.data_offset, r.data_size, how)", ".release_range(&inner.file, r.data_offset - 2 * inner.layout.block(), r.data_size + 2 * inner.layout.block(), how)"),
+ ('crates/store-io-engine/src/lifecycle.rs', 'release_range(&inner.file, at, len, how)', 'release_range(&inner.file, at - 2 * inner.layout.block(), len + 2 * inner.layout.block(), how)'),
  ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) {", "        if holds != Some(false) && false {"),
  ("crates/store-io-engine/src/provision.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", "                Err(Error::NoSpace { .. }) if align && from.is_some() && false => align = false,\n"),
  # v0.3.1 (D-068..D-072)
@@ -361,7 +362,23 @@ def kill_stuck_tests():
         subprocess.run(["pkill", "-f", os.path.join(ROOT, "target")], capture_output=True)
 
 
+def check_patterns():
+    """Every entry's pattern occurs exactly once: run before each commit."""
+    bad = []
+    for i, entry in enumerate(M):
+        f, a = entry[0], entry[1]
+        with open(os.path.join(ROOT, *f.split("/")), encoding="utf-8") as fh:
+            n = fh.read().count(a)
+        if n != 1:
+            print(f"[{i}] {f}: pattern found {n} times: {a[:60]!r}", flush=True)
+            bad.append(i)
+    print(f"{len(M)} entries, {len(bad)} bad", flush=True)
+    sys.exit(1 if bad else 0)
+
+
 def main():
+    if sys.argv[1:] == ["--check"]:
+        check_patterns()
     only = [int(a) for a in sys.argv[1:]]
     survived, missing, invalid = [], [], []
     skipped = []

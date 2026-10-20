@@ -461,6 +461,10 @@ impl Platform for SimPlatform {
         len: u64,
         _how: ReleaseHow,
     ) -> RawResult<()> {
+        let probe = lock(&self.world).release_probe.0.clone();
+        if let Some(probe) = probe {
+            probe();
+        }
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         w.release(file.id, offset, len)

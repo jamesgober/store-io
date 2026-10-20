@@ -193,8 +193,9 @@ pub enum CrashMode {
     Random,
 }
 
-/// A test hook run at the start of every `Queue::submit`, with the world
-/// unlocked (to observe what the engine published before submitting).
+/// A test hook, run with the world unlocked: at the start of every
+/// `Queue::submit` (to observe what the engine published before submitting)
+/// or of every `Platform::release_range` (to observe the caller's locks).
 #[derive(Clone, Default)]
 pub(crate) struct SubmitProbe(pub(crate) Option<std::sync::Arc<dyn Fn() + Send + Sync>>);
 
@@ -229,6 +230,8 @@ pub struct World {
     waits: u64,
     write_submits: u64,
     pub(crate) submit_probe: SubmitProbe,
+    /// Run first by every `Platform::release_range`, outside the world lock.
+    pub(crate) release_probe: SubmitProbe,
     flushes_completed: u64,
     dir_syncs: u64,
     set_lens: u64,
@@ -257,6 +260,7 @@ impl World {
             waits: 0,
             write_submits: 0,
             submit_probe: SubmitProbe::default(),
+            release_probe: SubmitProbe::default(),
             flushes_completed: 0,
             dir_syncs: 0,
             set_lens: 0,
@@ -337,6 +341,12 @@ impl World {
     /// Sets (or clears) the hook every `Queue::submit` runs first.
     pub fn set_submit_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
         self.submit_probe = SubmitProbe(probe);
+    }
+
+    /// Sets (or clears) the hook every `Platform::release_range` runs first,
+    /// on the caller's thread and outside the world lock.
+    pub fn set_release_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+        self.release_probe = SubmitProbe(probe);
     }
 
     /// Write submissions so far (see [`FaultPlan::fail_submit`]).

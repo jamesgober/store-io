@@ -11,6 +11,25 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `store-io-engine`: **a release could destroy a region provisioned during
+  it.** `release` marked the region released in the table, then let go of
+  the store's metadata lock before writing the region's Released header and
+  deallocating its data area. A provisioning on another thread in that
+  window could reuse the extent (a released extent of exactly the same
+  length is reused) and commit a new region there; the release's late
+  writes then landed in it: the deallocation through its data, including
+  bytes it had already given durable receipts for, and the header write
+  over one of its header slots (which could leave the new region
+  unavailable at the next open). Present since 0.3.0; needs a release and
+  a provisioning of the same extent length on another thread, reaching
+  placement between the release's table update and its deallocation. The release now holds the lock until its
+  space is deallocated. Tests: the lock is held while the space is
+  deallocated (deterministic, through a simulator hook); a region placed in
+  just-released space keeps its durable bytes across a reopen. Mutation
+  entry killed. Found in the v0.5 design review.
+
 ---
 
 ## [0.4.0] - 2026-10-19

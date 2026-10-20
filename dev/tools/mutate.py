@@ -238,6 +238,9 @@ M = [
  ('crates/store-io-posix/src/file.rs', '        libc::O_RDONLY | libc::O_DIRECT | libc::O_CLOEXEC,', '        libc::O_RDWR | libc::O_DIRECT | libc::O_CLOEXEC,', POSIX),
  ('crates/store-io-posix/src/uring/queue.rs', '            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', '            self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', POSIX),
  ('crates/store-io-posix/src/uring/queue.rs', '            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', '            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f) || true);', POSIX),
+ # release keeps the metadata lock until its space is deallocated (no
+ # provisioning can reuse the extent under its late writes)
+ ('crates/store-io-engine/src/lifecycle.rs', '        // 2. The header, for tools that list regions from headers.', '        drop(meta);\n        // 2. The header, for tools that list regions from headers.'),
  # G1: a flush leader notifies only when a follower is registered
  ('crates/store-io-engine/src/domain.rs', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 0 {', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 1 {'),
  ('crates/store-io-engine/src/domain.rs', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = self.poison.set(FirstCause {', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = Some(FirstCause {'),

@@ -199,7 +199,11 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|x| x.id != r.id);
-        drop(meta);
+        // The metadata lock stays held through the header write and the
+        // deallocation (it is released on return): the table already names
+        // the extent released, so a provisioning that ran in between could
+        // reuse it, and this release's late writes would then land in the
+        // new region (its header slot, and a hole punched through its data).
         // 2. The header, for tools that list regions from headers.
         let _generation = self.rewrite_header(r, RegionState::Released)?;
         // 3. The data area (never the header, which must keep saying
@@ -217,10 +221,12 @@ where
         } else {
             ReleaseHow::Deallocate
         };
-        match inner
-            .platform
-            .release_range(&inner.file, r.data_offset, r.data_size, how)
-        {
+        let released_range =
+            inner
+                .platform
+                .release_range(&inner.file, r.data_offset, r.data_size, how);
+        // The metadata lock is released on return.
+        match released_range {
             Ok(()) => Ok(()),
             Err(_) if windows => Ok(()),
             Err(raw) => Err(Error::Io {
@@ -229,5 +235,84 @@ where
                 ctx: c,
             }),
         }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use crate::store::{Store, StoreOptions};
+
+    /// A release keeps the metadata lock until its region's space is
+    /// deallocated. Without it a provisioning could reuse the extent the
+    /// table already names released, and the release's late header write and
+    /// deallocation would land in the new region. Checked deterministically:
+    /// the deallocation runs on the releasing thread, where `try_lock`
+    /// reports the lock as held.
+    #[test]
+    fn test_a_release_holds_the_metadata_lock_until_its_space_is_deallocated() {
+        let p = SimPlatform::new(SimConfig::volatile(7));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let pages = s.provision_page_region("old", 1 << 20).unwrap();
+        let (held, calls) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)));
+        {
+            let (inner, held, calls) =
+                (Arc::clone(&s.inner), Arc::clone(&held), Arc::clone(&calls));
+            p.with_world(|w| {
+                w.set_release_probe(Some(Arc::new(move || {
+                    let _was = calls.fetch_add(1, Ordering::Relaxed);
+                    if inner.meta.try_lock().is_ok() {
+                        held.store(false, Ordering::Relaxed);
+                    }
+                })));
+            });
+        }
+        pages.release().unwrap();
+        p.with_world(|w| w.set_release_probe(None));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the space was not deallocated once"
+        );
+        assert!(
+            held.load(Ordering::Relaxed),
+            "the space was deallocated without the metadata lock: a provisioning could have reused it"
+        );
+    }
+
+    /// A region provisioned into the space of one just released keeps every
+    /// byte it was told is durable, across a reopen.
+    #[test]
+    fn test_a_region_reusing_released_space_keeps_its_data() {
+        let p = SimPlatform::new(SimConfig::volatile(8));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let old = s.provision_page_region("old", 1 << 20).unwrap();
+        let _r = old
+            .write_durable(old.pos(0).unwrap(), &[1u8; 4096])
+            .unwrap();
+        old.release().unwrap();
+        let new = s.provision_page_region("new", 1 << 20).unwrap();
+        // The new region did reuse the released extent (else this test would
+        // prove nothing about reuse).
+        assert_eq!(s.space().released, 0, "the released extent was not reused");
+        let _r = new
+            .write_durable(new.pos(0).unwrap(), &[2u8; 4096])
+            .unwrap();
+        drop((new, s));
+        let s = Store::open(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        let new = s.page_region("new").unwrap();
+        let mut out = [0u8; 4096];
+        assert_eq!(new.read(new.pos(0).unwrap(), &mut out).unwrap(), 4096);
+        assert!(
+            out.iter().all(|&b| b == 2),
+            "the new region lost its durable bytes"
+        );
     }
 }

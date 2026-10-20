@@ -10,7 +10,9 @@
 //! bytes to ignore.
 
 use crate::codec::{Reader, Writer};
-use crate::meta::{FillPattern, MetaError, NAME_MAX, RegionKind, RegionName, RegionState, VolumeMeta};
+use crate::meta::{
+    FillPattern, MetaError, NAME_MAX, RegionKind, RegionName, RegionState, VolumeMeta,
+};
 
 /// Encoded length of [`VolumeMeta2`].
 pub const VOLUME_META2_LEN: usize = 64;
@@ -31,19 +33,52 @@ pub const FLAG_CAPPED: u8 = 1 << 1;
 /// Must-understand entry flags this version knows.
 pub const KNOWN_FLAGS: u8 = FLAG_UNWRITTEN | FLAG_CAPPED;
 
+/// Container blocks and table slots: `log2` from 12 to 16 (4 KiB to 64 KiB).
+pub const LOG2_RANGE: core::ops::RangeInclusive<u8> = 12..=16;
+
 /// Entries per table page for a table slot of `1 << log2_table` bytes:
-/// `floor((T - 128 - 24) / 96)` (169 at 16 KiB).
+/// `floor((T - 128 - 24) / 96)` (169 at 16 KiB). `log2_table` is clamped to
+/// [`LOG2_RANGE`] (the volume record's decoder refuses anything else).
 #[must_use]
 pub const fn entries_per_page(log2_table: u8) -> u16 {
-    let t = 1u32 << log2_table;
+    let l = if log2_table < 12 {
+        12
+    } else if log2_table > 16 {
+        16
+    } else {
+        log2_table
+    };
+    let t = 1u32 << l;
     ((t - 128 - PAGE_HEADER_LEN as u32) / ENTRY2_LEN as u32) as u16
 }
 
 /// Most extents a region header can list at blocks of `1 << log2_block`:
-/// `(B - 192) / 16` (244 at 4 KiB).
+/// `(B - 192) / 16` (244 at 4 KiB). `log2_block` is clamped to
+/// [`LOG2_RANGE`].
 #[must_use]
 pub const fn max_extents(log2_block: u8) -> usize {
-    ((1usize << log2_block) - 128 - REGION_HEADER2_LEN) / EXTENT_LEN
+    let l = if log2_block < 12 {
+        12
+    } else if log2_block > 16 {
+        16
+    } else {
+        log2_block
+    };
+    ((1usize << l) - 128 - REGION_HEADER2_LEN) / EXTENT_LEN
+}
+
+/// Largest slot object at blocks of `1 << log2_block`: `B - 192` (3,904 at
+/// 4 KiB). `log2_block` is clamped to [`LOG2_RANGE`].
+#[must_use]
+pub const fn max_object(log2_block: u8) -> usize {
+    let l = if log2_block < 12 {
+        12
+    } else if log2_block > 16 {
+        16
+    } else {
+        log2_block
+    };
+    (1usize << l) - 128 - REGION_HEADER2_LEN
 }
 
 // ---------------------------------------------------------------------------
@@ -103,11 +138,16 @@ impl VolumeMeta2 {
         let reserved0 = r.u8()?;
         let flags = r.u32()?;
         let reserved1 = r.u32()?;
-        // Newer-format markers first, as format 1 does.
-        let base = VolumeMeta::decode(&bytes[..48])?;
+        // Newer-format markers first, before any other field, so a newer
+        // record is recognised as newer and never as damage: `features` (F1,
+        // bytes 32..40), then `flags`.
+        if bytes[32..40].iter().any(|&b| b != 0) {
+            return Err(MetaError::Field("features"));
+        }
         if flags != 0 {
             return Err(MetaError::Field("flags"));
         }
+        let base = VolumeMeta::decode(&bytes[..48])?;
         if reserved0 != 0 || reserved1 != 0 {
             return Err(MetaError::Field("reserved"));
         }
@@ -130,6 +170,19 @@ impl VolumeMeta2 {
             clean_close: clean_close == 1,
             flags,
         })
+    }
+
+    /// Checks that the table area lies within a container of `file_len`
+    /// bytes (spec §5; the decoder cannot know the file's length).
+    ///
+    /// # Errors
+    ///
+    /// [`MetaError::Field`] (`table_pages`) if it does not.
+    pub fn check_file_len(&self, file_len: u64) -> Result<(), MetaError> {
+        if self.table_end() > file_len {
+            return Err(MetaError::Field("table_pages"));
+        }
+        Ok(())
     }
 
     /// The end of the table area: `2B + 2PT`.
@@ -229,6 +282,39 @@ pub struct Entry2 {
 }
 
 impl Entry2 {
+    /// The rules between an entry and its region's header (spec §9 step 3):
+    /// the header names this region (`region_id`), kind and flags agree, the
+    /// header is Ready, it lists the entry's extents or one more (never more
+    /// for a slot region), and `data_size` is a whole number of the region's
+    /// data blocks.
+    ///
+    /// # Errors
+    ///
+    /// [`MetaError::Field`] naming the first rule that fails.
+    pub fn check_header(&self, region_id: u64, h: &RegionHeader2) -> Result<(), MetaError> {
+        if h.region_id != region_id {
+            return Err(MetaError::Field("region_id"));
+        }
+        if h.kind != self.kind {
+            return Err(MetaError::Field("kind"));
+        }
+        if h.flags != self.flags {
+            return Err(MetaError::Field("flags"));
+        }
+        if h.state != RegionState::Ready {
+            return Err(MetaError::Field("state"));
+        }
+        let more = if self.kind == RegionKind::Slot { 0 } else { 1 };
+        let (have, want) = (u32::from(h.extent_count), u32::from(self.extent_count));
+        if have < want || have > want + more {
+            return Err(MetaError::Field("extent_count"));
+        }
+        if self.data_size % (1u64 << h.log2_block.clamp(9, 16)) != 0 {
+            return Err(MetaError::Unaligned);
+        }
+        Ok(())
+    }
+
     /// The entry as stored (for writing it back).
     #[must_use]
     pub fn to_raw(&self) -> RawEntry {
@@ -312,18 +398,26 @@ impl RawEntry {
     }
 
     /// The per-entry checks (spec §6). An entry that fails them makes its
-    /// region unavailable; the page itself stands.
+    /// region unavailable; the page itself stands. The data-block rule is
+    /// checked here as far as the entry alone allows (B for page regions,
+    /// 512 bytes for append regions, which may use 512 B blocks); the
+    /// region's own block comes from its header, and
+    /// [`Entry2::check_header`] checks the rest.
     ///
     /// # Errors
     ///
-    /// [`MetaError`] naming the first rule that fails.
+    /// [`MetaError`] naming the first rule that fails (`flags` first, so an
+    /// entry from a newer release is recognised as such).
     pub fn check(&self, lim: &EntryLimits) -> Result<Entry2, MetaError> {
+        if self.flags & !KNOWN_FLAGS != 0 {
+            return Err(MetaError::Field("flags"));
+        }
+        if !LOG2_RANGE.contains(&lim.log2_block) {
+            return Err(MetaError::Field("log2_block"));
+        }
         let kind = RegionKind::from_u8(self.kind)?;
         if RegionState::from_u8(self.state)? != RegionState::Ready {
             return Err(MetaError::Field("state"));
-        }
-        if self.flags & !KNOWN_FLAGS != 0 {
-            return Err(MetaError::Field("flags"));
         }
         let name = RegionName::from_padded(self.name)?;
         if self.data_size > self.capacity {
@@ -355,12 +449,18 @@ impl RawEntry {
             if self.extent_count != 0 || self.capacity != 0 || self.data_size != 0 {
                 return Err(MetaError::Field("slot"));
             }
-        } else if self.extent_count == 0 || self.capacity == 0 {
+        } else if self.extent_count == 0 {
             return Err(MetaError::Field("extent_count"));
+        } else if self.capacity == 0 {
+            return Err(MetaError::Field("capacity"));
         }
-        // Region data comes in whole data blocks: B, or 512 bytes for a
-        // 512 B append region (whose header says so; checked against it).
-        if self.capacity % 512 != 0 || self.data_size % 512 != 0 {
+        // Whole data blocks: B for every kind but append (512 B possible).
+        let unit = if kind == RegionKind::Append {
+            512
+        } else {
+            block
+        };
+        if self.capacity % block != 0 || self.data_size % unit != 0 {
             return Err(MetaError::Unaligned);
         }
         Ok(Entry2 {
@@ -381,12 +481,18 @@ impl RawEntry {
         })
     }
 
-    /// The bytes an unavailable entry keeps reserved: its span, clamped to
-    /// the file and to past the table area (`None` when nothing is left).
+    /// The bytes an unavailable entry keeps reserved: its span widened to
+    /// whole blocks, then clamped to the file and to past the table area
+    /// (`None` when nothing is left).
     #[must_use]
     pub fn reserved_span(&self, lim: &EntryLimits) -> Option<(u64, u64)> {
-        let start = self.span_start.max(lim.table_end);
-        let end = self.span_end.min(lim.file_len);
+        let block = 1u64 << lim.log2_block.clamp(12, 16);
+        let start = (self.span_start - self.span_start % block).max(lim.table_end);
+        let end = self
+            .span_end
+            .checked_next_multiple_of(block)
+            .unwrap_or(u64::MAX)
+            .min(lim.file_len);
         (start < end).then_some((start, end))
     }
 }
@@ -397,8 +503,15 @@ impl RawEntry {
 ///
 /// [`MetaError::Length`] if `out` is too short or there are more than
 /// `u16::MAX` entries.
-pub fn encode_page(out: &mut [u8], h: &PageHeader, entries: &[RawEntry]) -> Result<usize, MetaError> {
+pub fn encode_page(
+    out: &mut [u8],
+    h: &PageHeader,
+    entries: &[RawEntry],
+) -> Result<usize, MetaError> {
     let count = u16::try_from(entries.len()).map_err(|_| MetaError::Length)?;
+    if count != h.count {
+        return Err(MetaError::Field("count"));
+    }
     let mut w = Writer::new(out);
     w.u32(h.page_index)?;
     w.u32(h.next_seq)?;
@@ -459,14 +572,17 @@ pub fn decode_page(bytes: &[u8], page_index: u32, max_entries: u16) -> Result<Pa
     let page = Page { header, entries };
     // Seqs unique and below next_seq; reserved bytes zero. O(n^2) over at
     // most a few hundred entries, with no allocation.
-    for (i, a) in page.entries().enumerate() {
-        if a.seq >= header.next_seq {
+    let seq_at = |c: &[u8]| u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+    let chunks = || entries.chunks_exact(ENTRY2_LEN);
+    for (i, c) in chunks().enumerate() {
+        let seq = seq_at(c);
+        if seq >= header.next_seq {
             return Err(MetaError::Field("seq"));
         }
-        if a.reserved != 0 {
+        if c[38] != 0 || c[39] != 0 {
             return Err(MetaError::Field("reserved"));
         }
-        if page.entries().skip(i + 1).any(|b| b.seq == a.seq) {
+        if chunks().skip(i + 1).any(|d| seq_at(d) == seq) {
             return Err(MetaError::Duplicate);
         }
     }
@@ -521,8 +637,12 @@ pub fn encode_region_header(
     extents: &[Extent],
     object: &[u8],
 ) -> Result<usize, MetaError> {
-    if usize::from(h.extent_count) != extents.len() || h.object_len as usize != object.len() {
+    let slot = h.kind == RegionKind::Slot;
+    if usize::from(h.extent_count) != extents.len() || (slot && !extents.is_empty()) {
         return Err(MetaError::Field("extent_count"));
+    }
+    if h.object_len as usize != object.len() || (!slot && !object.is_empty()) {
+        return Err(MetaError::Field("object_len"));
     }
     let mut w = Writer::new(out);
     w.u64(h.region_id)?;
@@ -557,13 +677,17 @@ impl<'a> RegionHeaderView<'a> {
     /// The listed extents, in data order.
     pub fn extents(&self) -> impl Iterator<Item = Extent> + 'a {
         let n = usize::from(self.header.extent_count) * EXTENT_LEN;
-        self.tail.get(..n).unwrap_or(&[]).chunks_exact(EXTENT_LEN).map(|c| {
-            let mut a = [0u8; 8];
-            let mut b = [0u8; 8];
-            a.copy_from_slice(&c[..8]);
-            b.copy_from_slice(&c[8..]);
-            (u64::from_le_bytes(a), u64::from_le_bytes(b))
-        })
+        self.tail
+            .get(..n)
+            .unwrap_or(&[])
+            .chunks_exact(EXTENT_LEN)
+            .map(|c| {
+                let mut a = [0u8; 8];
+                let mut b = [0u8; 8];
+                a.copy_from_slice(&c[..8]);
+                b.copy_from_slice(&c[8..]);
+                (u64::from_le_bytes(a), u64::from_le_bytes(b))
+            })
     }
 
     /// A slot region's object.
@@ -588,12 +712,20 @@ pub fn decode_region_header(
     log2_block: u8,
     file_len: u64,
 ) -> Result<RegionHeaderView<'_>, MetaError> {
+    if !LOG2_RANGE.contains(&log2_block) {
+        return Err(MetaError::Field("log2_block"));
+    }
     let mut r = Reader::new(bytes);
     let region_id = r.u64()?;
-    let kind = RegionKind::from_u8(r.u8()?)?;
-    let state = RegionState::from_u8(r.u8()?)?;
-    let fill = FillPattern::from_u8(r.u8()?)?;
-    let flags = r.u8()?;
+    let (kind, state, fill, flags) = (r.u8()?, r.u8()?, r.u8()?, r.u8()?);
+    // Must-understand flags first: a header from a newer release is
+    // recognised as such, not as a bad kind or fill.
+    if flags & !KNOWN_FLAGS != 0 {
+        return Err(MetaError::Field("flags"));
+    }
+    let kind = RegionKind::from_u8(kind)?;
+    let state = RegionState::from_u8(state)?;
+    let fill = FillPattern::from_u8(fill)?;
     let compat_flags = r.u8()?;
     let log2 = r.u8()?;
     let extent_count = r.u16()?;
@@ -602,9 +734,6 @@ pub fn decode_region_header(
     let object_len = r.u32()?;
     if r.bytes(20)?.iter().any(|&b| b != 0) {
         return Err(MetaError::Field("reserved"));
-    }
-    if flags & !KNOWN_FLAGS != 0 {
-        return Err(MetaError::Field("flags"));
     }
     if !(log2 == log2_block || (log2 == 9 && kind == RegionKind::Append)) {
         return Err(MetaError::Field("log2_block"));
@@ -620,11 +749,14 @@ pub fn decode_region_header(
         if extent_count != 0 {
             return Err(MetaError::Field("extent_count"));
         }
-        if tail.len() != object_len as usize || tail.len() > (1usize << log2_block) - 192 {
+        if tail.len() != object_len as usize || tail.len() > max_object(log2_block) {
             return Err(MetaError::Length);
         }
     } else {
-        if object_len != 0 || extent_count == 0 || usize::from(extent_count) > max_extents(log2_block) {
+        if object_len != 0
+            || extent_count == 0
+            || usize::from(extent_count) > max_extents(log2_block)
+        {
             return Err(MetaError::Field("extent_count"));
         }
         if tail.len() != usize::from(extent_count) * EXTENT_LEN {

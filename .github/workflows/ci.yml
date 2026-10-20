@@ -452,7 +452,7 @@ jobs:
       - name: Run every target from its seed corpus
         working-directory: fuzz
         run: |
-          for t in slot_validate pair_torn_update meta_decode table_decode probe_linux probe_windows; do
+          for t in slot_validate pair_torn_update meta_decode meta2_decode table_decode probe_linux probe_windows; do
             mkdir -p "corpus/$t"
             # The prebuilt cargo-fuzz is a musl binary and defaults to its own target.
             cargo +nightly-2026-09-28 fuzz run --target x86_64-unknown-linux-gnu "$t" "corpus/$t" -- -max_total_time=60

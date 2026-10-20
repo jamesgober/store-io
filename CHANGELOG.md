@@ -23,7 +23,17 @@
   whose header passes every check but the payload CRC, its generation and
   `meta_seq`): what the format-2 open uses to tell a torn write from
   damage. The engine still writes format 1; format 2 is specified ahead of
-  the code. Tests, a fuzz target extended to both formats, and four
+  the code. Tests, a fuzz target extended to both formats, and five
+  mutation entries.
+- `store-io-format`: **format-2 payload codecs** (`meta2`): the 64-byte
+  volume record (`VolumeMeta2`: the table's page count and entries per
+  page, `clean_close`, must-understand `flags`); table pages
+  (`encode_page`, `decode_page`) with 96-byte entries (`RawEntry`, checked
+  into `Entry2` against `EntryLimits`, so a bad entry makes only its region
+  unavailable and its clamped span stays reserved); region headers
+  (`encode_region_header`, `decode_region_header`) with an extent list or a
+  slot object. Payload lengths are exact. Tests for every rule and every
+  truncation, a fuzz target (`meta2_decode`, canonical round trips), and 21
   mutation entries.
 
 ### Changed

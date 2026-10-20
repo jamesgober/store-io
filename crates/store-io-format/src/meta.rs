@@ -152,7 +152,7 @@ pub enum RegionKind {
 }
 
 impl RegionKind {
-    fn to_u8(self) -> u8 {
+    pub(crate) fn to_u8(self) -> u8 {
         match self {
             Self::Append => 1,
             Self::Page => 2,
@@ -160,7 +160,7 @@ impl RegionKind {
         }
     }
 
-    fn from_u8(v: u8) -> Result<Self, MetaError> {
+    pub(crate) fn from_u8(v: u8) -> Result<Self, MetaError> {
         match v {
             1 => Ok(Self::Append),
             2 => Ok(Self::Page),
@@ -180,14 +180,14 @@ pub enum RegionState {
 }
 
 impl RegionState {
-    fn to_u8(self) -> u8 {
+    pub(crate) fn to_u8(self) -> u8 {
         match self {
             Self::Ready => 1,
             Self::Released => 2,
         }
     }
 
-    fn from_u8(v: u8) -> Result<Self, MetaError> {
+    pub(crate) fn from_u8(v: u8) -> Result<Self, MetaError> {
         match v {
             1 => Ok(Self::Ready),
             2 => Ok(Self::Released),
@@ -207,14 +207,14 @@ pub enum FillPattern {
 }
 
 impl FillPattern {
-    fn to_u8(self) -> u8 {
+    pub(crate) fn to_u8(self) -> u8 {
         match self {
             Self::Zeros => 0,
             Self::KeyedV1 => 1,
         }
     }
 
-    fn from_u8(v: u8) -> Result<Self, MetaError> {
+    pub(crate) fn from_u8(v: u8) -> Result<Self, MetaError> {
         match v {
             0 => Ok(Self::Zeros),
             1 => Ok(Self::KeyedV1),
@@ -264,7 +264,7 @@ impl RegionName {
         core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
     }
 
-    fn from_padded(raw: [u8; NAME_MAX]) -> Result<Self, MetaError> {
+    pub(crate) fn from_padded(raw: [u8; NAME_MAX]) -> Result<Self, MetaError> {
         let len = raw.iter().position(|&b| b == 0).unwrap_or(NAME_MAX);
         if len == 0 || raw[len..].iter().any(|&b| b != 0) {
             return Err(MetaError::Field("name"));

@@ -38,6 +38,7 @@ STACK = "crates/store-io-buf/src/stack.rs"
 # The format crate's own tests (slot, pair and payload codecs).
 FORMAT = ["-p", "store-io-format"]
 SLOT = "crates/store-io-format/src/slot.rs"
+META2 = "crates/store-io-format/src/meta2.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -276,6 +277,37 @@ M = [
  (SLOT, '        _ => meta_seq == 0,', '        _ => true,', FORMAT),
  (SLOT, '        || (major == FORMAT_2 && header_len != HEADER_LEN)', '        || false', FORMAT),
  (SLOT, '    if major != e.format_major || !(major == FORMAT_1 || major == FORMAT_2) {', '    if major != e.format_major {', FORMAT),
+ # Format 2 payloads (v0.5): page checks (seqs below next_seq and unique,
+ # the page index, exact lengths), entry checks (headers past the table
+ # area and inside the span, two distinct header blocks, footprint_seq at
+ # most its page copy's, data_size at most capacity), region header extents
+ # (inside the file, non-empty, exact list length), the volume geometry
+ (META2, '        if seq >= header.next_seq {', '        if seq > header.next_seq {', FORMAT),
+ (META2, '        if chunks().skip(i + 1).any(|d| seq_at(d) == seq) {', '        if chunks().skip(i + 1).any(|d| seq_at(d) == seq && false) {', FORMAT),
+ (META2, '    if header.page_index != page_index {', '    if header.page_index != page_index && false {', FORMAT),
+ (META2, '    if bytes.len() != PAGE_HEADER_LEN + len {', '    if bytes.len() < PAGE_HEADER_LEN + len {', FORMAT),
+ (META2, '            if h < lim.table_end || h < self.span_start || end > self.span_end {', '            if h < self.span_start || end > self.span_end {', FORMAT),
+ (META2, '        if self.header_a == self.header_b {', '        if false {', FORMAT),
+ (META2, '        if self.footprint_seq == 0 || self.footprint_seq > lim.page_meta_seq {', '        if self.footprint_seq == 0 {', FORMAT),
+ (META2, '        if self.data_size > self.capacity {', '        if false {', FORMAT),
+ (META2, '            Some(end) if end <= file_len => {}', '            Some(end) if end <= file_len || true => {}', FORMAT),
+ (META2, '        if len == 0 || off % block != 0 || len % block != 0 {', '        if off % block != 0 || len % block != 0 {', FORMAT),
+ (META2, '        if tail.len() != usize::from(extent_count) * EXTENT_LEN {', '        if tail.len() < usize::from(extent_count) * EXTENT_LEN {', FORMAT),
+ (META2, '    if entries != entries_per_page(base.log2_table_slot_size) {', '    if false {', FORMAT),
+ (META2, '    if table_pages == 0 || table_pages >= MAX_TABLE_PAGES {', '    if table_pages == 0 {', FORMAT),
+ # region header bounds (extent count, slot object size, extent offsets
+ # aligned) and an entry's agreement with its header (at most one extent
+ # ahead; data_size in the header's blocks)
+ (META2, '            || usize::from(extent_count) > max_extents(log2_block)', '            || false', FORMAT),
+ (META2, '        if tail.len() != object_len as usize || tail.len() > max_object(log2_block) {', '        if tail.len() != object_len as usize {', FORMAT),
+ (META2, '        if len == 0 || off % block != 0 || len % block != 0 {', '        if len == 0 || len % block != 0 {', FORMAT),
+ (META2, '        if have < want || have > want + more {', '        if have < want || more > 1 {', FORMAT),
+ (META2, '        if self.data_size % (1u64 << h.log2_block.clamp(9, 16)) != 0 {', '        if self.data_size % (1u64 << h.log2_block.clamp(9, 16)) != 0 && false {', FORMAT),
+ # an entry's capacity in whole blocks; a slot entry has no capacity; a
+ # slot region's header is never one extent ahead
+ (META2, '        if self.capacity % block != 0 || self.data_size % unit != 0 {', '        if self.capacity % unit != 0 || self.data_size % unit != 0 {', FORMAT),
+ (META2, '            if self.extent_count != 0 || self.capacity != 0 || self.data_size != 0 {', '            if self.extent_count != 0 || self.data_size != 0 {', FORMAT),
+ (META2, '        let more = if self.kind == RegionKind::Slot { 0 } else { 1 };', '        let more = if self.kind == RegionKind::Slot { 1 } else { 1 };', FORMAT),
 ]
 
 def kill_stuck_tests():

@@ -251,7 +251,7 @@ where
         let mut lane = s.lane(&self.state, Op::Write)?;
         let reserved = s.reserve_append(f, data.len() as u64, c)?;
         let r = reserved.range();
-        stream.at(self.state.data_offset + r.start);
+        stream.at(self.state.map.locate(r.start, r.end - r.start));
         // Until the pump returns the guard poisons on any exit (a panic
         // included); then the settle step completes the reservation, or
         // poisons: past it every failure leaves a hole.
@@ -584,7 +584,7 @@ where
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
         let mut stream = s.stage(data, c)?;
-        stream.at(self.state.data_offset + pos.offset);
+        stream.at(self.state.map.locate(pos.offset, end - pos.offset));
         let mut lane = s.lane(&self.state, Op::Write)?;
         let outcome = s.pump(&mut lane, &mut stream);
         let wrote = Wrote::Page {

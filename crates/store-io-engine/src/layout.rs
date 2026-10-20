@@ -25,8 +25,10 @@ pub(crate) const VOLUME_OBJECT: u64 = 0;
 pub(crate) const TABLE_OBJECT: u64 = 1;
 
 /// Object id of region `id`'s header pair.
-pub(crate) const fn region_object(id: u32) -> u64 {
-    (1u64 << 32) | id as u64
+pub(crate) const fn region_object(id: u64) -> u64 {
+    // Format 1 ids are below 2^32.
+    debug_assert!(id < 1 << 32, "a format 1 region id");
+    (1u64 << 32) | id
 }
 
 /// Chooses the block size from the device and filesystem evidence: the

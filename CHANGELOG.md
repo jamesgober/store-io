@@ -54,6 +54,12 @@
 
 ### Changed
 
+- **Breaking:** `RegionId` is 64-bit (`from_raw(u64)`, `get() -> u64`),
+  for container format 2's ids (`page << 32 | seq`), which this release
+  does not create yet. Format 1 ids are
+  unchanged in value. Inside the engine every region-to-file offset now
+  comes from one place (the region's map of extents, one extent today),
+  ready for regions that grow across extents.
 - **Breaking** (`store-io-format`): `slot::FORMAT_MAJOR` is gone (now
   `FORMAT_1` and `FORMAT_2`); `SlotFields` gains `format_major` and
   `meta_seq`, `Expect` gains `format_major` and `numbered`, and

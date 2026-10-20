@@ -56,12 +56,11 @@ where
     /// Where `r`'s header pair lives.
     pub(crate) fn header_at(&self, r: &LiveRegion) -> PairAt {
         let l = &self.inner.layout;
-        let a = r.data_offset - 2 * l.block();
         PairAt {
             volume: *self.inner.volume.as_bytes(),
             object: region_object(r.id.get()),
-            a,
-            b: a + l.block(),
+            a: r.header_at[0],
+            b: r.header_at[1],
             log2: l.log2_block,
         }
     }
@@ -138,8 +137,9 @@ where
             name: r.name,
             kind: r.kind,
             generation,
-            data_offset: r.data_offset,
+            map: r.map,
             data_size: r.data_size,
+            header_at: r.header_at,
             header: std::sync::Mutex::new(header),
             frontier: (r.kind == RegionKind::Append).then(|| {
                 AppendFrontier::new(
@@ -183,7 +183,10 @@ where
         let mut meta = lock_meta(&inner.meta);
         // 1. The table: the only authority on open.
         let mut entries = meta.entries.clone();
-        let Some(entry) = entries.iter_mut().find(|e| e.region_id == r.id.get()) else {
+        let Some(entry) = entries
+            .iter_mut()
+            .find(|e| u64::from(e.region_id) == r.id.get())
+        else {
             r.gate.restore();
             return Err(metadata(c));
         };
@@ -225,10 +228,10 @@ where
         } else {
             ReleaseHow::Deallocate
         };
-        let released_range =
-            inner
-                .platform
-                .release_range(&inner.file, r.data_offset, r.data_size, how);
+        let released_range = r
+            .map
+            .extents()
+            .try_for_each(|(at, len)| inner.platform.release_range(&inner.file, at, len, how));
         // The metadata lock is released on return.
         match released_range {
             Ok(()) => Ok(()),

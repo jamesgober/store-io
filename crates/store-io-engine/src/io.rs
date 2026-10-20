@@ -256,7 +256,7 @@ where
     ///
     /// `Io` for `op` if clearing failed: nothing of the call happened.
     pub(crate) fn lane(&self, r: &LiveRegion, op: Op) -> Result<LaneGuard<'_, P::Queue>, Error> {
-        self.cleared(self.inner.queues.get(r.id.get() as usize), r, op)
+        self.cleared(self.inner.queues.get(queue_hint(r.id)), r, op)
     }
 
     /// A parallel lane for a call on `r` that submits several independent
@@ -272,7 +272,7 @@ where
         op: Op,
     ) -> Result<LaneGuard<'_, P::Queue>, Error> {
         let inner = &*self.inner;
-        let lane = inner.queues.get_parallel(r.id.get() as usize, |n| {
+        let lane = inner.queues.get_parallel(queue_hint(r.id), |n| {
             let cfg = QueueConfig {
                 depth: inner.opts.queue_depth.max(1),
                 parallel: true,
@@ -566,7 +566,7 @@ where
                 &mut lane,
                 IoOp::Read {
                     file: &self.inner.file,
-                    offset: r.data_offset + offset + done as u64,
+                    offset: r.map.locate(offset + done as u64, piece),
                     buf,
                 },
             )
@@ -690,6 +690,14 @@ where
         }
         Ok(copied)
     }
+}
+
+/// Where a region's search for a free queue starts: its id folded to a
+/// `usize` (format 2 ids carry the page in their high bits).
+#[allow(clippy::cast_possible_truncation)]
+fn queue_hint(id: store_io_core::id::RegionId) -> usize {
+    let id = id.get();
+    (id ^ (id >> 32)) as usize
 }
 
 #[cfg(test)]

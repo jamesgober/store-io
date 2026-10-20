@@ -55,12 +55,12 @@ where
 
     fn at(&self) -> PairAt {
         let l = &self.store.inner.layout;
-        let a = self.state.data_offset - 2 * l.block();
+        let [a, b] = self.state.header_at;
         PairAt {
             volume: *self.store.inner.volume.as_bytes(),
             object: crate::layout::region_object(self.state.id.get()),
             a,
-            b: a + l.block(),
+            b,
             log2: l.log2_block,
         }
     }

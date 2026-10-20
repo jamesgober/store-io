@@ -49,21 +49,23 @@ impl fmt::Debug for VolumeId {
 }
 
 /// Identity of a region within a volume. Never reused within a volume.
+/// 64-bit: container format 2 ids are `page << 32 | seq`; format 1's fit in
+/// the low 32 bits.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct RegionId(u32);
+pub struct RegionId(u64);
 
 impl RegionId {
     /// Wraps the id stored on disk.
     #[inline]
     #[must_use]
-    pub const fn from_raw(raw: u32) -> Self {
+    pub const fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
 
     /// The id as stored on disk.
     #[inline]
     #[must_use]
-    pub const fn get(self) -> u32 {
+    pub const fn get(self) -> u64 {
         self.0
     }
 }

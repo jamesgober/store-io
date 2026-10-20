@@ -318,7 +318,7 @@ where
             offset: r.start,
         };
         let req = Req::Write {
-            offset: state.data_offset + r.start,
+            offset: state.map.locate(r.start, r.end - r.start),
             buf,
         };
         match self.issue(req, tag, Kind::Append(r), pass, mode == WriteMode::Durable) {
@@ -356,7 +356,7 @@ where
         let end = admit!(region.check(&pos, buf.len()), buf);
         let c = ctx_range(state, pos.offset, end);
         let req = Req::Write {
-            offset: state.data_offset + pos.offset,
+            offset: state.map.locate(pos.offset, end - pos.offset),
             buf,
         };
         let kind = Kind::Page {
@@ -442,7 +442,7 @@ where
             return Err(rejected(not_written(NotWrittenCause::OutOfBounds, c), buf));
         }
         let req = Req::Read {
-            offset: state.data_offset + offset,
+            offset: state.map.locate(offset, len),
             buf,
         };
         let kind = Kind::Read {

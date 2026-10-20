@@ -287,7 +287,7 @@ impl<Q: Queue> QueueSet<Q> {
             return self.get(hint);
         };
         let found = (0..n).find_map(|i| {
-            let at = (hint + i) % n;
+            let at = (hint % n + i) % n;
             match lanes[at].try_lock() {
                 Ok(g) => Some((at, g)),
                 Err(TryLockError::Poisoned(p)) => Some((at, p.into_inner())),
@@ -357,7 +357,7 @@ impl<Q: Queue> QueueSet<Q> {
     fn try_any(&self, hint: usize) -> Option<(usize, MutexGuard<'_, Lane<Q>>)> {
         let n = self.queues.len();
         (0..n).find_map(|i| {
-            let at = (hint + i) % n;
+            let at = (hint % n + i) % n;
             match self.queues[at].try_lock() {
                 Ok(g) => Some((at, g)),
                 Err(TryLockError::Poisoned(p)) => Some((at, p.into_inner())),

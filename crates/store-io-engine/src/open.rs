@@ -129,7 +129,7 @@ where
             let mut skip = |reason| {
                 unavailable.push(UnavailableRegion {
                     name: e.name.as_str().to_owned(),
-                    id: RegionId::from_raw(e.region_id),
+                    id: RegionId::from_raw(u64::from(e.region_id)),
                     kind: e.kind,
                     reason,
                 });
@@ -183,12 +183,16 @@ where
                 )
             });
             regions.push(Arc::new(LiveRegion {
-                id: RegionId::from_raw(e.region_id),
+                id: RegionId::from_raw(u64::from(e.region_id)),
                 name: e.name,
                 kind: e.kind,
                 generation,
-                data_offset: e.offset + 2 * layout.block(),
+                map: crate::regionmap::RegionMap::single(
+                    e.offset + 2 * layout.block(),
+                    e.data_size,
+                ),
                 data_size: e.data_size,
+                header_at: [e.offset, e.offset + layout.block()],
                 header: Mutex::new(header),
                 frontier,
                 positioned: std::sync::atomic::AtomicBool::new(false),

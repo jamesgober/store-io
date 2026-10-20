@@ -214,7 +214,7 @@ where
                 let _fits = buf.set_len(len);
                 let op = IoOp::Read {
                     file,
-                    offset: r.data_offset + next,
+                    offset: r.map.locate(next, len as u64),
                     buf,
                 };
                 match lane.submit(op, submitted) {
@@ -360,7 +360,7 @@ where
             lane,
             IoOp::Read {
                 file: &self.inner.file,
-                offset: r.data_offset + start,
+                offset: r.map.locate(start, len),
                 buf,
             },
         );

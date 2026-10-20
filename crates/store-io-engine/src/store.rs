@@ -309,8 +309,12 @@ pub(crate) struct LiveRegion {
     pub(crate) name: RegionName,
     pub(crate) kind: RegionKind,
     pub(crate) generation: Generation,
-    pub(crate) data_offset: u64,
+    /// Where the data lies in the container (every file offset of the
+    /// region's data comes from it).
+    pub(crate) map: crate::regionmap::RegionMap,
     pub(crate) data_size: u64,
+    /// The header pair's slot offsets.
+    pub(crate) header_at: [u64; 2],
     pub(crate) header: Mutex<PairRead>,
     pub(crate) frontier: Option<AppendFrontier>,
     /// Append regions: whether the append position is known (true when
@@ -760,7 +764,7 @@ pub(crate) fn pair_table(volume: VolumeId, l: &Layout) -> PairAt {
 pub(crate) fn pair_region(volume: VolumeId, l: &Layout, e: &TableEntry) -> PairAt {
     PairAt {
         volume: *volume.as_bytes(),
-        object: region_object(e.region_id),
+        object: region_object(u64::from(e.region_id)),
         a: e.offset,
         b: e.offset + l.block(),
         log2: l.log2_block,

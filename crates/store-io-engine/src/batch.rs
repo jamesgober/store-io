@@ -267,7 +267,7 @@ where
         }
         let mut src = Chunks {
             bufs: self.chunks.drain(..),
-            offset: state.data_offset + r.start,
+            offset: state.map.locate(r.start, r.end - r.start),
         };
         let outcome = s.pump(&mut lane, &mut src);
         drop(src);
@@ -436,7 +436,6 @@ where
         }
         let start = self.writes.first().map_or(0, |(at, _)| *at);
         let end = self.writes.last().map_or(0, |(at, b)| at + b.len() as u64);
-        let base = state.data_offset;
         // Several writes run concurrently on a parallel lane; one stays on
         // the caller's thread (D-096).
         let mut lane = if self.writes.len() > 1 {
@@ -445,7 +444,10 @@ where
             s.lane(state, Op::Write)?
         };
         let mut src = Placed {
-            writes: self.writes.drain(..).map(|(at, b)| (base + at, b)),
+            writes: self
+                .writes
+                .drain(..)
+                .map(|(at, b)| (state.map.locate(at, b.len() as u64), b)),
         };
         let outcome = s.pump(&mut lane, &mut src);
         drop(src);

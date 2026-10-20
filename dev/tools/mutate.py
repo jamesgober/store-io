@@ -348,6 +348,8 @@ M = [
  (JUDGE, '    let volume_demote = candidates != 1 || refused;', '    let volume_demote = candidates > 99 || refused;', FORMAT),
  (JUDGE, '    let volume_demote = candidates != 1 || refused;', '    let volume_demote = candidates != 1 || refused && false;', FORMAT),
  (JUDGE, '                let demote = if i == 0 { volume_demote } else { page_demote };', '                let demote = if i == 0 { page_demote || volume_demote } else { page_demote };', FORMAT),
+ # E1: a region range outside its map is refused, in release builds too
+ ('crates/store-io-engine/src/regionmap.rs', '            pos.checked_add(len).is_some_and(|end| end <= self.len),', '            pos.checked_add(len).is_some() || true,'),
 ]
 
 def kill_stuck_tests():

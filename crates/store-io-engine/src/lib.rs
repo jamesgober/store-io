@@ -39,6 +39,7 @@ mod provision;
 pub(crate) mod queue_core;
 pub mod receipt;
 mod region;
+mod regionmap;
 mod scan;
 mod settle;
 mod slot_handle;

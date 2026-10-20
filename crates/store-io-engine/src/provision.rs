@@ -224,12 +224,13 @@ where
         }
         lock_acct(&inner.acct).add(&entry, block);
         let state = Arc::new(LiveRegion {
-            id: RegionId::from_raw(id),
+            id: RegionId::from_raw(u64::from(id)),
             name: rname,
             kind,
             generation: Generation::FIRST,
-            data_offset: offset + 2 * block,
+            map: crate::regionmap::RegionMap::single(offset + 2 * block, data_size),
             data_size,
+            header_at: [offset, offset + block],
             header: Mutex::new(header),
             frontier: (kind == RegionKind::Append).then(|| {
                 AppendFrontier::new(

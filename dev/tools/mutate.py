@@ -41,6 +41,10 @@ FORMAT = ["-p", "store-io-format"]
 SLOT = "crates/store-io-format/src/slot.rs"
 META2 = "crates/store-io-format/src/meta2.rs"
 JUDGE = "crates/store-io-format/src/judge.rs"
+# Format 2 in the engine: its own tests (the format-1 suites never reach it).
+F2 = ["-p", "store-io-engine", "--test", "format2", "--test", "format2_create"]
+V2 = "crates/store-io-engine/src/v2.rs"
+CREATE = "crates/store-io-engine/src/create.rs"
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -79,10 +83,10 @@ M = [
  ("crates/store-io-engine/src/provision.rs", "        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {", "        if false {"),
  ("crates/store-io-engine/src/provision.rs", "            let zeros = (2 * block).saturating_sub(at).min(len) as usize;", "            let zeros = if at < 2 * block { len as usize } else { 0 };"),
  ('crates/store-io-engine/src/lifecycle.rs', 'release_range(&inner.file, at, len, how)', 'release_range(&inner.file, at - 2 * inner.layout.block(), len + 2 * inner.layout.block(), how)'),
- ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) {", "        if holds != Some(false) && false {"),
+ ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) ||", "        if holds != Some(false) && false ||"),
  ("crates/store-io-engine/src/provision.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", "                Err(Error::NoSpace { .. }) if align && from.is_some() && false => align = false,\n"),
  # v0.3.1 (D-068..D-072)
- ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) {", "        if holds == Some(true) {"),
+ ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) ||", "        if holds == Some(true) ||"),
  ("crates/store-io-engine/src/slots.rs", "            Some((i, _)) if i == w.index => w.payload,", "            Some((i, _)) if i == w.index && false => w.payload,"),
  ("crates/store-io-engine/src/store.rs", "    Ok(prev.after(written))", "    let _ = written;\n    Ok(prev.clone())"),
  ("crates/store-io-engine/src/io.rs", "                Some(mut lane) => flush_data(&mut lane, file),", "                Some(_lane) => flush_data(&mut self.inner.queues.get(0), file),"),
@@ -90,7 +94,7 @@ M = [
  ("crates/store-io-engine/src/region.rs", "        if self.store.inner.read_only {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,", "        if self.store.inner.read_only && false {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,"),
  # D-090: unavailable regions are reported and never NotFound
  ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
- ("crates/store-io-engine/src/open.rs", "            io: platform.io_path(),\n            unavailable,\n        };", "            io: platform.io_path(),\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n        };"),
+ ("crates/store-io-engine/src/open.rs", "            io: platform.io_path(),\n            unavailable,\n            format:", "            io: platform.io_path(),\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n            format:"),
  # Read errors are classified and media errors name the exact range
  ('crates/store-io-engine/src/settle.rs', '        Err(raw) if is_media_error(raw) => {', '        Err(raw) if true || is_media_error(raw) => {'),
  ("crates/store-io-engine/src/io.rs", "self.first_unreadable(r, start, end).unwrap_or((start, end));", "self.first_unreadable(r, start, end).map(|_| (start, end)).unwrap_or((start, end));"),
@@ -351,6 +355,71 @@ M = [
  (JUDGE, '                let demote = if i == 0 { volume_demote } else { page_demote };', '                let demote = if i == 0 { page_demote || volume_demote } else { page_demote };', FORMAT),
  # E1: a region range outside its map is refused, in release builds too
  ('crates/store-io-engine/src/regionmap.rs', '            pos.checked_add(len).is_some_and(|end| end <= self.len),', '            pos.checked_add(len).is_some() || true,'),
+ # E2a: create makes every page durable before the volume record and
+ # numbers them in order; the volume record is numbered
+ (V2, '    }\n    full_flush(platform, file)?;\n    let vm = VolumeMeta2 {', '    }\n    let vm = VolumeMeta2 {', F2),
+ (V2, '        next.meta_seq = u64::from(p) + 1;', '        next.meta_seq = u64::from(p) + 2;', F2),
+ (V2, '    next.meta_seq = u64::from(layout.pages) + 1;', '    next.meta_seq = u64::from(layout.pages);', F2),
+ ('crates/store-io-engine/src/store.rs', '        numbered: l.format == store_io_format::slot::FORMAT_2,', '        numbered: false,', F2),
+ # the open: a short file is corrupt; a refused pair, and a page holding
+ # regions (until E3), fail it; a page that does not decode is lost; the
+ # judgement sees each copy's facts; stale and lost pages freeze; an
+ # unwritable judgement opens read-only; a heal keeps the torn copy's
+ # meta_seq; an open records an unclean store; a read-only store never
+ # writes at close
+ (V2, '    if layout.data_start() > container_len {', '    if layout.data_start() > container_len && false {', F2),
+ (V2, '    if j.refused {', '    if j.refused && false {', F2),
+ (V2, '                    if !entries.is_empty() {', '                    if !entries.is_empty() && false {', F2),
+ (V2, '                    standing = Standing::Lost;', '                    standing = Standing::Unconfirmed;', F2),
+ (V2, '            facts: p.facts[1],', '            facts: None,', F2),
+ (V2, '    report.frozen = !report.stale_pages.is_empty() || !report.lost_pages.is_empty();', '    report.frozen = !report.stale_pages.is_empty();', F2),
+ (V2, '    report.frozen = !report.stale_pages.is_empty() || !report.lost_pages.is_empty();', '    report.frozen = !report.lost_pages.is_empty();', F2),
+ (V2, '    let read_only = read_only || {', '    let read_only = read_only && {', F2),
+ (V2, '        Some(m) => m,', '        Some(m) => m + 1,', F2),
+ (V2, '        q, file, pool, layout, volume, policy, &domain, &mut meta, og, false,', '        q, file, pool, layout, volume, policy, &domain, &mut meta, og, true,', F2),
+ (V2, '        if self.read_only\n            || self.domain', '        if self.domain', F2),
+ (V2, '            || std::thread::panicking()\n', '', F2),
+ # a newer volume record is refused, not corrupt; format 2 regions wait
+ # for E3
+ (V2, 'Field("features" | "flags") => Error::Unsupported {', 'Field("features") => Error::Unsupported {', F2),
+ ('crates/store-io-engine/src/provision.rs', '        if inner.layout.format == store_io_format::slot::FORMAT_2 {', '        if inner.layout.format == 99 {', F2),
+ ('crates/store-io-engine/src/space.rs', '        if inner.layout.format == store_io_format::slot::FORMAT_2 {', '        if inner.layout.format == 99 {', F2),
+ # create takes over only a crashed format-2 create: the leftover rule is
+ # format 2's; generation 1 only; a valid volume record is a store; a torn
+ # page is a leftover; a file past the metadata is not
+ (CREATE, '            _ if v2 && crashed_create_leftover(b.as_slice()) =>', '            _ if (v2 || true) && crashed_create_leftover(b.as_slice()) =>', F2),
+ (CREATE, ' || u64_at(56) != 1 || ', ' || u64_at(56) == 0 || ', F2),
+ (CREATE, '        return torn;', '        return true;', F2),
+ (CREATE, '    torn || store_io_format::meta2::decode_page', '    false || store_io_format::meta2::decode_page', F2),
+ (CREATE, '        let largest_metadata = if v2 {', '        let largest_metadata = if v2 && false {', F2),
+ # review: the format is read only from a verifying header; a failed
+ # metadata read is retried once; a page failing its checks stops a page
+ # heal; an unknown ro_compat bit opens read-only; clean_close is the
+ # judged one; a torn copy of unknown meta_seq heals at the next number
+ ('crates/store-io-engine/src/open.rs', '            if !header_verifies(b.as_slice()) {', '            if !header_verifies(b.as_slice()) && false {', F2),
+ ('crates/store-io-engine/src/slots.rs', '    if !failed(first.report.a) && !failed(first.report.b) {', '    if true {', F2),
+ (V2, '    if reread {', '    if reread && false {', F2),
+ (V2, '        if pair > 0 && decode_lost {', '        if pair > 0 && decode_lost && false {', F2),
+ (V2, '        .any(|p| p.report.winner_info().is_some_and(|(_, i)| !i.writable()));', '        .any(|p| p.report.winner_info().is_some_and(|(_, i)| !i.writable() && false));', F2),
+ (V2, '        clean_close: j.clean,', '        clean_close: vm.clean_close,', F2),
+ (V2, '        None => next_meta_seq(&meta.volume_pair, &v2.pages, Some((pair, slot)))?,', '        None => next_meta_seq(&meta.volume_pair, &v2.pages, Some((pair, slot)))? + 1,', F2),
+ # second review: a retry reads only the failed slot and keeps the other's
+ # result; a longer volume record is refused; the file grows past page 0
+ # only once page 0 is durable; past format 1's bound a takeover needs a
+ # format-2 leftover
+ ('crates/store-io-engine/src/slots.rs', '        if failed(status[i]) {', '        if true {', F2),
+ ('crates/store-io-engine/src/slots.rs', '            if failed([first.report.a, first.report.b][i]) {', '            if true {', F2),
+ (V2, '    if bytes.len() > VOLUME_META2_LEN {', '    if bytes.len() > VOLUME_META2_LEN && false {', F2),
+ (V2, '        layout.page_slots(0).1\n    })?;', '        layout.data_start()\n    })?;', F2),
+ (V2, '        if p == 1 {\n            full_flush(platform, file)?;', '        if p == 1 {', F2),
+ (CREATE, '        if holds != Some(false) || (len > v1_metadata && !leftovers) {', '        if holds != Some(false) {', F2),
+ (CREATE, ' => *leftovers = true,', ' => *leftovers = false,', F2),
+ # third review: a newer volume copy read on the retry is refused; a
+ # one-page table is sized whole; the size bound before the probe covers
+ # every block size
+ (V2, '        vm = decode_volume(&crate::open::winner_payload(&volume_pair)?)?;', '        vm = decode_volume(volume_pair.payload.as_deref().ok_or_else(corrupt)?)?;', F2),
+ (V2, '    allocate(if layout.pages == 1 {', '    allocate(if false {', F2),
+ (CREATE, '(crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)', '(crate::layout::MAX_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)', F2),
 ]
 
 def kill_stuck_tests():

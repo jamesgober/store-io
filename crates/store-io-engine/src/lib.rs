@@ -40,6 +40,7 @@ pub(crate) mod queue_core;
 pub mod receipt;
 mod region;
 mod regionmap;
+mod report;
 mod scan;
 mod settle;
 mod slot_handle;
@@ -49,6 +50,7 @@ mod stats;
 mod store;
 mod submitter;
 mod sync;
+mod v2;
 
 pub use batch::{AppendBatch, PageBatch};
 pub use completion::{SubmitterConfig, WriteMode};
@@ -60,6 +62,9 @@ pub use region::{AppendRegion, PageRegion, Slot};
 pub use scan::{ScanItem, ScanSummary};
 pub use space::{Reservation, SpaceReport, TagSpace};
 pub use stats::Outstanding;
-pub use store::{CONTAINER, Store, StoreOptions, StoreReport, Unavailable, UnavailableRegion};
+pub use store::{
+    CONTAINER, Healed, MetadataReport, Store, StoreOptions, StoreReport, Unavailable,
+    UnavailableRegion,
+};
 pub use store_io_format::meta::RegionKind;
 pub use submitter::{MAX_DEPTH, Submitter};

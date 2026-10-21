@@ -10,6 +10,8 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+pub use crate::v2::{Healed, MetadataReport};
+
 use store_io_buf::{BufPool, PoolConfig};
 use store_io_core::class::{DurabilityClass, ReceiptLabel};
 use store_io_core::decide::{ClassDecision, DurableOpen, Trust};
@@ -109,6 +111,17 @@ pub struct StoreOptions {
     /// some kernels (at least Linux 6.5.0 and 6.6.0), which no probe
     /// detects (D-107).
     pub register_file: bool,
+    /// Regions a format-2 store can hold, fixed at create (default 65,536:
+    /// a table of 12.1 MiB at 16 KiB table pages, written at create and
+    /// read at every open; smaller stores may ask for fewer; at most
+    /// 4,194,304). Ignored by format 1. Internal until format 2 is the
+    /// default (v0.5).
+    #[doc(hidden)]
+    pub region_capacity: u32,
+    /// The container format a create writes. Internal until format 2 is
+    /// complete (v0.5): 1 by default.
+    #[doc(hidden)]
+    pub container_format: u16,
 }
 
 impl Default for StoreOptions {
@@ -128,6 +141,8 @@ impl Default for StoreOptions {
             keyed_fill: false,
             linux_tier: LinuxTier::Auto,
             register_file: true,
+            region_capacity: 65_536,
+            container_format: store_io_format::slot::FORMAT_1,
         }
     }
 }
@@ -237,60 +252,10 @@ pub struct StoreReport {
     /// Regions the region table names that could not be opened, with the
     /// reason (D-090). Empty for a healthy store.
     pub unavailable: Vec<UnavailableRegion>,
-}
-
-impl core::fmt::Display for StoreReport {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let d = &self.decision;
-        writeln!(f, "volume           {}", self.volume)?;
-        writeln!(
-            f,
-            "io               {} ({})",
-            self.io.interface, self.io.reason
-        )?;
-        writeln!(f, "class            {}", d.class)?;
-        writeln!(f, "label            {}", d.label)?;
-        writeln!(f, "durable open     {:?}", d.durable_open)?;
-        if d.power_safe_candidate {
-            writeln!(
-                f,
-                "note             device reports no volatile cache; health unreadable (power-safe candidate)"
-            )?;
-        }
-        for r in d.reasons.iter() {
-            writeln!(f, "reason           {r}")?;
-        }
-        for m in d.missing.iter() {
-            writeln!(f, "missing          {m}")?;
-        }
-        writeln!(f, "flush execution  inline (leader)")?;
-        writeln!(f, "block size       {}", self.block_size)?;
-        writeln!(f, "table capacity   {} regions", self.table_capacity)?;
-        writeln!(f, "filesystem       {:?}", self.evidence.fs.kind)?;
-        writeln!(f, "bus              {:?}", self.evidence.device.bus)?;
-        if let Some(m) = &self.evidence.device.model {
-            writeln!(f, "model            {m}")?;
-        }
-        for u in &self.unavailable {
-            writeln!(
-                f,
-                "unavailable      region {:?} (id {}, {:?}): {}",
-                u.name,
-                u.id.get(),
-                u.kind,
-                u.reason
-            )?;
-        }
-        write!(
-            f,
-            "mode             {}",
-            if self.read_only {
-                "read-only"
-            } else {
-                "read-write"
-            }
-        )
-    }
+    /// The container format (1 or 2).
+    pub format: u16,
+    /// Format 2: what the open found in the metadata (empty for format 1).
+    pub metadata: MetadataReport,
 }
 
 /// In-memory metadata, guarded by the metadata lock.
@@ -301,6 +266,8 @@ pub(crate) struct Meta {
     pub(crate) next_region_id: u32,
     pub(crate) entries: Vec<TableEntry>,
     pub(crate) container_len: u64,
+    /// Format 2's metadata (the format-1 fields above are then unused).
+    pub(crate) v2: Option<Box<crate::v2::Meta2>>,
 }
 
 /// One live region.
@@ -747,8 +714,8 @@ pub(crate) fn pair_volume(volume: VolumeId, l: &Layout) -> PairAt {
         a,
         b,
         log2: l.log2_block,
-        format: store_io_format::slot::FORMAT_1,
-        numbered: false,
+        format: l.format,
+        numbered: l.format == store_io_format::slot::FORMAT_2,
     }
 }
 
@@ -760,7 +727,7 @@ pub(crate) fn pair_table(volume: VolumeId, l: &Layout) -> PairAt {
         a,
         b,
         log2: l.log2_table,
-        format: store_io_format::slot::FORMAT_1,
+        format: l.format,
         numbered: false,
     }
 }
@@ -772,7 +739,7 @@ pub(crate) fn pair_region(volume: VolumeId, l: &Layout, e: &TableEntry) -> PairA
         a: e.offset,
         b: e.offset + l.block(),
         log2: l.log2_block,
-        format: store_io_format::slot::FORMAT_1,
+        format: l.format,
         numbered: false,
     }
 }

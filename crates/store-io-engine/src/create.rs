@@ -89,9 +89,14 @@ where
     /// is a store and stays untouched (`AlreadyExists`). Abandoned means: no
     /// one holds its lock, it is no longer than the largest metadata area,
     /// and every block of it was read in full without finding a single slot
-    /// header whose header CRC verifies (D-068). A read error, an empty pool
-    /// or any verified header (a damaged store, or one of a newer format)
-    /// proves nothing, so the container is left untouched.
+    /// header whose header CRC verifies (D-068), apart from, for a format-2
+    /// create, what a crashed format-2 create leaves (see
+    /// [`holds_slot_header`]; a file longer than format 1's bound must show
+    /// at least one such leftover). A read error, an empty pool or any
+    /// other verified header (a damaged store, or one of a newer format)
+    /// proves nothing, so the container is left untouched. The bound is
+    /// this create's geometry: a crashed create with a larger table is
+    /// taken over only by a create asking for at least as much.
     fn reclaim_abandoned(
         platform: &P,
         dir: &P::Dir,
@@ -103,27 +108,54 @@ where
             .open_file(dir, name, FileMode::ReadWrite)
             .map_err(|_| exists())?;
         let lock = platform.lock_exclusive(&file).map_err(|_| exists())?;
-        let largest_metadata = 4u64 << crate::layout::MAX_LOG2_BLOCK;
-        if platform.size(&file).map_err(|e| io(Op::Open, e))? > largest_metadata {
+        // A crashed create never wrote past its metadata: format 1's four
+        // largest slots, or format 2's table area for this create's geometry
+        // (bounded here over every block size, before the probe, so a large
+        // store is refused without one).
+        let v2 = opts.container_format == store_io_format::slot::FORMAT_2;
+        let v1_metadata = 4u64 << crate::layout::MAX_LOG2_BLOCK;
+        let bound = if v2 {
+            (crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)
+                .map(|b| {
+                    let t = opts.log2_table_slot.clamp(b, 16);
+                    crate::v2::layout_for(b, t, opts.region_capacity).data_start()
+                })
+                .max()
+                .unwrap_or(v1_metadata)
+        } else {
+            v1_metadata
+        };
+        if platform.size(&file).map_err(|e| io(Op::Open, e))? > bound {
             return Err(exists());
         }
         let evidence = platform.probe(dir, &file).map_err(|e| io(Op::Probe, e))?;
+        let largest_metadata = if v2 {
+            let log2_block = choose_log2_block(&evidence, opts.block_size);
+            let log2_table = opts.log2_table_slot.clamp(log2_block, 16);
+            crate::v2::layout_for(log2_block, log2_table, opts.region_capacity).data_start()
+        } else {
+            v1_metadata
+        };
+        if platform.size(&file).map_err(|e| io(Op::Open, e))? > largest_metadata {
+            return Err(exists());
+        }
         let boot_pool = make_pool(
             &evidence,
-            &Layout {
-                log2_block: crate::layout::MAX_LOG2_BLOCK,
-                log2_table: crate::layout::MAX_LOG2_BLOCK,
-            },
+            &Layout::v1(crate::layout::MAX_LOG2_BLOCK, crate::layout::MAX_LOG2_BLOCK),
             opts,
             false,
         )?;
         let queues = make_queues(platform, opts)?;
         let len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
+        let mut leftovers = false;
         let holds = {
             let mut q = queues.get(0);
-            holds_slot_header(&mut q, &file, &boot_pool, len)
+            holds_slot_header(&mut q, &file, &boot_pool, len, v2, &mut leftovers)
         };
-        if holds != Some(false) {
+        // Past format 1's bound, only a format-2 create's own remains
+        // justify a takeover: a larger file with nothing that verifies may
+        // be a damaged store of either format.
+        if holds != Some(false) || (len > v1_metadata && !leftovers) {
             return Err(exists());
         }
         platform.set_len(&file, 0).map_err(|e| io(Op::Create, e))?;
@@ -150,16 +182,42 @@ where
         let evidence = platform.probe(dir, file).map_err(|e| io(Op::Probe, e))?;
         let decision = decide(&evidence, &opts.trust);
         refuse(&decision)?;
-        let layout = Layout {
-            log2_block: choose_log2_block(&evidence, opts.block_size),
-            log2_table: opts
-                .log2_table_slot
-                .clamp(choose_log2_block(&evidence, opts.block_size), 16),
+        let log2_block = choose_log2_block(&evidence, opts.block_size);
+        let log2_table = opts.log2_table_slot.clamp(log2_block, 16);
+        let v2 = opts.container_format == store_io_format::slot::FORMAT_2;
+        let layout = if v2 {
+            crate::v2::layout_for(log2_block, log2_table, opts.region_capacity)
+        } else {
+            Layout::v1(log2_block, log2_table)
         };
         let policy = policy_of(&decision);
         let pool = make_pool(&evidence, &layout, opts, true)?;
         let queues = make_queues(platform, opts)?;
         let volume = VolumeId::from_bytes(random_uuid());
+        let created = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if v2 {
+            let meta = {
+                let mut q = queues.get(0);
+                crate::v2::create_metadata(platform, file, &mut q, &pool, &layout, volume, created)?
+            };
+            let report = StoreReport {
+                evidence,
+                decision,
+                block_size: layout.block(),
+                table_capacity: layout.pages as usize
+                    * usize::from(store_io_format::meta2::entries_per_page(layout.log2_table)),
+                volume,
+                owner_generation: 1,
+                read_only: false,
+                io: platform.io_path(),
+                unavailable: Vec::new(),
+                format: store_io_format::slot::FORMAT_2,
+                metadata: MetadataReport::default(),
+            };
+            return Ok((meta, report, layout, policy, pool, queues));
+        }
         let header_len = layout.data_start();
         platform
             .allocate(file, header_len)
@@ -170,9 +228,7 @@ where
             device_index: 0,
             owner_generation: 1,
             table_offset: layout.table_slots().0,
-            created_unix_s: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
+            created_unix_s: created,
             features: 0,
         };
         let mut vbuf = [0u8; VOLUME_META_LEN];
@@ -208,6 +264,8 @@ where
             read_only: false,
             io: platform.io_path(),
             unavailable: Vec::new(),
+            format: store_io_format::slot::FORMAT_1,
+            metadata: MetadataReport::default(),
         };
         let meta = Meta {
             volume: vmeta,
@@ -216,6 +274,7 @@ where
             next_region_id: 0,
             entries: Vec::new(),
             container_len: header_len,
+            v2: None,
         };
         Ok((meta, report, layout, policy, pool, queues))
     }
@@ -227,11 +286,19 @@ where
 /// block could not be read in full: nothing is proven then (D-068). Slot
 /// headers sit at block starts and blocks are at least 4 KiB, so every header
 /// starts on a 4 KiB boundary.
+///
+/// With `v2` (a format-2 create), a crashed format-2 create's own leftovers
+/// do not count (spec §12): a generation-1 table page that is empty or torn,
+/// and a generation-1 volume record whose payload is torn (a valid one would
+/// make the file a store). Of any volume ids: an earlier crashed create may
+/// have left another. `leftovers` is set when one was seen.
 fn holds_slot_header<Q: Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,
     pool: &BufPool,
     len: u64,
+    v2: bool,
+    leftovers: &mut bool,
 ) -> Option<bool> {
     use store_io_format::slot::{Expect, SlotIndex, SlotStatus, validate};
     const SCAN: u64 = 4096;
@@ -272,9 +339,46 @@ fn holds_slot_header<Q: Queue>(
             | SlotStatus::BadHeaderCrc
             | SlotStatus::BadLength
             | SlotStatus::ReadError => {}
+            _ if v2 && crashed_create_leftover(b.as_slice()) => *leftovers = true,
             _ => return Some(true),
         }
         at += SCAN;
     }
     Some(false)
+}
+
+/// Whether a 4 KiB block whose slot header verifies is what a crashed
+/// format-2 create leaves behind (see [`holds_slot_header`]): format 2,
+/// generation 1, and either a table page whose payload is torn or an empty
+/// page, or a volume record whose payload is torn.
+fn crashed_create_leftover(b: &[u8]) -> bool {
+    let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+    let u64_at = |i: usize| {
+        let mut x = [0u8; 8];
+        x.copy_from_slice(&b[i..i + 8]);
+        u64::from_le_bytes(x)
+    };
+    let header_len = usize::from(u16_at(12));
+    if u16_at(14) != store_io_format::slot::FORMAT_2 || u64_at(56) != 1 || header_len != 128 {
+        return false;
+    }
+    let object = u64_at(48);
+    let payload_len = u32_at(72) as usize;
+    let Some(payload) = header_len
+        .checked_add(payload_len)
+        .and_then(|end| b.get(header_len..end))
+    else {
+        return false;
+    };
+    let torn = store_io_format::crc32c::crc32c(payload) != u32_at(28);
+    if object == 0 {
+        return torn;
+    }
+    let page = object & !(1u64 << 61);
+    if object >> 61 != 1 || page >= u64::from(store_io_format::meta2::MAX_TABLE_PAGES) {
+        return false;
+    }
+    torn || store_io_format::meta2::decode_page(payload, page as u32, u16::MAX)
+        .is_ok_and(|p| p.header.count == 0)
 }

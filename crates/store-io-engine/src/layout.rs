@@ -59,6 +59,10 @@ pub(crate) fn choose_log2_block(ev: &Evidence, requested: Option<u32>) -> u8 {
 pub(crate) struct Layout {
     pub(crate) log2_block: u8,
     pub(crate) log2_table: u8,
+    /// The container's format (`FORMAT_1` or `FORMAT_2`).
+    pub(crate) format: u16,
+    /// Format 2: table pages `P` (1 in format 1, whose table is one pair).
+    pub(crate) pages: u32,
 }
 
 impl Layout {
@@ -81,9 +85,26 @@ impl Layout {
         (a, a + self.table())
     }
 
-    /// First byte available to regions.
+    /// Format 2: table page `p`'s slots A and B.
+    pub(crate) fn page_slots(&self, p: u32) -> (u64, u64) {
+        let a = 2 * self.block() + 2 * u64::from(p) * self.table();
+        (a, a + self.table())
+    }
+
+    /// First byte available to regions: past the volume record and the
+    /// region table (format 1's one pair, or format 2's `P` page pairs).
     pub(crate) fn data_start(&self) -> u64 {
-        2 * self.block() + 2 * self.table()
+        2 * self.block() + 2 * u64::from(self.pages) * self.table()
+    }
+
+    /// A format-1 layout.
+    pub(crate) const fn v1(log2_block: u8, log2_table: u8) -> Self {
+        Self {
+            log2_block,
+            log2_table,
+            format: store_io_format::slot::FORMAT_1,
+            pages: 1,
+        }
     }
 
     /// Bytes a region of `data` bytes occupies (two header blocks + data).
@@ -186,10 +207,7 @@ mod tests {
 
     #[test]
     fn test_layout_offsets_and_capacity() {
-        let l = Layout {
-            log2_block: 12,
-            log2_table: 14,
-        };
+        let l = Layout::v1(12, 14);
         assert_eq!(l.volume_slots(), (0, 4096));
         assert_eq!(l.table_slots(), (8192, 8192 + 16384));
         assert_eq!(l.data_start(), 8192 + 32768);
@@ -198,10 +216,7 @@ mod tests {
 
     #[test]
     fn test_placement_appends_or_reuses_released_space() {
-        let l = Layout {
-            log2_block: 12,
-            log2_table: 14,
-        };
+        let l = Layout::v1(12, 14);
         let entry = |id, offset, data, state| TableEntry {
             region_id: id,
             kind: RegionKind::Append,
@@ -236,10 +251,7 @@ mod tests {
 
     #[test]
     fn test_large_regions_start_their_data_on_a_mebibyte_boundary() {
-        let l = Layout {
-            log2_block: 12,
-            log2_table: 14,
-        };
+        let l = Layout::v1(12, 14);
         let start = l.data_start();
         let len = 2 * 4096 + DATA_ALIGN;
         let (at, reuse, _) = l.place(&[], start, len, true).unwrap_or((0, None, false));

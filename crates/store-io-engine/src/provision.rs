@@ -51,6 +51,12 @@ where
         if let Some(first) = inner.domain.poisoned() {
             return Err(Error::Poisoned { first });
         }
+        if inner.layout.format == store_io_format::slot::FORMAT_2 {
+            // Format-2 regions arrive with E3.
+            return Err(Error::Unsupported {
+                what: store_io_core::error::Capability::FormatVersion,
+            });
+        }
         let rname = RegionName::new(name).map_err(|_| Error::NotWritten {
             cause: NotWrittenCause::InvalidName,
             ctx: ErrorContext::default(),

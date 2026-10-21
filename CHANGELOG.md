@@ -51,9 +51,41 @@
   by a small store model, a fuzz target (`judge`) that checks heal,
   refusal, writability and every pair's standing against a brute-force
   reference written from the specification, and 25 mutation entries.
+- Engine: **format-2 stores can be created and opened**, behind hidden
+  options until format 2 is complete (not yet the default, and holding no
+  regions yet: provisioning and reserving in one fail
+  `Unsupported(FormatVersion)` until the regions arrive). Create makes
+  every table page durable before it writes the volume record. An open
+  reads every page (a slot whose read failed is read once more; a slot
+  that read is never read again), applies the tear
+  judgement, rewrites the one torn metadata write a crash can leave (at
+  that write's own `meta_seq`, or the next one when its header is torn
+  too), and reports what it found in `StoreReport::metadata`
+  (`MetadataReport`: whether the last writer closed cleanly, stale and
+  lost pages, a damaged volume record, what was healed (`Healed`),
+  whether allocation is frozen, why a writable open was made read-only,
+  and how many reads were retried). The format is read only from a
+  header whose CRC verifies. A page or volume record of a newer format
+  (a longer volume record included) fails the open; one carrying a read-only-compatible feature this
+  version does not know opens read-only; a page that fails the page
+  checks is lost, and then no page's torn write is healed. A writable
+  store records a clean close when its last handle drops (not during a
+  panic, and not when poisoned). Create takes over the remains of a
+  crashed format-2 create (generation-1 table pages, empty or torn, and
+  generation-1 volume records only when their payload is torn; past format 1's size bound, at
+  least one of these) and nothing else: the file grows past format 1's
+  bound only once page 0 is durable, so a crash that leaves a larger file
+  always leaves one. `StoreReport::format`
+  names the container format (also in its `Display`). 39 simulator tests,
+  among them a power failure inside a create at each of its writes, and
+  41 mutation entries.
 
 ### Changed
 
+- **Breaking:** `StoreOptions` gains two hidden fields (the container
+  format and a format-2 store's region capacity) while format 2 is
+  incomplete; code that builds it without `..StoreOptions::default()`
+  must add them.
 - **Breaking:** `RegionId` is 64-bit (`from_raw(u64)`, `get() -> u64`),
   for container format 2's ids (`page << 32 | seq`), which this release
   does not create yet. Format 1 ids are

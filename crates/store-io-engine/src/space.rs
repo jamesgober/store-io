@@ -283,6 +283,12 @@ where
     pub fn reserve(&self, bytes: u64, tag: u32) -> Result<Reservation<P>, Error> {
         self.ready()?;
         let inner = &self.inner;
+        if inner.layout.format == store_io_format::slot::FORMAT_2 {
+            // Format-2 regions arrive with E3.
+            return Err(Error::Unsupported {
+                what: store_io_core::error::Capability::FormatVersion,
+            });
+        }
         let mut meta = lock_meta(&inner.meta);
         let mut acct = lock_acct(&inner.acct);
         if !acct.fits(tag, bytes) {

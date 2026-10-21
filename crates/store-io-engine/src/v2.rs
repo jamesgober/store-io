@@ -1,0 +1,643 @@
+//! Container format 2 (`.dev/design/format2-draft.md`): the paged region
+//! table's metadata, create, the open's tear judgement and healing, and the
+//! clean close. Built beside format 1 (D-116 makes format 1 read-only once
+//! creation switches, v0.5 E5); regions in format 2 arrive with E2b/E3, so a
+//! page holding entries is refused for now.
+
+use store_io_core::error::{Capability, Error, ErrorContext, Op};
+use store_io_core::id::VolumeId;
+use store_io_format::judge::{self, PairVerdict, SlotVerdict, Standing};
+use store_io_format::meta::VolumeMeta;
+use store_io_format::meta2::{
+    PageHeader, RawEntry, VOLUME_META2_LEN, VolumeMeta2, decode_page, encode_page, entries_per_page,
+};
+use store_io_format::slot::{FORMAT_2, SlotIndex, SlotStatus};
+use store_io_platform::Platform;
+
+use crate::domain::Domain;
+use crate::exec::Lane;
+use crate::layout::Layout;
+use crate::slots::{PairAt, PairRead, plan_next, read_pair, reread_failed, write_slot};
+use crate::store::*;
+
+/// The most regions a format-2 store can be created for (a table of
+/// 24,819 pages, two copies each: 776 MiB at 16 KiB pages, all read at
+/// every open); a larger `region_capacity` is
+/// clamped, and [`StoreReport::table_capacity`] says what was made.
+pub const MAX_REGION_CAPACITY: u32 = 1 << 22;
+
+/// What a format-2 open found in its metadata pairs (the volume record and
+/// the table pages).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MetadataReport {
+    /// The last writer closed cleanly: its final volume record is intact
+    /// and says so (a damaged or in-flight volume record voids it).
+    pub clean_close: bool,
+    /// Pages whose newest copy is damaged (Unconfirmed): their regions are
+    /// read-only and allocation is frozen.
+    pub stale_pages: Vec<u32>,
+    /// Pages with no usable copy (Lost), or whose copy fails the page
+    /// checks: their regions are unknown and allocation is frozen.
+    pub lost_pages: Vec<u32>,
+    /// The volume record's newest copy was damaged (a writable open
+    /// replaces it).
+    pub volume_stale: bool,
+    /// The one metadata write a crash left torn, which this open rewrote.
+    pub healed: Option<Healed>,
+    /// Allocation is frozen: some page is stale or lost.
+    pub frozen: bool,
+    /// Why a writable open was made read-only, if it was.
+    pub read_only_reason: Option<&'static str>,
+    /// Metadata pairs read a second time because a slot read failed
+    /// (each failed read is retried once).
+    pub retried_reads: u32,
+}
+
+/// Which metadata write a format-2 open healed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Healed {
+    /// The volume record.
+    VolumeRecord,
+    /// Table page `p`.
+    Page(u32),
+}
+
+impl core::fmt::Display for MetadataReport {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        writeln!(f, "clean close      {}", yes(self.clean_close))?;
+        if self.volume_stale {
+            writeln!(f, "volume record    stale")?;
+        }
+        if !self.stale_pages.is_empty() {
+            writeln!(f, "stale pages      {:?}", self.stale_pages)?;
+        }
+        if !self.lost_pages.is_empty() {
+            writeln!(f, "lost pages       {:?}", self.lost_pages)?;
+        }
+        if let Some(h) = self.healed {
+            writeln!(f, "healed           {h:?}")?;
+        }
+        if self.frozen {
+            writeln!(f, "allocation       frozen")?;
+        }
+        if let Some(r) = self.read_only_reason {
+            writeln!(f, "read-only        {r}")?;
+        }
+        if self.retried_reads > 0 {
+            writeln!(f, "retried reads    {}", self.retried_reads)?;
+        }
+        Ok(())
+    }
+}
+
+/// Object id of table page `p`.
+pub(crate) const fn page_object(p: u32) -> u64 {
+    (1u64 << 61) | p as u64
+}
+
+/// Where page `p`'s pair lives.
+pub(crate) fn pair_page(volume: VolumeId, l: &Layout, p: u32) -> PairAt {
+    let (a, b) = l.page_slots(p);
+    PairAt {
+        volume: *volume.as_bytes(),
+        object: page_object(p),
+        a,
+        b,
+        log2: l.log2_table,
+        format: FORMAT_2,
+        numbered: true,
+    }
+}
+
+/// One table page as the open found it.
+#[derive(Debug, Clone)]
+pub(crate) struct Page2 {
+    pub(crate) pair: PairRead,
+    pub(crate) standing: Standing,
+    /// The winner's page header (none when Lost).
+    pub(crate) header: Option<PageHeader>,
+    /// The winner's entries, unchecked (none yet in E2a).
+    pub(crate) entries: Vec<RawEntry>,
+}
+
+/// Format 2's metadata state.
+#[derive(Debug, Clone)]
+pub(crate) struct Meta2 {
+    pub(crate) volume: VolumeMeta2,
+    pub(crate) pages: Vec<Page2>,
+}
+
+/// The `meta_seq` a slot of `pair` counts for (`Valid`, or `BadPayloadCrc`
+/// with a numbered header).
+fn numbered(pair: &PairRead, slot: SlotIndex) -> Option<u64> {
+    let i = usize::from(slot.as_u8());
+    let status = if slot == SlotIndex::A {
+        pair.report.a
+    } else {
+        pair.report.b
+    };
+    match status {
+        SlotStatus::Valid(info) => Some(info.meta_seq),
+        SlotStatus::BadPayloadCrc => pair.facts[i].and_then(|f| f.numbered).map(|n| n.meta_seq),
+        _ => None,
+    }
+}
+
+/// One above every numbered slot of the volume record and the pages, except
+/// the slot `over` (pair 0 the volume record, `p + 1` page `p`) the write
+/// replaces (spec §7).
+fn next_meta_seq(
+    volume: &PairRead,
+    pages: &[Page2],
+    over: Option<(usize, SlotIndex)>,
+) -> Result<u64, Error> {
+    let pairs = core::iter::once(volume).chain(pages.iter().map(|p| &p.pair));
+    let mut max = 0u64;
+    for (i, pair) in pairs.enumerate() {
+        for slot in [SlotIndex::A, SlotIndex::B] {
+            if over == Some((i, slot)) {
+                continue;
+            }
+            if let Some(v) = numbered(pair, slot) {
+                max = max.max(v);
+            }
+        }
+    }
+    max.checked_add(1).ok_or(Error::Unsupported {
+        what: Capability::FormatVersion,
+    })
+}
+
+fn page_payload(p: u32) -> Result<Vec<u8>, Error> {
+    let mut buf = vec![0u8; store_io_format::meta2::PAGE_HEADER_LEN];
+    let n = encode_page(
+        &mut buf,
+        &PageHeader {
+            page_index: p,
+            next_seq: 0,
+            count: 0,
+        },
+        &[],
+    )
+    .map_err(|_| meta_err())?;
+    buf.truncate(n);
+    Ok(buf)
+}
+
+fn volume_payload(vm: &VolumeMeta2) -> Result<[u8; VOLUME_META2_LEN], Error> {
+    let mut buf = [0u8; VOLUME_META2_LEN];
+    let _n = vm.encode(&mut buf).map_err(|_| meta_err())?;
+    Ok(buf)
+}
+
+/// The format-2 layout for a container with blocks of `1 << log2_block`,
+/// table pages of `1 << log2_table` and room for `capacity` regions.
+pub(crate) fn layout_for(log2_block: u8, log2_table: u8, capacity: u32) -> Layout {
+    let e = u32::from(entries_per_page(log2_table)).max(1);
+    let pages = capacity
+        .min(MAX_REGION_CAPACITY)
+        .div_ceil(e)
+        .clamp(1, store_io_format::meta2::MAX_TABLE_PAGES - 1);
+    Layout {
+        log2_block,
+        log2_table,
+        format: FORMAT_2,
+        pages,
+    }
+}
+
+/// Writes a fresh format-2 container's metadata (spec §12, create): the
+/// file sized to the end of page 0's slot A (a one-page table: the whole
+/// table), page 0's slot A (generation 1, `meta_seq` 1, empty), for P > 1
+/// a full flush, the file sized for the whole table and every other page's
+/// slot A (`meta_seq` 2..P), then a full flush, the volume record's slot A (`meta_seq`
+/// P + 1), a full flush. The caller flushes the directory. Growing the file
+/// only once page 0 is durable means a crash never leaves a file past
+/// format 1's size bound without a page a later create recognises.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_metadata<P: Platform>(
+    platform: &P,
+    file: &P::File,
+    q: &mut Lane<P::Queue>,
+    pool: &store_io_buf::BufPool,
+    layout: &Layout,
+    volume: VolumeId,
+    created_unix_s: u64,
+) -> Result<Meta, Error> {
+    let allocate = |len: u64| {
+        platform
+            .allocate(file, len)
+            .map_err(|e| space_err(Op::Allocate, e, 0))
+    };
+    // Page 0's slot A; a one-page table is within format 1's bound whole.
+    allocate(if layout.pages == 1 {
+        layout.data_start()
+    } else {
+        layout.page_slots(0).1
+    })?;
+    let mut pages = Vec::with_capacity(layout.pages as usize);
+    for p in 0..layout.pages {
+        if p == 1 {
+            full_flush(platform, file)?;
+            allocate(layout.data_start())?;
+        }
+        let payload = page_payload(p)?;
+        let mut next = plan_next(&PairRead::blank(), &payload, 1)?;
+        next.meta_seq = u64::from(p) + 1;
+        let w = write_slot(q, file, pool, &pair_page(volume, layout, p), &next, false)?;
+        pages.push(Page2 {
+            pair: PairRead::blank().after(w),
+            standing: Standing::Confirmed,
+            header: Some(PageHeader {
+                page_index: p,
+                next_seq: 0,
+                count: 0,
+            }),
+            entries: Vec::new(),
+        });
+    }
+    full_flush(platform, file)?;
+    let vm = VolumeMeta2 {
+        base: VolumeMeta {
+            log2_block_size: layout.log2_block,
+            log2_table_slot_size: layout.log2_table,
+            device_index: 0,
+            owner_generation: 1,
+            table_offset: 2 * layout.block(),
+            created_unix_s,
+            features: 0,
+        },
+        table_pages: layout.pages,
+        entries_per_page: entries_per_page(layout.log2_table),
+        clean_close: false,
+        flags: 0,
+    };
+    let vbuf = volume_payload(&vm)?;
+    let mut next = plan_next(&PairRead::blank(), &vbuf, 1)?;
+    next.meta_seq = u64::from(layout.pages) + 1;
+    let w = write_slot(q, file, pool, &pair_volume(volume, layout), &next, false)?;
+    full_flush(platform, file)?;
+    Ok(Meta {
+        volume: vm.base,
+        volume_pair: PairRead::blank().after(w),
+        table_pair: PairRead::blank(),
+        next_region_id: 0,
+        entries: Vec::new(),
+        container_len: layout.data_start(),
+        v2: Some(Box::new(Meta2 { volume: vm, pages })),
+    })
+}
+
+fn full_flush<P: Platform>(platform: &P, file: &P::File) -> Result<(), Error> {
+    platform
+        .flush_all(file)
+        .map_err(|e| Error::DurabilityUnknown {
+            op: Op::FlushAll,
+            raw: Some(e),
+            ctx: ErrorContext::default(),
+        })
+}
+
+/// What a format-2 open decided.
+pub(crate) struct Opened {
+    pub(crate) meta: Meta,
+    pub(crate) owner_generation: u64,
+    pub(crate) read_only: bool,
+    pub(crate) report: MetadataReport,
+}
+
+/// Decodes a format-2 volume record: a longer record, or a `features` or
+/// `flags` bit this version does not know, is a newer format (refused);
+/// anything else that fails is corruption.
+pub(crate) fn decode_volume(bytes: &[u8]) -> Result<VolumeMeta2, Error> {
+    if bytes.len() > VOLUME_META2_LEN {
+        // A longer record is a newer layout (spec §14).
+        return Err(Error::Unsupported {
+            what: Capability::FormatVersion,
+        });
+    }
+    VolumeMeta2::decode(bytes).map_err(|e| match e {
+        store_io_format::meta::MetaError::Field("features" | "flags") => Error::Unsupported {
+            what: Capability::FormatVersion,
+        },
+        _ => corrupt(),
+    })
+}
+
+/// Reads a metadata pair, each slot whose read failed again once (spec
+/// §7), counting the retries.
+fn read_retried<Q: store_io_platform::Queue>(
+    q: &mut Lane<Q>,
+    file: &Q::File,
+    pool: &store_io_buf::BufPool,
+    at: &PairAt,
+    retried: &mut u32,
+) -> Result<PairRead, Error> {
+    let first = read_pair(q, file, pool, at)?;
+    let (pair, again) = reread_failed(q, file, pool, at, first)?;
+    *retried += u32::from(again);
+    Ok(pair)
+}
+
+fn judge_read(p: &PairRead) -> judge::PairRead {
+    judge::PairRead {
+        a: judge::SlotRead {
+            status: p.report.a,
+            facts: p.facts[0],
+        },
+        b: judge::SlotRead {
+            status: p.report.b,
+            facts: p.facts[1],
+        },
+    }
+}
+
+/// The format-2 open after the volume record was found (spec §9): reads
+/// every page, judges the metadata, heals the one torn write, and (when
+/// writable) writes the volume record with the next owner generation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn open_metadata<P: Platform>(
+    file: &P::File,
+    q: &mut Lane<P::Queue>,
+    pool: &store_io_buf::BufPool,
+    layout: &Layout,
+    volume: VolumeId,
+    mut vm: VolumeMeta2,
+    mut volume_pair: PairRead,
+    container_len: u64,
+    read_only: bool,
+    policy: &Policy,
+) -> Result<Opened, Error> {
+    if layout.data_start() > container_len {
+        return Err(corrupt());
+    }
+    let mut retried = 0u32;
+    let (again, reread) = reread_failed(q, file, pool, &pair_volume(volume, layout), volume_pair)?;
+    volume_pair = again;
+    if reread {
+        // A slot read again may be the newer winner: the record is read from
+        // it then, and must describe the same table.
+        retried += 1;
+        // A newer copy read the second time is refused, not corrupt.
+        vm = decode_volume(&crate::open::winner_payload(&volume_pair)?)?;
+        if vm.table_pages != layout.pages
+            || vm.base.log2_block_size != layout.log2_block
+            || vm.base.log2_table_slot_size != layout.log2_table
+        {
+            return Err(corrupt());
+        }
+    }
+    let mut pages = Vec::with_capacity(layout.pages as usize);
+    for p in 0..layout.pages {
+        let at = pair_page(volume, layout, p);
+        let pair = read_retried(q, file, pool, &at, &mut retried)?;
+        pages.push(Page2 {
+            pair,
+            standing: Standing::Lost,
+            header: None,
+            entries: Vec::new(),
+        });
+    }
+    let reads: Vec<judge::PairRead> = core::iter::once(&volume_pair)
+        .chain(pages.iter().map(|p| &p.pair))
+        .map(judge_read)
+        .collect();
+    let mut verdicts = vec![
+        PairVerdict {
+            standing: Standing::Lost,
+            winner: None,
+            a: SlotVerdict::Damage,
+            b: SlotVerdict::Damage,
+        };
+        reads.len()
+    ];
+    let j = judge::judge(&reads, vm.clean_close, &mut verdicts).map_err(|_| corrupt())?;
+    if j.refused {
+        return Err(Error::Unsupported {
+            what: Capability::FormatVersion,
+        });
+    }
+    let mut report = MetadataReport {
+        clean_close: j.clean,
+        volume_stale: verdicts[0].standing != Standing::Confirmed,
+        retried_reads: retried,
+        ..MetadataReport::default()
+    };
+    let mut decode_lost = false;
+    for (i, page) in pages.iter_mut().enumerate() {
+        let p = i as u32;
+        let mut standing = verdicts[i + 1].standing;
+        if standing != Standing::Lost {
+            match page.pair.payload.as_deref().map(|b| {
+                decode_page(b, p, entries_per_page(layout.log2_table))
+                    .map(|d| (d.header, d.entries().collect::<Vec<_>>()))
+            }) {
+                Some(Ok((h, entries))) => {
+                    if !entries.is_empty() {
+                        // Format-2 regions arrive with E2b/E3.
+                        return Err(Error::Unsupported {
+                            what: Capability::FormatVersion,
+                        });
+                    }
+                    page.header = Some(h);
+                    page.entries = entries;
+                }
+                _ => {
+                    standing = Standing::Lost;
+                    decode_lost = true;
+                }
+            }
+        }
+        page.standing = standing;
+    }
+    // A page that fails the page checks is Lost, which the judgement could
+    // not see: a page's torn write is healed only when nothing else is
+    // lost (spec §7), so the heal is dropped and the torn copy is damage.
+    let mut to_heal = j.heal;
+    if let Some((pair, _)) = to_heal {
+        if pair > 0 && decode_lost {
+            to_heal = None;
+            if pages[pair - 1].standing == Standing::Confirmed {
+                pages[pair - 1].standing = Standing::Unconfirmed;
+            }
+        }
+    }
+    for (i, page) in pages.iter().enumerate() {
+        match page.standing {
+            Standing::Unconfirmed => report.stale_pages.push(i as u32),
+            Standing::Lost | Standing::Refused => report.lost_pages.push(i as u32),
+            Standing::Confirmed => {}
+        }
+    }
+    report.frozen = !report.stale_pages.is_empty() || !report.lost_pages.is_empty();
+    // A winner with a read-only-compatible feature this version does not
+    // know may be read but never rewritten (spec §14).
+    let foreign = core::iter::once(&volume_pair)
+        .chain(pages.iter().map(|p| &p.pair))
+        .any(|p| p.report.winner_info().is_some_and(|(_, i)| !i.writable()));
+    let mut meta = Meta {
+        volume: vm.base,
+        volume_pair,
+        table_pair: PairRead::blank(),
+        next_region_id: 0,
+        entries: Vec::new(),
+        container_len,
+        v2: Some(Box::new(Meta2 { volume: vm, pages })),
+    };
+    let read_only = read_only || {
+        report.read_only_reason = if !j.writable {
+            Some("the volume record is damaged and a table page holds a damaged copy")
+        } else if foreign {
+            Some("the metadata carries a feature this version may read but not write")
+        } else {
+            None
+        };
+        report.read_only_reason.is_some()
+    };
+    if read_only {
+        return Ok(Opened {
+            meta,
+            owner_generation: 0,
+            read_only,
+            report,
+        });
+    }
+    let og = vm
+        .base
+        .owner_generation
+        .checked_add(1)
+        .ok_or_else(corrupt)?;
+    let domain = Domain::new();
+    if let Some((pair, slot)) = to_heal {
+        heal::<P>(
+            q, file, pool, layout, volume, policy, &domain, &mut meta, pair, slot, og,
+        )?;
+        report.healed = Some(if pair == 0 {
+            Healed::VolumeRecord
+        } else {
+            Healed::Page(pair as u32 - 1)
+        });
+    }
+    write_volume::<P>(
+        q, file, pool, layout, volume, policy, &domain, &mut meta, og, false,
+    )?;
+    Ok(Opened {
+        meta,
+        owner_generation: og,
+        read_only,
+        report,
+    })
+}
+
+/// Rewrites the one torn metadata write (`pair` 0 the volume record, `p + 1`
+/// page `p`; `slot` its failed slot) with the winner's payload byte for
+/// byte, at the torn copy's own `meta_seq` when it was readable (spec §7).
+#[allow(clippy::too_many_arguments)]
+fn heal<P: Platform>(
+    q: &mut Lane<P::Queue>,
+    file: &P::File,
+    pool: &store_io_buf::BufPool,
+    layout: &Layout,
+    volume: VolumeId,
+    policy: &Policy,
+    domain: &Domain,
+    meta: &mut Meta,
+    pair: usize,
+    slot: SlotIndex,
+    og: u64,
+) -> Result<(), Error> {
+    let v2 = meta.v2.as_mut().ok_or_else(corrupt)?;
+    let (at, prev) = if pair == 0 {
+        (pair_volume(volume, layout), &meta.volume_pair)
+    } else {
+        let p = u32::try_from(pair - 1).map_err(|_| corrupt())?;
+        (pair_page(volume, layout, p), &v2.pages[pair - 1].pair)
+    };
+    let payload = prev.payload.clone().ok_or_else(corrupt)?;
+    let mut next = plan_next(prev, &payload, og)?;
+    if next.index != slot {
+        return Err(corrupt());
+    }
+    let own = prev.facts[usize::from(slot.as_u8())]
+        .and_then(|f| f.numbered)
+        .map(|n| n.meta_seq);
+    next.meta_seq = match own {
+        Some(m) => m,
+        None => next_meta_seq(&meta.volume_pair, &v2.pages, Some((pair, slot)))?,
+    };
+    let healed = durable_slot::<P>(q, file, pool, &at, prev, &next, policy, domain)?;
+    if pair == 0 {
+        meta.volume_pair = healed;
+    } else {
+        v2.pages[pair - 1].pair = healed;
+        v2.pages[pair - 1].standing = Standing::Confirmed;
+    }
+    Ok(())
+}
+
+/// Writes the volume record's next version: `owner_generation` and
+/// `clean_close` as given, the next `meta_seq`, durably.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_volume<P: Platform>(
+    q: &mut Lane<P::Queue>,
+    file: &P::File,
+    pool: &store_io_buf::BufPool,
+    layout: &Layout,
+    volume: VolumeId,
+    policy: &Policy,
+    domain: &Domain,
+    meta: &mut Meta,
+    owner_generation: u64,
+    clean_close: bool,
+) -> Result<(), Error> {
+    let v2 = meta.v2.as_mut().ok_or_else(corrupt)?;
+    let mut vm = v2.volume;
+    vm.base.owner_generation = owner_generation;
+    vm.clean_close = clean_close;
+    let vbuf = volume_payload(&vm)?;
+    let mut next = plan_next(&meta.volume_pair, &vbuf, owner_generation)?;
+    next.meta_seq = next_meta_seq(&meta.volume_pair, &v2.pages, Some((0, next.index)))?;
+    let at = pair_volume(volume, layout);
+    meta.volume_pair =
+        durable_slot::<P>(q, file, pool, &at, &meta.volume_pair, &next, policy, domain)?;
+    v2.volume = vm;
+    meta.volume = vm.base;
+    Ok(())
+}
+
+impl<P: Platform> Drop for Inner<P> {
+    /// Format 2's clean close: once every handle is gone (so every write has
+    /// completed), a writable, unpoisoned store records `clean_close` in a
+    /// final durable volume-record write. Not after a panic (the in-memory
+    /// metadata may be half-changed). Best effort: a failure leaves the
+    /// next open to judge the store as not closed cleanly, which is safe.
+    fn drop(&mut self) {
+        if self.read_only
+            || self.domain.poisoned().is_some()
+            || self.meta.is_poisoned()
+            || std::thread::panicking()
+        {
+            return;
+        }
+        let mut meta = lock_meta(&self.meta);
+        if meta.v2.is_none() {
+            return;
+        }
+        let mut q = self.queues.get(0);
+        let _closed = write_volume::<P>(
+            &mut q,
+            &self.file,
+            &self.pool,
+            &self.layout,
+            self.volume,
+            &self.policy,
+            &self.domain,
+            &mut meta,
+            self.owner_generation,
+            true,
+        );
+    }
+}

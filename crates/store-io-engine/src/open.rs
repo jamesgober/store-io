@@ -100,20 +100,63 @@ where
         let container_len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
         // Geometry is in the volume record; the record's own location depends
         // on it, so try every legal block size.
-        let boot_pool = make_pool(
-            &evidence,
-            &Layout {
-                log2_block: 16,
-                log2_table: 16,
-            },
-            &opts,
-            false,
-        )?;
-        let (volume, layout, vmeta, volume_pair) = {
+        let boot_pool = make_pool(&evidence, &Layout::v1(16, 16), &opts, false)?;
+        let (volume, layout, found, volume_pair) = {
             let mut q = queues.get(0);
             find_volume(&mut q, &file, &boot_pool)?
         };
         let pool = make_pool(&evidence, &layout, &opts, true)?;
+        let vmeta = match found {
+            Found::V1(vm) => vm,
+            Found::V2(vm) => {
+                let opened = {
+                    let mut q = queues.get(0);
+                    crate::v2::open_metadata::<P>(
+                        &file,
+                        &mut q,
+                        &pool,
+                        &layout,
+                        volume,
+                        vm,
+                        volume_pair,
+                        container_len,
+                        read_only,
+                        &policy,
+                    )?
+                };
+                let report = StoreReport {
+                    evidence,
+                    decision,
+                    block_size: layout.block(),
+                    table_capacity: layout.pages as usize
+                        * usize::from(store_io_format::meta2::entries_per_page(layout.log2_table)),
+                    volume,
+                    owner_generation: opened.owner_generation,
+                    read_only: opened.read_only,
+                    io: platform.io_path(),
+                    unavailable: Vec::new(),
+                    format: store_io_format::slot::FORMAT_2,
+                    metadata: opened.report,
+                };
+                return Ok(Self::assemble(
+                    platform,
+                    dir,
+                    file,
+                    lock,
+                    volume,
+                    layout,
+                    policy,
+                    pool,
+                    queues,
+                    opened.meta,
+                    Vec::new(),
+                    report,
+                    opened.read_only,
+                    opened.owner_generation,
+                    opts,
+                ));
+            }
+        };
         let tat = pair_table(volume, &layout);
         let mut q = queues.get(0);
         let table_pair = read_pair(&mut q, &file, &pool, &tat)?;
@@ -208,6 +251,7 @@ where
             next_region_id,
             entries,
             container_len,
+            v2: None,
         };
         let owner_generation = if read_only {
             0
@@ -248,6 +292,8 @@ where
             read_only,
             io: platform.io_path(),
             unavailable,
+            format: store_io_format::slot::FORMAT_1,
+            metadata: MetadataReport::default(),
         };
         Ok(Self::assemble(
             platform,
@@ -316,12 +362,19 @@ where
     }
 }
 
-/// Finds the volume record by trying every legal block size.
+/// The volume record found, by format.
+enum Found {
+    V1(VolumeMeta),
+    V2(store_io_format::meta2::VolumeMeta2),
+}
+
+/// Finds the volume record by trying every legal block size; the slot's
+/// `format_major` says which format to read it as.
 fn find_volume<Q: Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,
     pool: &BufPool,
-) -> Result<(VolumeId, Layout, VolumeMeta, PairRead), Error> {
+) -> Result<(VolumeId, Layout, Found, PairRead), Error> {
     // Read the first slot header at the smallest size to learn the volume id;
     // either copy may be damaged, so try both locations per size.
     let mut media_error = false;
@@ -378,9 +431,20 @@ fn find_volume<Q: Queue>(
             if b.as_slice()[78] != log2 {
                 continue;
             }
+            // The format comes only from a header whose CRC verifies (spec
+            // §2): a bit flip there must not decide how the pair is read.
+            if !header_verifies(b.as_slice()) {
+                continue;
+            }
+            let format = u16::from_le_bytes([b.as_slice()[14], b.as_slice()[15]]);
+            let v2 = format == store_io_format::slot::FORMAT_2;
             let layout0 = Layout {
-                log2_block: log2,
-                log2_table: log2,
+                format: if v2 {
+                    format
+                } else {
+                    store_io_format::slot::FORMAT_1
+                },
+                ..Layout::v1(log2, log2)
             };
             let at = pair_volume(VolumeId::from_bytes(uuid), &layout0);
             let pair = read_pair(q, file, pool, &at)?;
@@ -396,6 +460,19 @@ fn find_volume<Q: Queue>(
             let newer = Error::Unsupported {
                 what: store_io_core::error::Capability::FormatVersion,
             };
+            if v2 {
+                let vm = crate::v2::decode_volume(&bytes)?;
+                if vm.base.log2_block_size != log2 {
+                    continue;
+                }
+                let layout = Layout {
+                    log2_block: log2,
+                    log2_table: vm.base.log2_table_slot_size,
+                    format,
+                    pages: vm.table_pages,
+                };
+                return Ok((VolumeId::from_bytes(uuid), layout, Found::V2(vm), pair));
+            }
             if bytes.len() > store_io_format::meta::VOLUME_META_LEN {
                 return Err(newer);
             }
@@ -406,14 +483,11 @@ fn find_volume<Q: Queue>(
             if vm.log2_block_size != log2 {
                 continue;
             }
-            let layout = Layout {
-                log2_block: log2,
-                log2_table: vm.log2_table_slot_size,
-            };
+            let layout = Layout::v1(log2, vm.log2_table_slot_size);
             if vm.table_offset != layout.table_slots().0 {
                 return Err(corrupt());
             }
-            return Ok((VolumeId::from_bytes(uuid), layout, vm, pair));
+            return Ok((VolumeId::from_bytes(uuid), layout, Found::V1(vm), pair));
         }
     }
     // No volume record found. If a read failed on the media on the way (a
@@ -442,7 +516,7 @@ fn not_found_or(op: Op, raw: OsError, what: Named) -> Error {
     }
 }
 
-fn winner_payload(p: &PairRead) -> Result<Vec<u8>, Error> {
+pub(crate) fn winner_payload(p: &PairRead) -> Result<Vec<u8>, Error> {
     match p.report.winner {
         Winner::Confirmed(_) | Winner::Unconfirmed(_) => p.payload.clone().ok_or_else(corrupt),
         Winner::Refused => Err(Error::Unsupported {
@@ -464,4 +538,21 @@ fn winner_payload(p: &PairRead) -> Result<Vec<u8>, Error> {
             ctx: ErrorContext::default(),
         }),
     }
+}
+
+/// Whether the slot header at the start of `b` carries a header CRC that
+/// verifies. A header longer than `b` (format 1 allows one; format 2's is
+/// exactly 128 bytes) is not judged here: true, unless it claims format 2.
+fn header_verifies(b: &[u8]) -> bool {
+    let len = usize::from(u16::from_le_bytes([b[12], b[13]]));
+    if len > b.len() {
+        return u16::from_le_bytes([b[14], b[15]]) != store_io_format::slot::FORMAT_2;
+    }
+    let Some(h) = b.get(..len.max(store_io_format::slot::HEADER_LEN)) else {
+        return false;
+    };
+    let stored = u32::from_le_bytes([h[8], h[9], h[10], h[11]]);
+    let mut h = h.to_vec();
+    h[8..12].fill(0);
+    store_io_format::crc32c::crc32c(&h) == stored
 }

@@ -251,6 +251,59 @@ pub(crate) fn read_pair<Q: Queue>(
     })
 }
 
+/// Reads again, once, each slot of `first` whose read failed, and decides
+/// the pair from the slots' best results: a slot that read stays as read
+/// (a second read of it could fail and lose a good copy). Nothing writes
+/// between the two reads (the caller holds the store). Returns whether any
+/// slot was read again.
+pub(crate) fn reread_failed<Q: Queue>(
+    q: &mut Lane<Q>,
+    file: &Q::File,
+    pool: &BufPool,
+    at: &PairAt,
+    first: PairRead,
+) -> Result<(PairRead, bool), Error> {
+    let failed = |s: SlotStatus| s == SlotStatus::ReadError;
+    if !failed(first.report.a) && !failed(first.report.b) {
+        return Ok((first, false));
+    }
+    let mut status = [first.report.a, first.report.b];
+    let mut facts = first.facts;
+    let mut payloads: [Option<Vec<u8>>; 2] = [None, None];
+    let mut media = false;
+    for (i, slot) in [SlotIndex::A, SlotIndex::B].into_iter().enumerate() {
+        if failed(status[i]) {
+            let one = read_one(q, file, pool, at, slot)?;
+            status[i] = one.status;
+            facts[i] = one.facts;
+            payloads[i] = one.payload;
+            media |= one.media;
+        }
+    }
+    let report = decide(status[0], status[1]);
+    // The first read's payload is its winner's, a slot that read.
+    let payload = match report.winner_info() {
+        Some((slot, _)) => {
+            let i = usize::from(slot.as_u8());
+            if failed([first.report.a, first.report.b][i]) {
+                payloads[i].take()
+            } else {
+                first.payload
+            }
+        }
+        None => None,
+    };
+    Ok((
+        PairRead {
+            report,
+            payload,
+            media_error: media,
+            facts,
+        },
+        true,
+    ))
+}
+
 /// What to write into the next slot of a pair.
 pub(crate) struct NextSlot<'a> {
     pub(crate) index: SlotIndex,

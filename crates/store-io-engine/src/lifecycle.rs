@@ -62,7 +62,7 @@ where
             a: r.header_at[0],
             b: r.header_at[1],
             log2: l.log2_block,
-            format: store_io_format::slot::FORMAT_1,
+            format: l.format,
             numbered: false,
         }
     }

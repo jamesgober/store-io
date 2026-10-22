@@ -225,6 +225,40 @@ pub fn is_end_of_file(raw: OsError) -> bool {
     }
 }
 
+/// Whether a non-blocking lock attempt failed because another holder has
+/// the lock (as opposed to the file system being unable to lock at all,
+/// say `ENOLCK` or `EOPNOTSUPP`, which is a plain failure).
+#[must_use]
+pub fn is_lock_held(raw: OsError) -> bool {
+    match raw.source {
+        OsErrorSource::Errno => errno_lock_held(raw.code),
+        // ERROR_LOCK_VIOLATION = 33.
+        OsErrorSource::Win32 => raw.code == 33,
+        // STATUS_LOCK_NOT_GRANTED.
+        OsErrorSource::NtStatus => raw.code as u32 == 0xC000_0055,
+        // The simulator's EWOULDBLOCK.
+        OsErrorSource::Sim => raw.code == 11,
+    }
+}
+
+/// Linux: EAGAIN (= EWOULDBLOCK) = 11, EACCES = 13.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn errno_lock_held(code: i32) -> bool {
+    matches!(code, 11 | 13)
+}
+
+/// macOS: EAGAIN (= EWOULDBLOCK) = 35, EACCES = 13.
+#[cfg(target_vendor = "apple")]
+fn errno_lock_held(code: i32) -> bool {
+    matches!(code, 35 | 13)
+}
+
+/// Elsewhere: EACCES = 13.
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn errno_lock_held(code: i32) -> bool {
+    code == 13
+}
+
 /// Whether the code means the call was interrupted before doing anything
 /// (`EINTR`). Only meaningful for calls documented to fail with `EINTR`
 /// before any I/O; callers retry those and count the retry.
@@ -419,5 +453,30 @@ mod tests {
         };
         assert!(is_media_error(nt(0xC000_009C)));
         assert!(!is_media_error(nt(0xC000_000D)));
+    }
+
+    #[test]
+    fn test_a_held_lock_is_told_from_a_file_system_that_cannot_lock() {
+        // EACCES everywhere; EAGAIN by each system's own number.
+        assert!(is_lock_held(errno(13)));
+        if cfg!(any(target_os = "linux", target_os = "android")) {
+            assert!(is_lock_held(errno(11)));
+            // ENOLCK and EOPNOTSUPP are failures, not a held lock.
+            assert!(!is_lock_held(errno(37)));
+            assert!(!is_lock_held(errno(95)));
+        }
+        if cfg!(target_vendor = "apple") {
+            assert!(is_lock_held(errno(35)));
+            assert!(!is_lock_held(errno(77)));
+            assert!(!is_lock_held(errno(102)));
+        }
+        assert!(is_lock_held(OsError {
+            code: 33,
+            source: OsErrorSource::Win32,
+        }));
+        assert!(!is_lock_held(OsError {
+            code: 1,
+            source: OsErrorSource::Win32,
+        }));
     }
 }

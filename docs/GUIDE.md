@@ -64,7 +64,7 @@ let store = Store::open("data/orders")?;
 let wal = store.append_region("wal")?;
 ```
 
-A store is one container file (`store.sio`) in a directory of its own. Only one process can open a store for writing at a time; a second writable open fails with `Error::Locked`.
+A store is one container file (`store.sio`) in a directory of its own. Only one handle can open a store for writing at a time, in this process or another; a second writable open, or a read-only open beside a writer, fails with `Error::Locked`.
 
 ---
 
@@ -151,7 +151,7 @@ meta.replace("CURRENT", b"MANIFEST-000042")?;
 let current = meta.read("CURRENT")?;
 ```
 
-`replace` writes a temporary file in the same directory, sets its exact length, flushes it, renames it over the target and flushes the directory. It reports success only after all of that. If anything fails from the rename on, the directory may name either version, so the call returns `DurabilityUnknown` and the handle refuses further changes. `open` tries a directory flush first: if the directory cannot be flushed, every `replace` and `remove` is refused (`Unsupported(DirectoryFlush)`, or `Io` for another failure) before anything is written, since the change could never be made durable. A failed length update after the writes poisons the handle, as a failed write does.
+`replace` writes a temporary file in the same directory, sets its exact length, flushes it, renames it over the target and flushes the directory. It reports success only after all of that. If anything fails from the rename on, the directory may name either version, so the call returns `DurabilityUnknown` and the handle refuses further changes. `open` tries a directory flush first: if the directory cannot be flushed, every `replace` and `remove` is refused (`Unsupported(DirectoryFlush)`, or `Io` for another failure) before anything is written, since the change could never be made durable. A failed length update after the writes poisons the handle, as a failed write does. One replace runs at a time in a directory, across handles and processes (it locks the directory's `.sio-lock` file): another fails `Locked` with nothing written, and the caller retries. Object names that could resolve to another file on some platform are refused, in `replace`, `read` and `remove` alike: longer than 247 bytes, ending in `.` or a space, shaped like a Windows short name (`NAME~1`), a Windows device name (`NUL`, `COM1`), or the directory's own `.sio-lock` and `*.sio-tmp` (compared as a case-insensitive file system compares names: case folded, ignorable code points dropped).
 
 ---
 
@@ -249,7 +249,7 @@ Every error carries the operation, the region and byte range where known, and th
 | `NoSpace { tag }` | A reservation or provisioning ran out of space or quota. Nothing was written or poisoned. | Free space, raise the cap, or release regions. |
 | `Corruption` | store-io's own metadata or the media is damaged. A region lookup returns it, naming the region, when the region exists but open could not use it (`store.unavailable_regions()` says why). | Recover from a replica or backup; scan what remains. Never treat it as "no data yet". |
 | `UnsafeDevice`, `Unverified` | The device was refused at open. | Use another device, or attest or override (section 8). |
-| `Locked` | Another process holds the store. | Wait for it, or stop it. |
+| `Locked` | Another handle (in this or another process) holds the store, or another handle or process is replacing in the directory. | Wait for it and retry, or stop it. |
 | `NotFound`, `AlreadyExists` | A store, region or slot lookup. `NotFound` means the name does not exist in the store at all. | Create, or open. |
 | `Unsupported` | The platform cannot do this. | See the platform notes. |
 | `Io` | A setup or metadata call failed; durable data is unaffected. | Check the raw code. |

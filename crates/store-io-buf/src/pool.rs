@@ -129,6 +129,13 @@ impl BufPool {
         if cfg.align == 0 || !cfg.align.is_power_of_two() {
             return Err(PoolError::Config("alignment must be a power of two"));
         }
+        // A buffer records its class in 16 bits: a class past that would be
+        // recorded as another, and its buffer returned to the wrong free
+        // list, handing a held slot out twice. Checked first, so a refused
+        // configuration costs nothing.
+        if cfg.classes.len() > usize::from(u16::MAX) + 1 {
+            return Err(PoolError::Config("at most 65,536 size classes"));
+        }
         let mut specs = cfg.classes.clone();
         specs.sort_by_key(|c| c.size);
         let mut total: usize = 0;
@@ -506,6 +513,37 @@ mod tests {
         drop(b);
         let b = p.take(4096).unwrap_or_else(|_| panic!("exhausted"));
         assert!(b.as_slice().iter().all(|&x| x == 0));
+    }
+
+    /// More classes than a buffer can record (16 bits) are refused: the
+    /// last one would be recorded as class 0, and its buffer's return would
+    /// hand a held class-0 slot out twice.
+    #[test]
+    fn test_more_classes_than_a_buffer_can_record_are_refused() {
+        let mut classes = vec![ClassSpec { size: 1, count: 1 }; 65_536];
+        // Building 65,536 classes takes minutes under Miri; the refusal
+        // below is what matters, and costs nothing.
+        if !cfg!(miri) {
+            let ok = PoolConfig {
+                align: 1,
+                classes: classes.clone(),
+                sensitive: false,
+            };
+            assert!(BufPool::new(&ok).is_ok(), "65,536 classes fit");
+        }
+        classes.push(ClassSpec { size: 2, count: 1 });
+        let over = PoolConfig {
+            align: 1,
+            classes,
+            sensitive: false,
+        };
+        assert!(
+            matches!(
+                BufPool::new(&over),
+                Err(PoolError::Config("at most 65,536 size classes"))
+            ),
+            "a class past 16 bits was accepted"
+        );
     }
 
     #[test]

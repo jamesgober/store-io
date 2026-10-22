@@ -41,6 +41,12 @@ const BLOCK: u64 = 4096;
 const CHUNK: usize = 1 << 20;
 /// Suffix of the temporary file a replace writes first.
 const TEMP_SUFFIX: &str = ".sio-tmp";
+/// The file whose exclusive lock a change holds, so one change at a time
+/// runs in the directory across handles and processes (the temporary name
+/// is then the changer's alone).
+const LOCK_NAME: &str = ".sio-lock";
+/// Longest object name: room for [`TEMP_SUFFIX`] within a file name.
+const NAME_MAX: usize = 255 - TEMP_SUFFIX.len();
 
 fn io(op: Op, raw: OsError) -> Error {
     Error::Io {
@@ -55,6 +61,131 @@ fn name_of(name: &str) -> Result<FileName, Error> {
         .map_err(|_| not_written(NotWrittenCause::InvalidName, ErrorContext::default()))
 }
 
+/// An object's name: a file name that leaves room for the temporary suffix
+/// and never resolves to one of the directory's own files (a temporary
+/// file or the lock, which a change would otherwise remove or overwrite),
+/// to the directory itself, or to another file through a platform's
+/// aliases (short names, devices, trimmed trailing characters). Names that
+/// differ only in case, or in ignorable code points, may still be one file
+/// on a case-insensitive file system, as `A` and `a` always were. Refused,
+/// on every platform alike so names stay portable:
+///
+/// - longer than [`NAME_MAX`];
+/// - empty or ending in `.` or a space once ignorable code points are
+///   dropped (Windows drops trailing dots and spaces: `x.` is `x`, `...` is
+///   the directory itself; and `.\u{200C}` is `.`, `\u{200C}` nothing, on
+///   file systems that drop ignorables);
+/// - shaped like a Windows short name (`SIO-LO~1`, `X~1.SIO`), which can
+///   alias any long name;
+/// - a Windows device name (`NUL`, `COM1`, `CON.txt`, ...);
+/// - the lock file or a temporary file's name, compared as a
+///   case-insensitive file system compares names: case folded (Unicode
+///   included: `ſ` is `s` and `K` (Kelvin) is `k` there) and ignorable code
+///   points dropped (HFS+, and Linux case-folding directories, skip them:
+///   `.sio\u{200C}-lock` is `.sio-lock` there). Elsewhere in a name they
+///   are kept: a word with a zero-width non-joiner is a name like any
+///   other.
+fn object_name(name: &str) -> Result<FileName, Error> {
+    // Ignorable code points dropped, as case-insensitive file systems drop
+    // them when comparing names.
+    let folded: String = name
+        .chars()
+        .filter(|&c| !ignorable(c))
+        .map(|c| match c {
+            '\u{17F}' => 's',
+            '\u{212A}' => 'k',
+            c => c.to_ascii_lowercase(),
+        })
+        .collect();
+    // Empty or ending in `.` or a space once folded (`x.`, `...`,
+    // `.\u{200C}`): the directory itself, its parent, or a name Windows
+    // trims.
+    let trimmed = folded.is_empty() || folded.ends_with(['.', ' ']);
+    let own = folded.ends_with(TEMP_SUFFIX) || folded == LOCK_NAME;
+    let too_long = name.len() > NAME_MAX;
+    let alias = short_name_shaped(name) || device_name(name);
+    if too_long || alias || trimmed || own {
+        return Err(not_written(
+            NotWrittenCause::InvalidName,
+            ErrorContext::default(),
+        ));
+    }
+    name_of(name)
+}
+
+/// Whether `name` has the shape of a Windows 8.3 short name: a base of at
+/// most 8 characters ending in `~` and digits (what comes before may hold
+/// `~` itself: `A~BCDE~1`, `~$DOCU~1`), then optionally `.` and at most 3
+/// characters.
+fn short_name_shaped(name: &str) -> bool {
+    let (base, ext) = name.split_once('.').unwrap_or((name, ""));
+    let Some((_, digits)) = base.rsplit_once('~') else {
+        return false;
+    };
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && base.chars().count() <= 8
+        && ext.chars().count() <= 3
+        && !ext.contains('.')
+}
+
+/// Whether case-insensitive file systems ignore `c` when comparing names:
+/// Unicode's Default_Ignorable_Code_Point (Linux case-folding directories
+/// drop all of them; HFS+ a subset).
+fn ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{34F}'
+            | '\u{61C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// Whether `name` is a Windows device name, with or without an extension
+/// (older Windows treats `NUL.txt` as the device too), in any case.
+fn device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name).trim_end();
+    let upper = stem.to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        upper.strip_prefix(prefix).is_some_and(|n| {
+            matches!(
+                n,
+                "0" | "1"
+                    | "2"
+                    | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "9"
+                    | "\u{B9}"
+                    | "\u{B2}"
+                    | "\u{B3}"
+            )
+        })
+    };
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || numbered("COM")
+        || numbered("LPT")
+}
+
 /// A directory of small objects, each replaced atomically.
 pub struct Directory<P: Platform> {
     platform: P,
@@ -64,8 +195,15 @@ pub struct Directory<P: Platform> {
     poisoned: OnceLock<FirstCause>,
     pool: BufPool,
     queue: QueueSet<P::Queue>,
-    /// Serialises replaces and removes (one temporary name per target).
+    /// Serialises this handle's replaces and removes; across handles and
+    /// processes, the lock on [`LOCK_NAME`] serialises replaces.
     change: Mutex<()>,
+    /// This handle's own open of [`LOCK_NAME`] (opened on first change):
+    /// each replace locks it, so the lock is this handle's open file
+    /// description, and a lock taken there excludes every other handle.
+    /// Kept for the handle's life: the lock file must not be deleted while
+    /// a handle is open.
+    lock_file: OnceLock<P::File>,
     /// The directory flush probed at open failed: every change is refused
     /// before any write, since its rename could never be made durable.
     dir_flush: Option<OsError>,
@@ -118,6 +256,7 @@ impl<P: Platform> Directory<P> {
             pool,
             queue: QueueSet::new(vec![queue], 8),
             change: Mutex::new(()),
+            lock_file: OnceLock::new(),
             dir_flush,
         })
     }
@@ -178,10 +317,25 @@ impl<P: Platform> Directory<P> {
 
     /// Replaces the file `name` with `data`, atomically and durably: after
     /// any crash the file holds exactly the old or exactly the new bytes, and
-    /// once this returns, exactly the new ones.
+    /// once this returns, exactly the new ones. One replace runs at a time in
+    /// the directory: while another handle or process is replacing, this
+    /// fails `Locked` with nothing written (the caller retries). Every
+    /// writer must take the lock for that to hold: a process of a version
+    /// before 0.5 does not. The lock is the file `.sio-lock` in the
+    /// directory, created on first use and kept; delete it only while no
+    /// `Directory` is open on the directory (an open handle keeps locking
+    /// the file it opened, so a new one beside it splits the writers).
     ///
     /// # Errors
     ///
+    /// `Locked` while another handle or process replaces in the directory;
+    /// `Io(Lock)` if the file system cannot lock at all.
+    /// `NotWritten(InvalidName)` for a name that could resolve to another
+    /// file: longer than 247 bytes; shaped like a Windows short name (`~`
+    /// and digits) or a Windows device name; and, compared as a
+    /// case-insensitive file system compares names (case folded, ignorable
+    /// code points dropped), empty, ending in `.` or a space, or the
+    /// directory's own `.sio-lock` or a name ending in `.sio-tmp`.
     /// `Unsupported(DirectoryFlush)` or `Io(SyncDir)` when the directory
     /// cannot be flushed (found at open; nothing is written).
     /// `NotWritten`, `UnsafeDevice`, `Unverified`, `NoSpace` or `Io` before
@@ -192,9 +346,14 @@ impl<P: Platform> Directory<P> {
     /// poisoned and later changes fail with `Poisoned`.
     pub fn replace(&self, name: &str, data: &[u8]) -> Result<(), Error> {
         self.writable()?;
-        let target = name_of(name)?;
+        let target = object_name(name)?;
         let temp = name_of(&format!("{name}{TEMP_SUFFIX}"))?;
         let _one_at_a_time = self.change.lock().unwrap_or_else(PoisonError::into_inner);
+        // Poisoned while this call waited for the handle's lock.
+        self.writable()?;
+        // One changer in the directory, across handles and processes: the
+        // temporary name below is ours alone.
+        let _owner = self.change_lock()?;
         // A leftover from an interrupted replace is never the live version.
         let _absent_or_removed = self.platform.unlink(&self.dir, &temp);
         let file = self
@@ -206,6 +365,15 @@ impl<P: Platform> Directory<P> {
             let _cleanup = self.platform.unlink(&self.dir, &temp);
             return Err(e);
         }
+        // The commit point: not after a poison seen here (a failed `sync`
+        // on this handle poisons without the change lock, so one landing
+        // after this check still commits; then the two calls overlapped,
+        // and this replace's own directory flush decides its result).
+        if let Some(first) = self.poisoned.get() {
+            drop(file);
+            let _cleanup = self.platform.unlink(&self.dir, &temp);
+            return Err(Error::Poisoned { first: *first });
+        }
         // From here on the directory may name either version.
         let renamed = self
             .platform
@@ -215,6 +383,49 @@ impl<P: Platform> Directory<P> {
         self.platform
             .sync_dir(&self.dir)
             .map_err(|raw| self.poison(Op::SyncDir, Some(raw)))
+    }
+
+    /// Takes the directory's change lock: an exclusive lock, through this
+    /// handle's own open of [`LOCK_NAME`] (created on first use and kept,
+    /// an empty file), held until the returned guard drops. `Locked` only
+    /// when another holder has it.
+    fn change_lock(&self) -> Result<P::Lock, Error> {
+        let file = match self.lock_file.get() {
+            Some(f) => f,
+            None => {
+                let name = name_of(LOCK_NAME)?;
+                let open = || {
+                    self.platform
+                        .open_file(&self.dir, &name, FileMode::ReadWrite)
+                };
+                let f = match open() {
+                    Ok(f) => f,
+                    Err(raw) if store_io_core::errno::is_not_found(raw) => {
+                        match self.platform.create_file(&self.dir, &name) {
+                            Ok(f) => f,
+                            // Created by another handle meanwhile.
+                            Err(raw) if store_io_core::errno::is_already_exists(raw) => {
+                                open().map_err(|raw| io(Op::Open, raw))?
+                            }
+                            Err(raw) => return Err(io(Op::Create, raw)),
+                        }
+                    }
+                    Err(raw) => return Err(io(Op::Open, raw)),
+                };
+                // Only this handle's change mutex holder gets here.
+                let _first = self.lock_file.set(f);
+                self.lock_file.get().ok_or_else(|| {
+                    not_written(NotWrittenCause::NotReady, ErrorContext::default())
+                })?
+            }
+        };
+        self.platform.lock_exclusive(file).map_err(|raw| {
+            if store_io_core::errno::is_lock_held(raw) {
+                Error::Locked
+            } else {
+                io(Op::Lock, raw)
+            }
+        })
     }
 
     /// Writes `data` to a fresh file, sets its exact length and flushes it.
@@ -278,12 +489,13 @@ impl<P: Platform> Directory<P> {
     ///
     /// # Errors
     ///
-    /// `NotFound`; `Corruption(MediaError)` for an unreadable range; `Io`.
+    /// `NotFound`; `Corruption(MediaError)` for an unreadable range;
+    /// `NotWritten(InvalidName)` as for [`Self::replace`]; `Io`.
     pub fn read(&self, name: &str) -> Result<Vec<u8>, Error> {
         let c = ErrorContext::default();
         let file = self
             .platform
-            .open_file(&self.dir, &name_of(name)?, FileMode::ReadOnly)
+            .open_file(&self.dir, &object_name(name)?, FileMode::ReadOnly)
             .map_err(|raw| {
                 if store_io_core::errno::is_not_found(raw) {
                     Error::NotFound { what: Named::Slot }
@@ -354,11 +566,15 @@ impl<P: Platform> Directory<P> {
     /// `Unsupported(DirectoryFlush)` or `Io(SyncDir)` when the directory
     /// cannot be flushed (nothing changed); `NotFound` (nothing changed);
     /// `DurabilityUnknown` if the unlink or the directory flush failed (the
-    /// handle is poisoned); `Poisoned`.
+    /// handle is poisoned); `Poisoned`; `NotWritten(InvalidName)` as for
+    /// [`Self::replace`]. A remove takes no lock: it touches no temporary
+    /// file, and a replace and a remove of one name racing each other end
+    /// in either order.
     pub fn remove(&self, name: &str) -> Result<(), Error> {
         self.writable()?;
-        let target = name_of(name)?;
+        let target = object_name(name)?;
         let _one_at_a_time = self.change.lock().unwrap_or_else(PoisonError::into_inner);
+        self.writable()?;
         match self.platform.unlink(&self.dir, &target) {
             Ok(()) => {}
             Err(raw) if store_io_core::errno::is_not_found(raw) => {

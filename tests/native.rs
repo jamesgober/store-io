@@ -755,3 +755,48 @@ fn test_flushes_in_flight_on_the_real_file_system() {
         assert!(out == data, "append at {at}");
     }
 }
+
+/// Concurrent probes of one directory each use a file of their own: none
+/// removes or reuses another's.
+#[test]
+fn test_concurrent_probes_of_one_directory() {
+    let t = TempDir::new("probes");
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let dir = t.path();
+            scope.spawn(move || {
+                for _ in 0..8 {
+                    store_io::probe(dir).unwrap();
+                }
+            });
+        }
+    });
+}
+
+/// A directory's replace takes the real lock on the real file system: held
+/// by another handle (another process would hold it the same way), the
+/// replace fails `Locked` and leaves the object as it was.
+#[test]
+fn test_a_directory_replace_takes_the_lock_on_the_real_file_system() {
+    use store_io_platform::{FileMode, FileName, Platform};
+    let t = TempDir::new("dirlock");
+    let (opts, _) = options_for(t.path());
+    let d = Directory::open_with(t.path(), true, opts.trust).unwrap();
+    d.replace("m", b"old").unwrap();
+    let p = store_io::NativePlatform::new();
+    let dir = p.open_dir(t.path(), false).unwrap();
+    let lock_file = p
+        .open_file(
+            &dir,
+            &FileName::new(".sio-lock").unwrap(),
+            FileMode::ReadWrite,
+        )
+        .unwrap();
+    let held = p.lock_exclusive(&lock_file).unwrap();
+    let r = d.replace("m", b"new");
+    assert!(matches!(r, Err(Error::Locked)), "{r:?}");
+    assert_eq!(d.read("m").unwrap(), b"old");
+    drop(held);
+    d.replace("m", b"new").unwrap();
+    assert_eq!(d.read("m").unwrap(), b"new");
+}

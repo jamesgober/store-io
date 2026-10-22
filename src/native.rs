@@ -213,13 +213,22 @@ pub fn probe(dir: impl AsRef<Path>) -> Result<Probe, Error> {
             io(Op::Open, raw)
         }
     })?;
-    let name = FileName::new(&format!(".store-io-probe-{}", std::process::id())).map_err(|_| {
-        Error::NotWritten {
-            cause: NotWrittenCause::InvalidName,
-            ctx: ErrorContext::default(),
-        }
+    // Unique per call (process, a counter and a random part, for processes
+    // in different PID namespaces sharing a directory), so concurrent
+    // probes of one directory never share, or remove, each other's file.
+    static PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let salt = {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(n);
+        h.finish()
+    };
+    let unique = format!(".store-io-probe-{}-{n}-{salt:016x}", std::process::id());
+    let name = FileName::new(&unique).map_err(|_| Error::NotWritten {
+        cause: NotWrittenCause::InvalidName,
+        ctx: ErrorContext::default(),
     })?;
-    let _leftover = p.unlink(&d, &name);
     let file = p
         .create_file(&d, &name)
         .map_err(|raw| io(Op::Create, raw))?;

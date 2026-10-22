@@ -77,7 +77,7 @@ M = [
  ("crates/store-io-engine/src/space.rs", "            a.add(e, block);", "            let _ = (e, block, &mut a);"),
  ("crates/store-io-engine/src/space.rs", "        lock_acct(&self.store.inner.acct).unreserve(self.tag, self.bytes);", ""),
  ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(&inner.meta);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(&inner.meta);\n        if !acct.fits(tag, bytes) {"),
- ("crates/store-io-engine/src/directory.rs", "        self.platform\n            .sync_dir(&self.dir)\n            .map_err(|raw| self.poison(Op::SyncDir, Some(raw)))\n    }\n\n    /// Writes", "        let _ = self.platform.sync_dir(&self.dir);\n        Ok(())\n    }\n\n    /// Writes"),
+ ("crates/store-io-engine/src/directory.rs", "        self.platform\n            .sync_dir(&self.dir)\n            .map_err(|raw| self.poison(Op::SyncDir, Some(raw)))\n    }\n\n    /// Takes the directory", "        let _ = self.platform.sync_dir(&self.dir);\n        Ok(())\n    }\n\n    /// Takes the directory"),
  ("crates/store-io-engine/src/directory.rs", "            .set_len(file, len)", "            .set_len(file, len.div_ceil(4096) * 4096)"),
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::FlushAll, Some(raw)))", "            .or(Ok(()))"),
  ("crates/store-io-engine/src/directory.rs", "        let _absent_or_removed = self.platform.unlink(&self.dir, &temp);", ""),
@@ -457,6 +457,37 @@ M = [
  ('crates/store-io-engine/src/frontier.rs', '        if self.waiters.fetch_or(0, Ordering::AcqRel) > 0 {', '        if self.waiters.load(Ordering::SeqCst) > 0 {', LOOM_ENGINE, LOOM),
  # resume_at advances over an append that raced it, and wakes waiters
  ('crates/store-io-engine/src/frontier.rs', '        let _moved = self.advance();\n        self.wake_if_waiting();\n        // A writable', '        // A writable', LOOM_ENGINE, LOOM),
+ # audit: one replace at a time in a directory across handles (remove
+ # takes no lock); no commit on a handle poisoned meanwhile; names that
+ # could resolve to another file refused (too long, aliases, the
+ # directory's own); at most 65,536 pool classes
+ ('crates/store-io-engine/src/directory.rs', '        let _owner = self.change_lock()?;\n        // A leftover', '        let _owner = self.change_lock().ok();\n        // A leftover'),
+ ('crates/store-io-engine/src/directory.rs', '        if let Some(first) = self.poisoned.get() {\n            drop(file);', '        if let Some(first) = self.poisoned.get().filter(|_| false) {\n            drop(file);'),
+ ('crates/store-io-engine/src/directory.rs', 'let too_long = name.len() > NAME_MAX;', 'let too_long = name.len() > NAME_MAX.max(255);'),
+ ('crates/store-io-engine/src/directory.rs', 'let alias = short_name_shaped(name) || device_name(name);', 'let alias = (short_name_shaped(name) && false) || device_name(name);'),
+ ('crates/store-io-engine/src/directory.rs', 'let alias = short_name_shaped(name) || device_name(name);', 'let alias = short_name_shaped(name) || (device_name(name) && false);'),
+ ('crates/store-io-engine/src/directory.rs', "            '\\u{17F}' => 's',", "            '\\u{17F}' => '\\u{17F}',"),
+ ('crates/store-io-engine/src/directory.rs', 'let own = folded.ends_with(TEMP_SUFFIX) || folded == LOCK_NAME;', 'let own = folded == LOCK_NAME;'),
+ ('crates/store-io-engine/src/directory.rs', 'let own = folded.ends_with(TEMP_SUFFIX) || folded == LOCK_NAME;', 'let own = folded.ends_with(TEMP_SUFFIX);'),
+ ('crates/store-io-buf/src/pool.rs', '        if cfg.classes.len() > usize::from(u16::MAX) + 1 {', '        if cfg.classes.len() > usize::from(u16::MAX) + 2 {', ['-p', 'store-io-buf']),
+ # names a case-insensitive file system or Windows resolves to another:
+ # short names split at the last `~`, each limit of the shape held;
+ # ignorable code points dropped before the comparison; device stems
+ # trimmed
+ ('crates/store-io-engine/src/directory.rs', '.filter(|&c| !ignorable(c))', '.filter(|&c| !ignorable(c) || true)'),
+ ('crates/store-io-engine/src/directory.rs', "    let Some((_, digits)) = base.rsplit_once('~') else {", "    let Some((_, digits)) = base.split_once('~') else {"),
+ ('crates/store-io-engine/src/directory.rs', '        && base.chars().count() <= 8\n', '        && base.chars().count() <= 9\n'),
+ ('crates/store-io-engine/src/directory.rs', '        && ext.chars().count() <= 3\n', '        && ext.chars().count() <= 4\n'),
+ ('crates/store-io-engine/src/directory.rs', "        && !ext.contains('.')\n", "        && !ext.contains('\\u{0}')\n"),
+ ('crates/store-io-engine/src/directory.rs', '    let stem = name.split(\'.\').next().unwrap_or(name).trim_end();', '    let stem = name.split(\'.\').next().unwrap_or(name);'),
+ # folded names that are empty, or end in `.` or a space (the directory,
+ # its parent, a name Windows trims); every ignorable
+ # range end; the Kelvin sign folds to k
+ ('crates/store-io-engine/src/directory.rs', "let trimmed = folded.is_empty() || folded.ends_with(['.', ' ']);", 'let trimmed = folded.is_empty();'),
+ ('crates/store-io-engine/src/directory.rs', "let trimmed = folded.is_empty() || folded.ends_with(['.', ' ']);", "let trimmed = folded.ends_with(['.', ' ']);"),
+ ('crates/store-io-engine/src/directory.rs', "            | '\\u{180B}'..='\\u{180F}'", "            | '\\u{180B}'..='\\u{180E}'"),
+ ('crates/store-io-engine/src/directory.rs', "            | '\\u{E0000}'..='\\u{E0FFF}'", "            | '\\u{E0001}'..='\\u{E0FFF}'"),
+ ('crates/store-io-engine/src/directory.rs', "            '\\u{212A}' => 'k',", "            '\\u{212A}' => '\\u{212A}',"),
 ]
 
 def kill_stuck_tests():

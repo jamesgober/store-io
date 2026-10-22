@@ -166,7 +166,9 @@ pub enum NotWrittenCause {
     Empty,
     /// The data exceeds the object's capacity (slots).
     TooLarge,
-    /// The name is invalid (empty, too long, or contains NUL).
+    /// The name is refused: empty, too long or holding NUL, or (for a
+    /// directory's objects) one that could resolve to another file (see
+    /// `Directory::replace`).
     InvalidName,
     /// The store is open read-only.
     ReadOnly,
@@ -201,7 +203,7 @@ impl fmt::Display for NotWrittenCause {
             Self::RegionFull => "region has no room for the append",
             Self::Empty => "data is empty",
             Self::TooLarge => "data exceeds the object's capacity",
-            Self::InvalidName => "name is empty, longer than 24 bytes, or contains NUL",
+            Self::InvalidName => "name refused (empty, too long, holding NUL, or not allowed here)",
             Self::ReadOnly => "store is open read-only",
             Self::QueueFull => "device queue (or submitter) is full",
             Self::Interrupted => {
@@ -346,7 +348,9 @@ pub enum Error {
         /// This handle's generation.
         stale: Generation,
     },
-    /// Another process holds the store.
+    /// Another holder has the lock: a store held by another handle (in
+    /// this or another process; a writer and a reader exclude each other),
+    /// or a directory another handle or process is replacing in.
     Locked,
     /// The named store, region or slot does not exist.
     NotFound {
@@ -413,7 +417,9 @@ impl fmt::Display for Error {
                 f,
                 "fenced: store taken over by a newer owner (this handle is {stale})"
             ),
-            Self::Locked => f.write_str("store is locked by another process"),
+            Self::Locked => {
+                f.write_str("locked by another holder (a store's owner, or a directory's writer)")
+            }
             Self::NotFound { what } => write!(f, "{what:?} not found"),
             Self::AlreadyExists { what } => write!(f, "{what:?} already exists"),
             Self::Io { op, raw, ctx } => write!(f, "{op} failed{ctx} ({raw})"),

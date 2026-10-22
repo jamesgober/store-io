@@ -13,6 +13,8 @@
 
 ### Added
 
+- `store-io-core`: `errno::is_lock_held` tells a lock another holder has
+  from a file system that cannot lock.
 - `store-io-format`: **container format 2, first step: the slot header.**
   `SlotFields` and `Expect` name the format (`FORMAT_1` or `FORMAT_2`); a
   format-2 slot carries `meta_seq`, the store-wide metadata sequence number,
@@ -114,6 +116,23 @@
 
 ### Changed
 
+- **Breaking** (`Directory`): a replace takes the directory's `.sio-lock`
+  file (created on first use and kept) and fails `Locked`, not waiting,
+  while another handle or process replaces there; the caller retries. A
+  file system that cannot lock gives `Io(Lock)`. Every writer must be on
+  this version for the protection to hold. Object names that could
+  resolve to another file are refused in `replace`, `remove` and `read`
+  alike: longer than 247 bytes; ending in `.` or a space (`x.`); shaped
+  like a Windows short name (`data~1`, `v~1.0`); Windows device names with
+  or without an extension (`aux.json`, `con.cfg`); and the directory's
+  own `.sio-lock` and `*.sio-tmp`, compared as a case-insensitive file
+  system compares names (case folded, ignorable code points dropped).
+  Objects written under such names by 0.4 can no longer be read or
+  removed through the API. `Error::Locked`'s message now covers
+  directories too.
+- A store's open and create (the reclaim of an abandoned container
+  included) now report a file system that cannot lock as `Io(Lock)`, not
+  `Locked` or `AlreadyExists` (another holder still gives those).
 - **Breaking:** the flush domain's `barrier` takes the slot and the
   flush's number (`FnMut(usize, u64)`); `barrier_main` leads only on
   slot 0 and `exclusive_main` holds it. `DomainStats` gains
@@ -202,6 +221,35 @@
   `resume_at` to the current tail could also move the completed prefix
   back below an append that had just completed there, hanging every later
   sync; it now moves the prefix only forward from the old tail.
+- Engine: **directory replaces from two handles could clobber each
+  other.** Every replace of an object used the same temporary name, and
+  nothing kept two handles (or processes) on one directory apart: one
+  could rename the other's half-written temporary file over the object,
+  report success, and leave it empty after a crash. A replace now holds an
+  exclusive lock on the directory's `.sio-lock` file; another handle's
+  replace fails `Locked` with nothing written. A handle poisoned while a
+  replace ran (by a failed `sync`, say) no longer commits it when the
+  poison is seen at the commit point, and is checked again once the
+  handle's own change lock is held.
+- Engine: directory object names that could resolve to another file were
+  accepted: the directory's own (`.sio-lock`, `*.sio-tmp`, in any case,
+  Unicode case folding included, and with ignorable code points such as
+  U+200C inside, which HFS+ and Linux case-folding directories drop),
+  names that fold that way to `.`, `..` or nothing,
+  their Windows short names
+  (`SIO-LO~1`), names ending in `.` or a space (`x.` read `x`; `...` is
+  the directory), Windows device names (`NUL`, `COM1`, which poisoned the
+  handle at the rename), and names longer than 247 bytes (readable but
+  never replaceable). `replace("x")` could delete an object named
+  `x.sio-tmp`, and a replace of `SIO-LO~1` could replace the lock file,
+  splitting the writers. All are now refused (`NotWritten(InvalidName)`)
+  in `replace`, `remove` and `read`, alike on every platform.
+- `store-io-buf`: a pool with more than 65,536 size classes recorded a
+  buffer's class in 16 bits, so a buffer of the last class returned to
+  class 0's free list and a held slot could be handed out twice (unsound
+  from safe code; no store or directory builds such a pool). Refused now.
+- `store-io`: concurrent `probe` calls on one directory shared one
+  temporary file name; each call now uses its own.
 
 ---
 

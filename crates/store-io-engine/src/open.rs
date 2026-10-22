@@ -36,9 +36,11 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::NotFound`], [`Error::Locked`], refusal errors,
+    /// [`Error::NotFound`], [`Error::Locked`] (another handle, in this or
+    /// another process, holds the store), refusal errors,
     /// [`Error::Corruption`] for unreadable or foreign metadata,
-    /// [`Error::Unsupported`] for a newer format.
+    /// [`Error::Unsupported`] for a newer format, [`Error::Io`] (`Io(Lock)`
+    /// on a file system that cannot lock).
     pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
         Self::open_inner(platform, path, opts, false)
     }
@@ -79,7 +81,15 @@ where
         } else {
             platform.lock_exclusive(&file)
         }
-        .map_err(|_| Error::Locked)?;
+        .map_err(|raw| {
+            // Another owner holds it; anything else (a file system that
+            // cannot lock) is a plain failure, not "locked".
+            if store_io_core::errno::is_lock_held(raw) {
+                Error::Locked
+            } else {
+                io(Op::Lock, raw)
+            }
+        })?;
         let evidence = platform.probe(&dir, &file).map_err(|e| io(Op::Probe, e))?;
         let decision = decide(&evidence, &opts.trust);
         if !read_only {

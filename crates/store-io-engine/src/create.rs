@@ -28,8 +28,10 @@ where
     /// # Errors
     ///
     /// [`Error::AlreadyExists`] if a store is already there;
+    /// [`Error::Locked`] if another handle holds the new container's lock;
     /// [`Error::UnsafeDevice`] / [`Error::Unverified`] on refusal;
-    /// [`Error::Io`] / [`Error::DurabilityUnknown`] on platform failures.
+    /// [`Error::Io`] / [`Error::DurabilityUnknown`] on platform failures
+    /// (`Io(Lock)` on a file system that cannot lock).
     pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
         let dir = platform
             .open_dir(path, true)
@@ -37,7 +39,13 @@ where
         let name = container_name()?;
         let (file, lock) = match platform.create_file(&dir, &name) {
             Ok(file) => {
-                let lock = platform.lock_exclusive(&file).map_err(|_| Error::Locked)?;
+                let lock = platform.lock_exclusive(&file).map_err(|raw| {
+                    if store_io_core::errno::is_lock_held(raw) {
+                        Error::Locked
+                    } else {
+                        io(Op::Lock, raw)
+                    }
+                })?;
                 (file, lock)
             }
             Err(e) if store_io_core::errno::is_already_exists(e) => {
@@ -107,7 +115,15 @@ where
         let file = platform
             .open_file(dir, name, FileMode::ReadWrite)
             .map_err(|_| exists())?;
-        let lock = platform.lock_exclusive(&file).map_err(|_| exists())?;
+        // Another holder: a live store, left alone. A file system that
+        // cannot lock is a plain failure, as at the first create.
+        let lock = platform.lock_exclusive(&file).map_err(|raw| {
+            if store_io_core::errno::is_lock_held(raw) {
+                exists()
+            } else {
+                io(Op::Lock, raw)
+            }
+        })?;
         // A crashed create never wrote past its metadata: format 1's four
         // largest slots, or format 2's table area for this create's geometry
         // (bounded here over every block size, before the probe, so a large

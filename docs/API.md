@@ -160,7 +160,7 @@ A batch holds at most what the buffer pool can lend (`buffers_per_class × max_i
 |---|---|
 | `Directory::open(path, create) -> Result<Directory>` | Opens (or creates) a directory with default trust, and tries a directory flush. If that fails, `replace` and `remove` are refused before any write (`Unsupported(DirectoryFlush)` or `Io(SyncDir)`); `read` still works. |
 | `Directory::open_with(path, create, Trust)` | With explicit trust inputs. |
-| `replace(name, &[u8]) -> Result<()>` | Temporary file, exact length, flush, rename over the target, directory flush. The file holds the old or the new bytes after any crash. |
+| `replace(name, &[u8]) -> Result<()>` | Temporary file, exact length, flush, rename over the target, directory flush. The file holds the old or the new bytes after any crash. One replace at a time in a directory, across handles and processes (the `.sio-lock` file): another fails `Locked` with nothing written; a file system that cannot lock gives `Io(Lock)`. Names that could resolve to another file are refused (`NotWritten(InvalidName)`, also in `read` and `remove`): longer than 247 bytes, ending in `.` or a space, shaped like a Windows short name, a Windows device name, or the directory's own `.sio-lock` or `*.sio-tmp` (compared as a case-insensitive file system compares names: case folded, ignorable code points dropped). |
 | `read(name) -> Result<Vec<u8>>` | Reads a whole file with direct I/O. |
 | `remove(name) -> Result<()>` | Unlinks, then flushes the directory. |
 | `sync() -> Result<()>` | Flushes the directory. |
@@ -236,7 +236,7 @@ None of these can be constructed outside store-io.
 | `Corruption { kind, ctx }` | `MediaError`, `HeaderCrc`, `IdentityMismatch`, `Metadata`, `Fork`, `Truncated` (the container is shorter than its metadata says). |
 | `UnsafeDevice { reasons }`, `Unverified { missing, reasons }` | The device was refused. |
 | `Unsupported { what }` | A capability the platform lacks. |
-| `Fenced { stale }`, `Locked` | Ownership: a newer owner exists; another process holds the store. |
+| `Fenced { stale }`, `Locked` | Ownership: a newer owner exists; another holder has the lock (another handle, in this or another process, holds the store, or another handle or process is replacing in a directory). |
 | `NotFound { what }`, `AlreadyExists { what }` | Store, region or slot lookups. `NotFound` means no such name exists in the store at all. |
 | `Io { op, raw, ctx }` | A setup or metadata failure; durable data unaffected. |
 

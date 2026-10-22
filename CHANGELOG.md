@@ -178,6 +178,30 @@
   not, and EDQUOT is 69, not 122. Each system's numbers are now matched
   against its own; on systems other than Linux and macOS only the numbers
   every Unix shares count (no change on Linux or Windows).
+- Engine: **`AppendRegion::resume_at` could mark unflushed bytes
+  durable.** Called after an append that was not yet durable, it raised
+  the durable point past that append, so a later sync of it returned a
+  receipt without flushing, and a power failure lost the bytes. It now
+  moves the durable point only when everything appended in this open is
+  already durable (otherwise the next flush covers both), and it is
+  refused on a poisoned store. The same held for a forced region's
+  flushed prefix on a power-safe store (D-102): its sync could claim
+  `data_synced` without a flush.
+- Engine: **two lost wakeups in the append frontier.** A writer waiting
+  for room in a full ring took its snapshot of the completed prefix after
+  the refusal, so when every append in flight finished in between it
+  waited for a prefix nothing would reach (the last writer of a burst
+  could hang forever). And a completion read the waiter count with a
+  plain load after publishing the prefix, which may miss a waiter that in
+  turn misses the prefix (store buffering), losing the last wake of a
+  waiting append or sync. Both fixed and modelled under loom. A waiter
+  woken after the store was poisoned now never reserves. And an append
+  racing a `resume_at` (between its moves of the tail and of the
+  prefix) could be left stranded, or a writer waiting for room left
+  unwoken: `resume_at` now advances and wakes as a completion does. A
+  `resume_at` to the current tail could also move the completed prefix
+  back below an append that had just completed there, hanging every later
+  sync; it now moves the prefix only forward from the old tail.
 
 ---
 

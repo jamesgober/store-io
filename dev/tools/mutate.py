@@ -33,6 +33,8 @@ SUB = "crates/store-io-engine/src/submitter/mod.rs"
 # (loom's bounded and unbounded searches each find bugs the other misses),
 # in a target directory of their own so the normal build stays cached.
 LOOM_BUF = ["-p", "store-io-buf", "--lib", "--release", "loom"]
+# The engine's loom models (domain, frontier, gate), bounded the same way.
+LOOM_ENGINE = ["-p", "store-io-engine", "--lib", "--release", "loom"]
 LOOM = {"RUSTFLAGS": "--cfg loom", "LOOM_MAX_PREEMPTIONS": "3",
         "CARGO_TARGET_DIR": os.path.join(ROOT, "target", "loom")}
 STACK = "crates/store-io-buf/src/stack.rs"
@@ -443,6 +445,18 @@ M = [
  ('crates/store-io-engine/src/domain/mod.rs', '            let slot = 31 - free.leading_zeros();', '            let slot = free.trailing_zeros();'),
  # a full flush waiting for slot 0 has it before new leaders
  ('crates/store-io-engine/src/domain/mod.rs', '            if st.main_waiting > 0 {', '            if st.main_waiting > 0 && false {'),
+ # audit: resume_at raises the durable point only from the old tail and
+ # never on a poisoned store; a waiter for room waits on a prefix read
+ # before its refusal; the last completion's wake is never lost; nothing
+ # is reserved once told to give up
+ ('crates/store-io-engine/src/frontier.rs', '        let _moved = self\n            .durable\n            .compare_exchange(tail, new, Ordering::SeqCst, Ordering::SeqCst);', '        let _moved = self.durable.fetch_max(new, Ordering::SeqCst);'),
+ ('crates/store-io-engine/src/frontier.rs', '        let _moved = self\n            .synced\n            .compare_exchange(tail, new, Ordering::SeqCst, Ordering::SeqCst);', '        let _moved = self.synced.fetch_max(new, Ordering::SeqCst);'),
+ ('crates/store-io-engine/src/region.rs', '        if let Some(first) = self.store.inner.domain.poisoned() {\n            return Err(Error::Poisoned { first });\n        }\n        let _pass = self.pass()?;\n        let at = self', '        let _pass = self.pass()?;\n        let at = self'),
+ ('crates/store-io-engine/src/frontier.rs', '            if give_up() {\n                return Err(NotWrittenCause::TooManyInFlight);\n            }\n            // The prefix', '            // The prefix'),
+ ('crates/store-io-engine/src/frontier.rs', '                    if !self.wait_completed(p + 1, &give_up) {', '                    if !self.wait_completed(p.max(self.prefix.load(Ordering::SeqCst)) + 1, &give_up) {', LOOM_ENGINE, LOOM),
+ ('crates/store-io-engine/src/frontier.rs', '        if self.waiters.fetch_or(0, Ordering::AcqRel) > 0 {', '        if self.waiters.load(Ordering::SeqCst) > 0 {', LOOM_ENGINE, LOOM),
+ # resume_at advances over an append that raced it, and wakes waiters
+ ('crates/store-io-engine/src/frontier.rs', '        let _moved = self.advance();\n        self.wake_if_waiting();\n        // A writable', '        // A writable', LOOM_ENGINE, LOOM),
 ]
 
 def kill_stuck_tests():

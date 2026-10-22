@@ -157,7 +157,8 @@ impl AppendFrontier {
     /// flight ahead of the new one it waits for the completed prefix to
     /// advance instead of failing. A completion always wakes it (there is an
     /// in-flight reservation whenever the ring is full), and `give_up` (the
-    /// domain was poisoned, which also wakes waiters) ends the wait.
+    /// domain was poisoned, which also wakes waiters) ends the wait and
+    /// refuses any later reservation.
     ///
     /// # Errors
     ///
@@ -169,9 +170,19 @@ impl AppendFrontier {
         give_up: impl Fn() -> bool,
     ) -> Result<Reservation, NotWrittenCause> {
         loop {
+            // Never reserve on a poisoned store, even after a wake that made
+            // room.
+            if give_up() {
+                return Err(NotWrittenCause::TooManyInFlight);
+            }
+            // The prefix a refusal is judged against is at least this one,
+            // read before the reservation: waiting for it to move past this
+            // never outlasts the appends in flight (read after, every
+            // in-flight append could finish first, leaving nothing to wake
+            // the wait).
+            let p = self.prefix.load(Ordering::SeqCst);
             match self.reserve(len) {
                 Err(NotWrittenCause::TooManyInFlight) => {
-                    let p = self.prefix.load(Ordering::SeqCst);
                     if !self.wait_completed(p + 1, &give_up) {
                         return Err(NotWrittenCause::TooManyInFlight);
                     }
@@ -196,6 +207,14 @@ impl AppendFrontier {
         let sb = r.start >> self.shift;
         let eb = r.end >> self.shift;
         let _previous = self.ring[(sb & self.mask) as usize].swap(pack(sb, eb), Ordering::AcqRel);
+        if self.advance() {
+            self.wake_if_waiting();
+        }
+    }
+
+    /// Advances the completed prefix over the contiguous marks from where it
+    /// stands; whether it moved.
+    fn advance(&self) -> bool {
         let mut advanced = false;
         loop {
             let p = self.prefix.load(Ordering::Acquire);
@@ -219,7 +238,18 @@ impl AppendFrontier {
                 advanced = true;
             }
         }
-        if advanced && self.waiters.load(Ordering::SeqCst) > 0 {
+        advanced
+    }
+
+    /// Wakes every waiter, if one is registered, after the prefix moved.
+    fn wake_if_waiting(&self) {
+        // A read-modify-write, after the prefix store: the waiter registers
+        // with one too and then reads the prefix, and read-modify-writes of
+        // one location are totally ordered and synchronise, so either this
+        // sees the waiter (and notifies under `wait`) or the waiter sees the
+        // new prefix. A plain load could miss the waiter while the waiter
+        // misses the prefix (store buffering), losing the last wake.
+        if self.waiters.fetch_or(0, Ordering::AcqRel) > 0 {
             let _guard = self
                 .wait
                 .lock()
@@ -303,7 +333,11 @@ impl AppendFrontier {
     }
 
     /// Moves the tail forward to `offset` rounded up to a block, when nothing
-    /// is in flight. Never moves it backwards.
+    /// is in flight. Never moves it backwards. The skipped range counts as
+    /// durable (a writable open flushed the device first) only when
+    /// everything appended in this open is durable too; otherwise the
+    /// durable point stays, and the next sync that flushes covers both (so
+    /// `durable_through` is conservative after it).
     ///
     /// # Errors
     ///
@@ -323,6 +357,16 @@ impl AppendFrontier {
             return Err(NotWrittenCause::TooManyInFlight);
         }
         let new = target.max(tail);
+        if new == tail {
+            // Already there: nothing moves (an append may be reserving at the
+            // tail right now; touching the tail or prefix could only race it).
+            // The prefix compare-exchange below is enough under the memory
+            // model even then, but loom (0.7) does not order a
+            // read-modify-write against a racing plain store and reports a
+            // false failure for that race; not running it at all keeps the
+            // model exact.
+            return Ok(tail);
+        }
         if self
             .tail
             .compare_exchange(tail, new, Ordering::SeqCst, Ordering::SeqCst)
@@ -330,10 +374,30 @@ impl AppendFrontier {
         {
             return Err(NotWrittenCause::TooManyInFlight);
         }
-        self.prefix.store(new, Ordering::SeqCst);
-        // A writable open flushed the device before reading anything.
-        let _previous = self.durable.fetch_max(new, Ordering::SeqCst);
-        let _previous = self.synced.fetch_max(new, Ordering::SeqCst);
+        // From the old tail only: with `new == tail` an append may already
+        // have reserved at the tail, completed and advanced the prefix past
+        // it; a plain store would move the prefix back below that append
+        // and strand everything after it. (With `new > tail` nothing can
+        // move it first: no reservation starts below `new`.)
+        let _moved = self
+            .prefix
+            .compare_exchange(tail, new, Ordering::SeqCst, Ordering::SeqCst);
+        // An append that reserved between the tail's move and this store
+        // read the old prefix: its completion may be marked and stranded, or
+        // a writer may wait for room. Advance over it and wake them, as a
+        // completion would.
+        let _moved = self.advance();
+        self.wake_if_waiting();
+        // A writable open flushed the device before reading anything, so the
+        // skipped range is on media; but bytes appended in this open and
+        // not yet flushed are not, and the durable point is a prefix: it
+        // moves only from the old tail (nothing waiting for a flush).
+        let _moved = self
+            .durable
+            .compare_exchange(tail, new, Ordering::SeqCst, Ordering::SeqCst);
+        let _moved = self
+            .synced
+            .compare_exchange(tail, new, Ordering::SeqCst, Ordering::SeqCst);
         Ok(new)
     }
 }
@@ -539,6 +603,18 @@ mod tests {
         assert_eq!(got.map(|r| r.start), Some(4 * 4096));
     }
 
+    /// A poisoned store reserves nothing, even with room in the ring (a
+    /// wake that made room never lets an append through after the poison).
+    #[test]
+    fn test_reserve_wait_refuses_once_told_to_give_up() {
+        let fr = AppendFrontier::new(0, 1 << 30, 12, 4);
+        assert_eq!(
+            fr.reserve_wait(4096, || true),
+            Err(NotWrittenCause::TooManyInFlight)
+        );
+        assert_eq!(fr.tail(), 0, "reserved on a poisoned store");
+    }
+
     #[test]
     fn test_reserve_wait_gives_up_when_told() {
         let fr = Arc::new(AppendFrontier::new(0, 1 << 30, 12, 4));
@@ -589,6 +665,124 @@ mod loom_tests {
                 let _joined = t.join();
             }
             assert_eq!(fr.completed(), fr.tail());
+        });
+    }
+
+    /// A waiter for room in a full ring, racing the completions that drain
+    /// it: however they interleave, the waiter reserves (the snapshot it
+    /// waits on is taken before its refusal).
+    #[test]
+    fn loom_a_waiter_for_room_sees_the_ring_drain() {
+        loom::model(|| {
+            let fr = Arc::new(AppendFrontier::new(0, 1 << 20, 12, 2));
+            let a = fr.reserve(4096).unwrap_or_else(|_| unreachable!());
+            let b = fr.reserve(4096).unwrap_or_else(|_| unreachable!());
+            let done = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || {
+                    fr.complete(a);
+                    fr.complete(b);
+                })
+            };
+            let waiter = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || fr.reserve_wait(4096, || false).is_ok())
+            };
+            let _joined = done.join();
+            assert_eq!(waiter.join().ok(), Some(true));
+        });
+    }
+
+    /// A waiter for the completed prefix, racing the one completion that
+    /// reaches it: the completion's wake is never lost.
+    #[test]
+    fn loom_the_last_completion_wakes_its_waiter() {
+        loom::model(|| {
+            let fr = Arc::new(AppendFrontier::new(0, 1 << 20, 12, 4));
+            let a = fr.reserve(4096).unwrap_or_else(|_| unreachable!());
+            let done = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || fr.complete(a))
+            };
+            let waiter = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || fr.wait_completed(a.end, || false))
+            };
+            let _joined = done.join();
+            assert_eq!(waiter.join().ok(), Some(true));
+        });
+    }
+
+    /// An append racing `resume_at`: a reservation made between the tail's
+    /// move and the prefix's is never stranded once both are done.
+    #[test]
+    fn loom_an_append_racing_resume_is_never_stranded() {
+        loom::model(|| {
+            let fr = Arc::new(AppendFrontier::new(0, 1 << 20, 12, 4));
+            let resume = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || {
+                    let _r = fr.resume_at(4096);
+                })
+            };
+            let append = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || {
+                    if let Ok(r) = fr.reserve(4096) {
+                        fr.complete(r);
+                    }
+                })
+            };
+            let _a = resume.join();
+            let _b = append.join();
+            assert_eq!(fr.completed(), fr.tail(), "a completion was stranded");
+        });
+    }
+
+    /// A writer waiting for room while `resume_at` skips past the ring is
+    /// woken by the skip.
+    #[test]
+    fn loom_a_waiter_racing_resume_is_woken() {
+        loom::model(|| {
+            let fr = Arc::new(AppendFrontier::new(0, 1 << 20, 12, 2));
+            let resume = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || {
+                    let _r = fr.resume_at(4 * 4096);
+                })
+            };
+            let waiter = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || fr.reserve_wait(4096, || false).is_ok())
+            };
+            let _a = resume.join();
+            assert_eq!(waiter.join().ok(), Some(true));
+        });
+    }
+
+    /// `resume_at` to the tail itself, racing an append there: the prefix
+    /// never moves back below the append's completion.
+    #[test]
+    fn loom_resume_to_the_tail_never_moves_the_prefix_back() {
+        loom::model(|| {
+            let fr = Arc::new(AppendFrontier::new(0, 1 << 20, 12, 4));
+            let resume = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || {
+                    let _r = fr.resume_at(0);
+                })
+            };
+            let append = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || {
+                    if let Ok(r) = fr.reserve(4096) {
+                        fr.complete(r);
+                    }
+                })
+            };
+            let _a = resume.join();
+            let _b = append.join();
+            assert_eq!(fr.completed(), fr.tail(), "the prefix moved back");
         });
     }
 }

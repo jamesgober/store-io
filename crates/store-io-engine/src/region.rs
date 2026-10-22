@@ -386,20 +386,30 @@ where
     /// typically after recovery found where valid data ends. Never moves
     /// backwards, and only while no append is in flight.
     ///
-    /// Everything before the new position counts as durable: a writable open
-    /// flushed the device before reading anything, so whatever recovery found
-    /// is on media. A read-only open flushes nothing, so there `resume_at` is
-    /// refused (D-072); appends are refused there anyway.
+    /// The skipped range counts as durable: a writable open flushed the
+    /// device before reading anything, so whatever recovery found is on
+    /// media. Bytes appended in this open and not yet made durable never do:
+    /// then the durable point stays where it is, and the next sync that
+    /// flushes covers both (`durable_through` reads lower until then).
+    /// A read-only open flushes nothing, so there `resume_at` is refused
+    /// (D-072); appends are refused there anyway, and so is a poisoned
+    /// store.
     ///
     /// # Errors
     ///
-    /// `NotWritten(ReadOnly | TooManyInFlight | OutOfBounds)`.
+    /// `NotWritten(ReadOnly | TooManyInFlight | OutOfBounds)`, `Poisoned`.
     pub fn resume_at(&self, offset: u64) -> Result<u64, Error> {
         if self.store.inner.read_only {
             return Err(Error::NotWritten {
                 cause: NotWrittenCause::ReadOnly,
                 ctx: ctx(&self.state),
             });
+        }
+        // A poison landing after this check is harmless: a failed append
+        // leaves the prefix below the tail (refused below), a failed flush
+        // leaves the durable point below it (not raised).
+        if let Some(first) = self.store.inner.domain.poisoned() {
+            return Err(Error::Poisoned { first });
         }
         let _pass = self.pass()?;
         let at = self

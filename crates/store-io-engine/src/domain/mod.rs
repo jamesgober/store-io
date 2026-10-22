@@ -52,8 +52,11 @@
 //! lands on one that cannot use the freed slot). Barriers needing a later
 //! flush are only rarely woken by an earlier one: on a virtual machine every
 //! wake is an interrupt to another processor, and waking every waiter on
-//! every flush cost the leader more than the flush (G15, D-125). Failures,
-//! poison and freed slots outside a barrier wake everyone.
+//! every flush cost the leader more than the flush (G15, D-125). Who to wake
+//! is decided under the slot lock and the wakes are sent after it is
+//! released, so a woken barrier finds the lock free instead of blocking on
+//! it at once (a second sleep and wake). Failures, poison and freed slots
+//! outside a barrier wake everyone.
 //!
 //! # Poison
 //!
@@ -117,6 +120,51 @@ struct Bucket {
     waiting: u32,
     /// Their need, while `waiting > 0`.
     need: u64,
+}
+
+/// Wakes decided under the slot lock and sent after it is released: every
+/// change they announce was made under the lock, so a barrier asleep then
+/// is still woken, and one arriving after sees the change and does not
+/// sleep. A late wake that finds its bucket left or reused is spurious, and
+/// a woken barrier always re-checks.
+// Bucket indices are kept in a byte.
+const _: () = assert!(BUCKETS <= 256);
+
+struct Wakes {
+    /// Buckets in which to wake one barrier.
+    one: [u8; BUCKETS + 1],
+    len: usize,
+    /// Wake everyone on the shared condvar.
+    shared: bool,
+}
+
+impl Wakes {
+    fn new() -> Self {
+        Self {
+            one: [0; BUCKETS + 1],
+            len: 0,
+            shared: false,
+        }
+    }
+
+    fn bucket(&mut self, b: usize) {
+        // At most one per bucket covered plus the next flush's: never full
+        // (a dropped wake would strand a barrier).
+        debug_assert!(self.len < self.one.len(), "wake list full");
+        if let Some(slot) = self.one.get_mut(self.len) {
+            *slot = b as u8;
+            self.len += 1;
+        }
+    }
+
+    fn send(self, d: &Domain) {
+        for &b in &self.one[..self.len] {
+            d.bucket_wake[usize::from(b)].notify_one();
+        }
+        if self.shared {
+            d.wake.notify_all();
+        }
+    }
 }
 
 /// Observability counters, on a cache line of their own: incrementing them
@@ -345,8 +393,8 @@ impl Domain {
                 // A barrier that would lead but may use fewer slots than
                 // the domain has must not take the next flush's wake.
                 let narrow = need > issued && usable < self.slots;
-                // Re-locked on return; everything is re-checked from the top.
-                drop(self.sleep(st, need, narrow));
+                // `sleep` releases the lock; the loop re-locks and re-checks.
+                self.sleep(st, need, narrow);
                 continue;
             }
             // The highest free slot: slot 0, the only one a main-handle
@@ -383,13 +431,15 @@ impl Domain {
                     });
                 }
             }
+            let mut wakes = Wakes::new();
             if self.poison.get().is_some() {
                 self.wake_waiters(&st);
             } else {
-                self.wake_covered(&st, before);
-                self.wake_next(&st);
+                self.wake_covered(&st, before, &mut wakes);
+                self.wake_next(&st, &mut wakes);
             }
             drop(st);
+            wakes.send(self);
             if let Some(raw) = failed {
                 return Err(Error::DurabilityUnknown {
                     op: Op::FlushData,
@@ -484,20 +534,16 @@ impl Domain {
         self.wake_waiters(&st);
     }
 
-    /// Sleeps a barrier for `need` (the caller re-checks on return): in its
-    /// bucket when the bucket is empty or holds `need`, else (or when
-    /// `narrow`: it may lead on fewer slots than the domain has) on `wake`.
-    /// A covered barrier leaving its bucket wakes the next one there.
-    fn sleep<'a>(
-        &'a self,
-        mut st: MutexGuard<'a, Slots>,
-        need: u64,
-        narrow: bool,
-    ) -> MutexGuard<'a, Slots> {
+    /// Sleeps a barrier for `need`, then releases the lock (the caller
+    /// re-locks and re-checks): in its bucket when the bucket is empty or
+    /// holds `need`, else (or when `narrow`: it may lead on fewer slots than
+    /// the domain has) on `wake`. A covered barrier leaving its bucket wakes
+    /// the next one there, once the lock is released.
+    fn sleep(&self, mut st: MutexGuard<'_, Slots>, need: u64, narrow: bool) {
         let b = (need % BUCKETS as u64) as usize;
         st.waiters += 1;
         let own = !narrow && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);
-        if own {
+        let pass_on = if own {
             st.buckets[b].need = need;
             st.buckets[b].waiting += 1;
             st = self.bucket_wake[b]
@@ -505,9 +551,7 @@ impl Domain {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             st.buckets[b].waiting -= 1;
             // Everyone left here needs the same flush: pass the wake on.
-            if st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need {
-                self.bucket_wake[b].notify_one();
-            }
+            st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need
         } else {
             st.overflow += 1;
             st = self
@@ -515,22 +559,26 @@ impl Domain {
                 .wait(st)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             st.overflow -= 1;
-        }
+            false
+        };
         st.waiters -= 1;
-        st
+        drop(st);
+        if pass_on {
+            self.bucket_wake[b].notify_one();
+        }
     }
 
     /// After `done` moved from `before`: one wake in each bucket now
     /// covered (each passes it on). Barriers on `wake` are woken by
     /// [`Self::wake_next`], which follows.
-    fn wake_covered(&self, st: &Slots, before: u64) {
+    fn wake_covered(&self, st: &Slots, before: u64, wakes: &mut Wakes) {
         let after = self.done.load(Ordering::SeqCst);
         // At most WINDOW needs became covered; a bucket is visited once.
         for d in before + 1..=after.min(before + BUCKETS as u64) {
             let b = (d % BUCKETS as u64) as usize;
             let w = st.buckets[b];
             if w.waiting > 0 && w.need > before && w.need <= after {
-                self.bucket_wake[b].notify_one();
+                wakes.bucket(b);
             }
         }
     }
@@ -538,14 +586,14 @@ impl Domain {
     /// After a slot was freed or `done` moved: one wake for a barrier
     /// needing the next flush (the only need that may lead one), and the
     /// `exclusive_main` callers and barriers on `wake`.
-    fn wake_next(&self, st: &Slots) {
+    fn wake_next(&self, st: &Slots, wakes: &mut Wakes) {
         let next = self.issued.load(Ordering::SeqCst).wrapping_add(1);
         let b = (next % BUCKETS as u64) as usize;
         if st.buckets[b].waiting > 0 && st.buckets[b].need == next {
-            self.bucket_wake[b].notify_one();
+            wakes.bucket(b);
         }
         if st.overflow > 0 || st.main_waiting > 0 {
-            self.wake.notify_all();
+            wakes.shared = true;
         }
     }
 

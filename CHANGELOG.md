@@ -138,17 +138,22 @@
   needing the next flush is woken to lead it. Measured with eight writers
   on CI (a diagnostic build, before the shared fallback below was added):
   79k to 92k durable appends a second on null_blk, 43k to 48k on a loop
-  device, context switches 3.5 to 0.1-0.6 per write. A barrier whose
-  bucket holds another need, or that may lead on fewer slots than the
-  domain has (a metadata write), sleeps on a shared condvar that every
-  finished flush wakes. Receipts, poison and the join rule are unchanged.
-  Tests: six wake tests (a covered barrier passes the wake on, a jump past
-  several flushes wakes each need, the next flush's barrier leads, a
-  barrier sharing a bucket with another need is still woken, the next
-  flush is led on the freed slot by a barrier that can use it, poison
-  wakes every bucket); the domain tests build with two buckets, so the
-  shared fallback runs often; a loom model of three barriers of one need
-  (the pass-on); 7 new mutation entries, run on the domain's own tests.
+  device, voluntary context switches 3.5 to 0.1-0.6 per write. A barrier
+  whose bucket holds another need, or that may lead on fewer slots than
+  the domain has (a metadata write), sleeps on a shared condvar that every
+  finished flush wakes. Who to wake is decided under the slot lock and the
+  wakes are sent after it is released, so a woken barrier finds the lock
+  free instead of blocking on it at once (measured on null_blk: eight
+  writers 155k to 168k, sixteen 173k to 213k, voluntary context switches
+  1.56 to 1.28 per write, on another runner and run). Receipts, poison and
+  the join rule are unchanged. Tests: six wake tests (a covered barrier
+  passes the wake on, a jump past several flushes wakes each need, the
+  next flush's barrier leads, a barrier sharing a bucket with another need
+  is still woken, the next flush is led on the freed slot by a barrier
+  that can use it, poison wakes every bucket); the domain tests build with
+  two buckets, so the shared fallback runs often; a loom model of three
+  barriers of one need (the pass-on); 8 new mutation entries, run on the
+  domain's wake tests.
 - **Breaking** (`Directory`): a replace takes the directory's `.sio-lock`
   file (created on first use and kept) and fails `Locked`, not waiting,
   while another handle or process replaces there; the caller retries. A

@@ -442,7 +442,8 @@ M = [
  # a barrier whose bucket holds another need, or that may lead on fewer
  # slots than the domain has, sleeps on the shared condvar, which every
  # finished flush wakes; poison wakes every bucket
- ('crates/store-io-engine/src/domain/mod.rs', '            if st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need {', '            if st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need && false {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need\n', '            st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need && false\n', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            wakes.send(self);', '            wakes.len = 0;\n            wakes.shared = false;\n            wakes.send(self);', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        for d in before + 1..=after.min(before + BUCKETS as u64) {', '        for d in after..=after {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        if st.buckets[b].waiting > 0 && st.buckets[b].need == next {', '        if st.buckets[b].waiting > 0 && st.buckets[b].need == next && false {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        let own = !narrow && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', '        let own = !(narrow && false) && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', DOMAIN),

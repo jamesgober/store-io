@@ -15,6 +15,7 @@
 # Usage: bash dev/tools/iowq-gate.sh   (needs fio and a release harness:
 #        cd harness && cargo build --release; CARGO_TARGET_DIR is honoured)
 set -u
+command -v fio >/dev/null || { echo "FAIL: fio is not installed"; exit 2; }
 root=$(cd "$(dirname "$0")/../.." && pwd)
 bin=${CARGO_TARGET_DIR:-$root/harness/target}/release/store-io-harness
 work=${STORE_IO_TEST_DIR:-$HOME}/.iowq-gate-$$
@@ -43,9 +44,18 @@ watch() {
 }
 
 fio --name=c --filename="$work/control.dat" --size=64m --ioengine=io_uring --direct=1 \
-    --rw=randwrite --bs=4k --iodepth=8 --fsync=1 --time_based --runtime=3s >/dev/null 2>&1 &
-control=$(watch $!)
+    --rw=randwrite --bs=4k --iodepth=8 --fsync=1 --time_based --runtime=3s \
+    >"$work/control.log" 2>&1 &
+cpid=$!
+control=$(watch "$cpid")
+wait "$cpid"
+cstatus=$?
 echo "control (fio, fsync on io_uring): io-wq threads seen = $control"
+if [ "$cstatus" -ne 0 ]; then
+  echo "FAIL: the control fio run failed (exit $cstatus):"
+  tail -5 "$work/control.log"
+  exit 2
+fi
 if [ "$control" -eq 0 ]; then
   echo "FAIL: the sampling cannot see io-wq threads here; the gate proves nothing"
   exit 2

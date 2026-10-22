@@ -584,18 +584,23 @@ where
     fn process(&mut self) {
         let _unwind = PoisonOnUnwind::new(&self.store);
         for c in self.core.raw.drain() {
-            if let Some((qtag, need)) = self.core.table.finish(&self.store, c.tag, c.buf, c.result)
-            {
-                // Only a write needing a flush asks (see `Table::finish`).
-                durable::ask(
-                    &mut self.core.table,
-                    &self.store,
-                    &self.inbox,
-                    qtag,
-                    need,
-                    true,
-                );
+            // Only a write needing a flush asks (see `Table::finish`).
+            if let Some(ask) = self.core.table.finish(&self.store, c.tag, c.buf, c.result) {
+                self.core.table.asks.push(ask);
             }
+        }
+        // Asked once every completion of the pass is finished, the largest
+        // need first, so one flush can cover them all. Taken one at a time:
+        // after a panic the rest stay to be asked for, in the same buffer.
+        while let Some((qtag, need)) = self.core.table.asks.pop() {
+            durable::ask(
+                &mut self.core.table,
+                &self.store,
+                &self.inbox,
+                qtag,
+                need,
+                true,
+            );
         }
         // Flush outcomes too, under the same guard.
         while self.core.table.asked > 0 {

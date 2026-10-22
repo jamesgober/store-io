@@ -204,9 +204,21 @@
 - CI: every job of the CI workflow has a time limit (20 to 60 minutes,
   well above its usual run; the mutation workflow already had one), so a
   hung test fails its job instead of running for hours.
+- CI: a failed `apt-get update` (one package source refusing, as
+  packages.microsoft.com once did) no longer stops the packages from
+  installing from the lists it did fetch; a failed install still fails the
+  step. The io-wq gate now says when fio is missing or its control run
+  failed, instead of reporting that it cannot see io-wq threads.
 
 ### Fixed
 
+- Engine: **a `Submitter`'s durable writes could each get their own flush.**
+  Completions collected together asked for their flushes one by one, so a
+  flush thread quick enough to start between two asks flushed for each in
+  turn (64 flushes for 64 writes in one macOS test run). Every completion of
+  a pass is now processed before any flush is asked for, so one flush can
+  cover them all. With a 1 ms pause after each ask, the old order took 64
+  flushes for 64 writes and the new one 7 or 8.
 - `store-io-core`: the out-of-space and media-error checks matched Linux
   error numbers on every system. On macOS, 61 and 74 (ECONNREFUSED,
   EPROGUNAVAIL) would have counted as media errors, EBADMSG (94) would

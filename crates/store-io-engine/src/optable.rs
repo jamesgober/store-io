@@ -79,6 +79,10 @@ pub(crate) struct Table {
     /// Of those, requests the flush thread accepted and has not answered
     /// (or whose answer is not taken yet): the ones worth waiting for.
     pub(crate) asked: usize,
+    /// Flushes wanted by the completions of one pass, `(qtag, need)`, asked
+    /// for once the whole pass is finished (one row each, so never more
+    /// than the depth: no allocation after creation).
+    pub(crate) asks: Vec<(u64, u64)>,
     next_seq: u64,
     /// Busy mark for `Store::oldest_outstanding`: `2 * oldest + 1` while
     /// anything is in flight, even otherwise (D-095's lane-mark rules).
@@ -100,6 +104,7 @@ impl Table {
             live: 0,
             flushing: 0,
             asked: 0,
+            asks: Vec::with_capacity(depth),
             next_seq: 0,
             mark,
         }

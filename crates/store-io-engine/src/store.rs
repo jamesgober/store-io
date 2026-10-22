@@ -112,12 +112,16 @@ pub struct StoreOptions {
     /// detects (D-107).
     pub register_file: bool,
     /// Flushes the store runs at once (1 to 4; default 1, one in flight as
-    /// before, D-124). Several overlap on drives that execute flushes in
-    /// parallel (NVMe): each runs on a handle and queue of its own, so each
-    /// reports its own failures, and a receipt still needs every flush up
-    /// to its own to have succeeded. Platforms that cannot keep flush
-    /// failures per handle run one (Linux 4.16 and later can); the number
-    /// run is in [`StoreReport::flushes_in_flight`].
+    /// before, D-124). Several can overlap, meant for drives that execute
+    /// flushes in parallel (NVMe; not yet measured on one): each runs on a
+    /// handle and queue of its own, so each reports its own failures, and a
+    /// receipt still needs every flush up to its own to have succeeded.
+    /// Platforms that cannot keep flush failures per handle run one (Linux
+    /// 4.16 and later can); the number run is in
+    /// [`StoreReport::flushes_in_flight`]. Measure on the target drive
+    /// before raising it: at eight writers, 2 and 4 gained nothing on a
+    /// memory-backed device and lost on a virtual disk (1,314, 974 and 595
+    /// durable writes a second at 1, 2 and 4).
     pub flushes_in_flight: u8,
     /// Regions a format-2 store can hold, fixed at create (default 65,536:
     /// a table of 12.1 MiB at 16 KiB table pages, written at create and

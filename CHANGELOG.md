@@ -102,10 +102,16 @@
   (`peak_in_flight`) and those that finished early (`out_of_order`). The
   stuck-operation report treats every flush lane as a flush. The harness's
   G15 measures eight writers at 1, 2 and 4 (and the number each run
-  actually used), from which the default will be chosen. Tests: domain
-  tests for out-of-order completion, a failure behind a success, poison
-  during a flush, the issue window and slot 0 for the main handle; three
-  new loom models; simulator tests (the wiring and end to end: every
+  actually used). The default stays 1: 2 and 4 gained nothing on CI's
+  memory-backed device (43,329, 42,816 and 42,959 durable writes a second)
+  and lost on a WSL virtual disk (1,314, 974 and 595); there the
+  eight-writer runs at 1 (median 1,374) made 3.3 times the durable writes
+  of fio's eight writers flushing after every write (421), and on CI 0.68
+  times (43,329 against 63,899), where a flush is cheap (fio flushing
+  after every write kept 46% of its writes, against 1% on WSL). Tests:
+  domain tests for out-of-order completion, a failure behind a success,
+  poison during a flush, the issue window and slot 0 for the main handle;
+  three new loom models; simulator tests (the wiring and end to end: every
   acknowledged append survives a power failure, with and without a failed
   flush, at 1 and 4 in flight, with flushes shown to overlap and reorder);
   two tests that metadata and full flushes of the main handle wait for its

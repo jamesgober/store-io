@@ -195,6 +195,9 @@
   hardware available; power-cut certification and the power-safe
   reference measurements move to 1.x (they add evidence without changing
   the API or the format).
+- CI: every job of the CI workflow has a time limit (20 to 60 minutes,
+  well above its usual run; the mutation workflow already had one), so a
+  hung test fails its job instead of running for hours.
 
 ### Fixed
 

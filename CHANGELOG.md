@@ -128,6 +128,27 @@
 
 ### Changed
 
+- Engine: **a finished flush wakes only the barriers it covered** (D-125).
+  Every finished flush used to wake every waiting barrier, on the leader's
+  path, including those needing a later flush; on a virtual machine each
+  wake is an interrupt to another processor, and eight blocking writers
+  spent 18-20% of their CPU waking and 3.5 context switches per durable
+  write. Barriers now sleep by the flush they need: the leader wakes one
+  barrier per need it covered, each passes the wake on, and one barrier
+  needing the next flush is woken to lead it. Measured with eight writers
+  on CI (a diagnostic build, before the shared fallback below was added):
+  79k to 92k durable appends a second on null_blk, 43k to 48k on a loop
+  device, context switches 3.5 to 0.1-0.6 per write. A barrier whose
+  bucket holds another need, or that may lead on fewer slots than the
+  domain has (a metadata write), sleeps on a shared condvar that every
+  finished flush wakes. Receipts, poison and the join rule are unchanged.
+  Tests: six wake tests (a covered barrier passes the wake on, a jump past
+  several flushes wakes each need, the next flush's barrier leads, a
+  barrier sharing a bucket with another need is still woken, the next
+  flush is led on the freed slot by a barrier that can use it, poison
+  wakes every bucket); the domain tests build with two buckets, so the
+  shared fallback runs often; a loom model of three barriers of one need
+  (the pass-on); 7 new mutation entries, run on the domain's own tests.
 - **Breaking** (`Directory`): a replace takes the directory's `.sio-lock`
   file (created on first use and kept) and fails `Locked`, not waiting,
   while another handle or process replaces there; the caller retries. A

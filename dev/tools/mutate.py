@@ -35,6 +35,10 @@ SUB = "crates/store-io-engine/src/submitter/mod.rs"
 LOOM_BUF = ["-p", "store-io-buf", "--lib", "--release", "loom"]
 # The engine's loom models (domain, frontier, gate), bounded the same way.
 LOOM_ENGINE = ["-p", "store-io-engine", "--lib", "--release", "loom"]
+# The domain's wake tests: a mutant that strands a barrier fails there within
+# their 10 s waits, where suites that join stuck threads would hang to the
+# timeout.
+DOMAIN = ["-p", "store-io-engine", "--lib", "domain::wake_tests"]
 LOOM = {"RUSTFLAGS": "--cfg loom", "LOOM_MAX_PREEMPTIONS": "3",
         "CARGO_TARGET_DIR": os.path.join(ROOT, "target", "loom")}
 STACK = "crates/store-io-buf/src/stack.rs"
@@ -433,6 +437,18 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        let lanes = if read_only || !policy.flush {\n            1\n        } else {\n            queues.flush_lanes()', '        let lanes = if !policy.flush {\n            1\n        } else {\n            queues.flush_lanes()'),
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(lanes);'),
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
+ # D-125 targeted wakes: a covered barrier passes the wake on; a jump in
+ # done wakes every bucket it covered; the next flush's barrier is woken;
+ # a barrier whose bucket holds another need, or that may lead on fewer
+ # slots than the domain has, sleeps on the shared condvar, which every
+ # finished flush wakes; poison wakes every bucket
+ ('crates/store-io-engine/src/domain/mod.rs', '            if st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need {', '            if st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need && false {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        for d in before + 1..=after.min(before + BUCKETS as u64) {', '        for d in after..=after {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if st.buckets[b].waiting > 0 && st.buckets[b].need == next {', '        if st.buckets[b].waiting > 0 && st.buckets[b].need == next && false {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        let own = !narrow && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', '        let own = !(narrow && false) && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        let own = !narrow && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', '        let own = !narrow;', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if st.overflow > 0 || st.main_waiting > 0 {', '        if st.main_waiting > 0 {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                if w.waiting > 0 {\n                    self.bucket_wake[b].notify_all();', '                if w.waiting > 0 && false {\n                    self.bucket_wake[b].notify_all();', DOMAIN),
  # D-124 review: done never jumps to the highest finished flush; every
  # flush lane is a flush to the watchdog; a full flush of the main handle
  # waits for slot 0 and gives it back

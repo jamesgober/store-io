@@ -3,6 +3,11 @@
 //! three times (after all the rounds, so neither store-io point follows
 //! fio's load).
 //!
+//! Beside them, reported and never judged: eight writers at each of
+//! [`SWEEP`]'s flushes in flight (D-124 chose the default from these), and
+//! two diagnostics of what holds eight writers back, a region per writer
+//! and many queues.
+//!
 //! Why the controls: G15 asks that flush sharing lift eight writers to 1.5x
 //! one. That needs a device whose writes alone go faster than 1.5x one
 //! writer's durable rate. On a memory-backed device with a cheap flush the
@@ -20,6 +25,15 @@ use crate::report::Point;
 
 /// Rounds of one writer then eight, and then of the two fio controls.
 const ROUNDS: usize = 3;
+
+/// Queues of the many-queues diagnostic: two per writer, and at least the
+/// default (one per CPU).
+#[must_use]
+pub fn diag_queues() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .max(16)
+}
 
 /// Flushes in flight measured beside the run's own setting, at eight
 /// writers (D-124: the default is chosen from these).
@@ -45,6 +59,13 @@ pub struct G15 {
     pub sweep: Vec<(u8, u8, Vec<f64>)>,
     /// The most flushes in flight the eight-writer runs actually used.
     pub ran_at_eight: u8,
+    /// Diagnostics at eight writers (reported, never judged): durable
+    /// appends per second with a region per writer, so none waits for
+    /// another's append before its own counts, and on the shared region
+    /// with [`diag_queues`] queues, so none waits for a free queue.
+    pub own_regions: Vec<f64>,
+    /// See [`Self::own_regions`].
+    pub many_queues: Vec<f64>,
     /// store-io's points, in the order measured.
     pub points: Vec<Point>,
 }
@@ -77,6 +98,8 @@ pub fn measure(
         fio_errors: Vec::new(),
         sweep: SWEEP.iter().map(|&f| (f, 0, Vec::new())).collect(),
         ran_at_eight: 0,
+        own_regions: Vec::new(),
+        many_queues: Vec::new(),
         points: Vec::new(),
     };
     for _ in 0..ROUNDS {
@@ -104,6 +127,15 @@ pub fn measure(
             }
             g.points.push(p);
         }
+        let own = concurrent::store_point_in(ctx, 8, &ctx.opts, 8);
+        g.own_regions.extend(val(&own, "ops_per_s"));
+        let queues = StoreOptions {
+            queues: diag_queues(),
+            ..ctx.opts.clone()
+        };
+        let many = concurrent::store_point_with(ctx, 8, &queues);
+        g.many_queues.extend(val(&many, "ops_per_s"));
+        g.points.extend([own, many]);
     }
     for _ in 0..ROUNDS {
         for (args, into) in [
@@ -149,9 +181,12 @@ impl G15 {
             id: "G15",
             gate: "Concurrent writers: durable ops/s rises with writers through flush sharing (8 writers at least 1.5x one, under 0.9 flushes per op; medians of 3 alternated runs)",
             measured: format!(
-                "1 writer {one:.0?} /s, 8 writers {eight:.0?} /s, {} flushes per op at 8 ({} in flight); 8 writers by flushes in flight: {sweep}; fio 8 writers ({}): writes alone {:.0?} /s, each flushed {:.0?} /s",
+                "1 writer {one:.0?} /s, 8 writers {eight:.0?} /s, {} flushes per op at 8 ({} in flight); 8 writers by flushes in flight: {sweep}; diagnostics at 8 writers: a region each {:.0?} /s, {} queues {:.0?} /s; fio 8 writers ({}): writes alone {:.0?} /s, each flushed {:.0?} /s",
                 f(f8, 2),
                 self.ran_at_eight,
+                self.own_regions,
+                diag_queues(),
+                self.many_queues,
                 fio::sync_engine(),
                 self.fio_writes,
                 self.fio_durable

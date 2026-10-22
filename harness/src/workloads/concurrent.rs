@@ -197,6 +197,8 @@ fn record(p: &mut Point, r: &Threaded<impl Sized>) {
 }
 
 struct StoreThread {
+    /// The region this thread appends to.
+    region: usize,
     buf: Vec<u8>,
     recs: Vec<Rec>,
     short_receipts: u64,
@@ -211,36 +213,69 @@ pub fn store_point(ctx: &Ctx, n: usize) -> Point {
 /// As [`store_point`], the store made with `opts` (G15's flushes in flight,
 /// D-124).
 pub fn store_point_with(ctx: &Ctx, n: usize, opts: &StoreOptions) -> Point {
-    let p = Point::new(
-        System::StoreIo,
-        "AppendRegion::append_durable (shared region)",
-    )
-    .param("threads", Json::Num(n as f64))
-    .param("bytes", Json::Num(KIB4 as f64))
-    .param(
-        "flushes_in_flight",
-        Json::Num(f64::from(opts.flushes_in_flight)),
+    store_point_in(ctx, n, opts, 1)
+}
+
+/// As [`store_point_with`], the `n` threads spread over `regions` append
+/// regions (thread `t` on region `t % regions`; 1 is the shared region).
+/// With a region per thread no writer waits for another's append to
+/// complete before its own counts: one of G15's diagnostics.
+pub fn store_point_in(ctx: &Ctx, n: usize, opts: &StoreOptions, regions: usize) -> Point {
+    let regions = regions.clamp(1, n.max(1));
+    let what = match (regions, opts.queues) {
+        (1, 0) => "AppendRegion::append_durable (shared region)".to_owned(),
+        (1, q) => format!("AppendRegion::append_durable (shared region, {q} queues)"),
+        (r, _) if r == n => "AppendRegion::append_durable (a region per thread)".to_owned(),
+        (r, _) => format!("AppendRegion::append_durable ({r} regions shared by the threads)"),
+    };
+    let p = Point::new(System::StoreIo, what)
+        .param("threads", Json::Num(n as f64))
+        .param("bytes", Json::Num(KIB4 as f64))
+        .param("regions", Json::Num(regions as f64))
+        .param("queues", Json::Num(opts.queues as f64))
+        .param(
+            "flushes_in_flight",
+            Json::Num(f64::from(opts.flushes_in_flight)),
+        );
+    let name = format!(
+        "w2-store-{n}-f{}-r{regions}-q{}",
+        opts.flushes_in_flight, opts.queues
     );
-    let name = format!("w2-store-{n}-f{}", opts.flushes_in_flight);
     let mut p = with_store_using(ctx, &name, opts, p, |store, p| {
         // What the store runs, which the platform or device may hold to 1.
         p.metric(
             "flushes_run",
             Some(f64::from(store.report().flushes_in_flight)),
         );
-        let bytes = region_bytes(ctx, KIB4 as u64, 40_000.0, 2 << 30);
-        let wal = provision_append(store, "w2", bytes, p)?;
-        let margin = (n as u64 + 1) * KIB4 as u64;
+        // Sized for the shared region's rate as before; several regions
+        // let a fast device go well past it, so they get room for more.
+        let rate = if regions == 1 { 40_000.0 } else { 120_000.0 };
+        let total = region_bytes(ctx, KIB4 as u64, rate, 2 << 30);
+        let bytes = (total / regions as u64).div_ceil(1 << 20).max(16) * (1 << 20);
+        let mut wals = Vec::with_capacity(regions);
+        for k in 0..regions {
+            let name = if regions == 1 {
+                "w2".to_owned()
+            } else {
+                format!("w2-{k}")
+            };
+            wals.push(provision_append(store, &name, bytes, p)?);
+        }
+        let wals = &wals;
+        // Room for every writer of the busiest region.
+        let margin = (n.div_ceil(regions) as u64 + 1) * KIB4 as u64;
         let r = threaded(
             ctx,
             n,
             &|| Snap::store(store),
-            |_| StoreThread {
+            |t| StoreThread {
+                region: t % regions,
                 buf: vec![0u8; KIB4],
                 recs: Vec::with_capacity(1 << 12),
                 short_receipts: 0,
             },
             |st, t, i| {
+                let wal = &wals[st.region];
                 if wal.tail() + margin > wal.len() {
                     return Ok(Step::Full);
                 }
@@ -266,8 +301,29 @@ pub fn store_point_with(ctx: &Ctx, n: usize, opts: &StoreOptions) -> Point {
         );
         record(p, &r);
         let short: u64 = r.states.iter().map(|s| s.short_receipts).sum();
-        let recs: Vec<Rec> = r.states.into_iter().flat_map(|s| s.recs).collect();
-        p.verify = verify_appends(&wal, &ctx.pool, &recs, CHECKS);
+        let mut by_region: Vec<Vec<Rec>> = (0..regions).map(|_| Vec::new()).collect();
+        for s in r.states {
+            by_region[s.region].extend(s.recs);
+        }
+        let mut verdicts: Vec<Verify> = wals
+            .iter()
+            .zip(&by_region)
+            .map(|(wal, recs)| verify_appends(wal, &ctx.pool, recs, CHECKS))
+            .collect();
+        // The first that did not pass, named, else the first region's (each
+        // region checked alike).
+        let at = verdicts
+            .iter()
+            .position(|v| !matches!(v, Verify::Passed(_)))
+            .unwrap_or(0);
+        p.verify = match verdicts.swap_remove(at) {
+            v if regions == 1 => v,
+            Verify::Passed(s) => {
+                Verify::Passed(format!("each of {regions} regions; region 0: {s}"))
+            }
+            Verify::Failed(s) => Verify::Failed(format!("region {at}: {s}")),
+            Verify::NotChecked(s) => Verify::NotChecked(format!("region {at}: {s}")),
+        };
         if short > 0 {
             p.verify = Verify::Failed(format!("{short} receipts did not cover their own append"));
         }

@@ -72,4 +72,7 @@ pub struct FaultPlan {
     /// when the OS rejects an operation at submission: the media is
     /// untouched.
     pub fail_submit: Option<(u64, i32)>,
+    /// The n-th `Platform::reopen` of a writable file (1-based) makes no
+    /// handle, as when the OS refuses another open of the file.
+    pub fail_reopen: Option<u64>,
 }

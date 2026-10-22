@@ -359,6 +359,16 @@ impl<Q: Queue> QueueSet<Q> {
         self.flush.len()
     }
 
+    /// Keeps only the first `n` flush lanes (at least one when there are
+    /// any), closing the rest: those of a store found read-only after its
+    /// queues were made, and those left without a handle. Their busy marks
+    /// stay, always even.
+    pub(crate) fn keep_flush_lanes(&mut self, n: usize) {
+        let mut lanes = core::mem::take(&mut self.flush).into_vec();
+        lanes.truncate(n.max(1));
+        self.flush = lanes.into_boxed_slice();
+    }
+
     /// The shared lanes (as many parallel lanes follow them).
     pub(crate) fn shared_len(&self) -> usize {
         self.queues.len()

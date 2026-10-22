@@ -341,7 +341,7 @@ where
         layout: Layout,
         policy: Policy,
         pool: BufPool,
-        queues: QueueSet<P::Queue>,
+        mut queues: QueueSet<P::Queue>,
         meta: Meta,
         regions: Vec<Arc<LiveRegion>>,
         report: StoreReport,
@@ -350,11 +350,18 @@ where
         opts: StoreOptions,
     ) -> Self {
         let acct = Accounting::from_entries(&meta.entries, layout.block());
-        let flush_files = if read_only || !policy.flush {
-            Vec::new()
+        // Every flush lane past the first needs a handle of its own. A store
+        // that flushes nothing (read-only: asked for, or found so by a
+        // format-2 open after its queues were made; or on a device that
+        // needs no flush) opens none, and a lane whose handle could not be
+        // made is closed.
+        let lanes = if read_only || !policy.flush {
+            1
         } else {
-            flush_handles(&platform, &file, queues.flush_lanes())
+            queues.flush_lanes()
         };
+        let flush_files = flush_handles(&platform, &file, lanes);
+        queues.keep_flush_lanes(1 + flush_files.len());
         let mut report = report;
         report.flushes_in_flight = 1 + flush_files.len() as u8;
         Self {

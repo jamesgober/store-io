@@ -59,28 +59,27 @@
   `Unsupported(FormatVersion)` until the regions arrive). Create makes
   every table page durable before it writes the volume record. An open
   reads every page (a slot whose read failed is read once more; a slot
-  that read is never read again), applies the tear
-  judgement, rewrites the one torn metadata write a crash can leave (at
-  that write's own `meta_seq`, or the next one when its header is torn
-  too), and reports what it found in `StoreReport::metadata`
-  (`MetadataReport`: whether the last writer closed cleanly, stale and
-  lost pages, a damaged volume record, what was healed (`Healed`),
-  whether allocation is frozen, why a writable open was made read-only,
-  and how many reads were retried). The format is read only from a
-  header whose CRC verifies. A page or volume record of a newer format
-  (a longer volume record included) fails the open; one carrying a read-only-compatible feature this
-  version does not know opens read-only; a page that fails the page
-  checks is lost, and then no page's torn write is healed. A writable
-  store records a clean close when its last handle drops (not during a
-  panic, and not when poisoned). Create takes over the remains of a
-  crashed format-2 create (generation-1 table pages, empty or torn, and
-  generation-1 volume records only when their payload is torn; past format 1's size bound, at
+  that read is never read again), applies the tear judgement, rewrites the
+  one torn metadata write a crash can leave (at that write's own
+  `meta_seq`, or the next one when its header is torn too), and reports
+  what it found in `StoreReport::metadata` (`MetadataReport`: whether the
+  last writer closed cleanly, stale and lost pages, a damaged volume
+  record, what was healed (`Healed`), whether allocation is frozen, why a
+  writable open was made read-only, and how many reads were retried). The
+  format is read only from a header whose CRC verifies. A page or volume
+  record of a newer format (a longer volume record included) fails the
+  open; one carrying a read-only-compatible feature this version does not
+  know opens read-only; a page that fails the page checks is lost, and
+  then no page's torn write is healed. A writable store records a clean
+  close when its last handle drops (not during a panic, and not when
+  poisoned). Create takes over the remains of a crashed format-2 create
+  (generation-1 table pages, empty or torn, and generation-1 volume
+  records only when their payload is torn; past format 1's size bound, at
   least one of these) and nothing else: the file grows past format 1's
   bound only once page 0 is durable, so a crash that leaves a larger file
-  always leaves one. `StoreReport::format`
-  names the container format (also in its `Display`). 39 simulator tests,
-  among them a power failure inside a create at each of its writes, and
-  41 mutation entries.
+  always leaves one. `StoreReport::format` names the container format
+  (also in its `Display`). 39 simulator tests, among them a power failure
+  inside a create at each of its writes, and 41 mutation entries.
 - Engine: **flushes in flight** (`StoreOptions::flushes_in_flight`, 1 to
   4, default 1). A store can run several flushes at once, for drives that
   execute flushes in parallel (NVMe). Each runs on a handle and queue of
@@ -95,24 +94,31 @@
   a flush through any handle persists the whole file and failures are
   reported per handle (`Platform::flush_errors_per_handle`, new: Linux
   4.16 and later, and the simulator); the number run is in
-  `StoreReport::flushes_in_flight` (1 also for read-only stores and
-  devices that need no flush), and `DomainStats` counts the most that
-  overlapped (`peak_in_flight`) and those that finished early
-  (`out_of_order`). The stuck-operation report treats every flush lane as
-  a flush. The harness's G15 measures eight writers at 1, 2 and 4 (and
-  the number each run actually used), from which the default will be
-  chosen. Tests: domain tests for out-of-order completion, a failure
-  behind a success, poison during a flush, the issue window and slot 0 for
-  the main handle; three new loom models; simulator tests (the wiring and
-  end to end: every acknowledged append survives a power failure, with
-  and without a failed flush, at 1 and 4 in flight, with flushes shown to
-  overlap and reorder); two tests that metadata and full flushes of the
-  main handle wait for its slot; a test on the real file system. Data
-  leaders take the main handle's slot last, so metadata operations are
-  not starved. At the default of one flush, provisioning's full flush now
-  holds the slot, so a data barrier that needs a new flush waits for it
-  instead of running beside it (two flushes on one handle could split one
-  failure report). 12 new mutation entries; 6 repointed.
+  `StoreReport::flushes_in_flight`: 1 also for a read-only store (a
+  format-2 store found read-only at open included: its extra flush queues
+  are closed and it opens no flush handles) and for a device that needs no
+  flush, and fewer than asked when a handle cannot be made (its queue is
+  closed too). `DomainStats` counts the most that overlapped
+  (`peak_in_flight`) and those that finished early (`out_of_order`). The
+  stuck-operation report treats every flush lane as a flush. The harness's
+  G15 measures eight writers at 1, 2 and 4 (and the number each run
+  actually used), from which the default will be chosen. Tests: domain
+  tests for out-of-order completion, a failure behind a success, poison
+  during a flush, the issue window and slot 0 for the main handle; three
+  new loom models; simulator tests (the wiring and end to end: every
+  acknowledged append survives a power failure, with and without a failed
+  flush, at 1 and 4 in flight, with flushes shown to overlap and reorder);
+  two tests that metadata and full flushes of the main handle wait for its
+  slot; tests that a queue left without a handle is closed and that a
+  format-2 store found read-only opens no flush handle and closes its
+  extra queues; a test on the real file system. Data leaders take the main
+  handle's slot last, so metadata operations are not starved. At the
+  default of one flush, provisioning's full flush now holds the slot, so a
+  data barrier that needs a new flush waits for it instead of running
+  beside it (two flushes on one handle could split one failure report). 14
+  new mutation entries; 6 repointed.
+- `store-io-sim`: `FaultPlan::fail_reopen` (the n-th reopen of a
+  writable file makes no handle) and `World::reopens()`.
 
 ### Changed
 
@@ -171,8 +177,9 @@
   rotating against 9, measured on CI). It also keeps fewer buffers
   resident: only about as many as are in use at once are ever touched.
   Allocation-free and blocking-free as before; `IndexQueue` stays public.
-  A class now holds at most 16,777,215 buffers (`IndexStack::MAX_CAPACITY`; the head word keeps a 40-bit tag
-  against ABA), and a larger count is a configuration error.
+  A class now holds at most 16,777,215 buffers
+  (`IndexStack::MAX_CAPACITY`; the head word keeps a 40-bit tag against
+  ABA), and a larger count is a configuration error.
 - Tests: the loom models of `store-io-buf` no longer yield in their retry
   loops. Loom never offers a thread a value it read before yielding, so a
   stale read on a retry was never tried: without a preemption bound, a

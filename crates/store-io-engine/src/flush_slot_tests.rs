@@ -14,6 +14,9 @@ use store_io_sim::{SimConfig, SimPlatform};
 
 use crate::{Store, StoreOptions};
 
+#[path = "../tests/format2_util/mod.rs"]
+mod format2_util;
+
 const LONG: Duration = Duration::from_secs(10);
 
 fn store(seed: u64) -> (SimPlatform, Store<SimPlatform>) {
@@ -45,6 +48,58 @@ fn until_waiting(s: &Store<SimPlatform>, n: u32) {
         assert!(start.elapsed() < LONG, "never waited");
         std::thread::yield_now();
     }
+}
+
+/// A flush lane whose handle could not be made is closed: the store runs
+/// as many flushes as it has handles for.
+#[test]
+fn test_a_lane_without_a_handle_is_closed() {
+    let mut cfg = SimConfig::volatile(502);
+    cfg.faults.fail_reopen = Some(2);
+    let p = SimPlatform::new(cfg);
+    let o = StoreOptions {
+        flushes_in_flight: 4,
+        ..StoreOptions::default()
+    };
+    let s = Store::create(p.clone(), Path::new("/db"), o).unwrap();
+    assert_eq!(p.with_world(|w| w.reopens()), 2);
+    assert_eq!(s.report().flushes_in_flight, 2);
+    assert_eq!(s.inner.queues.flush_lanes(), 2);
+    // It still runs on the lanes it kept.
+    s.provision_append_region("wal", 1 << 20).unwrap();
+    std::thread::scope(|scope| {
+        for w in 0..4u8 {
+            let s = &s;
+            scope.spawn(move || {
+                let wal = s.append_region("wal").unwrap();
+                for _ in 0..8 {
+                    let (pos, receipt) = wal.append_durable(&[w; 300]).unwrap();
+                    assert!(receipt.durable_through() >= pos.offset() + 300);
+                }
+            });
+        }
+    });
+}
+
+/// A store opened for writing and then found read-only by the format-2
+/// open (a feature this version may read but not write) flushes nothing:
+/// its extra flush lanes are closed.
+#[test]
+fn test_a_store_found_read_only_closes_its_flush_lanes() {
+    use format2_util::{DIR, create, opts, page_at, page_copy_b, put, rehash};
+    let p = SimPlatform::new(SimConfig::volatile(503));
+    drop(create(&p));
+    let mut slot = page_copy_b(&p, 0, false);
+    slot[20] = 0x80;
+    rehash(&mut slot);
+    put(&p, page_at(&p, 0, 1), &slot);
+    let o = StoreOptions {
+        flushes_in_flight: 4,
+        ..opts()
+    };
+    let s = Store::open(p.clone(), Path::new(DIR), o).unwrap();
+    assert!(s.report().read_only);
+    assert_eq!(s.inner.queues.flush_lanes(), 1);
 }
 
 /// A slot commit (a metadata write, flushed through the main handle) waits

@@ -28,6 +28,10 @@ pub mod domain;
 mod exec;
 #[cfg(all(test, not(loom)))]
 mod flush_slot_tests;
+// The format-2 test helpers, shared with the in-crate tests, name the crate
+// from outside.
+#[cfg(all(test, not(loom)))]
+extern crate self as store_io_engine;
 mod flusher;
 mod force;
 pub mod frontier;

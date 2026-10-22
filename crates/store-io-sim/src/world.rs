@@ -234,6 +234,7 @@ pub struct World {
     pub(crate) release_probe: SubmitProbe,
     flushes_completed: u64,
     dir_syncs: u64,
+    reopens: u64,
     set_lens: u64,
     allocated: u64,
     trace: Vec<TraceEvent>,
@@ -263,6 +264,7 @@ impl World {
             release_probe: SubmitProbe::default(),
             flushes_completed: 0,
             dir_syncs: 0,
+            reopens: 0,
             set_lens: 0,
             allocated: 0,
             trace: Vec::new(),
@@ -368,6 +370,13 @@ impl World {
         self.dir_syncs
     }
 
+    /// Reopens of a writable file so far, made or failed. Arm
+    /// `fail_reopen = Some(reopens() + 1)` to fail the next one.
+    #[must_use]
+    pub fn reopens(&self) -> u64 {
+        self.reopens
+    }
+
     /// Reads completed so far, successful or not (misaligned ones excepted:
     /// see [`Self::misaligned_reads`]).
     #[must_use]
@@ -469,6 +478,12 @@ impl World {
         }
         let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
         d.entries.remove(name).map(|_| ()).ok_or(ENOENT)
+    }
+
+    /// Counts a reopen of a writable file: false when the plan fails it.
+    pub(crate) fn reopen(&mut self) -> bool {
+        self.reopens += 1;
+        self.cfg.faults.fail_reopen != Some(self.reopens)
     }
 
     pub(crate) fn sync_dir(&mut self, dir: &PathBuf) -> Result<(), OsError> {

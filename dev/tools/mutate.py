@@ -425,12 +425,14 @@ M = [
  # D-124 flushes in flight: done advances only over an unbroken run of
  # successes; a main-handle barrier leads on slot 0 only; nothing is
  # recorded once poisoned; the issue window bounds the success mask; a
- # read-only store opens no flush handles
+ # read-only store opens no flush handles; a lane without a handle closes
  ('crates/store-io-engine/src/domain/mod.rs', '        while st.ahead & 1 == 1 {', '        while st.ahead != 0 {'),
  ('crates/store-io-engine/src/domain/mod.rs', '            let mut free = (!st.busy) & ((1u32 << usable) - 1);', '            let mut free = (!st.busy) & ((1u32 << self.slots.max(usable)) - 1);'),
  ('crates/store-io-engine/src/domain/mod.rs', '                None if self.poison.get().is_none() => self.record(&mut st, k),', '                None if true => self.record(&mut st, k),'),
  ('crates/store-io-engine/src/domain/mod.rs', '            if issued >= need || free == 0 || issued - done >= WINDOW {', '            if issued >= need || free == 0 || issued - done >= 4 * WINDOW {'),
- ('crates/store-io-engine/src/open.rs', '        let flush_files = if read_only || !policy.flush {', '        let flush_files = if !policy.flush {'),
+ ('crates/store-io-engine/src/open.rs', '        let lanes = if read_only || !policy.flush {\n            1\n        } else {\n            queues.flush_lanes()', '        let lanes = if !policy.flush {\n            1\n        } else {\n            queues.flush_lanes()'),
+ ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(lanes);'),
+ ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # D-124 review: done never jumps to the highest finished flush; every
  # flush lane is a flush to the watchdog; a full flush of the main handle
  # waits for slot 0 and gives it back

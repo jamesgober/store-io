@@ -425,7 +425,7 @@ impl Platform for SimPlatform {
     }
 
     fn reopen(&self, file: &SimFile) -> Option<SimFile> {
-        file.writable.then_some(SimFile {
+        (file.writable && lock(&self.world).reopen()).then_some(SimFile {
             id: file.id,
             epoch: file.epoch,
             writable: true,

@@ -562,3 +562,29 @@ fn test_a_store_of_one_table_page_round_trips() {
     assert!(s.report().metadata.clean_close);
     assert!(!s.report().metadata.frozen);
 }
+
+/// A store opened for writing and then found read-only (here, a feature
+/// this version may read but not write) runs one flush, with no extra
+/// read-write handles, however many flushes the options asked for.
+#[test]
+fn test_a_store_found_read_only_runs_one_flush() {
+    let p = SimPlatform::new(SimConfig::volatile(117));
+    drop(create(&p));
+    let mut slot = page_copy_b(&p, 0, false);
+    slot[20] = 0x80;
+    rehash(&mut slot);
+    put(&p, page_at(&p, 0, 1), &slot);
+    let o = StoreOptions {
+        flushes_in_flight: 4,
+        ..opts()
+    };
+    let reopens = p.with_world(|w| w.reopens());
+    let s = Store::open(p.clone(), Path::new(DIR), o).unwrap();
+    assert!(s.report().read_only);
+    assert_eq!(s.report().flushes_in_flight, 1);
+    assert_eq!(
+        p.with_world(|w| w.reopens()),
+        reopens,
+        "opened a flush handle"
+    );
+}

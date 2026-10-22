@@ -454,15 +454,21 @@ where
         let obs = &self.inner.observer;
         obs.add(Counter::Barriers, 1);
         let _timed = obs.span(Stage::Barrier);
-        let file = &self.inner.file;
-        self.inner
+        let inner = &self.inner;
+        inner
             .domain
-            .barrier(need, || {
+            .barrier(need, |slot, _k| {
                 let _flush = obs.span(Stage::Flush);
                 obs.add(Counter::Flushes, 1);
-                match self.inner.queues.flush_lane() {
+                // Each slot its own handle and lane (D-124); the domain
+                // never hands out a slot without both.
+                let file = match slot {
+                    0 => &inner.file,
+                    s => &inner.flush_files[s - 1],
+                };
+                match inner.queues.flush_lane(slot) {
                     Some(mut lane) => flush_data(&mut lane, file),
-                    None => flush_data(&mut self.inner.queues.get(0), file),
+                    None => flush_data(&mut inner.queues.get(0), file),
                 }
             })
             .inspect_err(|_| self.wake_frontiers())

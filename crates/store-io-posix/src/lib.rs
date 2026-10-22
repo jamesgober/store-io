@@ -446,6 +446,20 @@ mod platform {
             PosixLock::acquire(file, true)
         }
 
+        fn flush_errors_per_handle(&self) -> bool {
+            // errseq_t, per open file description, since Linux 4.13; since
+            // 4.16 a description opened after an unseen error still sees it
+            // (the extra slots' handles are opened after the store's own).
+            sys::kernel_release()
+                .as_deref()
+                .and_then(crate::probe::virt::kernel_version)
+                .is_some_and(|v| v >= (4, 16, 0))
+        }
+
+        fn reopen(&self, file: &PosixFile) -> Option<PosixFile> {
+            file.read_write_twin().ok()
+        }
+
         fn monotonic_ms(&self) -> u64 {
             sys::monotonic_coarse_ms()
         }

@@ -96,7 +96,12 @@ where
                 })?;
         }
         let policy = policy_of(&decision);
-        let queues = make_queues(&platform, &opts)?;
+        let lanes = if read_only || !policy.flush {
+            1
+        } else {
+            flush_slots(&platform, &opts)
+        };
+        let queues = make_queues(&platform, &opts, lanes)?;
         let container_len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
         // Geometry is in the volume record; the record's own location depends
         // on it, so try every legal block size.
@@ -137,6 +142,7 @@ where
                     unavailable: Vec::new(),
                     format: store_io_format::slot::FORMAT_2,
                     metadata: opened.report,
+                    flushes_in_flight: 1,
                 };
                 return Ok(Self::assemble(
                     platform,
@@ -294,6 +300,7 @@ where
             unavailable,
             format: store_io_format::slot::FORMAT_1,
             metadata: MetadataReport::default(),
+            flushes_in_flight: 1,
         };
         Ok(Self::assemble(
             platform,
@@ -333,8 +340,17 @@ where
         opts: StoreOptions,
     ) -> Self {
         let acct = Accounting::from_entries(&meta.entries, layout.block());
+        let flush_files = if read_only || !policy.flush {
+            Vec::new()
+        } else {
+            flush_handles(&platform, &file, queues.flush_lanes())
+        };
+        let mut report = report;
+        report.flushes_in_flight = 1 + flush_files.len() as u8;
         Self {
             inner: Arc::new(Inner {
+                domain: Domain::with_slots(1 + flush_files.len()),
+                flush_files: flush_files.into_boxed_slice(),
                 platform,
                 _dir: dir,
                 file,
@@ -342,7 +358,6 @@ where
                 volume,
                 layout,
                 policy,
-                domain: Domain::new(),
                 pool,
                 queues,
                 meta: Mutex::new(meta),
@@ -360,6 +375,16 @@ where
             }),
         }
     }
+}
+
+/// Handles for flush slots 1.. (D-124): the container itself reopened
+/// (`Platform::reopen`), once per slot past the first, each its own open
+/// file description (so each flush reports its own failures; the ownership
+/// lock stays on slot 0's, and closing these never releases it). Best
+/// effort: a handle that cannot be made leaves fewer slots, which the report
+/// states.
+fn flush_handles<P: Platform>(platform: &P, file: &P::File, lanes: usize) -> Vec<P::File> {
+    (1..lanes).map_while(|_| platform.reopen(file)).collect()
 }
 
 /// The volume record found, by format.

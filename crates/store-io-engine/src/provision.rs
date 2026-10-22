@@ -335,7 +335,12 @@ where
 
     fn flush_all_accounted(&self) -> Result<(), Error> {
         let inner = &self.inner;
-        inner.platform.flush_all(&inner.file).map_err(|raw| {
+        // Holding slot 0, so no data flush runs on the main handle at the
+        // same time (each flush's failure report stays its own, D-124).
+        let flushed = inner
+            .domain
+            .exclusive_main(|| inner.platform.flush_all(&inner.file));
+        flushed.map_err(|raw| {
             inner.domain.poison(FirstCause {
                 op: Some(Op::FlushAll),
                 raw: Some(raw),

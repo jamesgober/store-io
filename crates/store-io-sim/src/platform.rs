@@ -418,6 +418,20 @@ impl Platform for SimPlatform {
         lock(&self.world).clock_ms()
     }
 
+    fn flush_errors_per_handle(&self) -> bool {
+        // A flush persists the file whatever the handle, and reports its
+        // own outcome.
+        true
+    }
+
+    fn reopen(&self, file: &SimFile) -> Option<SimFile> {
+        file.writable.then_some(SimFile {
+            id: file.id,
+            epoch: file.epoch,
+            writable: true,
+        })
+    }
+
     fn io_path(&self) -> store_io_platform::IoPath {
         store_io_platform::IoPath {
             interface: store_io_platform::IoInterface::Simulator,

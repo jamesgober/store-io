@@ -145,7 +145,7 @@ where
             opts,
             false,
         )?;
-        let queues = make_queues(platform, opts)?;
+        let queues = make_queues(platform, opts, 1)?;
         let len = platform.size(&file).map_err(|e| io(Op::Open, e))?;
         let mut leftovers = false;
         let holds = {
@@ -192,7 +192,12 @@ where
         };
         let policy = policy_of(&decision);
         let pool = make_pool(&evidence, &layout, opts, true)?;
-        let queues = make_queues(platform, opts)?;
+        let lanes = if policy.flush {
+            flush_slots(platform, opts)
+        } else {
+            1
+        };
+        let queues = make_queues(platform, opts, lanes)?;
         let volume = VolumeId::from_bytes(random_uuid());
         let created = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -215,6 +220,7 @@ where
                 unavailable: Vec::new(),
                 format: store_io_format::slot::FORMAT_2,
                 metadata: MetadataReport::default(),
+                flushes_in_flight: 1,
             };
             return Ok((meta, report, layout, policy, pool, queues));
         }
@@ -266,6 +272,7 @@ where
             unavailable: Vec::new(),
             format: store_io_format::slot::FORMAT_1,
             metadata: MetadataReport::default(),
+            flushes_in_flight: 1,
         };
         let meta = Meta {
             volume: vmeta,

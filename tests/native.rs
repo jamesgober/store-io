@@ -699,3 +699,59 @@ fn test_a_registered_file_round_trips_and_is_reported() {
         );
     }
 }
+
+/// Flushes in flight on the real file system (D-124): eight writers append
+/// durably with four flushes allowed; every receipt covers its append and
+/// every append reads back after a reopen. Linux (4.16 and later) runs the
+/// four when the store needs flushes; Windows, which cannot yet be shown to
+/// keep flush failures per handle, runs one.
+#[test]
+fn test_flushes_in_flight_on_the_real_file_system() {
+    let t = TempDir::new("flushes");
+    let (mut opts, _) = options_for(t.path());
+    opts.flushes_in_flight = 4;
+    let store = Store::create(t.path().join("f"), opts.clone()).unwrap();
+    let ran = store.report().flushes_in_flight;
+    if cfg!(windows) {
+        assert_eq!(ran, 1);
+    } else {
+        assert!(ran == 1 || ran == 4, "{ran}");
+    }
+    let wal = store.provision_append_region("wal", 8 << 20).unwrap();
+    let acked = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for w in 0..8u8 {
+            let (wal, acked) = (&wal, &acked);
+            scope.spawn(move || {
+                for i in 0..50u8 {
+                    let data = vec![w.wrapping_mul(31).wrapping_add(i); 700];
+                    let (pos, receipt) = wal.append_durable(&data).unwrap();
+                    assert!(receipt.durable_through() >= pos.offset() + data.len() as u64);
+                    acked.lock().unwrap().push((pos.offset(), data));
+                }
+            });
+        }
+    });
+    // Linux 4.16 and later keep flush failures per handle.
+    let per_handle = std::fs::read_to_string("/proc/sys/kernel/osrelease").is_ok_and(|r| {
+        let mut v = r
+            .trim()
+            .split(|c: char| !c.is_ascii_digit())
+            .map(|x| x.parse::<u32>().unwrap_or(0));
+        (v.next().unwrap_or(0), v.next().unwrap_or(0)) >= (4, 16)
+    });
+    if store.domain_stats().flushes > 0 && per_handle {
+        assert_eq!(
+            ran, 4,
+            "flushes were needed and the kernel keeps errors per handle"
+        );
+    }
+    drop((wal, store));
+    let store = Store::open_with(t.path().join("f"), opts).unwrap();
+    let wal = store.append_region("wal").unwrap();
+    for (at, data) in acked.into_inner().unwrap() {
+        let mut out = vec![0u8; data.len()];
+        assert_eq!(wal.read(at, &mut out).unwrap(), data.len());
+        assert!(out == data, "append at {at}");
+    }
+}

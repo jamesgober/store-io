@@ -26,6 +26,8 @@ mod create;
 mod directory;
 pub mod domain;
 mod exec;
+#[cfg(all(test, not(loom)))]
+mod flush_slot_tests;
 mod flusher;
 mod force;
 pub mod frontier;

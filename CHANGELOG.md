@@ -79,8 +79,46 @@
   names the container format (also in its `Display`). 39 simulator tests,
   among them a power failure inside a create at each of its writes, and
   41 mutation entries.
+- Engine: **flushes in flight** (`StoreOptions::flushes_in_flight`, 1 to
+  4, default 1). A store can run several flushes at once, for drives that
+  execute flushes in parallel (NVMe). Each runs on a handle and queue of
+  its own: the container reopened from the store's own handle
+  (`Platform::reopen`, new; never by name, so a rename cannot put another
+  file under it), without the ownership lock, so each reports its own
+  failures. A receipt still needs every flush up to its own to have
+  succeeded: a flush finishing before an earlier one satisfies nothing
+  until the earlier one has succeeded, and any failure poisons the store.
+  Metadata writes lead their flush only on the main handle's slot, and a
+  full flush of the main handle holds that slot. Platforms run one unless
+  a flush through any handle persists the whole file and failures are
+  reported per handle (`Platform::flush_errors_per_handle`, new: Linux
+  4.16 and later, and the simulator); the number run is in
+  `StoreReport::flushes_in_flight` (1 also for read-only stores and
+  devices that need no flush), and `DomainStats` counts the most that
+  overlapped (`peak_in_flight`) and those that finished early
+  (`out_of_order`). The stuck-operation report treats every flush lane as
+  a flush. The harness's G15 measures eight writers at 1, 2 and 4 (and
+  the number each run actually used), from which the default will be
+  chosen. Tests: domain tests for out-of-order completion, a failure
+  behind a success, poison during a flush, the issue window and slot 0 for
+  the main handle; three new loom models; simulator tests (the wiring and
+  end to end: every acknowledged append survives a power failure, with
+  and without a failed flush, at 1 and 4 in flight, with flushes shown to
+  overlap and reorder); two tests that metadata and full flushes of the
+  main handle wait for its slot; a test on the real file system. Data
+  leaders take the main handle's slot last, so metadata operations are
+  not starved. At the default of one flush, provisioning's full flush now
+  holds the slot, so a data barrier that needs a new flush waits for it
+  instead of running beside it (two flushes on one handle could split one
+  failure report). 12 new mutation entries; 6 repointed.
 
 ### Changed
+
+- **Breaking:** the flush domain's `barrier` takes the slot and the
+  flush's number (`FnMut(usize, u64)`); `barrier_main` leads only on
+  slot 0 and `exclusive_main` holds it. `DomainStats` gains
+  `peak_in_flight` and `out_of_order`, `StoreReport` gains
+  `flushes_in_flight`, and `StoreOptions` gains `flushes_in_flight`.
 
 - **Breaking:** `StoreOptions` gains two hidden fields (the container
   format and a format-2 store's region capacity) while format 2 is

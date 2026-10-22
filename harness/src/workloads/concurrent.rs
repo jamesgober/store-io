@@ -15,8 +15,10 @@ use std::time::Instant;
 
 use super::{
     Ctx, KIB4, Rec, Snap, Step, Threaded, fserr, ioerr, provision_append, record_delta,
-    region_bytes, remove, sample, sioerr, threaded, verify_appends, with_store,
+    region_bytes, remove, sample, sioerr, threaded, verify_appends, with_store_using,
 };
+use store_io_engine::StoreOptions;
+
 use crate::aligned::AlignedBuf;
 use crate::fsys_cmp::{self, Journal};
 use crate::json::Json;
@@ -203,13 +205,29 @@ struct StoreThread {
 /// One W2 store-io point: `n` threads each looping a durable 4 KiB
 /// append (also run on its own by the gates, alternated).
 pub fn store_point(ctx: &Ctx, n: usize) -> Point {
+    store_point_with(ctx, n, &ctx.opts)
+}
+
+/// As [`store_point`], the store made with `opts` (G15's flushes in flight,
+/// D-124).
+pub fn store_point_with(ctx: &Ctx, n: usize, opts: &StoreOptions) -> Point {
     let p = Point::new(
         System::StoreIo,
         "AppendRegion::append_durable (shared region)",
     )
     .param("threads", Json::Num(n as f64))
-    .param("bytes", Json::Num(KIB4 as f64));
-    let mut p = with_store(ctx, &format!("w2-store-{n}"), p, |store, p| {
+    .param("bytes", Json::Num(KIB4 as f64))
+    .param(
+        "flushes_in_flight",
+        Json::Num(f64::from(opts.flushes_in_flight)),
+    );
+    let name = format!("w2-store-{n}-f{}", opts.flushes_in_flight);
+    let mut p = with_store_using(ctx, &name, opts, p, |store, p| {
+        // What the store runs, which the platform or device may hold to 1.
+        p.metric(
+            "flushes_run",
+            Some(f64::from(store.report().flushes_in_flight)),
+        );
         let bytes = region_bytes(ctx, KIB4 as u64, 40_000.0, 2 << 30);
         let wal = provision_append(store, "w2", bytes, p)?;
         let margin = (n as u64 + 1) * KIB4 as u64;

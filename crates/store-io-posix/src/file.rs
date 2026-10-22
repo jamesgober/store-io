@@ -69,6 +69,20 @@ impl PosixFile {
         })
     }
 
+    /// A read-write twin of this handle (D-124): the same file through
+    /// `/proc/thread-self/fd` (never a file that has since taken its name),
+    /// an open file description of its own, checked to be the same inode.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_only_twin`]; `EBADF` for a read-only handle.
+    pub(crate) fn read_write_twin(&self) -> RawResult<Self> {
+        if !self.writable {
+            return Err(sys::errno(libc::EBADF));
+        }
+        Self::from_fd(twin(&self.fd, libc::O_RDWR)?, true)
+    }
+
     /// Whether the handle was opened read-write.
     #[must_use]
     pub fn is_writable(&self) -> bool {
@@ -151,12 +165,17 @@ pub(crate) fn open_confined(
 /// The open's failure (no `/proc`, say), or `ESTALE` if what opened is not
 /// this file.
 pub(crate) fn read_only_twin(fd: &OwnedFd) -> RawResult<OwnedFd> {
+    twin(fd, libc::O_RDONLY)
+}
+
+/// As [`read_only_twin`], opened with `access` (`O_RDONLY` or `O_RDWR`).
+fn twin(fd: &OwnedFd, access: libc::c_int) -> RawResult<OwnedFd> {
     let path = std::ffi::CString::new(format!("/proc/thread-self/fd/{}", fd.as_raw_fd()))
         .map_err(|_| sys::errno(libc::EINVAL))?;
     let twin = sys::openat(
         libc::AT_FDCWD,
         &path,
-        libc::O_RDONLY | libc::O_DIRECT | libc::O_CLOEXEC,
+        access | libc::O_DIRECT | libc::O_CLOEXEC,
         0,
     )?;
     let (mine, other) = (sys::fstat(fd.as_raw_fd())?, sys::fstat(twin.as_raw_fd())?);

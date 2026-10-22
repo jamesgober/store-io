@@ -111,6 +111,14 @@ pub struct StoreOptions {
     /// some kernels (at least Linux 6.5.0 and 6.6.0), which no probe
     /// detects (D-107).
     pub register_file: bool,
+    /// Flushes the store runs at once (1 to 4; default 1, one in flight as
+    /// before, D-124). Several overlap on drives that execute flushes in
+    /// parallel (NVMe): each runs on a handle and queue of its own, so each
+    /// reports its own failures, and a receipt still needs every flush up
+    /// to its own to have succeeded. Platforms that cannot keep flush
+    /// failures per handle run one (Linux 4.16 and later can); the number
+    /// run is in [`StoreReport::flushes_in_flight`].
+    pub flushes_in_flight: u8,
     /// Regions a format-2 store can hold, fixed at create (default 65,536:
     /// a table of 12.1 MiB at 16 KiB table pages, written at create and
     /// read at every open; smaller stores may ask for fewer; at most
@@ -141,6 +149,7 @@ impl Default for StoreOptions {
             keyed_fill: false,
             linux_tier: LinuxTier::Auto,
             register_file: true,
+            flushes_in_flight: 1,
             region_capacity: 65_536,
             container_format: store_io_format::slot::FORMAT_1,
         }
@@ -256,6 +265,11 @@ pub struct StoreReport {
     pub format: u16,
     /// Format 2: what the open found in the metadata (empty for format 1).
     pub metadata: MetadataReport,
+    /// Flushes run at once ([`StoreOptions::flushes_in_flight`] as far as
+    /// the store and platform allow): 1 for a read-only store, a device that
+    /// needs no flush, or a platform that cannot keep flush failures per
+    /// handle; fewer where a handle for a further slot could not be made.
+    pub flushes_in_flight: u8,
 }
 
 /// In-memory metadata, guarded by the metadata lock.
@@ -318,6 +332,9 @@ pub(crate) struct Inner<P: Platform> {
     /// The store directory, held open for directory syncs.
     pub(crate) _dir: P::Dir,
     pub(crate) file: P::File,
+    /// Flush slots 1.. (D-124): a handle each, opened on the container
+    /// beside `file` (slot 0's). Empty with one slot.
+    pub(crate) flush_files: Box<[P::File]>,
     pub(crate) _lock: P::Lock,
     pub(crate) volume: VolumeId,
     pub(crate) layout: Layout,
@@ -570,7 +587,8 @@ pub(crate) fn durable_slot<P: Platform>(
     })?;
     if policy.flush {
         let need = domain.ticket();
-        domain.barrier(need, || flush_data(q, file))?;
+        // Through this lane and the main handle: slot 0's.
+        domain.barrier_main(need, || flush_data(q, file))?;
     }
     Ok(prev.after(written))
 }
@@ -666,6 +684,7 @@ pub(crate) fn large_size(opts: &StoreOptions) -> usize {
 pub(crate) fn make_queues<P: Platform>(
     platform: &P,
     opts: &StoreOptions,
+    flush_lanes: usize,
 ) -> Result<QueueSet<P::Queue>, Error> {
     let n = if opts.queues == 0 {
         std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
@@ -680,9 +699,25 @@ pub(crate) fn make_queues<P: Platform>(
     for _ in 0..n {
         qs.push(platform.queue(cfg).map_err(|e| io(Op::Queue, e))?);
     }
-    // One more queue, used only by the flush leader (D-070).
-    let flush = platform.queue(cfg).map_err(|e| io(Op::Queue, e))?;
-    Ok(QueueSet::with_flush_lane(qs, flush, cfg.depth as usize))
+    // One more queue per flush slot, used only by that slot's flush leader
+    // (D-070, D-124).
+    let mut flush = Vec::with_capacity(flush_lanes);
+    for _ in 0..flush_lanes.max(1) {
+        flush.push(platform.queue(cfg).map_err(|e| io(Op::Queue, e))?);
+    }
+    Ok(QueueSet::with_flush_lanes(qs, flush, cfg.depth as usize))
+}
+
+/// The flush slots a store runs (D-124): `opts.flushes_in_flight` clamped to
+/// `1..=MAX_FLUSH_SLOTS`, and 1 unless the platform reports flush failures
+/// per handle.
+pub(crate) fn flush_slots<P: Platform>(platform: &P, opts: &StoreOptions) -> usize {
+    let asked = usize::from(opts.flushes_in_flight).clamp(1, crate::domain::MAX_FLUSH_SLOTS);
+    if asked > 1 && platform.flush_errors_per_handle() {
+        asked
+    } else {
+        1
+    }
 }
 
 pub(crate) fn space_err(op: Op, raw: OsError, tag: u32) -> Error {

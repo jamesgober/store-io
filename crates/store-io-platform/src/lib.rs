@@ -490,6 +490,28 @@ pub trait Platform: Send + Sync + 'static {
         self.queue(cfg)
     }
 
+    /// Whether flushes may run concurrently on separate handles of one file
+    /// (D-124). Both must hold: a flush through any handle persists every
+    /// write that completed through **any** handle of the file before the
+    /// flush began (file systems flush the file, not the handle); and a
+    /// flush reports every write-back failure since the previous flush **on
+    /// the same handle**, independently of flushes on other handles (Linux
+    /// 4.16 and later: the error sequence is kept per open file
+    /// description, and a handle opened after an unseen error still sees
+    /// it). False by default: one flush in flight.
+    fn flush_errors_per_handle(&self) -> bool {
+        false
+    }
+
+    /// A second handle on the very file `file` is (never another file that
+    /// has since taken its name), read-write, with an open file description
+    /// of its own and no lock: what a store's extra flush slots flush
+    /// through (D-124). `None` where the platform cannot (the default).
+    fn reopen(&self, file: &Self::File) -> Option<Self::File> {
+        let _ = file;
+        None
+    }
+
     /// The kernel interface this platform's queues use, and why.
     fn io_path(&self) -> IoPath {
         IoPath {

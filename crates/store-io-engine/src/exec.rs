@@ -44,7 +44,9 @@ use crate::sync::{AtomicBool, AtomicU64, Ordering};
 /// shared lanes.
 pub(crate) struct QueueSet<Q> {
     queues: Box<[Mutex<Lane<Q>>]>,
-    flush: Option<Mutex<Lane<Q>>>,
+    /// The flush lanes, one per flush slot (D-070, D-124); empty when the
+    /// set has none.
+    flush: Box<[Mutex<Lane<Q>>]>,
     parallel: OnceLock<Box<[Mutex<Lane<Q>>]>>,
     /// Serialises creating the parallel lanes.
     parallel_init: Mutex<()>,
@@ -56,7 +58,7 @@ pub(crate) struct QueueSet<Q> {
     parallel_off: AtomicBool,
     depth: usize,
     /// One busy mark per shared lane, then one per parallel lane, then one
-    /// for the flush lane (D-095), each alone on its cache line and published
+    /// per flush lane (at least one, D-095), each alone on its cache line and published
     /// by its lane's op table: odd while an operation is in flight on the
     /// lane (`2 * oldest + 1`, so it changes when the oldest completes),
     /// even otherwise. Only the holder writes it; a watchdog reads it
@@ -222,19 +224,20 @@ impl<Q: Queue> DerefMut for LaneGuard<'_, Q> {
 impl<Q: Queue> QueueSet<Q> {
     /// Wraps already-created queues; no flush lane.
     pub(crate) fn new(queues: Vec<Q>, depth: usize) -> Self {
-        Self::build(queues, None, depth)
+        Self::build(queues, Vec::new(), depth)
     }
 
-    /// Wraps already-created queues and a dedicated flush lane.
-    pub(crate) fn with_flush_lane(queues: Vec<Q>, flush: Q, depth: usize) -> Self {
-        Self::build(queues, Some(flush), depth)
+    /// Wraps already-created queues and dedicated flush lanes, one per
+    /// flush slot.
+    pub(crate) fn with_flush_lanes(queues: Vec<Q>, flush: Vec<Q>, depth: usize) -> Self {
+        Self::build(queues, flush, depth)
     }
 
-    fn build(queues: Vec<Q>, flush: Option<Q>, depth: usize) -> Self {
-        // One mark per shared lane, one per parallel lane, then the flush
-        // lane's (which stays even when there is no flush lane).
+    fn build(queues: Vec<Q>, flush: Vec<Q>, depth: usize) -> Self {
+        // One mark per shared lane, one per parallel lane, then one per
+        // flush lane (one at least, which stays even when there is none).
         let n = queues.len();
-        let marks: Box<[Arc<LaneMark>]> = (0..=2 * n)
+        let marks: Box<[Arc<LaneMark>]> = (0..2 * n + flush.len().max(1))
             .map(|_| Arc::new(LaneMark(AtomicU64::new(0))))
             .collect();
         Self {
@@ -243,7 +246,11 @@ impl<Q: Queue> QueueSet<Q> {
                 .zip(marks.iter())
                 .map(|(q, m)| lane(q, m, depth))
                 .collect(),
-            flush: flush.map(|q| lane(q, &marks[2 * n], depth)),
+            flush: flush
+                .into_iter()
+                .zip(&marks[2 * n..])
+                .map(|(q, m)| lane(q, m, depth))
+                .collect(),
             parallel: OnceLock::new(),
             parallel_init: Mutex::new(()),
             parallel_workers: OnceLock::new(),
@@ -256,10 +263,10 @@ impl<Q: Queue> QueueSet<Q> {
         }
     }
 
-    /// The flush lane, for the thread holding flush leadership only; `None`
-    /// when the set has none.
-    pub(crate) fn flush_lane(&self) -> Option<FlushGuard<'_, Q>> {
-        self.flush.as_ref().map(|m| {
+    /// Flush slot `slot`'s lane, for the thread leading a flush on that
+    /// slot only; `None` when the set has none.
+    pub(crate) fn flush_lane(&self, slot: usize) -> Option<FlushGuard<'_, Q>> {
+        self.flush.get(slot).map(|m| {
             let guard = m.lock().unwrap_or_else(PoisonError::into_inner);
             FlushGuard { guard }
         })
@@ -347,8 +354,18 @@ impl<Q: Queue> QueueSet<Q> {
         self.parallel_workers.get().copied().flatten()
     }
 
+    /// The flush lanes, one per flush slot (0 when the set has none).
+    pub(crate) fn flush_lanes(&self) -> usize {
+        self.flush.len()
+    }
+
+    /// The shared lanes (as many parallel lanes follow them).
+    pub(crate) fn shared_len(&self) -> usize {
+        self.queues.len()
+    }
+
     /// Every lane's busy mark: the shared lanes in order, the parallel lanes,
-    /// then the flush lane (odd while an operation is in flight on it;
+    /// then the flush lanes (odd while an operation is in flight on it;
     /// always even for a lane that does not exist).
     pub(crate) fn marks(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.marks.iter().map(|m| m.0.load(Ordering::Relaxed))

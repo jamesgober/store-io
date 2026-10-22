@@ -125,7 +125,7 @@ M = [
  ("crates/store-io-engine/src/open.rs", "            media_error |= pair.media_error;", "            media_error |= pair.media_error && false;"),
  ("crates/store-io-engine/src/open.rs", "        Winner::Lost if p.media_error => Err(Error::Corruption {", "        Winner::Lost if p.media_error && false => Err(Error::Corruption {"),
  # D-095: a new operation is first seen anew (lane marks: A1 C6, below)
- ("crates/store-io-engine/src/stats.rs", "            if mark % 2 == 0 || entry.0 != mark {", "            if mark % 2 == 0 {"),
+ ("crates/store-io-engine/src/stats/mod.rs", "            if mark % 2 == 0 || entry.0 != mark {", "            if mark % 2 == 0 {"),
  # D-096: a pooled queue's drop waits for its jobs; its depth bounds the pool
  ("crates/store-io-posix/src/queue.rs", "                p.inbox.settle(p.in_flight);", "                if false { p.inbox.settle(p.in_flight); }", POSIX),
  ("crates/store-io-posix/src/queue.rs", "        if self.in_flight() >= self.depth {", "        if self.ready.len() >= self.depth {", POSIX),
@@ -181,7 +181,7 @@ M = [
  ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live, _)) if g != ticket.generation || !live => {', '            Some((g, live, _)) if (g != ticket.generation || !live) && false => {'),
  ('crates/store-io-engine/src/submitter/durable.rs', '        if ticket.epoch != inner.epoch || ticket.volume != inner.volume {', '        if (ticket.epoch != inner.epoch || ticket.volume != inner.volume) && false {'),
  (SUB, '        while self.core.table.asked > 0 {\n            self.inbox.wait(false);', '        while self.core.table.asked > 0 && false {\n            self.inbox.wait(false);'),
- ('crates/store-io-engine/src/domain.rs', '        let done = self.done.load(Ordering::SeqCst) >= need;', '        let done = self.done.load(Ordering::SeqCst) >= need || true;'),
+ ('crates/store-io-engine/src/domain/mod.rs', '        let done = self.done.load(Ordering::SeqCst) >= need;', '        let done = self.done.load(Ordering::SeqCst) >= need || true;'),
  ('crates/store-io-engine/src/optable.rs', '                    receipt.need = need;', '                    receipt.need = 0 * need;'),
  ('crates/store-io-engine/src/settle.rs', '                if through >= r.end {', '                if through >= r.end || true {'),
  ('crates/store-io-engine/src/submitter/durable.rs', '        if self.store.inner.read_only {\n            // Nothing to flush', '        if self.store.inner.read_only && false {\n            // Nothing to flush'),
@@ -252,16 +252,16 @@ M = [
  # registered file itself, never a write (lock fencing); the slot is a
  # read-only twin of the file, never the store's own description (the
  # ban on registered-buffer opcodes is checked at compile time)
- ('crates/store-io-posix/src/file.rs', '    let twin = sys::openat(\n        libc::AT_FDCWD,\n        &path,\n        libc::O_RDONLY | libc::O_DIRECT | libc::O_CLOEXEC,\n        0,\n    )?;', '    let _ = &path;\n    let twin = sys::dup_cloexec(fd.as_raw_fd())?;', POSIX),
- ('crates/store-io-posix/src/file.rs', '        libc::O_RDONLY | libc::O_DIRECT | libc::O_CLOEXEC,', '        libc::O_RDWR | libc::O_DIRECT | libc::O_CLOEXEC,', POSIX),
+ ('crates/store-io-posix/src/file.rs', '    let twin = sys::openat(\n        libc::AT_FDCWD,\n        &path,\n        access | libc::O_DIRECT | libc::O_CLOEXEC,\n        0,\n    )?;', '    let _ = (&path, access);\n    let twin = sys::dup_cloexec(fd.as_raw_fd())?;', POSIX),
+ ('crates/store-io-posix/src/file.rs', '    twin(fd, libc::O_RDONLY)', '    twin(fd, libc::O_RDWR)', POSIX),
  ('crates/store-io-posix/src/uring/queue.rs', '            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', '            self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', POSIX),
  ('crates/store-io-posix/src/uring/queue.rs', '            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f));', '            write.is_none() && self.fixed_file.as_ref().is_some_and(|f| file.same_fd(f) || true);', POSIX),
  # release keeps the metadata lock until its space is deallocated (no
  # provisioning can reuse the extent under its late writes)
  ('crates/store-io-engine/src/lifecycle.rs', '        // 2. The header, for tools that list regions from headers.', '        drop(meta);\n        // 2. The header, for tools that list regions from headers.'),
  # G1: a flush leader notifies only when a follower is registered
- ('crates/store-io-engine/src/domain.rs', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 0 {', '        if self.waiters.fetch_add(0, Ordering::AcqRel) > 1 {'),
- ('crates/store-io-engine/src/domain.rs', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = self.poison.set(FirstCause {', '    fn poison_unknown_flush(&self) {\n        let _first_cause_kept = Some(FirstCause {'),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if st.waiters > 0 {', '        if st.waiters > 1 {'),
+ ('crates/store-io-engine/src/domain/mod.rs', '    fn poison_unknown_flush(&self, slot: u32) {\n        let _first_cause_kept = self.poison.set(FirstCause {', '    fn poison_unknown_flush(&self, slot: u32) {\n        let _first_cause_kept = Some(FirstCause {'),
  # The pool's LIFO free list: a head without its tag lets a pop install a
  # stale `next` after another thread popped and pushed back (ABA), handing
  # out a buffer that is still held; a push that publishes its value without
@@ -420,6 +420,29 @@ M = [
  (V2, '        vm = decode_volume(&crate::open::winner_payload(&volume_pair)?)?;', '        vm = decode_volume(volume_pair.payload.as_deref().ok_or_else(corrupt)?)?;', F2),
  (V2, '    allocate(if layout.pages == 1 {', '    allocate(if false {', F2),
  (CREATE, '(crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)', '(crate::layout::MAX_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)', F2),
+ # D-124 flushes in flight: done advances only over an unbroken run of
+ # successes; a main-handle barrier leads on slot 0 only; nothing is
+ # recorded once poisoned; the issue window bounds the success mask; a
+ # read-only store opens no flush handles
+ ('crates/store-io-engine/src/domain/mod.rs', '        while st.ahead & 1 == 1 {', '        while st.ahead != 0 {'),
+ ('crates/store-io-engine/src/domain/mod.rs', '            let mut free = (!st.busy) & ((1u32 << usable) - 1);', '            let mut free = (!st.busy) & ((1u32 << self.slots.max(usable)) - 1);'),
+ ('crates/store-io-engine/src/domain/mod.rs', '                None if self.poison.get().is_none() => self.record(&mut st, k),', '                None if true => self.record(&mut st, k),'),
+ ('crates/store-io-engine/src/domain/mod.rs', '            if issued >= need || free == 0 || issued - done >= WINDOW {', '            if issued >= need || free == 0 || issued - done >= 4 * WINDOW {'),
+ ('crates/store-io-engine/src/open.rs', '        let flush_files = if read_only || !policy.flush {', '        let flush_files = if !policy.flush {'),
+ # D-124 review: done never jumps to the highest finished flush; every
+ # flush lane is a flush to the watchdog; a full flush of the main handle
+ # waits for slot 0 and gives it back
+ ('crates/store-io-engine/src/domain/mod.rs', '        self.done.store(done, Ordering::SeqCst);', '        self.done.store(done.max(k), Ordering::SeqCst);'),
+ ('crates/store-io-engine/src/stats/mod.rs', '            let flush = i >= first_flush;', '            let flush = i >= first_flush + 3;'),
+ ('crates/store-io-engine/src/domain/mod.rs', '        while st.busy & 1 == 1 {', '        while st.busy & 1 == 2 {'),
+ ('crates/store-io-engine/src/domain/mod.rs', '        st.busy &= !1;', '        st.busy &= !0;'),
+ # D-124 second review: a metadata flush leads only on slot 0;
+ # provisioning's full flush holds slot 0; data leaders take slot 0 last
+ ('crates/store-io-engine/src/store.rs', '        domain.barrier_main(need, || flush_data(q, file))?;', '        domain.barrier(need, |_, _| flush_data(q, file))?;'),
+ ('crates/store-io-engine/src/provision.rs', '            .exclusive_main(|| inner.platform.flush_all(&inner.file));', '            .poisoned()\n            .map_or_else(|| inner.platform.flush_all(&inner.file), |_| inner.platform.flush_all(&inner.file));'),
+ ('crates/store-io-engine/src/domain/mod.rs', '            let slot = 31 - free.leading_zeros();', '            let slot = free.trailing_zeros();'),
+ # a full flush waiting for slot 0 has it before new leaders
+ ('crates/store-io-engine/src/domain/mod.rs', '            if st.main_waiting > 0 {', '            if st.main_waiting > 0 && false {'),
 ]
 
 def kill_stuck_tests():

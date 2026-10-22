@@ -25,7 +25,7 @@ use crate::report::{Better, Comparison, Point, Section, System, Table};
 const SPAN: u64 = 256 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Verdict {
+pub(super) enum Verdict {
     Pass,
     NotResolvable,
     Fail,
@@ -45,11 +45,11 @@ impl Verdict {
     }
 }
 
-struct Row {
-    id: &'static str,
-    gate: &'static str,
-    measured: String,
-    verdict: Verdict,
+pub(super) struct Row {
+    pub(super) id: &'static str,
+    pub(super) gate: &'static str,
+    pub(super) measured: String,
+    pub(super) verdict: Verdict,
 }
 
 /// A latency gate's margin over `base`: on Linux `us` microseconds, on
@@ -162,7 +162,7 @@ fn against_fsys<'a>(cs: impl Iterator<Item = &'a Comparison>) -> (usize, usize, 
 }
 
 /// The median of a set, `None` when empty.
-fn med(v: &[f64]) -> Option<f64> {
+pub(super) fn med(v: &[f64]) -> Option<f64> {
     let mut v = v.to_vec();
     v.sort_by(f64::total_cmp);
     let n = v.len();
@@ -214,7 +214,7 @@ fn rerun(ctx: &Ctx, id: &str) -> Section {
     }
 }
 
-fn f(v: Option<f64>, d: usize) -> String {
+pub(super) fn f(v: Option<f64>, d: usize) -> String {
     v.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.d$}"))
 }
 
@@ -802,31 +802,7 @@ pub fn run(ctx: &Ctx) -> Section {
     if let Some(e) = remove(&file) {
         sec.anomalies.push(e);
     }
-    let (one, eight) = (&g15.one, &g15.eight);
-    let whole = g15.whole();
-    let (o1, o8, f8) = (med(one), med(eight), med(&g15.flushes_at_eight));
-    rows.push(Row {
-        id: "G15",
-        gate: "Concurrent writers: durable ops/s rises with writers through flush sharing (8 writers at least 1.5x one, under 0.9 flushes per op; medians of 3 alternated runs)",
-        measured: format!(
-            "1 writer {one:.0?} /s, 8 writers {eight:.0?} /s, {} flushes per op at 8; fio 8 writers ({}): writes alone {:.0?} /s, each flushed {:.0?} /s",
-            f(f8, 2),
-            fio::sync_engine(),
-            g15.fio_writes,
-            g15.fio_durable
-        ),
-        verdict: match (whole, o1, o8, f8) {
-            (true, Some(a), Some(b), Some(x)) if b >= 1.5 * a && x < 0.9 => Verdict::Pass,
-            // Sharing flushes, and 1.5x one writer lies within the range of
-            // the eight-writer runs: this disk cannot tell.
-            (true, Some(a), Some(_), Some(x))
-                if x < 0.9 && eight.iter().copied().fold(f64::MIN, f64::max) >= 1.5 * a =>
-            {
-                Verdict::NotResolvable
-            }
-            _ => Verdict::Fail,
-        },
-    });
+    rows.push(g15.row());
     // G16: caller batch: N writes + one flush per commit.
     let batch_fl: Vec<f64> = w3
         .points

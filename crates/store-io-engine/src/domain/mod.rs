@@ -345,7 +345,8 @@ impl Domain {
                 // A barrier that would lead but may use fewer slots than
                 // the domain has must not take the next flush's wake.
                 let narrow = need > issued && usable < self.slots;
-                st = self.sleep(st, need, narrow);
+                // Re-locked on return; everything is re-checked from the top.
+                drop(self.sleep(st, need, narrow));
                 continue;
             }
             // The highest free slot: slot 0, the only one a main-handle

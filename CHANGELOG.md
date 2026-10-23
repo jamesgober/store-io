@@ -13,6 +13,20 @@
 
 ### Added
 
+- Engine: **growth within capacity** in format 2 (v0.5 E4 C8, still
+  behind the hidden `StoreOptions::container_format`):
+  `AppendRegion::grow`, `PageRegion::grow` (to at least `new_size`,
+  rounded up to the block; returns the new size; at most the current one
+  writes nothing) and `capacity()`. Under the region lock the new range is
+  filled with the region's pattern (keyed by region offset, across runs),
+  flushed and verified; one table page write commits the new `data_size`
+  (`footprint_seq` unchanged); then the region map's length and the
+  append frontier's limit are raised. A crash before the commit leaves the
+  old size. Growth past the capacity is `NotWritten(TooLarge)` until E4
+  C9; while a table page is stale or lost it is `NotWritten(Frozen)`
+  (stricter than the spec, which freezes only growth beyond the
+  capacity); format 1 returns `Unsupported`. Space accounting follows
+  (logical bytes; the capacity was already counted).
 - `store-io-platform`: `Platform::allocate_range(file, offset, len)`:
   allocates real blocks inside the file, never changing its size or a
   written byte (blocks it allocates read as zeros until written); a

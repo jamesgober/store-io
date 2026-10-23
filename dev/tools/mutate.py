@@ -69,6 +69,8 @@ ENGINE_LIB_LIFECYCLE = ["-p", "store-io-engine", "--lib", "lifecycle::"]
 SUBMITTER_TEST = ["-p", "store-io-engine", "--test", "submitter"]
 # Format-2 regions of several extents.
 F2E = ["-p", "store-io-engine", "--test", "format2_extents"]
+# Format-2 growth within capacity.
+F2G = ["-p", "store-io-engine", "--test", "format2_grow"]
 # The append frontier's unit tests.
 FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 # The region map's unit tests; the format crate's footprint tests.
@@ -112,7 +114,7 @@ M = [
  ("crates/store-io-engine/src/directory.rs", "        let _absent_or_removed = self.platform.unlink(&self.dir, &temp);", ""),
  ("crates/store-io-engine/src/provision.rs", "            .any(|e| e.state == RegionState::Ready && e.name == rname)", "            .any(|e| e.state == RegionState::Ready && e.name == rname && false)"),
  ("crates/store-io-engine/src/provision.rs", "        if meta.entries.len() + usize::from(reuse.is_none()) > inner.layout.table_capacity() {", "        if false {"),
- ("crates/store-io-engine/src/provision.rs", "            let zeros = (2 * block).saturating_sub(at).min(len) as usize;", "            let zeros = if at < 2 * block { len as usize } else { 0 };"),
+ ("crates/store-io-engine/src/provision.rs", "            let z = zeros.saturating_sub(at).min(len) as usize;", "            let z = if at < zeros { len as usize } else { 0 };"),
  ('crates/store-io-engine/src/lifecycle.rs', 'release_range(&inner.file, at, len, how)', 'release_range(&inner.file, at - 2 * inner.layout.block(), len + 2 * inner.layout.block(), how)'),
  ("crates/store-io-engine/src/create.rs", "        if holds != Some(false) ||", "        if holds != Some(false) && false ||"),
  ("crates/store-io-engine/src/provision.rs", "                Err(Error::NoSpace { .. }) if align && from.is_some() => align = false,\n", "                Err(Error::NoSpace { .. }) if align && from.is_some() && false => align = false,\n"),
@@ -385,7 +387,7 @@ M = [
  (JUDGE, '    let volume_demote = candidates != 1 || refused;', '    let volume_demote = candidates != 1 || refused && false;', FORMAT),
  (JUDGE, '                let demote = if i == 0 { volume_demote } else { page_demote };', '                let demote = if i == 0 { page_demote || volume_demote } else { page_demote };', FORMAT),
  # E1: a region range outside its map is refused, in release builds too
- ('crates/store-io-engine/src/regionmap.rs', '            pos.checked_add(len).is_some_and(|end| end <= self.len),', '            pos.checked_add(len).is_some() || true,'),
+ ('crates/store-io-engine/src/regionmap.rs', '            pos.checked_add(len).is_some_and(|end| end <= data),', '            pos.checked_add(len).is_some_and(|end| end <= data) || true,'),
  # E2a: create makes every page durable before the volume record and
  # numbers them in order; the volume record is numbered
  (V2, '    }\n    full_flush(platform, file)?;\n    let vm = VolumeMeta2 {', '    }\n    let vm = VolumeMeta2 {', F2),
@@ -468,6 +470,21 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C8: growth within capacity: the fill flushed and verified before the
+ # commit; the capacity bound; published after the commit (the map, then
+ # the frontier's limit); the fill keyed by region offset; the usage and
+ # accounting follow
+ ('crates/store-io-engine/src/grow2.rs', '        self.flush_all_accounted()?;\n        for &(file, _, n) in &pieces {', '        for &(file, _, n) in &pieces {', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '            self.verify_ready(file, n)?;', '            let _ = (file, n);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', 'if new > r.map.capacity() || new / block >= u64::from(u32::MAX) {', 'if new >= r.map.capacity() || new / block >= u64::from(u32::MAX) {', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        // 2. The commit: the page with the entry\'s new data size.', '        r.map.publish_len(new);\n        // 2. The commit: the page with the entry\'s new data size.', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        if let Some(f) = &r.frontier {\n            f.raise_limit(new);', '        if let Some(f) = r.frontier.as_ref().filter(|_| false) {\n            f.raise_limit(new);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '            self.fill_range(file, n, 0, fill, &key, at)?;', '            self.fill_range(file, n, 0, fill, &key, file + (at & 0))?;', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '                u.1 = new;', '                u.1 = u.1.max(0);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '            acct.add_usage(entry.tag, new, 0);', '            acct.add_usage(entry.tag, entry.data_size, 0);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '            entry.data_size = new;', '            entry.data_size = len;', F2G),
+ # C8 review: refused while frozen (stricter than the spec)
+ ('crates/store-io-engine/src/grow2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2G),
  # E4 C7: the completion ring allocated at the first completion, never at
  # construction (outside loom); a resume_at that moves the tail has the
  # ring through get_or_init (a plain look races a first completion)
@@ -526,7 +543,7 @@ M = [
  ('crates/store-io-format/src/footprint.rs', '(Some(end), Some(total)) if end == next => len = total,', '(Some(end), Some(total)) if end <= next => len = total,', FOOTPRINT_FMT),
  ('crates/store-io-engine/src/regionmap.rs', '            pos + len <= end,', '            pos + len <= end || true,', REGIONMAP),
  ('crates/store-io-engine/src/regionmap.rs', 'let k = self.more.partition_point(|r| r.0 <= pos);', 'let k = self.more.partition_point(|r| r.0 < pos);', REGIONMAP),
- ('crates/store-io-engine/src/regionmap.rs', '.chain(core::iter::once(self.capacity));', '.chain(core::iter::once(self.len));', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', '.chain(core::iter::once(self.capacity));', '.chain(core::iter::once(self.len()));', REGIONMAP),
  # E4 C1: a release tries every extent (a failed trim on Windows is no
  # error); a submitter's reservation is held under a poisoning guard until
  # its row holds it

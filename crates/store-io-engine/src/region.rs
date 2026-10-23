@@ -450,6 +450,34 @@ where
         self.state.map.len()
     }
 
+    /// How far the data area can grow without new space: the region's
+    /// capacity in bytes (its data size until format 2's growth).
+    #[must_use]
+    pub fn capacity(&self) -> u64 {
+        self.state.map.capacity()
+    }
+
+    /// Grows the data area to at least `new_size` bytes (rounded up to the
+    /// block size) within the capacity: the new range is filled, flushed
+    /// and verified before one table page write commits the new size (spec
+    /// §12, growth within capacity). Returns the new size; on a writable
+    /// store a size at most the current one writes nothing and returns it.
+    /// Positions and tickets taken before stay valid.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` in container format 1; `NotWritten` (`TooLarge` past
+    /// the capacity; `ReadOnly`; `Frozen` while a table page is stale or
+    /// lost; `NotReady` if the filled range does not verify;
+    /// `StaleGeneration` for a recycled region; `QueueFull`); `NoSpace`;
+    /// `Io` if the range could not be probed; `Corruption` for metadata
+    /// that does not decode; `Poisoned`; `DurabilityUnknown` (a fill, a
+    /// flush or the page write failed after submission: poisoned).
+    pub fn grow(&self, new_size: u64) -> Result<u64, Error> {
+        let _pass = self.pass()?;
+        self.store.grow_region2(&self.state, new_size)
+    }
+
     /// Whether the data area is empty (never for a provisioned region).
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -711,6 +739,34 @@ where
     #[must_use]
     pub fn len(&self) -> u64 {
         self.state.map.len()
+    }
+
+    /// How far the data area can grow without new space: the region's
+    /// capacity in bytes (its data size until format 2's growth).
+    #[must_use]
+    pub fn capacity(&self) -> u64 {
+        self.state.map.capacity()
+    }
+
+    /// Grows the data area to at least `new_size` bytes (rounded up to the
+    /// block size) within the capacity: the new range is filled, flushed
+    /// and verified before one table page write commits the new size (spec
+    /// §12, growth within capacity). Returns the new size; on a writable
+    /// store a size at most the current one writes nothing and returns it.
+    /// Positions and tickets taken before stay valid.
+    ///
+    /// # Errors
+    ///
+    /// `Unsupported` in container format 1; `NotWritten` (`TooLarge` past
+    /// the capacity; `ReadOnly`; `Frozen` while a table page is stale or
+    /// lost; `NotReady` if the filled range does not verify;
+    /// `StaleGeneration` for a recycled region; `QueueFull`); `NoSpace`;
+    /// `Io` if the range could not be probed; `Corruption` for metadata
+    /// that does not decode; `Poisoned`; `DurabilityUnknown` (a fill, a
+    /// flush or the page write failed after submission: poisoned).
+    pub fn grow(&self, new_size: u64) -> Result<u64, Error> {
+        let _pass = self.pass()?;
+        self.store.grow_region2(&self.state, new_size)
     }
 
     /// Whether the data area is empty (never for a provisioned region).

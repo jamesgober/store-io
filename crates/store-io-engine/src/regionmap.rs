@@ -8,16 +8,20 @@
 //! (every format-1 region, and a format-2 region that never grew elsewhere)
 //! pays one comparison more than its bounds check.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use store_io_format::footprint::runs;
 use store_io_format::meta2::Extent;
 
 /// A region's data placement: its runs, in data order, and its length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct RegionMap {
     /// The file offset of region offset 0 (the first run's).
     first: u64,
-    /// The data's length (`data_size`): only `[0, len)` is addressable.
-    len: u64,
+    /// The data's length (`data_size`): only `[0, len)` is addressable. It
+    /// only grows, published by a growth after its commit (Release), so a
+    /// range a reader checked against an earlier length stays inside.
+    len: AtomicU64,
     /// The runs' total length (the capacity): `len` at most.
     capacity: u64,
     /// The runs after the first, `(region offset, file offset)`, ascending:
@@ -25,12 +29,23 @@ pub(crate) struct RegionMap {
     more: Box<[(u64, u64)]>,
 }
 
+impl Clone for RegionMap {
+    fn clone(&self) -> Self {
+        Self {
+            first: self.first,
+            len: AtomicU64::new(self.len()),
+            capacity: self.capacity,
+            more: self.more.clone(),
+        }
+    }
+}
+
 impl RegionMap {
     /// One extent: `len` bytes at file offset `base`, all of them data.
     pub(crate) fn single(base: u64, len: u64) -> Self {
         Self {
             first: base,
-            len,
+            len: AtomicU64::new(len),
             capacity: len,
             more: Box::default(),
         }
@@ -53,7 +68,7 @@ impl RegionMap {
         assert!(len <= capacity, "data past the capacity");
         Self {
             first: head.file,
-            len,
+            len: AtomicU64::new(len),
             capacity,
             more,
         }
@@ -62,7 +77,29 @@ impl RegionMap {
     /// The data's length (`data_size`).
     #[inline]
     pub(crate) fn len(&self) -> u64 {
-        self.len
+        self.len.load(Ordering::Acquire)
+    }
+
+    /// Publishes a growth's new length, after its commit (never more than
+    /// the capacity; never shrinks).
+    pub(crate) fn publish_len(&self, len: u64) {
+        assert!(len <= self.capacity, "data past the capacity");
+        let _was = self.len.fetch_max(len, Ordering::Release);
+    }
+
+    /// The runs' pieces of `[from, to)` (region offsets, at most the
+    /// capacity): `(file offset, region offset, length)`, in data order.
+    pub(crate) fn pieces(&self, from: u64, to: u64) -> Vec<(u64, u64, u64)> {
+        let mut out = Vec::new();
+        let mut start = 0u64;
+        for (file, n) in self.extents() {
+            let (s, e) = (start.max(from), (start + n).min(to));
+            if s < e {
+                out.push((file + (s - start), s, e - s));
+            }
+            start += n;
+        }
+        out
     }
 
     /// The runs' total length.
@@ -89,10 +126,10 @@ impl RegionMap {
     /// bytes: checked in release builds too.
     #[inline]
     pub(crate) fn locate(&self, pos: u64, len: u64) -> u64 {
+        let data = self.len();
         assert!(
-            pos.checked_add(len).is_some_and(|end| end <= self.len),
-            "region range {pos}+{len} outside the map ({} bytes)",
-            self.len
+            pos.checked_add(len).is_some_and(|end| end <= data),
+            "region range {pos}+{len} outside the map ({data} bytes)"
         );
         if self.more.is_empty() {
             return self.first + pos;
@@ -111,9 +148,9 @@ impl RegionMap {
     #[inline]
     pub(crate) fn run_end(&self, pos: u64) -> u64 {
         if self.more.is_empty() {
-            return self.len;
+            return self.len();
         }
-        self.run_of(pos).2.min(self.len)
+        self.run_of(pos).2.min(self.len())
     }
 
     /// The runs, `(file offset, length)`, in data order, over the whole
@@ -174,6 +211,23 @@ mod tests {
     fn test_a_range_across_runs_is_refused() {
         let _ =
             RegionMap::from_extents(&[(0, 4 * B), (100 * B, 4 * B)], 8 * B).locate(3 * B, 2 * B);
+    }
+
+    /// The pieces of a range: clipped to it, run by run, at the runs' file
+    /// offsets, past the data's length up to the capacity.
+    #[test]
+    fn test_pieces_of_a_range() {
+        let m = RegionMap::from_extents(&[(100 * B, 4 * B), (10 * B, 4 * B)], 2 * B);
+        assert_eq!(
+            m.pieces(B, 6 * B),
+            [(101 * B, B, 3 * B), (10 * B, 4 * B, 2 * B)]
+        );
+        assert_eq!(m.pieces(5 * B, 8 * B), [(11 * B, 5 * B, 3 * B)]);
+        assert!(m.pieces(3 * B, 3 * B).is_empty());
+        m.publish_len(6 * B);
+        assert_eq!(m.len(), 6 * B);
+        m.publish_len(4 * B);
+        assert_eq!(m.len(), 6 * B, "never shrinks");
     }
 
     /// Adjacent extents are one run: a range across them is one operation.

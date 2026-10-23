@@ -36,7 +36,8 @@ use crate::sync::{AtomicU64, Ordering};
 #[derive(Debug)]
 pub struct AppendFrontier {
     shift: u32,
-    limit: u64,
+    /// The region's data size: only grows ([`Self::raise_limit`]).
+    limit: AtomicU64,
     tail: AtomicU64,
     prefix: AtomicU64,
     durable: AtomicU64,
@@ -116,7 +117,7 @@ impl AppendFrontier {
         let _set = cell.set(slots(ring));
         Self {
             shift,
-            limit,
+            limit: AtomicU64::new(limit),
             tail: AtomicU64::new(resume),
             prefix: AtomicU64::new(resume),
             durable: AtomicU64::new(resume),
@@ -149,7 +150,7 @@ impl AppendFrontier {
                 .checked_add(block - 1)
                 .ok_or(NotWrittenCause::RegionFull)?
                 & !(block - 1);
-            if end > self.limit {
+            if end > self.limit.load(Ordering::Acquire) {
                 return Err(NotWrittenCause::RegionFull);
             }
             let prefix = self.prefix.load(Ordering::SeqCst);
@@ -230,6 +231,12 @@ impl AppendFrontier {
         if self.advance(ring) {
             self.wake_if_waiting();
         }
+    }
+
+    /// Raises the limit to `limit` (a growth's new data size, after its
+    /// commit and the region map's publication); never lowers it.
+    pub(crate) fn raise_limit(&self, limit: u64) {
+        let _was = self.limit.fetch_max(limit, Ordering::Release);
     }
 
     /// The completion ring, allocated on first use (once, whoever asks
@@ -382,7 +389,7 @@ impl AppendFrontier {
             .checked_add(block - 1)
             .ok_or(NotWrittenCause::OutOfBounds)?
             & !(block - 1);
-        if target > self.limit {
+        if target > self.limit.load(Ordering::Acquire) {
             return Err(NotWrittenCause::OutOfBounds);
         }
         let tail = self.tail.load(Ordering::SeqCst);
@@ -463,6 +470,21 @@ mod tests {
         let moved = AppendFrontier::new(0, 64 << 20, 12, ring);
         assert_eq!(moved.resume_at(8192), Ok(8192));
         assert_eq!(moved.ring_slots(), 4096);
+    }
+
+    /// A raised limit admits reservations up to it; a lower one changes
+    /// nothing.
+    #[test]
+    fn test_raise_limit() {
+        let fr = AppendFrontier::new(0, 8192, 12, 4);
+        let r = fr.reserve(8192).unwrap();
+        fr.complete(r);
+        assert_eq!(fr.reserve(1), Err(NotWrittenCause::RegionFull));
+        fr.raise_limit(16384);
+        fr.raise_limit(4096);
+        let r = fr.reserve(8192).unwrap();
+        assert_eq!((r.start, r.end), (8192, 16384));
+        assert_eq!(fr.reserve(1), Err(NotWrittenCause::RegionFull));
     }
 
     /// Sixteen appenders making their first appends at once share one ring,
@@ -766,6 +788,31 @@ mod tests {
 mod loom_tests {
     use super::*;
     use loom::sync::Arc;
+
+    /// A reservation racing a growth's raised limit ends at or before the
+    /// limit it read: past the old one only once the new one is seen, and
+    /// after the raise a reservation past the old limit always fits.
+    #[test]
+    fn loom_a_raised_limit_racing_a_reservation() {
+        loom::model(|| {
+            let fr = Arc::new(AppendFrontier::new(0, 4096, 12, 4));
+            let r = fr.reserve(4096).unwrap();
+            fr.complete(r);
+            let raiser = {
+                let fr = fr.clone();
+                loom::thread::spawn(move || fr.raise_limit(8192))
+            };
+            let got = fr.reserve(4096);
+            raiser.join().unwrap();
+            match got {
+                Ok(r) => assert_eq!((r.start, r.end), (4096, 8192)),
+                Err(cause) => {
+                    assert_eq!(cause, NotWrittenCause::RegionFull);
+                    assert!(fr.reserve(4096).is_ok(), "the raised limit was lost");
+                }
+            }
+        });
+    }
 
     /// Two appenders complete in either order; the prefix ends at the tail
     /// with no slot left behind.

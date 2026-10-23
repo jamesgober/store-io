@@ -260,24 +260,44 @@ where
         fill: FillPattern,
         key: &[u8; 16],
     ) -> Result<(), Error> {
+        // The two header blocks are always zero so no old header survives;
+        // the data area gets the pattern from its first byte.
+        self.fill_range(offset, extent, 2 * block, fill, key, 0)
+    }
+
+    /// Writes `[offset, offset + extent)` of the container: its first `zeros`
+    /// bytes zero, the rest `fill`, whose keyed index starts at region
+    /// offset `key_at` (a growth's fill of a run: no zeros, its region
+    /// offset). Failures as [`Self::fill`] (a write failed after submission
+    /// poisons; running out of space does not).
+    pub(crate) fn fill_range(
+        &self,
+        offset: u64,
+        extent: u64,
+        zeros: u64,
+        fill: FillPattern,
+        key: &[u8; 16],
+        key_at: u64,
+    ) -> Result<(), Error> {
         let inner = &self.inner;
+        let block = inner.layout.block();
         let chunk = (self.chunk() as u64).min(1 << 20).max(block);
         let mut q = inner.queues.get(0);
         let mut at = 0u64;
         while at < extent {
             let len = chunk.min(extent - at);
             let mut buf = self.take(len as usize, ErrorContext::default())?;
-            // The two header blocks are always zero so no old header
-            // survives; the data area gets the pattern from its first byte,
-            // even inside a chunk that also covers the headers.
+            // The pattern from the first byte past the zeros, even inside a
+            // chunk that also covers some of them.
             let dst = buf.as_mut_slice();
-            let zeros = (2 * block).saturating_sub(at).min(len) as usize;
-            dst[..zeros].fill(0);
+            let z = zeros.saturating_sub(at).min(len) as usize;
+            dst[..z].fill(0);
             match fill {
                 FillPattern::KeyedV1 => {
-                    fill_keyed_v1(key, at + zeros as u64 - 2 * block, &mut dst[zeros..]);
+                    let index = key_at + (at + z as u64).saturating_sub(zeros);
+                    fill_keyed_v1(key, index, &mut dst[z..]);
                 }
-                FillPattern::Zeros => dst[zeros..].fill(0),
+                FillPattern::Zeros => dst[z..].fill(0),
             }
             let ran = run(
                 &mut q,

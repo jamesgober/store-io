@@ -37,6 +37,7 @@ mod footprint;
 mod force;
 pub mod frontier;
 mod gate;
+mod grow2;
 mod io;
 mod layout;
 mod lifecycle;

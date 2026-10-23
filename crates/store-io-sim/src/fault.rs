@@ -78,4 +78,7 @@ pub struct FaultPlan {
     /// The n-th `Platform::release_range` (1-based) fails with this raw
     /// code and releases nothing.
     pub fail_release: Option<(u64, i32)>,
+    /// The n-th `Platform::allocate_range` (1-based) fails with this raw
+    /// code (for example 28, ENOSPC) and allocates nothing.
+    pub fail_allocate_range: Option<(u64, i32)>,
 }

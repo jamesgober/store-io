@@ -44,6 +44,29 @@ pub(crate) fn allocate(file: &PosixFile, len: u64) -> RawResult<()> {
     sys::fallocate(file.raw(), 0, offset, grow)
 }
 
+/// Allocates `[offset, offset + len)` inside the file: `fallocate` with
+/// `KEEP_SIZE`, which allocates the holes as unwritten extents (reading as
+/// zero) and leaves written blocks and the size as they are (inside the
+/// file it allocates as mode 0 does; and a file shrunk meanwhile is never
+/// grown back). A range past the end is refused (`EINVAL`) before the call.
+pub(crate) fn allocate_range(file: &PosixFile, offset: u64, len: u64) -> RawResult<()> {
+    if !file.is_writable() {
+        return Err(sys::errno(libc::EBADF));
+    }
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| sys::errno(libc::EINVAL))?;
+    if end > size(file)? {
+        return Err(sys::errno(libc::EINVAL));
+    }
+    if len == 0 {
+        return Ok(());
+    }
+    let off = libc::off_t::try_from(offset).map_err(|_| sys::errno(libc::EFBIG))?;
+    let l = libc::off_t::try_from(len).map_err(|_| sys::errno(libc::EFBIG))?;
+    sys::fallocate(file.raw(), libc::FALLOC_FL_KEEP_SIZE, off, l)
+}
+
 /// Releases a range. `Deallocate` punches a hole (`PUNCH_HOLE|KEEP_SIZE`);
 /// `TrimInPlace` is not available for Linux files and reports `EOPNOTSUPP`.
 pub(crate) fn release(file: &PosixFile, offset: u64, len: u64, how: ReleaseHow) -> RawResult<()> {

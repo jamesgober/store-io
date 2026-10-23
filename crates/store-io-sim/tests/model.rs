@@ -358,3 +358,112 @@ fn test_a_read_past_the_end_of_the_file_transfers_nothing() {
     let done = drain(&mut q);
     assert_eq!(done, vec![(9, Ok(0))]);
 }
+
+/// A deallocated range reads as unwritten (a hole) until written; a trim in
+/// place keeps it written; `allocate_range` changes no byte and no size,
+/// refuses a range past the end, and fails when the plan says.
+#[test]
+fn test_holes_read_unwritten_until_written_and_allocate_range_keeps_bytes() {
+    use store_io_core::evidence::Tri;
+    use store_io_platform::ReleaseHow;
+    let (p, _d, f, pool) = setup(SimConfig::volatile(91));
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    for i in 0..4u64 {
+        write(&mut q, &f, &pool, i * 4096, 1, false);
+    }
+    drain(&mut q);
+    let state = |off: u64, len: u64| p.range_state(&f, off, len).unwrap().unwritten;
+    assert_eq!(state(0, 16384), Tri::No);
+    p.release_range(&f, 0, 8192, ReleaseHow::Deallocate)
+        .unwrap();
+    assert_eq!(state(0, 8192), Tri::Yes);
+    assert_eq!(state(4096, 4096), Tri::Yes);
+    assert_eq!(state(8192, 8192), Tri::No);
+    p.release_range(&f, 8192, 4096, ReleaseHow::TrimInPlace)
+        .unwrap();
+    assert_eq!(state(8192, 4096), Tri::No, "a trim punches no hole");
+    p.allocate_range(&f, 0, 16384).unwrap();
+    assert_eq!(
+        state(0, 8192),
+        Tri::Yes,
+        "an allocated hole stays unwritten"
+    );
+    assert_eq!(p.size(&f).unwrap(), 1 << 20);
+    write(&mut q, &f, &pool, 0, 2, false);
+    drain(&mut q);
+    assert_eq!(state(0, 4096), Tri::No, "a write fills the hole");
+    assert_eq!(state(4096, 4096), Tri::Yes);
+    assert_eq!(
+        p.allocate_range(&f, (1 << 20) - 4096, 8192)
+            .unwrap_err()
+            .code,
+        22
+    );
+    let next = p.with_world(|w| w.range_allocations()) + 1;
+    p.with_world(|w| w.faults_mut().fail_allocate_range = Some((next, 28)));
+    assert_eq!(p.allocate_range(&f, 0, 4096).unwrap_err().code, 28);
+    // Past the end is not written data (the last block written, the rest of
+    // the range past the end), nor is a file's growth until it is written;
+    // a zero-length query is never unwritten.
+    write(&mut q, &f, &pool, (1 << 20) - 4096, 5, false);
+    drain(&mut q);
+    assert_eq!(state((1 << 20) - 4096, 4096), Tri::No);
+    assert_eq!(state((1 << 20) - 4096, 8192), Tri::Yes);
+    assert_eq!(state(0, 0), Tri::No);
+    p.set_len(&f, 4096).unwrap();
+    p.set_len(&f, 8192).unwrap();
+    assert_eq!(state(4096, 4096), Tri::Yes, "grown, never written");
+    // A write past the end: the gap before it is a hole, the write is not.
+    write(&mut q, &f, &pool, 16384, 3, false);
+    drain(&mut q);
+    assert_eq!(state(8192, 8192), Tri::Yes);
+    assert_eq!(state(16384, 4096), Tri::No);
+    // A write the device lost is still written to the file system.
+    let lost = p.with_world(|w| w.writes()) + 1;
+    p.with_world(|w| w.faults_mut().lose_write = Some(lost));
+    write(&mut q, &f, &pool, 8192, 4, false);
+    drain(&mut q);
+    assert_eq!(state(8192, 4096), Tri::No);
+}
+
+/// A crash takes a file back to its durable length: growth, holes and
+/// writes past it are gone, and a later growth over those bytes is new
+/// (unwritten until written).
+#[test]
+fn test_a_crash_drops_holes_past_the_durable_length() {
+    use store_io_core::evidence::Tri;
+    use store_io_platform::ReleaseHow;
+    let (p, _d, f, pool) = setup(SimConfig::volatile(92));
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    for i in 0..256u64 {
+        write(&mut q, &f, &pool, i * 4096, 1, false);
+        drain(&mut q);
+    }
+    p.flush_all(&f).unwrap();
+    // Grown and punched, never flushed: gone at the crash.
+    p.allocate(&f, 2 << 20).unwrap();
+    for i in 256..512u64 {
+        write(&mut q, &f, &pool, i * 4096, 2, false);
+        drain(&mut q);
+    }
+    p.release_range(&f, 1 << 20, 4096, ReleaseHow::Deallocate)
+        .unwrap();
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    let d = p.open_dir(&dir(), false).unwrap();
+    let f = p
+        .open_file(&d, &FileName::new("f").unwrap(), FileMode::ReadWrite)
+        .unwrap();
+    assert_eq!(p.size(&f).unwrap(), 1 << 20);
+    assert_eq!(p.range_state(&f, 0, 1 << 20).unwrap().unwritten, Tri::No);
+    // Grown again and written: no hole left from before the crash.
+    p.allocate(&f, 2 << 20).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    for i in 256..512u64 {
+        write(&mut q, &f, &pool, i * 4096, 3, false);
+        drain(&mut q);
+    }
+    assert_eq!(
+        p.range_state(&f, 1 << 20, 1 << 20).unwrap().unwritten,
+        Tri::No
+    );
+}

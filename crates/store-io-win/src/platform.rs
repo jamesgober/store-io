@@ -113,6 +113,10 @@ impl Platform for WinPlatform {
         alloc::allocate(file, len)
     }
 
+    fn allocate_range(&self, file: &WinFile, offset: u64, len: u64) -> RawResult<()> {
+        alloc::allocate_range(file, offset, len)
+    }
+
     fn set_len(&self, file: &WinFile, len: u64) -> RawResult<()> {
         if !file.is_writable() {
             return Err(sys::win32(

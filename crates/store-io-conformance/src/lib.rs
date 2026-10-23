@@ -244,6 +244,10 @@ where
             ),
             ("a released range keeps the file's size", release_keeps_size),
             (
+                "allocate_range allocates inside the file and keeps its size and bytes",
+                allocate_range_keeps_size,
+            ),
+            (
                 "the probe reports alignment and lists what it could not read",
                 probe_is_honest,
             ),
@@ -754,6 +758,51 @@ fn release_keeps_size<P: Platform>(c: &Ctx<'_, P>) -> Check {
     check!(
         r == Ok(BLOCK) && back.is_some_and(|b| b.as_slice() == &pattern(9, 32 * BLOCK)[..BLOCK]),
         "release changed bytes outside its range"
+    );
+    Ok(())
+}
+
+fn allocate_range_keeps_size<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    let dir = c.dir()?;
+    let len = 32 * BLOCK as u64;
+    let f = c.file(&dir, "a", len)?;
+    let mut q = c.queue(4)?;
+    let _w = write_one(&mut q, &f, 0, c.buf(&pattern(5, 32 * BLOCK))?, false)?;
+    ok(c.p.flush_all(&f), "flush_all")?;
+    ok(
+        c.p.allocate_range(&f, 8 * BLOCK as u64, 8 * BLOCK as u64),
+        "allocate_range",
+    )?;
+    check!(
+        ok(c.p.size(&f), "size")? == len,
+        "allocate_range changed the file size"
+    );
+    let (r, back) = read_one(&mut q, &f, 8 * BLOCK as u64, c.buf(&[0; BLOCK])?)?;
+    check!(
+        r == Ok(BLOCK)
+            && back.is_some_and(|b| b.as_slice() == &pattern(5, 32 * BLOCK)[8 * BLOCK..9 * BLOCK]),
+        "allocate_range changed written bytes"
+    );
+    check!(
+        c.p.allocate_range(&f, len - BLOCK as u64, 2 * BLOCK as u64)
+            .is_err(),
+        "allocate_range past the end succeeded"
+    );
+    check!(
+        ok(c.p.size(&f), "size")? == len,
+        "allocate_range past the end grew the file"
+    );
+    ok(
+        c.p.allocate_range(&f, len, 0),
+        "allocate_range of 0 at the end",
+    )?;
+    let r = ok(
+        c.p.open_file(&dir, &name("a")?, FileMode::ReadOnly),
+        "open read-only",
+    )?;
+    check!(
+        c.p.allocate_range(&r, 0, BLOCK as u64).is_err(),
+        "allocate_range on a read-only handle succeeded"
     );
     Ok(())
 }

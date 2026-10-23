@@ -7,7 +7,10 @@
 use store_io_core::evidence::Tri;
 use store_io_platform::{RangeState, RawResult, ReleaseHow};
 use windows_sys::Win32::Foundation::{ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED};
-use windows_sys::Win32::Storage::FileSystem::{FileAllocationInfo, FileEndOfFileInfo};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_INTEGRITY_STREAM, FILE_ATTRIBUTE_SPARSE_FILE,
+    FileAllocationInfo, FileEndOfFileInfo,
+};
 use windows_sys::Win32::System::Ioctl::{
     FILE_REGION_USAGE_VALID_CACHED_DATA, FILE_REGION_USAGE_VALID_NONCACHED_DATA,
     FSCTL_FILE_LEVEL_TRIM, FSCTL_QUERY_FILE_REGIONS, FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA,
@@ -34,6 +37,35 @@ pub(crate) fn allocate(file: &WinFile, len: u64) -> RawResult<()> {
     let rec = signed.to_le_bytes();
     sys::set_file_info(file.handle(), FileAllocationInfo, &rec)?;
     sys::set_file_info(file.handle(), FileEndOfFileInfo, &rec)
+}
+
+/// Allocates `[offset, offset + len)` inside the file. A plain NTFS file
+/// has every cluster below its end of file allocated already (`allocate`
+/// and `set_len` allocate real clusters; the valid data length moves only
+/// the zero fill), so there is nothing to do. Refused as unsupported: a
+/// sparse file (after a `Deallocate` release: holes NTFS allocates only by
+/// writing them), a compressed one (units of zeros stay unallocated, and a
+/// rewrite may need more) and one with an integrity stream (ReFS copies on
+/// write).
+pub(crate) fn allocate_range(file: &WinFile, offset: u64, len: u64) -> RawResult<()> {
+    if !file.is_writable() {
+        return Err(sys::win32(
+            windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED,
+        ));
+    }
+    let Some(end) = offset.checked_add(len) else {
+        return Err(sys::win32(ERROR_INVALID_PARAMETER));
+    };
+    if end > size(file)? {
+        return Err(sys::win32(ERROR_INVALID_PARAMETER));
+    }
+    let (attrs, _tag) = sys::attribute_tag(file.handle())?;
+    let unsure =
+        FILE_ATTRIBUTE_SPARSE_FILE | FILE_ATTRIBUTE_COMPRESSED | FILE_ATTRIBUTE_INTEGRITY_STREAM;
+    if attrs & unsure != 0 {
+        return Err(sys::win32(ERROR_NOT_SUPPORTED));
+    }
+    Ok(())
 }
 
 /// Sets the end of file to exactly `len` (allocation follows NTFS rules).

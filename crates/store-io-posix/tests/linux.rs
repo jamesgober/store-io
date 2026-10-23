@@ -679,3 +679,63 @@ fn test_set_len_truncates_and_extends_with_zeros() {
     );
     drop(t);
 }
+
+/// `allocate_range` allocates a punched range again (as unwritten extents:
+/// the file's blocks are back, and they read as not written), leaves the
+/// written bytes and the size as they are, and refuses a range past the end
+/// and a read-only handle.
+#[test]
+fn test_allocate_range_allocates_holes_inside_the_file() {
+    use std::os::unix::fs::MetadataExt;
+    let (t, p, dir, file, pool, mut q) = setup();
+    let len = 1u64 << 20;
+    p.allocate(&file, len).unwrap();
+    for i in 0..16u64 {
+        assert_eq!(
+            write(&mut q, &file, &pool, i * 65536, 65536, 0x5A, false),
+            Ok(65536)
+        );
+    }
+    q.submit(IoOp::FlushData { file: &file }, 0).unwrap();
+    assert_eq!(drain(&mut q)[0].1, Ok(0));
+    let blocks = || std::fs::metadata(t.path().join("data")).unwrap().blocks();
+    let full = blocks();
+    p.release_range(&file, 0, 256 << 10, ReleaseHow::Deallocate)
+        .unwrap();
+    assert!(blocks() < full, "the hole was not punched");
+    p.allocate_range(&file, 0, 256 << 10).unwrap();
+    assert!(blocks() >= full, "the hole was not allocated again");
+    assert_eq!(p.size(&file).unwrap(), len);
+    assert_eq!(
+        p.range_state(&file, 0, 256 << 10).unwrap().unwritten,
+        Tri::Yes,
+        "allocated, not written"
+    );
+    assert_eq!(
+        p.range_state(&file, 256 << 10, len - (256 << 10))
+            .unwrap()
+            .unwritten,
+        Tri::No,
+        "written bytes stay written"
+    );
+    assert_eq!(
+        p.allocate_range(&file, len - 4096, 8192).unwrap_err().code,
+        libc::EINVAL
+    );
+    assert_eq!(p.size(&file).unwrap(), len, "nothing grew the file");
+    // A length of 0 inside the file or at its end does nothing (the call
+    // itself would refuse it).
+    p.allocate_range(&file, len, 0).unwrap();
+    p.allocate_range(&file, 4096, 0).unwrap();
+    assert_eq!(
+        p.allocate_range(&file, len + 4096, 0).unwrap_err().code,
+        libc::EINVAL
+    );
+    let ro = p
+        .open_file(&dir, &name("data"), FileMode::ReadOnly)
+        .unwrap();
+    assert_eq!(
+        p.allocate_range(&ro, 0, 4096).unwrap_err().code,
+        libc::EBADF
+    );
+}

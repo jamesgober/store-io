@@ -473,7 +473,7 @@ impl Platform for SimPlatform {
         file: &SimFile,
         offset: u64,
         len: u64,
-        _how: ReleaseHow,
+        how: ReleaseHow,
     ) -> RawResult<()> {
         let probe = lock(&self.world).release_probe.0.clone();
         if let Some(probe) = probe {
@@ -481,14 +481,23 @@ impl Platform for SimPlatform {
         }
         let mut w = lock(&self.world);
         file.check(&w, true)?;
-        w.release(file.id, offset, len)
+        // A deallocation punches a hole; a trim in place leaves the space
+        // allocated.
+        w.release(file.id, offset, len, how == ReleaseHow::Deallocate)
     }
 
-    fn range_state(&self, file: &SimFile, _offset: u64, len: u64) -> RawResult<RangeState> {
+    fn allocate_range(&self, file: &SimFile, offset: u64, len: u64) -> RawResult<()> {
+        let mut w = lock(&self.world);
+        file.check(&w, true)?;
+        w.allocate_range(file.id, offset, len)
+    }
+
+    fn range_state(&self, file: &SimFile, offset: u64, len: u64) -> RawResult<RangeState> {
         let w = lock(&self.world);
         file.check(&w, false)?;
+        let unwritten = w.unwritten(file.id, offset, len)?;
         Ok(RangeState {
-            unwritten: Tri::No,
+            unwritten: if unwritten { Tri::Yes } else { Tri::No },
             shared: Tri::No,
             cached_pages: Some(if w.cached_pages() {
                 len.div_ceil(4096)

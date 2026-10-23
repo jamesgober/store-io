@@ -130,6 +130,50 @@ struct FileState {
     visible: Vec<u8>,
     media: Vec<u8>,
     durable_len: u64,
+    /// Bytes nothing has written since a `Deallocate` release punched them,
+    /// or since the file grew over them (`allocate`, `set_len`, a write past
+    /// the end), `(start, end)`, sorted and apart: `range_state` reports
+    /// them unwritten, as a real file system's holes and unwritten extents.
+    holes: Vec<(u64, u64)>,
+}
+
+/// Adds `[s, e)` to `ranges` (sorted, apart), merging what it touches.
+fn mark(ranges: &mut Vec<(u64, u64)>, s: u64, e: u64) {
+    if s >= e {
+        return;
+    }
+    let (mut s, mut e) = (s, e);
+    ranges.retain(|&(a, b)| {
+        if b < s || a > e {
+            return true;
+        }
+        s = s.min(a);
+        e = e.max(b);
+        false
+    });
+    let at = ranges.partition_point(|r| r.0 < s);
+    ranges.insert(at, (s, e));
+}
+
+/// Removes `[s, e)` from `ranges`.
+fn unmark(ranges: &mut Vec<(u64, u64)>, s: u64, e: u64) {
+    if s >= e {
+        return;
+    }
+    let mut out = Vec::with_capacity(ranges.len() + 1);
+    for &(a, b) in ranges.iter() {
+        if b <= s || a >= e {
+            out.push((a, b));
+            continue;
+        }
+        if a < s {
+            out.push((a, s));
+        }
+        if b > e {
+            out.push((e, b));
+        }
+    }
+    *ranges = out;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -236,6 +280,7 @@ pub struct World {
     dir_syncs: u64,
     reopens: u64,
     releases: u64,
+    range_allocations: u64,
     queues: u64,
     set_lens: u64,
     allocated: u64,
@@ -268,6 +313,7 @@ impl World {
             dir_syncs: 0,
             reopens: 0,
             releases: 0,
+            range_allocations: 0,
             queues: 0,
             set_lens: 0,
             allocated: 0,
@@ -386,6 +432,14 @@ impl World {
     #[must_use]
     pub fn releases(&self) -> u64 {
         self.releases
+    }
+
+    /// `Platform::allocate_range` calls so far, failed or not. Arm
+    /// `fail_allocate_range = Some((range_allocations() + 1, code))` to fail
+    /// the next one.
+    #[must_use]
+    pub fn range_allocations(&self) -> u64 {
+        self.range_allocations
     }
 
     /// Queues made so far (`Platform::queue`).
@@ -565,6 +619,7 @@ impl World {
             let new_len = usize::try_from(len).map_err(|_| EINVAL)?;
             if let Some(f) = self.files.get_mut(&file) {
                 f.visible.resize(new_len, 0);
+                mark(&mut f.holes, cur, len);
             }
         }
         Ok(())
@@ -583,6 +638,7 @@ impl World {
         self.allocated = self.allocated.saturating_sub(cur - len);
         if let Some(f) = self.files.get_mut(&file) {
             f.visible.truncate(new_len);
+            unmark(&mut f.holes, len, u64::MAX);
         }
         Ok(())
     }
@@ -594,7 +650,13 @@ impl World {
             .ok_or(EBADF)
     }
 
-    pub(crate) fn release(&mut self, file: FileId, offset: u64, len: u64) -> Result<(), OsError> {
+    pub(crate) fn release(
+        &mut self,
+        file: FileId,
+        offset: u64,
+        len: u64,
+        hole: bool,
+    ) -> Result<(), OsError> {
         self.releases += 1;
         if let Some((at, code)) = self.cfg.faults.fail_release {
             if at == self.releases {
@@ -610,7 +672,46 @@ impl World {
         for (i, b) in f.visible[s..e].iter_mut().enumerate() {
             *b = 0xDE ^ (i as u8);
         }
+        if hole {
+            mark(&mut f.holes, s as u64, e as u64);
+        }
         Ok(())
+    }
+
+    /// `Platform::allocate_range`: inside the file, no byte changed (a
+    /// hole stays unwritten, as an unwritten extent reads).
+    pub(crate) fn allocate_range(
+        &mut self,
+        file: FileId,
+        offset: u64,
+        len: u64,
+    ) -> Result<(), OsError> {
+        self.range_allocations += 1;
+        if let Some((at, code)) = self.cfg.faults.fail_allocate_range {
+            if at == self.range_allocations {
+                return Err(OsError {
+                    code,
+                    source: OsErrorSource::Sim,
+                });
+            }
+        }
+        let f = self.files.get(&file).ok_or(EBADF)?;
+        let end = offset.checked_add(len).ok_or(EINVAL)?;
+        if end > f.visible.len() as u64 {
+            return Err(EINVAL);
+        }
+        Ok(())
+    }
+
+    /// Whether any of `[offset, offset + len)` is a hole (see `holes`) or
+    /// past the end of the file.
+    pub(crate) fn unwritten(&self, file: FileId, offset: u64, len: u64) -> Result<bool, OsError> {
+        let f = self.files.get(&file).ok_or(EBADF)?;
+        if len == 0 {
+            return Ok(false);
+        }
+        let end = offset.saturating_add(len);
+        Ok(end > f.visible.len() as u64 || f.holes.iter().any(|&(a, b)| a < end && b > offset))
     }
 
     pub(crate) fn cached_pages(&self) -> bool {
@@ -664,6 +765,10 @@ impl World {
             });
             return Err(EIO);
         }
+        // The file system marks the range it was asked to write as written,
+        // whatever the device does with the data (a short write: only what
+        // it transferred, below).
+        let asked = (offset, offset.saturating_add(data.len() as u64));
         if self.cfg.faults.lose_write == Some(n) {
             self.trace.push(TraceEvent::Write {
                 file,
@@ -671,6 +776,9 @@ impl World {
                 len: data.len() as u64,
                 err: 0,
             });
+            if let Some(f) = self.files.get_mut(&file) {
+                unmark(&mut f.holes, asked.0, asked.1);
+            }
             return Ok(data.len());
         }
         let mut target = offset;
@@ -692,10 +800,15 @@ impl World {
             .and_then(|t| t.checked_add(len))
             .ok_or(EINVAL)?;
         if f.visible.len() < end {
+            let old = f.visible.len() as u64;
             f.visible.resize(end, 0);
+            mark(&mut f.holes, old, end as u64);
         }
         let start = end - len;
         f.visible[start..end].copy_from_slice(data);
+        // Where the write was asked to go (a misdirected one lands
+        // elsewhere, but its own range is what the file system marks).
+        unmark(&mut f.holes, asked.0, asked.0.saturating_add(len as u64));
         if durable_now {
             if f.media.len() < end {
                 f.media.resize(end, 0);
@@ -884,6 +997,7 @@ impl World {
             let len = usize::try_from(f.durable_len).unwrap_or(usize::MAX);
             f.media.resize(len, 0);
             f.visible = f.media.clone();
+            unmark(&mut f.holes, f.durable_len, u64::MAX);
         }
         for d in self.dirs.values_mut() {
             d.entries = d.durable.clone();

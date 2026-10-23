@@ -13,6 +13,21 @@
 
 ### Added
 
+- `store-io-platform`: `Platform::allocate_range(file, offset, len)`:
+  allocates real blocks inside the file, never changing its size or a
+  written byte (blocks it allocates read as zeros until written); a
+  range past the end, or a read-only handle, is refused. Linux:
+  `fallocate` with `KEEP_SIZE` (`EOPNOTSUPP` where the file system cannot
+  allocate inside a file); Windows: nothing to do in a plain NTFS file,
+  a sparse, compressed or integrity-stream one refused as unsupported (a
+  write there may still need space). A copy-on-write file system may
+  still allocate when the range is written. For format 2's capped regions
+  (v0.5 E4 C6). A conformance scenario runs on every backend.
+- Simulator: `range_state` now reports unwritten what no write has
+  covered: a hole a `Deallocate` release punched (a trim in place
+  punches none), a file's growth, and anything past its end (it used to
+  report everything written); `FaultPlan::fail_allocate_range`,
+  `World::range_allocations`.
 - `store-io-format`: `footprint::{Run, runs}`, a region's extents in data
   order coalesced into runs, extents adjacent in the file (spec §11). The
   engine's region map is built from them (v0.5 E4 C2): a region in several

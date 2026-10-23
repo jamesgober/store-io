@@ -466,6 +466,23 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C6: allocate_range inside the file only, at its own range (Linux);
+ # the simulator's holes (punched by a deallocation, filled by a write) and
+ # its bounds
+ ('crates/store-io-posix/src/alloc.rs', '    if end > size(file)? {\n        return Err(sys::errno(libc::EINVAL));\n    }\n    if len == 0 {', '    if end > size(file)? && false {\n        return Err(sys::errno(libc::EINVAL));\n    }\n    if len == 0 {', POSIX),
+ ('crates/store-io-posix/src/alloc.rs', '    sys::fallocate(file.raw(), libc::FALLOC_FL_KEEP_SIZE, off, l)\n}', '    sys::fallocate(file.raw(), libc::FALLOC_FL_KEEP_SIZE, off + 4096, l)\n}', POSIX),
+ ('crates/store-io-posix/src/alloc.rs', '    if len == 0 {\n        return Ok(());\n    }\n    let off', '    if len == 0 && false {\n        return Ok(());\n    }\n    let off', POSIX),
+ ('crates/store-io-sim/src/world.rs', '        unmark(&mut f.holes, asked.0, asked.0.saturating_add(len as u64));', '        let _ = asked;', ENGINE),
+ ('crates/store-io-sim/src/world.rs', '        if hole {\n            mark(&mut f.holes, s as u64, e as u64);', '        if hole && false {\n            mark(&mut f.holes, s as u64, e as u64);', ENGINE),
+ ('crates/store-io-sim/src/world.rs', '        if end > f.visible.len() as u64 {\n            return Err(EINVAL);\n        }\n        Ok(())', '        if end > f.visible.len() as u64 && false {\n            return Err(EINVAL);\n        }\n        Ok(())', ENGINE),
+ # C6 review: a trim punches no hole; past the end is unwritten; growth,
+ # and the gap a write past the end leaves, are holes; a lost write is
+ # still written to the file system
+ ('crates/store-io-sim/src/platform.rs', 'w.release(file.id, offset, len, how == ReleaseHow::Deallocate)', 'w.release(file.id, offset, len, how == ReleaseHow::Deallocate || true)', ENGINE),
+ ('crates/store-io-sim/src/world.rs', 'Ok(end > f.visible.len() as u64 || f.holes', 'Ok(end > f.visible.len() as u64 && false || f.holes', ENGINE),
+ ('crates/store-io-sim/src/world.rs', '                mark(&mut f.holes, cur, len);', '                let _ = cur;', ENGINE),
+ ('crates/store-io-sim/src/world.rs', '            mark(&mut f.holes, old, end as u64);', '            let _ = old;', ENGINE),
+ ('crates/store-io-sim/src/world.rs', '            if let Some(f) = self.files.get_mut(&file) {\n                unmark(&mut f.holes, asked.0, asked.1);\n            }', '            if let Some(f) = self.files.get_mut(&file).filter(|_| false) {\n                unmark(&mut f.holes, asked.0, asked.1);\n            }', ENGINE),
  # E4 C5: a Submitter's operation across runs: its first piece; the
  # rotation after each piece and at the end; settled once, over the whole
  # operation; a refused next piece settles over what was done; a refused

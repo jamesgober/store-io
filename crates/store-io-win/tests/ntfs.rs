@@ -742,3 +742,53 @@ fn test_idle_wakes_do_not_pile_up_and_never_count_as_completions() {
     assert_eq!(q.in_flight(), 0);
     assert_eq!(q.reap(&mut out), 0);
 }
+
+/// `allocate_range` inside a plain (not sparse) file succeeds and changes
+/// nothing; past the end it is refused; a file a deallocation made sparse
+/// may hold holes NTFS allocates only by writing: refused as unsupported.
+#[test]
+fn test_allocate_range_inside_a_plain_file_and_not_a_sparse_one() {
+    const ERROR_NOT_SUPPORTED: i32 = 50;
+    const ERROR_INVALID_PARAMETER: i32 = 87;
+    let fx = fixture("arange");
+    let f = fx.p.create_file(&fx.dir, &name("a.sio")).unwrap();
+    fx.p.allocate(&f, 1 << 20).unwrap();
+    let mut q = fx.p.queue(QueueConfig::default()).unwrap();
+    for i in 0..16u64 {
+        assert_eq!(
+            write_block(&mut q, &f, &fx.pool, i * BLOCK as u64, 0xAA, false),
+            Ok(BLOCK)
+        );
+    }
+    fx.p.flush_all(&f).unwrap();
+    fx.p.allocate_range(&f, 0, 1 << 20).unwrap();
+    assert_eq!(fx.p.size(&f).unwrap(), 1 << 20);
+    assert!(
+        read_block(&mut q, &f, &fx.pool, 0)
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0xAA)
+    );
+    assert_eq!(
+        fx.p.allocate_range(&f, (1 << 20) - BLOCK as u64, 2 * BLOCK as u64)
+            .unwrap_err()
+            .code,
+        ERROR_INVALID_PARAMETER
+    );
+    let ro =
+        fx.p.open_file(&fx.dir, &name("a.sio"), FileMode::ReadOnly)
+            .unwrap();
+    assert_eq!(
+        fx.p.allocate_range(&ro, 0, BLOCK as u64).unwrap_err().code,
+        ERROR_ACCESS_DENIED
+    );
+    fx.p.release_range(&f, 0, 8 * BLOCK as u64, ReleaseHow::Deallocate)
+        .unwrap();
+    assert_eq!(
+        fx.p.allocate_range(&f, 0, 8 * BLOCK as u64)
+            .unwrap_err()
+            .code,
+        ERROR_NOT_SUPPORTED
+    );
+    assert_eq!(fx.p.size(&f).unwrap(), 1 << 20);
+}

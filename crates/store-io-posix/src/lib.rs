@@ -510,6 +510,10 @@ mod platform {
             alloc::allocate(file, len)
         }
 
+        fn allocate_range(&self, file: &PosixFile, offset: u64, len: u64) -> RawResult<()> {
+            alloc::allocate_range(file, offset, len)
+        }
+
         fn set_len(&self, file: &PosixFile, len: u64) -> RawResult<()> {
             alloc::set_len(file, len)
         }

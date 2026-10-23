@@ -560,6 +560,28 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error (out of space reports the platform's ENOSPC equivalent).
     fn allocate(&self, file: &Self::File, len: u64) -> RawResult<()>;
 
+    /// Allocates real blocks for `[offset, offset + len)`, inside the file:
+    /// its size never changes, and bytes already written stay as they are.
+    /// Blocks it allocates read as zeros until written (an unwritten extent
+    /// on Linux), never another file's data. For space a write will need
+    /// later without writing it now (format 2's capped regions): that holds
+    /// on a file system that overwrites in place; one that copies on write
+    /// (btrfs, ZFS) or a range sharing blocks with another file (a reflink)
+    /// may still allocate when the range is written. A length of 0 inside
+    /// the file or at its end does nothing.
+    ///
+    /// # Errors
+    ///
+    /// The raw error: out of space as the platform's ENOSPC equivalent; a
+    /// range past the end of the file as EINVAL's (Windows:
+    /// `ERROR_INVALID_PARAMETER`); a read-only handle (`EBADF`,
+    /// `ERROR_ACCESS_DENIED`); a file system that cannot allocate inside a
+    /// file (Linux `EOPNOTSUPP`: ext4 without extents, NFS before 4.2, many
+    /// FUSE file systems) or a file whose space a write may still need to
+    /// allocate (Windows: sparse, compressed or integrity-stream files,
+    /// `ERROR_NOT_SUPPORTED`) as unsupported.
+    fn allocate_range(&self, file: &Self::File, offset: u64, len: u64) -> RawResult<()>;
+
     /// Current file size.
     ///
     /// # Errors

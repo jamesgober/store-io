@@ -124,6 +124,13 @@ impl Accounting {
         t.physical = t.physical.saturating_add(physical);
     }
 
+    /// Stops counting a released format-2 region.
+    pub(crate) fn remove_usage(&mut self, tag: u32, logical: u64, physical: u64) {
+        let t = self.tag(tag);
+        t.logical = t.logical.saturating_sub(logical);
+        t.physical = t.physical.saturating_sub(physical);
+    }
+
     /// Counts a newly ready region.
     pub(crate) fn add(&mut self, e: &TableEntry, block: u64) {
         let physical = e.extent_len(block).unwrap_or(u64::MAX);

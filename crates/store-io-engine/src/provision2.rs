@@ -240,7 +240,11 @@ where
         }
         // Durable: memory follows.
         if let Some(v2) = meta.v2.as_deref_mut() {
-            v2.allocated.push((offset, extent));
+            // As the open records a footprint: the header blocks, then the
+            // data extent (release removes exactly these).
+            v2.allocated.push((offset, block));
+            v2.allocated.push((offset + block, block));
+            v2.allocated.extend(extents.iter().copied());
             v2.usage.push((tag, data_size, extent));
         }
         let len = meta.container_len;

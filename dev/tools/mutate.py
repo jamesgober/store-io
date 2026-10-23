@@ -57,6 +57,8 @@ F2 = ["-p", "store-io-engine", "--test", "format2", "--test", "format2_create"]
 F2R = ["-p", "store-io-engine", "--test", "format2_regions", "--test", "format2"]
 # Format-2 provisioning, audited on the raw media.
 F2P = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "format2"]
+# Format-2 release, audited on the raw media.
+F2X = ["-p", "store-io-engine", "--test", "format2_release"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -445,6 +447,16 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
+ # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
+ # the footprint and usage leave memory; free space recomputed; the
+ # header says Released; format 2 never takes format 1's path
+ ('crates/store-io-engine/src/lifecycle2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '                next_seq: ph.next_seq,', '                next_seq: ph.next_seq - 1,', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '                    let _gone = v2.allocated.swap_remove(i);', '                    let _gone = i;', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '                let _gone = v2.usage.swap_remove(i);', '                let _gone = i;', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '            v2.rebuild_free(len);', '            let _ = (v2, len);', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Released, 0)?;', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0)?;', F2X),
+ ('crates/store-io-engine/src/lifecycle.rs', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {\n            return self.release_region2(r);', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 && r.id.get() == u64::MAX {\n            return self.release_region2(r);', F2X),
  # E2b/E3 C5: provisioning in format 2: frozen refuses provisioning
  # and reservations; a name held by an unavailable or unknown-kind entry
  # is taken; a page is used while it has room; first fit before the

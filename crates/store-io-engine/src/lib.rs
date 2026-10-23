@@ -40,6 +40,7 @@ mod gate;
 mod io;
 mod layout;
 mod lifecycle;
+mod lifecycle2;
 mod open;
 mod open2;
 mod optable;

@@ -102,7 +102,7 @@ where
     }
 
     /// Retires `r` for `how`, waiting out every operation in flight.
-    fn retire(&self, r: &LiveRegion, how: Retire) -> Result<(), Error> {
+    pub(crate) fn retire(&self, r: &LiveRegion, how: Retire) -> Result<(), Error> {
         self.ready_for(r)?;
         if r.kind == RegionKind::Slot {
             return Err(Error::Unsupported {
@@ -113,9 +113,8 @@ where
     }
 
     /// Starts a new generation of `r` and returns its state.
-    /// Recycle, release and slot commit rewrite a format-1 header; their
-    /// format-2 forms arrive with E2b/E3 C6 and C7. Refused before anything
-    /// is touched.
+    /// Recycle and slot commit rewrite a format-1 header; their format-2
+    /// forms arrive with E2b/E3 C7. Refused before anything is touched.
     pub(crate) fn refuse_format_2(&self) -> Result<(), Error> {
         if self.inner.layout.format == store_io_format::slot::FORMAT_2 {
             return Err(Error::Unsupported {
@@ -187,7 +186,9 @@ where
 
     /// Releases `r`: table entry, header, then the space.
     pub(crate) fn release_region(&self, r: &Arc<LiveRegion>) -> Result<(), Error> {
-        self.refuse_format_2()?;
+        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {
+            return self.release_region2(r);
+        }
         let inner = &self.inner;
         let c = ctx(r);
         // Retired (waiting out every operation in flight) before the

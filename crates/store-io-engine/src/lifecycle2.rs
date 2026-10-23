@@ -1,0 +1,228 @@
+//! Releasing a region in container format 2 (spec §12): with the region
+//! drained and its lock held (the header mutex, before the metadata lock,
+//! D-113), and the metadata lock held throughout, the region's page is
+//! written without its entry (the commit; every other entry byte for byte,
+//! `next_seq` never reused), then its header says Released, its data
+//! extents are deallocated, and free space is the complement again.
+
+use std::sync::{Arc, PoisonError};
+
+use store_io_core::error::{Error, NotWrittenCause, Op};
+use store_io_core::evidence::PlatformKind;
+use store_io_format::judge::Standing;
+use store_io_format::meta::RegionState;
+use store_io_format::meta2::{
+    PAGE_HEADER_LEN, PageHeader, decode_region_header, encode_page, encode_region_header,
+};
+use store_io_format::slot::FORMAT_2;
+use store_io_platform::{Platform, ReleaseHow};
+
+use crate::gate::Retire;
+use crate::io::{ctx, not_written};
+use crate::slots::{PairAt, PairRead, plan_next};
+use crate::store::*;
+
+impl<P: Platform> Store<P>
+where
+    P::Queue: Send,
+{
+    /// Releases a format-2 region. See [`Store::release_region`].
+    pub(crate) fn release_region2(&self, r: &Arc<LiveRegion>) -> Result<(), Error> {
+        let inner = &self.inner;
+        let c = ctx(r);
+        if inner.report.metadata.frozen {
+            return Err(not_written(NotWrittenCause::Frozen, c));
+        }
+        // Drained before any lock (a `Submitter` operation holds its pass
+        // until its thread processes the completion; see format 1).
+        self.retire(r, Retire::Release)?;
+        // The region lock, then the metadata lock, both held throughout.
+        let mut header = r.header.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut meta = lock_meta(&inner.meta);
+        let id = r.id.get();
+        let p = usize::try_from(id >> 32).map_err(|_| corrupt())?;
+        let seq = (id & 0xFFFF_FFFF) as u32;
+        let refused = |e: Error| {
+            r.gate.restore();
+            e
+        };
+        // 1. The commit: the page without the entry.
+        let (payload, removed) = {
+            let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
+            let page = v2.pages.get(p).ok_or_else(corrupt)?;
+            let ph = page.header.ok_or_else(corrupt)?;
+            if page.standing != Standing::Confirmed {
+                return Err(refused(not_written(NotWrittenCause::Frozen, c)));
+            }
+            let Some(at) = page.entries.iter().position(|e| e.seq == seq) else {
+                return Err(refused(corrupt()));
+            };
+            let mut raws = page.entries.clone();
+            let removed = raws.remove(at);
+            let next = PageHeader {
+                page_index: ph.page_index,
+                // Never decreases: the id is never handed out again.
+                next_seq: ph.next_seq,
+                count: raws.len() as u16,
+            };
+            let mut buf = vec![0u8; PAGE_HEADER_LEN + 96 * raws.len()];
+            let n = encode_page(&mut buf, &next, &raws).map_err(|_| meta_err())?;
+            buf.truncate(n);
+            (buf, removed)
+        };
+        let meta_seq = crate::v2::next_meta_seq_of(&meta).map_err(refused)?;
+        {
+            let mut q = inner.queues.get(0);
+            if let Err(e) = crate::v2::write_page::<P>(
+                &mut q,
+                &inner.file,
+                &inner.pool,
+                &inner.layout,
+                inner.volume,
+                &inner.policy,
+                &inner.domain,
+                &mut meta,
+                p,
+                &payload,
+                meta_seq,
+                inner.owner_generation,
+            ) {
+                // Not submitted: nothing changed, the region serves again.
+                // Submitted: the domain is poisoned (durability unknown).
+                if inner.domain.poisoned().is_none() {
+                    r.gate.restore();
+                }
+                self.wake_frontiers();
+                return Err(e);
+            }
+        }
+        // Committed: memory follows, before the header and the space.
+        let block = inner.layout.block();
+        let footprint = footprint_of(&removed, r, block);
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            for range in &footprint {
+                if let Some(i) = v2.allocated.iter().position(|a| a == range) {
+                    let _gone = v2.allocated.swap_remove(i);
+                }
+            }
+            let physical = removed.capacity.saturating_add(2 * block);
+            if let Some(i) = v2
+                .usage
+                .iter()
+                .position(|u| *u == (removed.tag, removed.data_size, physical))
+            {
+                let _gone = v2.usage.swap_remove(i);
+            }
+        }
+        crate::space::lock_acct(&inner.acct).remove_usage(
+            removed.tag,
+            removed.data_size,
+            removed.capacity.saturating_add(2 * block),
+        );
+        inner
+            .regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|x| x.id != r.id);
+        // 2. The header says Released (for tools that list regions from
+        //    headers); its extents, fill and key as they were.
+        let _generation = self.rewrite_header2(r, &mut header, RegionState::Released, 0)?;
+        // 3. The data extents (never the header blocks, which must keep
+        //    saying released), as format 1 does.
+        let windows = inner.report.evidence.platform == PlatformKind::Windows;
+        let how = if windows {
+            ReleaseHow::TrimInPlace
+        } else {
+            ReleaseHow::Deallocate
+        };
+        let released = r
+            .map
+            .extents()
+            .try_for_each(|(at, len)| inner.platform.release_range(&inner.file, at, len, how));
+        // 4. Free space: the complement, recomputed.
+        let len = meta.container_len;
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            v2.rebuild_free(len);
+        }
+        match released {
+            Ok(()) => Ok(()),
+            Err(_) if windows => Ok(()),
+            Err(raw) => Err(Error::Io {
+                op: Op::Release,
+                raw,
+                ctx: c,
+            }),
+        }
+    }
+
+    /// Writes the region's header again with `state` and its region
+    /// generation moved on by `generation_step`: the extents it lists (the
+    /// entry's, never an extra one), its fill and key, its may-ignore
+    /// flags and its object as they were. The caller holds the region lock
+    /// (`header`).
+    pub(crate) fn rewrite_header2(
+        &self,
+        r: &LiveRegion,
+        header: &mut PairRead,
+        state: RegionState,
+        generation_step: u64,
+    ) -> Result<u64, Error> {
+        let inner = &self.inner;
+        let c = ctx(r);
+        let metadata = || Error::Corruption {
+            kind: store_io_core::error::CorruptionKind::Metadata,
+            ctx: c,
+        };
+        let bytes = header.payload.as_deref().ok_or_else(metadata)?;
+        let view = decode_region_header(bytes, inner.layout.log2_block, u64::MAX)
+            .map_err(|_| metadata())?;
+        let extents: Vec<(u64, u64)> = view.extents().take(r.map.extents().count()).collect();
+        let mut h = view.header;
+        h.state = state;
+        h.extent_count = extents.len() as u16;
+        h.region_generation = h
+            .region_generation
+            .checked_add(generation_step)
+            .ok_or_else(metadata)?;
+        let object = view.object().to_vec();
+        let mut buf = vec![0u8; inner.layout.block() as usize];
+        let n = encode_region_header(&mut buf, &h, &extents, &object).map_err(|_| metadata())?;
+        let next = plan_next(header, &buf[..n], inner.owner_generation)?;
+        let [a, b] = r.header_at;
+        let at = PairAt {
+            volume: *inner.volume.as_bytes(),
+            object: inner.layout.region_object(r.id.get()),
+            a,
+            b,
+            log2: inner.layout.log2_block,
+            format: FORMAT_2,
+            numbered: false,
+        };
+        let mut lane = self.lane(r, Op::Write)?;
+        let written = durable_slot::<P>(
+            &mut lane,
+            &inner.file,
+            &inner.pool,
+            &at,
+            header,
+            &next,
+            &inner.policy,
+            &inner.domain,
+        )
+        .inspect_err(|_| self.wake_frontiers())?;
+        *header = written;
+        Ok(h.region_generation)
+    }
+}
+
+/// The byte ranges a region occupies, as the open and provisioning record
+/// them: its two header blocks, then its data extents.
+fn footprint_of(
+    e: &store_io_format::meta2::RawEntry,
+    r: &LiveRegion,
+    block: u64,
+) -> Vec<(u64, u64)> {
+    let mut v = vec![(e.header_a, block), (e.header_b, block)];
+    v.extend(r.map.extents().filter(|x| x.1 > 0));
+    v
+}

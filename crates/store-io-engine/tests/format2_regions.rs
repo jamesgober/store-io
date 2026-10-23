@@ -342,8 +342,8 @@ fn unsupported(e: &Error) -> bool {
     )
 }
 
-/// Recycle, release and slot commit are format 1's until E2b/E3 C6 and C7:
-/// refused before anything is touched, and the region still serves.
+/// Recycle and slot commit are format 1's until E2b/E3 C7: refused before
+/// anything is touched, and the region still serves.
 #[test]
 fn test_lifecycle_changes_are_refused_in_format_2_for_now() {
     let p = fresh(216);
@@ -358,7 +358,6 @@ fn test_lifecycle_changes_are_refused_in_format_2_for_now() {
     let s = open(&p);
     let log = s.append_region("log").unwrap();
     assert!(unsupported(&log.recycle().err().unwrap()));
-    assert!(unsupported(&log.clone().release().unwrap_err()));
     assert!(unsupported(
         &s.slot("slot").unwrap().commit(b"x").unwrap_err()
     ));

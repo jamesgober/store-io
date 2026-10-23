@@ -108,6 +108,12 @@ where
 
     /// Commits a new version of the object.
     ///
+    /// The receipt's generation counts commits (the slot pair's
+    /// generation: 2 for the first). In format 2 a slot region also has a
+    /// region generation, in its header, which a commit leaves as it is
+    /// (only a recycle moves a region generation on, and slots are never
+    /// recycled).
+    ///
     /// # Errors
     ///
     /// `NotWritten(TooLarge)` beyond [`Self::capacity`], `Io` if the store's

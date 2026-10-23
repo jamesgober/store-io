@@ -176,7 +176,6 @@ where
     /// entry's extents (never an extra one) and everything else kept.
     /// Returns the new region generation.
     pub(crate) fn recycle_header2(&self, r: &LiveRegion) -> Result<Generation, Error> {
-        let c = ctx(r);
         let mut header = r.header.lock().unwrap_or_else(PoisonError::into_inner);
         // The entry's extent count, read under the metadata lock (taken
         // after the region lock, D-113).
@@ -192,8 +191,7 @@ where
                 .map(|e| usize::from(e.extent_count))
                 .ok_or_else(corrupt)?
         };
-        let g = self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)?;
-        Generation::from_raw(g).ok_or_else(|| not_written(NotWrittenCause::TooLarge, c))
+        self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)
     }
 
     /// Writes the region's header again with `state` and its region
@@ -208,7 +206,7 @@ where
         state: RegionState,
         generation_step: u64,
         committed: usize,
-    ) -> Result<u64, Error> {
+    ) -> Result<Generation, Error> {
         let inner = &self.inner;
         let c = ctx(r);
         let metadata = || Error::Corruption {
@@ -226,6 +224,8 @@ where
             .region_generation
             .checked_add(generation_step)
             .ok_or_else(metadata)?;
+        // Converted before the write, so nothing can fail after it.
+        let generation = Generation::from_raw(h.region_generation).ok_or_else(metadata)?;
         let object = view.object().to_vec();
         let mut buf = vec![0u8; inner.layout.block() as usize];
         let n = encode_region_header(&mut buf, &h, &extents, &object).map_err(|_| metadata())?;
@@ -253,7 +253,7 @@ where
         )
         .inspect_err(|_| self.wake_frontiers())?;
         *header = written;
-        Ok(h.region_generation)
+        Ok(generation)
     }
 }
 

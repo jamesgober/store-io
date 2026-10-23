@@ -219,9 +219,24 @@ pub(crate) fn check_regions<Q: Queue>(
                 small: false,
                 outcome: Err(Unavailable::HeaderUnreadable),
             };
-            if let (Some(bytes), Some((_, info))) =
+            if let (Some(bytes), Some((won, info))) =
                 (c.header.payload.as_deref(), c.header.report.winner_info())
             {
+                // The other slot's header verifies with a newer generation,
+                // its version unread (a torn write explains the survivor, so
+                // the winner is still Confirmed): a recycle or slot commit
+                // possibly lost (spec §8).
+                let other = usize::from(1 - won.as_u8());
+                let newer = c.header.facts[other]
+                    .and_then(|f| f.numbered)
+                    .is_some_and(|n| n.generation > info.generation);
+                if newer {
+                    pushed(
+                        &mut report.lost_header_writes,
+                        RegionId::from_raw(id),
+                        &mut truncated,
+                    );
+                }
                 c.outcome = Err(Unavailable::HeaderInvalid);
                 if let Ok(view) = decode_region_header(bytes, layout.log2_block, container_len) {
                     let committed = usize::from(entry.extent_count);

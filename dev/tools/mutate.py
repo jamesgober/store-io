@@ -455,10 +455,13 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E2b/E3 C7 review: a header version newer than the winner's that does
+ # not read is reported as a possibly lost recycle or slot commit
+ ('crates/store-io-engine/src/open2.rs', '                if newer {', '                if newer && false {', F2C),
  # E2b/E3 C7: recycle in format 2 moves the region generation on and
  # writes the entry's extents only; a slot commit in format 2 carries
  # the object after the fixed part; neither takes format 1's path
- ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)?', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed)?', F2C),
+ ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed)', F2C),
  ('crates/store-io-engine/src/lifecycle2.rs', '                .map(|e| usize::from(e.extent_count))', '                .map(|e| usize::from(e.extent_count) + 1)', F2C),
  ('crates/store-io-engine/src/lifecycle.rs', '        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 {', '        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 && r.id.get() == u64::MAX {', F2C),
  ('crates/store-io-engine/src/slot_handle.rs', '        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 {', '        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 && data.is_empty() {', F2C),

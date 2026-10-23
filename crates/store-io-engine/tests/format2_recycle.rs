@@ -22,7 +22,8 @@ use format2_util::craft::{region, tear_newer_copy_of, write_regions};
 use format2_util::*;
 use store_io_core::error::{Error, NotWrittenCause};
 use store_io_engine::Store;
-use store_io_format::meta::RegionKind;
+use store_io_format::meta::{FillPattern, RegionKind};
+use store_io_format::slot::SlotIndex;
 use store_io_sim::{CrashMode, SimConfig, SimPlatform};
 
 const B: u64 = 4096;
@@ -195,7 +196,8 @@ fn test_a_slot_commit_keeps_the_fixed_part() {
 #[test]
 fn test_every_crash_of_a_slot_commit_reads_old_or_new() {
     let mut seen = [false; 2];
-    for k in 1..=3u64 {
+    // A commit makes two submissions: its header write, then its flush.
+    for k in 1..=2u64 {
         for seed in 0..8 {
             let p = fresh(1200 + seed);
             let s = open(&p);
@@ -255,4 +257,97 @@ fn test_a_stale_page_refuses_recycle_and_slot_commit() {
         cause(&s.slot("slot").unwrap().commit(b"x").unwrap_err()),
         ro
     );
+}
+
+/// The region generation is the header's, not the slot pair's: a region at
+/// region generation 5 whose header slot B won at slot generation 9
+/// recycles to 6, and opens at 6. Fill and key are kept.
+#[test]
+fn test_recycle_counts_the_region_generation_and_keeps_the_fill() {
+    let p = fresh(1007);
+    let mut r = region(0, RegionKind::Page, "pages", BASE, CAP);
+    r.header.region_generation = 5;
+    r.header.fill = FillPattern::KeyedV1;
+    r.header.fill_key = [3; 16];
+    r.header_slot = SlotIndex::B;
+    r.header_generation = 9;
+    write_regions(&p, 0, &[r]);
+    let s = open(&p);
+    let pages = s.page_region("pages").unwrap();
+    assert_eq!(pages.generation().get(), 5);
+    let next = pages.recycle().unwrap();
+    assert_eq!(next.generation().get(), 6);
+    drop((pages, next));
+    drop(s);
+    let h = header_of(&p, 0, [BASE, BASE + B]).unwrap();
+    assert_eq!((h.header.region_generation, h.slot_generation), (6, 10));
+    assert_eq!(
+        (h.header.fill, h.header.fill_key),
+        (FillPattern::KeyedV1, [3; 16])
+    );
+    assert_eq!(open(&p).page_region("pages").unwrap().generation().get(), 6);
+}
+
+/// A recycle whose header write is refused before submission changes
+/// nothing: the old handle serves, the header is as it was.
+#[test]
+fn test_a_refused_recycle_changes_nothing() {
+    let p = fresh(1008);
+    let s = open(&p);
+    let log = s.provision_append_region("log", CAP).unwrap();
+    let before = header_of(&p, 0, [BASE, BASE + B]).unwrap();
+    p.with_world(|w| {
+        let at = w.write_submits() + 1;
+        w.faults_mut().fail_submit = Some((at, 5));
+    });
+    assert!(log.recycle().is_err());
+    assert!(
+        log.append_durable(&[1u8; B as usize]).is_ok(),
+        "not given back"
+    );
+    let after = header_of(&p, 0, [BASE, BASE + B]).unwrap();
+    assert_eq!(after.slot_generation, before.slot_generation);
+    assert_eq!(after.header.region_generation, 1);
+}
+
+/// A newer header version that does not read (a recycle or slot commit
+/// cut short) is reported (spec §8); the older one is served.
+#[test]
+fn test_a_lost_header_write_is_reported() {
+    let p = fresh(1009);
+    write_regions(&p, 0, &[region(0, RegionKind::Append, "log", BASE, CAP)]);
+    // Slot B: the next generation, torn (its header reads, its payload
+    // does not).
+    let m = media(&p);
+    let a = &m[BASE as usize..(BASE + B) as usize];
+    let h = header_of(&p, 0, [BASE, BASE + B]).unwrap();
+    let mut payload = vec![0u8; B as usize];
+    let n = store_io_format::meta2::encode_region_header(
+        &mut payload,
+        &h.header,
+        &h.extents,
+        &h.object,
+    )
+    .unwrap();
+    payload.truncate(n);
+    let slot = format2_util::craft::slot(
+        &p,
+        1 << 62,
+        BASE + B,
+        SlotIndex::B,
+        12,
+        2,
+        u32::from_le_bytes(a[8..12].try_into().unwrap()),
+        0,
+        &payload,
+        0,
+    );
+    put(&p, BASE + B, &slot);
+    tear(&p, BASE + B);
+    let s = open(&p);
+    assert!(s.report().unavailable.is_empty());
+    assert_eq!(s.append_region("log").unwrap().generation().get(), 1);
+    let lost = &s.report().metadata.lost_header_writes;
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert_eq!(lost[0].get(), 0);
 }

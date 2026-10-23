@@ -70,6 +70,10 @@ pub struct MetadataReport {
     /// growth within capacity changes only the entry, and a lost release
     /// can leave a Ready header over reused space.
     pub stale_page_agreement: Vec<(u32, bool)>,
+    /// Regions whose header pair shows a newer, unreadable version than the
+    /// one the open uses (spec §8): a recycle or slot commit possibly lost
+    /// to a crash. The older version is served.
+    pub lost_header_writes: Vec<RegionId>,
     /// A list above was cut at its limit (256 items).
     pub truncated: bool,
 }
@@ -124,6 +128,9 @@ impl core::fmt::Display for MetadataReport {
         for (p, agrees) in &self.stale_page_agreement {
             let word = if *agrees { "agree" } else { "disagree" };
             writeln!(f, "stale page {p}     headers {word} with entries")?;
+        }
+        if !self.lost_header_writes.is_empty() {
+            writeln!(f, "lost header      {:?}", self.lost_header_writes)?;
         }
         if self.truncated {
             writeln!(f, "(lists cut at 256 items)")?;

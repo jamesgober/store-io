@@ -49,7 +49,9 @@
     stale or lost); `Unavailable::{EntryInvalid, ExtentsInvalid,
     Overlaps, NameTaken}`; `MetadataReport::{invalid_entries,
     extra_extents, superseded, shares_reserved, stale_page_agreement,
-    truncated}`; `store_io_format::meta2::RawEntry::{name,
+    lost_header_writes, truncated}` (`lost_header_writes`: a region header
+    slot that verifies with a newer generation than the version served, a
+    recycle or slot commit possibly lost, spec §8); `store_io_format::meta2::RawEntry::{name,
     name_and_kind}`; `RawEntry::check` bounds the capacity by the span.
   - Tests against media from an independent writer
     (`tests/format2_util/craft.rs`) and judged by an independent audit of

@@ -83,10 +83,15 @@ pub struct StoreOptions {
     pub t3_pool_threads: u32,
     /// How far, in bytes, a new append may start ahead of the oldest
     /// incomplete one on the same region, in blocks: rounded down to a power
-    /// of two, or, on a region smaller than the window, the region rounded
-    /// up (so a region never limits its own appends); at least 2 and at most
-    /// 2^20 blocks. Each append region holds 8 bytes of memory per block of it.
-    /// Default 16 MiB.
+    /// of two, or, on a region that cannot grow past a size smaller than the
+    /// window (format 1's regions, a capped format-2 region), that size
+    /// rounded up (so a region never limits its own appends); at least 2 and
+    /// at most 2^20 blocks. Each append region that has appended since the
+    /// open or its last recycle holds 8 bytes of memory per block of its
+    /// ring: a format-2 region that may grow (no `max_size`) holds the
+    /// window's whatever its size, 32 KiB at the default 16 MiB and 4 KiB
+    /// blocks (2 GiB for 65,536 such regions; a cap, or a smaller window,
+    /// bounds it). Default 16 MiB.
     pub append_window: u64,
     /// Fill new regions with the keyed incompressible pattern instead of
     /// zeros (for thin, virtual, deduplicating or zero-detecting stacks).
@@ -135,10 +140,10 @@ pub struct StoreOptions {
     pub container_format: u16,
     /// The options the `provision_{append,page}_region_default` calls (of
     /// [`Store`] and [`Reservation`](crate::Reservation)) use (default
-    /// none: those calls are refused). An open-time choice, never stored: each open
-    /// may give others, and they apply to regions provisioned from then
-    /// on (an existing region keeps its size and cap). Checked when used,
-    /// so options a later call would refuse never fail an open.
+    /// none: those calls are refused). An open-time choice, never stored:
+    /// each open may give others, and they apply to regions provisioned
+    /// from then on (an existing region keeps its size and cap). Checked
+    /// when used, so options a later call would refuse never fail an open.
     pub region_defaults: Option<crate::RegionOptions>,
 }
 

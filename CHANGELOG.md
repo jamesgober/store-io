@@ -44,10 +44,10 @@
   bytes a write starting past a file's valid data would have zeroed first
   are counted in `World::gap_fill_bytes`; `range_state` reports a range
   past it not valid; a crash or a shrink cuts it back);
-  `World::is_unwritten`; a world that completes more than 500,000 writes,
-  or holds more than 1 GiB of unflushed writes in a volatile cache,
-  panics (a write that never stops fails its test instead of exhausting
-  memory).
+  `World::is_unwritten`; a world that completes more than
+  `SimConfig::runaway_writes` writes (default 500,000), or holds more than
+  1 GiB of unflushed writes in a volatile cache, panics (a write that
+  never stops fails its test instead of exhausting memory).
 - Engine: **growth beyond capacity** in format 2 (v0.5 E4 C9, still
   behind the hidden `StoreOptions::container_format`): `grow` past the
   capacity adds one extent of at least 1 MiB and an eighth of the
@@ -297,7 +297,18 @@
 
 ### Changed
 
-- Engine: `StoreOptions` gains a public field (`region_defaults`).
+- Engine: **an append region in format 2 that may grow (no `max_size`)
+  has a completion ring of the append window's size**, however small it
+  is (v0.5 E4 C12): a ring sized for a small region held a region grown
+  from 64 KiB to 2 GiB to a tenth of the append rate of one provisioned at
+  2 GiB (measured, Windows NVMe, 64 threads); now the same rate. A capped
+  region's ring is sized for its cap, a format-1 region's for its size.
+  The ring is still made at the first completed append: 32 KiB at the
+  default 16 MiB window and 4 KiB blocks for every such region that has
+  appended since the open (2 GiB for 65,536 of them; a cap or a smaller
+  `append_window` bounds it).
+- Engine: `StoreOptions` gains a public field (`region_defaults`), and
+  `store_io_sim::SimConfig` two (`valid_data_model`, `runaway_writes`).
   Breaking for a struct literal or pattern that names every field; one
   with `..` is unaffected.
 - `store-io-core`: **`ReserveTag` is `#[non_exhaustive]`** and gains

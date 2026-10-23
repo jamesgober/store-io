@@ -138,6 +138,24 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        // Format 2: a region that may grow has its ring sized by the window.
+        let reach = if self.inner.layout.format == store_io_format::slot::FORMAT_2 {
+            let flags = header
+                .payload
+                .as_deref()
+                .and_then(|b| {
+                    store_io_format::meta2::decode_region_header(
+                        b,
+                        self.inner.layout.log2_block,
+                        u64::MAX,
+                    )
+                    .ok()
+                })
+                .map_or(0, |v| v.header.flags);
+            crate::frontier::ring_reach(r.map.capacity(), flags)
+        } else {
+            r.map.capacity()
+        };
         let fresh = Arc::new(LiveRegion {
             id: r.id,
             name: r.name,
@@ -153,7 +171,7 @@ where
                     u32::from(self.inner.layout.log2_block),
                     crate::frontier::ring_for(
                         self.inner.opts.append_window,
-                        r.map.capacity(),
+                        reach,
                         u32::from(self.inner.layout.log2_block),
                     ),
                 )

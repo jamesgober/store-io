@@ -490,6 +490,9 @@ M = [
  ('crates/store-io-engine/src/grow2.rs', 'the map\'s length is the entry\'s");\n            e.data_size = new;', 'the map\'s length is the entry\'s");\n            e.data_size = len;', F2G),
  # C8 review: refused while frozen (stricter than the spec)
  ('crates/store-io-engine/src/grow2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2G),
+ # E4 C12: a format-2 region that may grow has a ring of the window's
+ # size (a small region's ring held a grown one to a tenth of the rate)
+ ('crates/store-io-engine/src/frontier.rs', '    if flags & store_io_format::meta2::FLAG_CAPPED != 0 {\n        capacity', '    if flags & store_io_format::meta2::FLAG_CAPPED != 0 || flags == 0 {\n        capacity', FRONTIER),
  # E4 C11: store-wide region defaults, used by the _default calls,
  # refused when unset
  ('crates/store-io-engine/src/space.rs', '        let opts = self.store.region_defaults()?;\n        self.provision_append_region_with(name, opts)', '        let opts = self.store.region_defaults().map(|_| RegionOptions::default())?;\n        self.provision_append_region_with(name, opts)', F2OPT),
@@ -806,9 +809,31 @@ def kill_stuck_tests():
         subprocess.run(["pkill", "-f", os.path.join(ROOT, "target")], capture_output=True)
 
 
+def check_names():
+    """No name at the module's top level is assigned twice (plain `name =`
+    assignments): a second assignment of a test-selection constant silently
+    retargets every entry before it (C10 once made C8's open entries run
+    another test file)."""
+    import ast
+    with open(os.path.abspath(__file__), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    seen, twice = set(), []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    if t.id in seen:
+                        twice.append(t.id)
+                    seen.add(t.id)
+    for name in twice:
+        print(f"{name} is assigned twice", flush=True)
+    return twice
+
+
 def check_patterns():
-    """Every entry's pattern occurs exactly once: run before each commit."""
-    bad = []
+    """Every entry's pattern occurs exactly once, and no name is assigned
+    twice: run before each commit."""
+    bad = check_names()
     for i, entry in enumerate(M):
         f, a = entry[0], entry[1]
         with open(os.path.join(ROOT, *f.split("/")), encoding="utf-8") as fh:

@@ -104,6 +104,12 @@ pub struct SimConfig {
     /// holds), and `range_state` reports a range reaching past it not
     /// valid.
     pub valid_data_model: bool,
+    /// The most writes the world completes in its life (default 500,000,
+    /// far past any test's): a write that never stops (a bug, or a mutation
+    /// of one) panics instead of exhausting memory, as does holding more
+    /// than 1 GiB of unflushed writes in a volatile cache (a fixed bound). A
+    /// benchmark that writes more raises it.
+    pub runaway_writes: u64,
 }
 
 impl SimConfig {
@@ -118,6 +124,7 @@ impl SimConfig {
             faults: FaultPlan::default(),
             evidence: None,
             valid_data_model: false,
+            runaway_writes: 500_000,
         }
     }
 
@@ -131,12 +138,8 @@ impl SimConfig {
     }
 }
 
-/// The most writes one simulated world completes in its life, and the most
-/// bytes it holds in a volatile cache at once (the cache's entries are
-/// bounded by the first): no test comes near either, so a write that never
-/// stops (a bug, or a mutation of one) fails there instead of exhausting
-/// memory (see `complete_write`).
-const RUNAWAY_WRITES: u64 = 500_000;
+/// The most bytes a simulated world holds in a volatile cache at once (see
+/// `SimConfig::runaway_writes`).
 const RUNAWAY_CACHED_BYTES: usize = 1 << 30;
 
 /// Identity of a simulated file.
@@ -806,7 +809,10 @@ impl World {
         // No test writes this much: a write that never stops (a bug, or a
         // mutation of one) fails here instead of exhausting memory with
         // its trace and cached copies.
-        assert!(n <= RUNAWAY_WRITES, "{n} writes: a runaway");
+        assert!(
+            n <= self.cfg.runaway_writes,
+            "{n} writes: a runaway (SimConfig::runaway_writes)"
+        );
         let faults = &self.cfg.faults;
         let fail = faults.fail_write == Some(n) || {
             let ppm = faults.write_eio_ppm;

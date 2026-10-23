@@ -7,8 +7,11 @@
 //!
 //! Usage: `open_scale <dir> <regions> [reps]` (the directory is emptied, if
 //! it is missing, empty or holds only a store's container).
-//! `DENSE` set writes every region's blocks (no holes); on Linux, `SYNC` set
-//! uses the synchronous tier.
+//! `DENSE` set writes every region's blocks (no holes); `RUNS=k` gives each
+//! region k one-block extents apart from each other (k runs, v0.5 E4 C12:
+//! the cost of multi-run maps); on Linux, `SYNC` set uses the synchronous
+//! tier. Each open prints the heap the open store holds (a counting
+//! allocator).
 
 // `clone_on_copy`: the Windows platform is `Copy`, the Linux one is not.
 #![allow(
@@ -17,6 +20,46 @@
     clippy::print_stdout,
     clippy::clone_on_copy
 )]
+
+/// Counts the heap in use, so an open store's share can be printed.
+struct Counting;
+
+static HEAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// SAFETY: every call forwards to the system allocator unchanged; the
+// counter only records sizes.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: std::alloc::Layout) -> *mut u8 {
+        HEAP.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: as the caller's contract.
+        unsafe { std::alloc::System.alloc(l) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, l: std::alloc::Layout) {
+        HEAP.fetch_sub(l.size(), std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: as the caller's contract.
+        unsafe { std::alloc::System.dealloc(ptr, l) }
+    }
+    unsafe fn alloc_zeroed(&self, l: std::alloc::Layout) -> *mut u8 {
+        HEAP.fetch_add(l.size(), std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: as the caller's contract.
+        unsafe { std::alloc::System.alloc_zeroed(l) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, l: std::alloc::Layout, new: usize) -> *mut u8 {
+        // SAFETY: as the caller's contract.
+        let out = unsafe { std::alloc::System.realloc(ptr, l, new) };
+        if !out.is_null() {
+            if new >= l.size() {
+                HEAP.fetch_add(new - l.size(), std::sync::atomic::Ordering::Relaxed);
+            } else {
+                HEAP.fetch_sub(l.size() - new, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        out
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
 
 #[cfg(any(windows, target_os = "linux"))]
 mod scale {
@@ -62,7 +105,7 @@ mod scale {
 
     /// Writes `n` page regions of one data block each into the closed store's
     /// container: every page's next copy in slot B, every header in its slot A.
-    fn craft(path: &Path, n: u32, block: u64, dense: bool) {
+    fn craft(path: &Path, n: u32, block: u64, dense: bool, runs: u64) {
         let table = 1u64 << LOG2_TABLE;
         let per_page = u32::from(entries_per_page(LOG2_TABLE));
         let pages = n.div_ceil(per_page);
@@ -88,7 +131,12 @@ mod scale {
             .map(|at| u64_at(&meta, at as usize + 96))
             .max()
             .unwrap();
-        let region = 3 * block;
+        // k data blocks, apart from each other (a gap after each).
+        let region = if runs == 1 {
+            3 * block
+        } else {
+            2 * block + 2 * runs * block
+        };
         let mut buf = vec![0u8; block as usize];
         for p in 0..pages {
             // Each page write takes the next sequence.
@@ -107,13 +155,13 @@ mod scale {
                         compat_flags: 0,
                         name: RegionName::new(&format!("r{i}")).unwrap(),
                         tag: 0,
-                        extent_count: 1,
+                        extent_count: runs as u16,
                         header_a: off,
                         header_b: off + block,
-                        data_size: block,
-                        capacity: block,
+                        data_size: runs * block,
+                        capacity: runs * block,
                         span_start: off,
-                        span_end: off + region,
+                        span_end: off + 2 * block + (2 * runs - 1) * block,
                         footprint_seq: meta_seq,
                     }
                     .to_raw(),
@@ -126,14 +174,16 @@ mod scale {
                     flags: 0,
                     compat_flags: 0,
                     log2_block: block.trailing_zeros() as u8,
-                    extent_count: 1,
+                    extent_count: runs as u16,
                     region_generation: 1,
                     fill_key: [0; 16],
                     object_len: 0,
                 };
                 let mut payload = vec![0u8; block as usize];
-                let len = encode_region_header(&mut payload, &h, &[(off + 2 * block, block)], &[])
-                    .unwrap();
+                let extents: Vec<(u64, u64)> = (0..runs)
+                    .map(|k| (off + 2 * block + 2 * k * block, block))
+                    .collect();
+                let len = encode_region_header(&mut payload, &h, &extents, &[]).unwrap();
                 buf.fill(0);
                 let _crc = encode(
                     &mut buf,
@@ -156,7 +206,7 @@ mod scale {
                 f.write_all(&buf).unwrap();
                 if dense {
                     // The rest of the region written too: no holes.
-                    f.write_all(&vec![0u8; 2 * block as usize]).unwrap();
+                    f.write_all(&vec![0u8; (region - block) as usize]).unwrap();
                 }
             }
             let mut payload = vec![0u8; PAGE_HEADER_LEN + 96 * raws.len()];
@@ -230,11 +280,17 @@ mod scale {
         let block = s.report().block_size;
         drop(s);
         let t = Instant::now();
+        let runs: u64 = std::env::var("RUNS").map_or(1, |r| r.parse().unwrap());
+        assert!(
+            (1..=store_io_format::meta2::max_extents(12) as u64).contains(&runs),
+            "RUNS from 1 to a header's extents"
+        );
         craft(
             &dir.join(CONTAINER),
             n,
             block,
             std::env::var_os("DENSE").is_some(),
+            runs,
         );
         println!("crafted {n} regions in {:.2} s", t.elapsed().as_secs_f64());
         {
@@ -247,13 +303,20 @@ mod scale {
             );
         }
         for r in 0..reps {
+            let heap = super::HEAP.load(std::sync::atomic::Ordering::Relaxed);
             let t = Instant::now();
             let s = Store::open(p.clone(), dir, opts.clone()).unwrap();
             let el = t.elapsed().as_secs_f64();
+            // Another thread may free during the open: never below zero.
+            let held = super::HEAP
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(heap);
             let rep = s.report();
             println!(
-                "open {r}: {el:.3} s  ({:.1} us a region)  unavailable {}  retried reads {}",
+                "open {r}: {el:.3} s  ({:.1} us a region)  heap {:.1} MiB ({} B a region)  unavailable {}  retried reads {}",
                 el * 1e6 / f64::from(n.max(1)),
+                held as f64 / f64::from(1 << 20),
+                held / n.max(1) as usize,
                 rep.unavailable.len(),
                 rep.metadata.retried_reads
             );

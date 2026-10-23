@@ -304,7 +304,7 @@ where
                     u32::from(inner.layout.log2_block),
                     crate::frontier::ring_for(
                         inner.opts.append_window,
-                        capacity,
+                        crate::frontier::ring_reach(capacity, flags),
                         u32::from(inner.layout.log2_block),
                     ),
                 )

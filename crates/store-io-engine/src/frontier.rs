@@ -88,9 +88,9 @@ const MAX_RING: u64 = 1 << 20;
 /// window is the bound, its blocks rounded down to a power of two, so the
 /// window never holds more than was asked; when the region is no larger, the
 /// region's blocks rounded up, so a region never limits its own appends and
-/// a small region never pays for a large ring. A growth keeps the ring: a
-/// region grown past the size its frontier was made for allows at most the
-/// old ring's blocks in flight until it is reopened or recycled.
+/// a small region that cannot grow never pays for a large ring. A format-2
+/// region that may grow is sized for no limit ([`ring_reach`]): it pays the
+/// window's ring however small it is (growth never resizes a ring).
 #[must_use]
 pub(crate) fn ring_for(window: u64, limit: u64, shift: u32) -> usize {
     let (w, r) = (window >> shift, limit.div_ceil(1 << shift));
@@ -103,6 +103,22 @@ pub(crate) fn ring_for(window: u64, limit: u64, shift: u32) -> usize {
     #[allow(clippy::cast_possible_truncation)]
     let slots = blocks.clamp(2, MAX_RING) as usize;
     slots
+}
+
+/// The region size a format-2 region's ring is sized for (see
+/// [`ring_for`]): its capacity when it is capped (it never grows past it),
+/// else unbounded: it may grow to any size, so only the window bounds the
+/// ring (a ring sized for a small region would hold a grown one to the
+/// small region's appends in flight; measured: a region grown from 64 KiB
+/// to 2 GiB appended at a tenth of the rate of one provisioned at 2 GiB,
+/// v0.5 E4 C12).
+#[must_use]
+pub(crate) fn ring_reach(capacity: u64, flags: u8) -> u64 {
+    if flags & store_io_format::meta2::FLAG_CAPPED != 0 {
+        capacity
+    } else {
+        u64::MAX
+    }
 }
 
 impl AppendFrontier {
@@ -551,6 +567,65 @@ mod tests {
         let used: Vec<_> = rings(&s).into_iter().filter(|r| r.1 > 0).collect();
         assert_eq!(used.len(), 1, "{used:?}");
         assert_eq!(used[0].0, "a7");
+    }
+
+    /// Format 2: a region that may grow has a ring of the window's size,
+    /// however small it is now; a capped one, its cap's; so at
+    /// provisioning, at the open and after a recycle.
+    #[test]
+    fn test_a_growable_regions_ring_is_the_windows() {
+        use std::path::Path;
+
+        use store_io_sim::{SimConfig, SimPlatform};
+
+        use crate::RegionOptions;
+        use crate::store::{Store, StoreOptions};
+
+        let p = SimPlatform::new(SimConfig::volatile(62));
+        let opts = StoreOptions {
+            container_format: store_io_format::slot::FORMAT_2,
+            region_capacity: 64,
+            append_window: 1 << 20,
+            ..StoreOptions::default()
+        };
+        let window = ring_for(1 << 20, u64::MAX, 12);
+        assert_eq!(window, 256);
+        let s = Store::create(p.clone(), Path::new("/db"), opts.clone()).unwrap();
+        let g = s.provision_append_region("g", 64 << 10).unwrap();
+        let c = s
+            .provision_append_region_with(
+                "c",
+                RegionOptions::default().size(64 << 10).max_size(256 << 10),
+            )
+            .unwrap();
+        let ring = |s: &Store<SimPlatform>, name: &str| {
+            s.regions_snapshot()
+                .iter()
+                .find(|r| r.name.as_str() == name)
+                .and_then(|r| r.frontier.as_ref().map(AppendFrontier::ring_slots))
+                .unwrap()
+        };
+        let _t = g.append(b"x").unwrap();
+        let _t = c.append(b"x").unwrap();
+        assert_eq!((ring(&s, "g"), ring(&s, "c")), (window, 64));
+        drop((g, c, s));
+        let s = Store::open(p, Path::new("/db"), opts).unwrap();
+        let g = s.append_region("g").unwrap();
+        let c = s.append_region("c").unwrap();
+        let _p = g.resume_at(0).unwrap();
+        let _p = c.resume_at(0).unwrap();
+        let _t = g.append(b"x").unwrap();
+        let _t = c.append(b"x").unwrap();
+        assert_eq!((ring(&s, "g"), ring(&s, "c")), (window, 64), "at the open");
+        let g = g.recycle().unwrap();
+        let c = c.recycle().unwrap();
+        let _t = g.append(b"x").unwrap();
+        let _t = c.append(b"x").unwrap();
+        assert_eq!(
+            (ring(&s, "g"), ring(&s, "c")),
+            (window, 64),
+            "after a recycle"
+        );
     }
 
     fn f() -> AppendFrontier {

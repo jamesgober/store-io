@@ -405,7 +405,11 @@ pub(crate) fn check_regions<Q: Queue>(
                 0,
                 e.data_size,
                 u32::from(layout.log2_block),
-                crate::frontier::ring_for(append_window, e.capacity, u32::from(layout.log2_block)),
+                crate::frontier::ring_for(
+                    append_window,
+                    crate::frontier::ring_reach(e.capacity, e.flags),
+                    u32::from(layout.log2_block),
+                ),
             )
         });
         // Room for every run the header may list (a growth adds them).

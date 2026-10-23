@@ -1,4 +1,8 @@
-//! How a [`StoreReport`] prints.
+//! How a [`StoreReport`] prints, and the unavailable-region report (D-090).
+
+use store_io_core::RegionId;
+use store_io_core::error::CorruptionKind;
+use store_io_format::meta::RegionKind;
 
 use crate::store::StoreReport;
 
@@ -58,4 +62,72 @@ impl core::fmt::Display for StoreReport {
             }
         )
     }
+}
+
+/// Why a region the region table names could not be opened (D-090).
+///
+/// Such a region is never used as ready and its name stays reserved; a lookup
+/// returns [`Error::Corruption`](store_io_core::error::Error::Corruption) naming the region, never `NotFound`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unavailable {
+    /// The container is shorter than the region's extent.
+    ContainerShort {
+        /// Bytes the container must hold for this region.
+        needed: u64,
+        /// Bytes it holds.
+        actual: u64,
+    },
+    /// Neither copy of the region's header is valid.
+    HeaderUnreadable,
+    /// The header passes its checksum but holds impossible values.
+    HeaderInvalid,
+    /// The header belongs to another region or another kind of region.
+    HeaderMismatch,
+    /// The header says the region was released while the table says ready.
+    HeaderReleased,
+}
+
+impl Unavailable {
+    /// The corruption kind a lookup of such a region reports.
+    #[must_use]
+    pub fn corruption_kind(&self) -> CorruptionKind {
+        match self {
+            Self::ContainerShort { .. } => CorruptionKind::Truncated,
+            Self::HeaderUnreadable => CorruptionKind::HeaderCrc,
+            Self::HeaderInvalid | Self::HeaderMismatch | Self::HeaderReleased => {
+                CorruptionKind::Metadata
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ContainerShort { needed, actual } => write!(
+                f,
+                "the container holds {actual} bytes but the region needs {needed}"
+            ),
+            Self::HeaderUnreadable => f.write_str("neither copy of its header is valid"),
+            Self::HeaderInvalid => f.write_str("its header holds impossible values"),
+            Self::HeaderMismatch => f.write_str("its header belongs to another region or kind"),
+            Self::HeaderReleased => {
+                f.write_str("its header says released while the table says ready")
+            }
+        }
+    }
+}
+
+/// A region the region table names that could not be opened (D-090).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableRegion {
+    /// The region's name.
+    pub name: String,
+    /// The region's id.
+    pub id: RegionId,
+    /// The region's kind.
+    pub kind: RegionKind,
+    /// Why it could not be opened.
+    pub reason: Unavailable,
 }

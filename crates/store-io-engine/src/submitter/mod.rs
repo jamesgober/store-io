@@ -280,7 +280,7 @@ where
         let state = region.state();
         let c = ctx(state);
         let pass = admit!(self.admit(region.store(), state, &buf), buf);
-        admit!(self.store.ready(), buf);
+        admit!(self.store.ready_for(state), buf);
         let Some(f) = state.frontier.as_ref() else {
             return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
         };
@@ -352,7 +352,7 @@ where
     ) -> Result<(), Rejected> {
         let state = region.state();
         let pass = admit!(self.admit(region.store(), state, &buf), buf);
-        admit!(self.store.ready(), buf);
+        admit!(self.store.ready_for(state), buf);
         let end = admit!(region.check(&pos, buf.len()), buf);
         let c = ctx_range(state, pos.offset, end);
         let req = Req::Write {

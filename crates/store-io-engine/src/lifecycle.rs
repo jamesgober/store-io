@@ -27,7 +27,6 @@ use store_io_platform::{Platform, ReleaseHow};
 use crate::frontier::AppendFrontier;
 use crate::gate::{Gate, Retire, Retired};
 use crate::io::{ctx, not_written};
-use crate::layout::region_object;
 use crate::slots::{PairAt, plan_next};
 use crate::store::{LiveRegion, Store, durable_slot, lock_meta};
 
@@ -58,7 +57,7 @@ where
         let l = &self.inner.layout;
         PairAt {
             volume: *self.inner.volume.as_bytes(),
-            object: region_object(r.id.get()),
+            object: l.region_object(r.id.get()),
             a: r.header_at[0],
             b: r.header_at[1],
             log2: l.log2_block,
@@ -104,7 +103,7 @@ where
 
     /// Retires `r` for `how`, waiting out every operation in flight.
     fn retire(&self, r: &LiveRegion, how: Retire) -> Result<(), Error> {
-        self.ready()?;
+        self.ready_for(r)?;
         if r.kind == RegionKind::Slot {
             return Err(Error::Unsupported {
                 what: store_io_core::error::Capability::Platform,
@@ -160,6 +159,7 @@ where
             // A runtime setting of the region, shared with its next
             // generation.
             force_sync: Arc::clone(&r.force_sync),
+            read_only: r.read_only,
         });
         let mut regions = self
             .inner

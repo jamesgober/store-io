@@ -148,7 +148,7 @@ where
     /// pass that keeps a recycle or release out until the append is done.
     pub(crate) fn writable(&self) -> Result<(&crate::frontier::AppendFrontier, Pass<'_>), Error> {
         let pass = self.pass()?;
-        self.store.ready()?;
+        self.store.ready_for(&self.state)?;
         let f = self.frontier()?;
         if !self.state.positioned.load(Ordering::Acquire) {
             return Err(not_written(
@@ -399,7 +399,7 @@ where
     ///
     /// `NotWritten(ReadOnly | TooManyInFlight | OutOfBounds)`, `Poisoned`.
     pub fn resume_at(&self, offset: u64) -> Result<u64, Error> {
-        if self.store.inner.read_only {
+        if self.store.inner.read_only || self.state.read_only {
             return Err(Error::NotWritten {
                 cause: NotWrittenCause::ReadOnly,
                 ctx: ctx(&self.state),
@@ -590,7 +590,7 @@ where
     pub fn write(&self, pos: RegionPos, data: &[u8]) -> Result<WriteTicket, Error> {
         let s = &self.store;
         let _pass = self.pass()?;
-        s.ready()?;
+        s.ready_for(&self.state)?;
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
         let mut stream = s.stage(data, c)?;

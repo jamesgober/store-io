@@ -17,8 +17,7 @@ use store_io_core::class::{DurabilityClass, ReceiptLabel};
 use store_io_core::decide::{ClassDecision, DurableOpen, Trust};
 use store_io_core::errno::{Stage, classify};
 use store_io_core::error::{
-    CorruptionKind, Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op, OsError,
-    ReserveTag,
+    Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op, OsError, ReserveTag,
 };
 use store_io_core::evidence::Evidence;
 use store_io_core::id::{Generation, RegionId, VolumeId};
@@ -30,7 +29,7 @@ use crate::domain::Domain;
 use crate::exec::{Lane, QueueSet, Ran, run};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
-use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT, region_object};
+use crate::layout::{Layout, TABLE_OBJECT, VOLUME_OBJECT};
 use crate::slots::{NextSlot, PairAt, PairRead, write_slot};
 use crate::space::Accounting;
 
@@ -172,73 +171,7 @@ pub(crate) struct Policy {
     pub(crate) flush: bool,
 }
 
-/// Why a region the region table names could not be opened (D-090).
-///
-/// Such a region is never used as ready and its name stays reserved; a lookup
-/// returns [`Error::Corruption`] naming the region, never `NotFound`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Unavailable {
-    /// The container is shorter than the region's extent.
-    ContainerShort {
-        /// Bytes the container must hold for this region.
-        needed: u64,
-        /// Bytes it holds.
-        actual: u64,
-    },
-    /// Neither copy of the region's header is valid.
-    HeaderUnreadable,
-    /// The header passes its checksum but holds impossible values.
-    HeaderInvalid,
-    /// The header belongs to another region or another kind of region.
-    HeaderMismatch,
-    /// The header says the region was released while the table says ready.
-    HeaderReleased,
-}
-
-impl Unavailable {
-    /// The corruption kind a lookup of such a region reports.
-    #[must_use]
-    pub fn corruption_kind(&self) -> CorruptionKind {
-        match self {
-            Self::ContainerShort { .. } => CorruptionKind::Truncated,
-            Self::HeaderUnreadable => CorruptionKind::HeaderCrc,
-            Self::HeaderInvalid | Self::HeaderMismatch | Self::HeaderReleased => {
-                CorruptionKind::Metadata
-            }
-        }
-    }
-}
-
-impl core::fmt::Display for Unavailable {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::ContainerShort { needed, actual } => write!(
-                f,
-                "the container holds {actual} bytes but the region needs {needed}"
-            ),
-            Self::HeaderUnreadable => f.write_str("neither copy of its header is valid"),
-            Self::HeaderInvalid => f.write_str("its header holds impossible values"),
-            Self::HeaderMismatch => f.write_str("its header belongs to another region or kind"),
-            Self::HeaderReleased => {
-                f.write_str("its header says released while the table says ready")
-            }
-        }
-    }
-}
-
-/// A region the region table names that could not be opened (D-090).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnavailableRegion {
-    /// The region's name.
-    pub name: String,
-    /// The region's id.
-    pub id: RegionId,
-    /// The region's kind.
-    pub kind: RegionKind,
-    /// Why it could not be opened.
-    pub reason: Unavailable,
-}
+pub use crate::report::{Unavailable, UnavailableRegion};
 
 /// What the store learned about its device, and what it decided.
 #[derive(Debug, Clone)]
@@ -312,6 +245,10 @@ pub(crate) struct LiveRegion {
     /// every generation of the region, so a setting made through any handle
     /// holds after a recycle.
     pub(crate) force_sync: Arc<std::sync::atomic::AtomicBool>,
+    /// Writes refused, the store being writable: format 2's regions on a
+    /// page that is not confirmed, or possibly superseded (always false in
+    /// format 1).
+    pub(crate) read_only: bool,
 }
 
 impl LiveRegion {
@@ -774,7 +711,7 @@ pub(crate) fn pair_table(volume: VolumeId, l: &Layout) -> PairAt {
 pub(crate) fn pair_region(volume: VolumeId, l: &Layout, e: &TableEntry) -> PairAt {
     PairAt {
         volume: *volume.as_bytes(),
-        object: region_object(u64::from(e.region_id)),
+        object: l.region_object(u64::from(e.region_id)),
         a: e.offset,
         b: e.offset + l.block(),
         log2: l.log2_block,

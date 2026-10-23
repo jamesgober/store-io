@@ -256,6 +256,7 @@ where
                 frontier,
                 positioned: std::sync::atomic::AtomicBool::new(false),
                 force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                read_only: false,
                 gate: Gate::new(),
             }));
         }

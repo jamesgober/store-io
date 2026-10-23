@@ -24,13 +24,6 @@ pub(crate) const VOLUME_OBJECT: u64 = 0;
 /// Region table object id.
 pub(crate) const TABLE_OBJECT: u64 = 1;
 
-/// Object id of region `id`'s header pair.
-pub(crate) const fn region_object(id: u64) -> u64 {
-    // Format 1 ids are below 2^32.
-    debug_assert!(id < 1 << 32, "a format 1 region id");
-    (1u64 << 32) | id
-}
-
 /// Chooses the block size from the device and filesystem evidence: the
 /// largest of 4 KiB, the logical and physical block, the preferred write
 /// size and the direct-I/O alignments, rounded up to a power of two and
@@ -66,6 +59,18 @@ pub(crate) struct Layout {
 }
 
 impl Layout {
+    /// Object id of region `id`'s header pair: `2^32 | id` in format 1,
+    /// `2^62 | id` in format 2 (format 2 ids are `page << 32 | seq`).
+    pub(crate) fn region_object(&self, id: u64) -> u64 {
+        if self.format == store_io_format::slot::FORMAT_2 {
+            (1u64 << 62) | id
+        } else {
+            // Format 1 ids are below 2^32.
+            debug_assert!(id < 1 << 32, "a format 1 region id");
+            (1u64 << 32) | id
+        }
+    }
+
     pub(crate) fn block(&self) -> u64 {
         1u64 << self.log2_block
     }
@@ -203,6 +208,17 @@ mod tests {
         assert_eq!(choose_log2_block(&ev, None), 16, "capped at 64 KiB");
         let ev = Evidence::unknown(PlatformKind::Sim);
         assert_eq!(choose_log2_block(&ev, Some(8192)), 13);
+    }
+
+    /// Region header objects: `2^32 | id` in format 1, `2^62 | id` in
+    /// format 2, where ids are `page << 32 | seq`.
+    #[test]
+    fn test_region_header_objects_follow_the_format() {
+        let mut l = Layout::v1(12, 16);
+        assert_eq!(l.region_object(7), (1 << 32) | 7);
+        l.format = store_io_format::slot::FORMAT_2;
+        let id = (3u64 << 32) | 9;
+        assert_eq!(l.region_object(id), (1 << 62) | id);
     }
 
     #[test]

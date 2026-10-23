@@ -58,7 +58,7 @@ where
         let [a, b] = self.state.header_at;
         PairAt {
             volume: *self.store.inner.volume.as_bytes(),
-            object: crate::layout::region_object(self.state.id.get()),
+            object: l.region_object(self.state.id.get()),
             a,
             b,
             log2: l.log2_block,
@@ -97,7 +97,7 @@ where
     /// `DurabilityUnknown` (the domain is now poisoned).
     pub fn commit(&self, data: &[u8]) -> Result<DurableReceipt, Error> {
         let s = &self.store;
-        s.ready()?;
+        s.ready_for(&self.state)?;
         let _timed = s
             .inner
             .observer

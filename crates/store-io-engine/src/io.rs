@@ -200,6 +200,16 @@ impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
+    /// [`Self::ready`] for a write to `r`, which also refuses a read-only
+    /// region (naming it).
+    pub(crate) fn ready_for(&self, r: &LiveRegion) -> Result<(), Error> {
+        self.ready()?;
+        if r.read_only {
+            return Err(not_written(NotWrittenCause::ReadOnly, ctx(r)));
+        }
+        Ok(())
+    }
+
     /// Writes are allowed: not read-only and not poisoned.
     pub(crate) fn ready(&self) -> Result<(), Error> {
         if self.inner.read_only {

@@ -245,6 +245,7 @@ where
             }),
             positioned: std::sync::atomic::AtomicBool::new(true),
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            read_only: false,
             gate: Gate::new(),
         });
         inner

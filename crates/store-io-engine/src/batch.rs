@@ -425,7 +425,7 @@ where
         }
         let s = self.region.store();
         let _pass = self.region.pass()?;
-        s.ready()?;
+        s.ready_for(state)?;
         self.writes.sort_unstable_by_key(|(at, _)| *at);
         let overlap = self
             .writes

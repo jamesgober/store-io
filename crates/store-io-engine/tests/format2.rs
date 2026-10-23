@@ -184,27 +184,25 @@ fn test_a_page_of_a_newer_format_is_refused() {
     }
 }
 
+/// Regions are provisioned in format 2, with and without a reservation,
+/// and found again after a reopen (the full tests: `format2_provision.rs`).
 #[test]
-fn test_regions_in_format_2_are_not_yet_supported() {
+fn test_regions_are_provisioned_in_format_2() {
     let p = SimPlatform::new(SimConfig::volatile(82));
     let s = create(&p);
-    let r = s.provision_page_region("pages", 1 << 20);
+    assert!(s.provision_page_region("pages", 1 << 20).is_ok());
+    let mut r = s.reserve(1 << 20, 1).unwrap();
+    assert!(r.provision_append_region("log", 1 << 19).is_ok());
+    drop(r);
+    drop(s);
+    let s = open(&p);
     assert!(
-        matches!(
-            r,
-            Err(Error::Unsupported {
-                what: Capability::FormatVersion
-            })
-        ),
+        s.report().unavailable.is_empty(),
         "{:?}",
-        r.map(|_| ())
+        s.report().unavailable
     );
-    let r = s.reserve(1 << 20, 1);
-    assert!(
-        matches!(r, Err(Error::Unsupported { .. })),
-        "{:?}",
-        r.map(|_| ())
-    );
+    assert!(s.page_region("pages").is_ok());
+    assert!(s.append_region("log").is_ok());
 }
 
 #[test]

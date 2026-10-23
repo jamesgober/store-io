@@ -1,7 +1,7 @@
 //! Helpers shared by the format-2 engine tests: a store on the simulator,
 //! and raw access to its metadata slots for crafting crashes and damage.
 
-#![allow(dead_code, clippy::unwrap_used)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +13,7 @@ use store_io_format::slot::{FORMAT_2, SlotFields, SlotIndex, encode};
 use store_io_platform::{CompletionBuf, FileMode, FileName, IoOp, Platform, Queue, QueueConfig};
 use store_io_sim::{CrashMode, SimPlatform};
 
+pub(crate) mod audit;
 pub(crate) mod craft;
 
 pub(crate) const DIR: &str = "/db";

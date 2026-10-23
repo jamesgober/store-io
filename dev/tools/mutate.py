@@ -55,6 +55,8 @@ JUDGE = "crates/store-io-format/src/judge.rs"
 F2 = ["-p", "store-io-engine", "--test", "format2", "--test", "format2_create"]
 # The format-2 open's region checks, on crafted media.
 F2R = ["-p", "store-io-engine", "--test", "format2_regions", "--test", "format2"]
+# Format-2 provisioning, audited on the raw media.
+F2P = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "format2"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -394,7 +396,6 @@ M = [
  # for E3
  (V2, 'Field("features" | "flags") => Error::Unsupported {', 'Field("features") => Error::Unsupported {', F2),
  ('crates/store-io-engine/src/provision.rs', '        if inner.layout.format == store_io_format::slot::FORMAT_2 {', '        if inner.layout.format == 99 {', F2),
- ('crates/store-io-engine/src/space.rs', '        if inner.layout.format == store_io_format::slot::FORMAT_2 {', '        if inner.layout.format == 99 {', F2),
  # create takes over only a crashed format-2 create: the leftover rule is
  # format 2's; generation 1 only; a valid volume record is a store; a torn
  # page is a leftover; a file past the metadata is not
@@ -444,6 +445,22 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
+ # E2b/E3 C5: provisioning in format 2: frozen refuses provisioning
+ # and reservations; a name held by an unavailable or unknown-kind entry
+ # is taken; a page is used while it has room; first fit before the
+ # tail; large data aligned; free space rebuilt after the commit; growth
+ # refused past a truncated entry; a reservation grows past what is
+ # allocated
+ ('crates/store-io-engine/src/provision2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2P),
+ ('crates/store-io-engine/src/space.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '                .any(|u| u.name == name.as_str())', '                .any(|u| u.name == name.as_str() && false)', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '                .is_some_and(|v| v.reserved_names.contains(name))', '                .is_some_and(|v| v.reserved_names.contains(name) && false)', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '                        && h.count < per_page', '                        && h.count <= per_page', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '            let offset = match v2.free.first_fit(extent, align, 2 * block) {', '            let offset = match v2.free.first_fit(extent, align, 2 * block).filter(|_| false) {', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '        let mut align = if data_size >= DATA_ALIGN {\n            DATA_ALIGN', '        let mut align = if data_size >= DATA_ALIGN && false {\n            DATA_ALIGN', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '            v2.rebuild_free(len);', '            let _ = (v2, len);', F2P),
+ ('crates/store-io-engine/src/space.rs', '        if meta.v2.as_deref().is_some_and(|v| v.cut_short) {', '        if meta.v2.as_deref().is_some_and(|v| v.cut_short && false) {', F2P),
+ ('crates/store-io-engine/src/space.rs', '            Some(v2) => v2.free.end(),', '            Some(v2) => v2.free.end().min(self.inner.layout.tail(&meta.entries)),', F2P),
  # E2b/E3 C4: the format-2 open's regions: stale, superseded and
  # foreign-header regions are read-only; overlap and name demote; extra
  # extents are reported; several extents and 512 B blocks are refused
@@ -482,13 +499,13 @@ M = [
  ('crates/store-io-engine/src/footprint.rs', '        if m.is_some() {', '        if m.is_some() && false {', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '        for &(off, n) in allocated.iter().filter(|r| r.1 > 0) {', '        for &(off, n) in allocated.iter() {', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '                if gap_end > at {', '                if gap_end >= at {', FOOTPRINT),
- ('crates/store-io-engine/src/footprint.rs', '        Some(self.tail.checked_add(align - 1)? & !(align - 1))', '        Some(self.tail)', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        Some((self.tail.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew)', '        Some(self.tail + (skew & 0))', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '        out[qi] = stab.max(inside);', '        out[qi] = inside.max(stab.filter(|_| false));', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '        out[qi] = stab.max(inside);', '        out[qi] = stab.max(inside.filter(|_| false));', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '            tree.max(lo, qi).max(tree.max(qi + 1, hi))', '            tree.max(lo, hi)', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '        while heap.peek().is_some_and(|&(_, end)| end <= q.start) {', '        while heap.peek().is_some_and(|&(_, end)| end < q.start) {', FOOTPRINT),
  ('crates/store-io-engine/src/footprint.rs', '            at = at.max(end);', '            at = end;', FOOTPRINT),
- ('crates/store-io-engine/src/footprint.rs', '            let at = start.checked_add(align - 1)? & !(align - 1);', '            let at = start;', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '            let at = (start.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew;', '            let at = start + (skew & 0);', FOOTPRINT),
  # E2b/E3 C2: a region's committed extents sum to its capacity, lie in
  # its span past the table area, and overlap nothing of its footprint
  ('crates/store-io-format/src/footprint.rs', '    if sum != entry.capacity {', '    if sum != entry.capacity && false {', FORMAT),

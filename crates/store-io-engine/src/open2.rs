@@ -48,6 +48,8 @@ pub(crate) struct Regions2 {
     pub(crate) reserved_names: Vec<store_io_format::meta::RegionName>,
     /// An entry names space past the file's end.
     pub(crate) cut_short: bool,
+    /// Every allocated range `free` is the complement of.
+    pub(crate) allocated: Vec<Extent>,
 }
 
 /// A region whose entry passed the entry checks.
@@ -406,7 +408,7 @@ pub(crate) fn check_regions<Q: Queue>(
         }
     }
     report.truncated |= truncated;
-    let free = FreeMap::complement(table_end, container_len, &mut allocated);
+    let free = FreeMap::complement(table_end, container_len, &mut allocated.clone());
     Ok(Regions2 {
         live,
         unavailable,
@@ -415,5 +417,6 @@ pub(crate) fn check_regions<Q: Queue>(
         read_only_reason,
         reserved_names,
         cut_short,
+        allocated,
     })
 }

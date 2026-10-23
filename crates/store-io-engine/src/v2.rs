@@ -179,6 +179,64 @@ pub(crate) struct Meta2 {
     /// An entry names space past the file's end: growth is refused (it
     /// would make zeros of the lost tail).
     pub(crate) cut_short: bool,
+    /// Every allocated range: free space is rebuilt from it (never by
+    /// adding a range back).
+    pub(crate) allocated: Vec<(u64, u64)>,
+}
+
+impl Meta2 {
+    /// Free space again, as the complement of `allocated` in a container
+    /// of `len` bytes.
+    pub(crate) fn rebuild_free(&mut self, len: u64) {
+        let mut all = self.allocated.clone();
+        self.free = crate::footprint::FreeMap::complement(self.volume.table_end(), len, &mut all);
+    }
+}
+
+/// The next `meta_seq` of the store's metadata (overflow refused).
+pub(crate) fn next_meta_seq_of(meta: &Meta) -> Result<u64, Error> {
+    let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
+    next_meta_seq(&meta.volume_pair, &v2.pages, None)
+}
+
+/// Writes table page `p`'s next copy, `payload` at `meta_seq` (chosen by
+/// the caller first, so the entries it carries can name it), durably; only
+/// a Confirmed page is ever written (spec §9 step 2). The page's state in
+/// `meta` follows once the write is durable.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_page<P: Platform>(
+    q: &mut Lane<P::Queue>,
+    file: &P::File,
+    pool: &store_io_buf::BufPool,
+    layout: &Layout,
+    volume: VolumeId,
+    policy: &Policy,
+    domain: &Domain,
+    meta: &mut Meta,
+    p: usize,
+    payload: &[u8],
+    meta_seq: u64,
+    owner_generation: u64,
+) -> Result<(), Error> {
+    let v2 = meta.v2.as_deref_mut().ok_or_else(corrupt)?;
+    let page = v2.pages.get_mut(p).ok_or_else(corrupt)?;
+    if page.standing != Standing::Confirmed {
+        return Err(Error::NotWritten {
+            cause: store_io_core::error::NotWrittenCause::Frozen,
+            ctx: ErrorContext::default(),
+        });
+    }
+    let pi = u32::try_from(p).map_err(|_| corrupt())?;
+    let decoded = decode_page(payload, pi, entries_per_page(layout.log2_table))
+        .map(|d| (d.header, d.entries().collect::<Vec<_>>()))
+        .map_err(|_| corrupt())?;
+    let mut next = plan_next(&page.pair, payload, owner_generation)?;
+    next.meta_seq = meta_seq;
+    let at = pair_page(volume, layout, pi);
+    page.pair = durable_slot::<P>(q, file, pool, &at, &page.pair, &next, policy, domain)?;
+    page.header = Some(decoded.0);
+    page.entries = decoded.1;
+    Ok(())
 }
 
 /// The `meta_seq` a slot of `pair` counts for (`Valid`, or `BadPayloadCrc`
@@ -349,6 +407,7 @@ pub(crate) fn create_metadata<P: Platform>(
             usage: Vec::new(),
             reserved_names: Vec::new(),
             cut_short: false,
+            allocated: Vec::new(),
         })),
     })
 }
@@ -553,6 +612,7 @@ pub(crate) fn open_metadata<P: Platform>(
             usage: Vec::new(),
             reserved_names: Vec::new(),
             cut_short: false,
+            allocated: Vec::new(),
         })),
     };
     // Steps 3-6, before anything is written.
@@ -575,6 +635,7 @@ pub(crate) fn open_metadata<P: Platform>(
         v2.usage = regions.usage;
         v2.reserved_names = regions.reserved_names;
         v2.cut_short = regions.cut_short;
+        v2.allocated = regions.allocated;
     }
     let read_only = read_only || {
         report.read_only_reason = if !j.writable {

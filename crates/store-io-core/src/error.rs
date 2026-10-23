@@ -187,6 +187,10 @@ pub enum NotWrittenCause {
     /// The buffer does not come from this store's pool, so it may not meet
     /// the device's alignment (use the submitter's `take_buf`).
     ForeignBuffer,
+    /// Allocation is frozen: a table page of a format-2 store is stale or
+    /// lost, so no region may be provisioned, grown past its capacity or
+    /// released until it is repaired (spec §9 step 2).
+    Frozen,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -212,6 +216,7 @@ impl fmt::Display for NotWrittenCause {
             Self::NotPositioned => "append position unknown after reopen; call resume_at first",
             Self::Overlap => "two writes in one batch overlap",
             Self::ForeignBuffer => "the buffer is not from this store's pool",
+            Self::Frozen => "allocation is frozen: a table page is stale or lost",
         })
     }
 }

@@ -117,6 +117,13 @@ impl Accounting {
         &mut self.tags[i]
     }
 
+    /// Counts a newly provisioned format-2 region.
+    pub(crate) fn add_usage(&mut self, tag: u32, logical: u64, physical: u64) {
+        let t = self.tag(tag);
+        t.logical = t.logical.saturating_add(logical);
+        t.physical = t.physical.saturating_add(physical);
+    }
+
     /// Counts a newly ready region.
     pub(crate) fn add(&mut self, e: &TableEntry, block: u64) {
         let physical = e.extent_len(block).unwrap_or(u64::MAX);
@@ -307,11 +314,12 @@ where
     pub fn reserve(&self, bytes: u64, tag: u32) -> Result<Reservation<P>, Error> {
         self.ready()?;
         let inner = &self.inner;
-        if inner.layout.format == store_io_format::slot::FORMAT_2 {
-            // Format-2 regions arrive with E3.
-            return Err(Error::Unsupported {
-                what: store_io_core::error::Capability::FormatVersion,
-            });
+        if inner.report.metadata.frozen {
+            // Allocation is frozen (spec §9 step 2).
+            return Err(not_written(
+                NotWrittenCause::Frozen,
+                ErrorContext::default(),
+            ));
         }
         let mut meta = lock_meta(&inner.meta);
         let mut acct = lock_acct(&inner.acct);
@@ -368,7 +376,10 @@ where
     /// The end of the last extent in the table (the start of free tail
     /// space).
     pub(crate) fn tail(&self, meta: &Meta) -> u64 {
-        self.inner.layout.tail(&meta.entries)
+        match meta.v2.as_deref() {
+            Some(v2) => v2.free.end(),
+            None => self.inner.layout.tail(&meta.entries),
+        }
     }
 
     /// Grows the container to at least `target` bytes.
@@ -409,6 +420,10 @@ where
             .allocate(&inner.file, target)
             .map_err(|raw| crate::store::space_err(store_io_core::error::Op::Allocate, raw, tag))?;
         meta.container_len = target;
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            // The new space past the old end is free.
+            v2.rebuild_free(target);
+        }
         Ok(())
     }
 }

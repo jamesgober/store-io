@@ -59,6 +59,7 @@ pub(crate) struct Settled {
     pub superseded: bool,
 }
 
+#[cfg(test)]
 impl Settled {
     /// Still usable after settling.
     pub(crate) fn usable(self) -> bool {
@@ -265,22 +266,30 @@ impl FreeMap {
     }
 
     /// The first free range, in offset order, holding `len` bytes from an
-    /// offset that is a multiple of `align` (a power of two): that offset.
-    pub(crate) fn first_fit(&self, len: u64, align: u64) -> Option<u64> {
+    /// offset `at` whose `at + skew` is a multiple of `align` (a power of
+    /// two; `skew` lets a region align its data after its header blocks):
+    /// that offset.
+    pub(crate) fn first_fit(&self, len: u64, align: u64, skew: u64) -> Option<u64> {
         debug_assert!(align.is_power_of_two());
         self.free.iter().find_map(|&(start, end)| {
-            let at = start.checked_add(align - 1)? & !(align - 1);
+            let at = (start.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew;
             (at.checked_add(len)? <= end).then_some(at)
         })
     }
 
     /// Where a region placed past everything allocated starts (the
     /// container grows to hold it): the end of the last allocated byte,
-    /// rounded up to `align` (a power of two; a clamped unavailable span may
-    /// end anywhere). `None` past `u64::MAX`.
-    pub(crate) fn tail(&self, align: u64) -> Option<u64> {
+    /// moved up so `tail + skew` is a multiple of `align` (a power of two;
+    /// a clamped unavailable span may end anywhere). `None` past
+    /// `u64::MAX`.
+    pub(crate) fn tail(&self, align: u64, skew: u64) -> Option<u64> {
         debug_assert!(align.is_power_of_two());
-        Some(self.tail.checked_add(align - 1)? & !(align - 1))
+        Some((self.tail.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew)
+    }
+
+    /// The end of the last allocated byte (at least the table's end).
+    pub(crate) fn end(&self) -> u64 {
+        self.tail
     }
 
     /// Free bytes inside the container.
@@ -541,8 +550,11 @@ mod tests {
         let mut alloc = [(150, 50), (100, 30), (120, 40), (400, 10)];
         let f = FreeMap::complement(100, 1000, &mut alloc);
         assert_eq!(f.free, [(200, 400), (410, 1000)]);
-        assert_eq!(f.tail(1), Some(410));
-        assert_eq!(f.tail(4096), Some(4096));
+        assert_eq!(f.tail(1, 0), Some(410));
+        assert_eq!(f.tail(4096, 0), Some(4096));
+        // Data two blocks after the start aligned to 8192.
+        assert_eq!(f.tail(8192, 200), Some(8192 - 200));
+        assert_eq!(f.end(), 410);
         assert_eq!(f.free_bytes(), 200 + 590);
         // Allocation before the table's end is inside the table area.
         let f = FreeMap::complement(100, 300, &mut [(0, 120)]);
@@ -553,13 +565,13 @@ mod tests {
         // Nothing allocated: everything past the table is free.
         let f = FreeMap::complement(100, 300, &mut []);
         assert_eq!(
-            (f.free.as_slice(), f.tail(1)),
+            (f.free.as_slice(), f.tail(1, 0)),
             ([(100, 300)].as_slice(), Some(100))
         );
         // A zero-length range splits nothing and moves no tail.
         let f = FreeMap::complement(1, 150, &mut [(31, 0), (5000, 0)]);
         assert_eq!(
-            (f.free.as_slice(), f.tail(1)),
+            (f.free.as_slice(), f.tail(1, 0)),
             ([(1, 150)].as_slice(), Some(1))
         );
         // A gap that would start at the container's end is not a free range.
@@ -567,12 +579,12 @@ mod tests {
         assert!(f.free.is_empty());
         // A tail that cannot be aligned within a u64.
         let f = FreeMap::complement(100, 100, &mut [(u64::MAX - 10, 5)]);
-        assert_eq!(f.tail(4096), None);
+        assert_eq!(f.tail(4096, 0), None);
         // An allocation past the container's end (an entry past the file
         // end, kept by the growth guard) leaves nothing free there.
         let f = FreeMap::complement(100, 300, &mut [(250, 100)]);
         assert_eq!(
-            (f.free.as_slice(), f.tail(1)),
+            (f.free.as_slice(), f.tail(1, 0)),
             ([(100, 250)].as_slice(), Some(350))
         );
     }
@@ -582,10 +594,13 @@ mod tests {
         let f = FreeMap::complement(4096, 1 << 20, &mut [(4096, 100), (8192, 4096)]);
         // The first gap, [4196, 8192), has no aligned 4 KiB block in it; the
         // next starts at 12288.
-        assert_eq!(f.first_fit(4096, 4096), Some(12288));
-        assert_eq!(f.first_fit(3000, 1), Some(4196));
+        assert_eq!(f.first_fit(4096, 4096, 0), Some(12288));
+        assert_eq!(f.first_fit(3000, 1, 0), Some(4196));
         // Small enough for the first gap unaligned, not aligned.
-        assert_eq!(f.first_fit(1000, 4096), Some(12288));
-        assert_eq!(f.first_fit(1 << 21, 4096), None);
+        assert_eq!(f.first_fit(1000, 4096, 0), Some(12288));
+        assert_eq!(f.first_fit(1 << 21, 4096, 0), None);
+        // Skewed: `at + 100` aligned to 4096 inside [4196, 8192).
+        assert_eq!(f.first_fit(90, 4096, 100), Some(8192 - 100));
+        assert_eq!(f.first_fit(4000, 4096, 100), Some(12288 - 100 + 4096));
     }
 }

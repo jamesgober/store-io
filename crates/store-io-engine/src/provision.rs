@@ -52,10 +52,7 @@ where
             return Err(Error::Poisoned { first });
         }
         if inner.layout.format == store_io_format::slot::FORMAT_2 {
-            // Format-2 regions arrive with E3.
-            return Err(Error::Unsupported {
-                what: store_io_core::error::Capability::FormatVersion,
-            });
+            return self.provision2(name, kind, data_size, from);
         }
         let rname = RegionName::new(name).map_err(|_| Error::NotWritten {
             cause: NotWrittenCause::InvalidName,
@@ -256,7 +253,7 @@ where
         Ok(state)
     }
 
-    fn fill(
+    pub(crate) fn fill(
         &self,
         offset: u64,
         extent: u64,
@@ -334,7 +331,7 @@ where
         Ok(())
     }
 
-    fn flush_all_accounted(&self) -> Result<(), Error> {
+    pub(crate) fn flush_all_accounted(&self) -> Result<(), Error> {
         let inner = &self.inner;
         // Holding slot 0, so no data flush runs on the main handle at the
         // same time (each flush's failure report stays its own, D-124).
@@ -354,7 +351,7 @@ where
         })
     }
 
-    fn verify_ready(&self, offset: u64, extent: u64) -> Result<(), Error> {
+    pub(crate) fn verify_ready(&self, offset: u64, extent: u64) -> Result<(), Error> {
         let inner = &self.inner;
         let st = inner
             .platform

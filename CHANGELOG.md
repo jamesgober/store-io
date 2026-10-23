@@ -45,6 +45,20 @@
     dropped), fill, key and flags kept. Slot commit: the object after the
     header's 64-byte fixed part (`object_len` bytes, capacity B - 192),
     the fixed part kept; a slot reads its object back from it.
+  - The open reads the region header pairs many at a time (up to the
+    queue depth in flight, as buffers allow), a pair whose slot B follows
+    its slot A (every region provisioning makes) in one read of both, and
+    from 16 regions (entries that passed the entry checks) on a queue of
+    its own that keeps several reads in flight (a blocking
+    call's lane runs one at a time on Linux, D-104). A failed read of both
+    slots is read again slot by slot. An open of 65,536 regions
+    (`harness/examples/open_scale.rs`): Windows 9 s to 1.0 s, near the
+    disk's 4 KiB random-read rate (fio, 64 in flight); Linux (WSL,
+    io_uring) 2.5-3.3 s, the virtual disk's rate (fio, 8 KiB, 64 in
+    flight, NOWAIT: 24k a second), and 4.4-5.2 s on the synchronous tier
+    (whose submit pool such an open now starts, as the first parallel read
+    would). New: `store_io_buf::BufPool::class_len`;
+    `store_io_sim::World::queues`.
   - New: `NotWrittenCause::Frozen` (allocation refused while a page is
     stale or lost); `Unavailable::{EntryInvalid, ExtentsInvalid,
     Overlaps, NameTaken}`; `MetadataReport::{invalid_entries,

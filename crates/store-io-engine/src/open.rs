@@ -13,7 +13,7 @@ use store_io_format::meta::{
     RegionKind, RegionMeta, RegionState, TableEntry, VOLUME_META_LEN, VolumeMeta, decode_table,
 };
 use store_io_format::pair::Winner;
-use store_io_platform::{FileMode, IoOp, Platform, Queue};
+use store_io_platform::{FileMode, IoOp, Platform, Queue, QueueConfig};
 
 use crate::domain::Domain;
 use crate::exec::{Lane, QueueSet, Ran, run};
@@ -138,6 +138,15 @@ where
                         read_only,
                         &policy,
                         opts.append_window,
+                        &mut || {
+                            let cfg = QueueConfig {
+                                depth: opts.queue_depth.max(1),
+                                parallel: true,
+                                pool_threads: opts.t3_pool_threads,
+                                ..QueueConfig::default()
+                            };
+                            platform.queue(cfg).ok().map(|q| (q, cfg.depth as usize))
+                        },
                     )?
                 };
                 let report = StoreReport {

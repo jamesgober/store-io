@@ -16,7 +16,7 @@ use store_io_platform::Platform;
 use crate::domain::Domain;
 use crate::exec::Lane;
 use crate::layout::Layout;
-use crate::slots::{PairAt, PairRead, plan_next, read_pair, reread_failed, write_slot};
+use crate::slots::{PairAt, PairRead, plan_next, read_pair, read_pairs, reread_failed, write_slot};
 use crate::store::*;
 
 /// The most regions a format-2 store can be created for (a table of
@@ -472,6 +472,25 @@ pub(crate) fn read_retried<Q: store_io_platform::Queue>(
     Ok(pair)
 }
 
+/// As [`read_retried`] for every pair in `ats`, many reads in flight at
+/// once (the re-reads, rare, one at a time); in `ats`'s order.
+pub(crate) fn read_all_retried<Q: store_io_platform::Queue>(
+    q: &mut Lane<Q>,
+    file: &Q::File,
+    pool: &store_io_buf::BufPool,
+    ats: &[PairAt],
+    retried: &mut u32,
+) -> Result<Vec<PairRead>, Error> {
+    let first = read_pairs(q, file, pool, ats, usize::MAX)?;
+    let mut out = Vec::with_capacity(first.len());
+    for (at, pair) in ats.iter().zip(first) {
+        let (pair, again) = reread_failed(q, file, pool, at, pair)?;
+        *retried += u32::from(again);
+        out.push(pair);
+    }
+    Ok(out)
+}
+
 fn judge_read(p: &PairRead) -> judge::PairRead {
     judge::PairRead {
         a: judge::SlotRead {
@@ -503,6 +522,7 @@ pub(crate) fn open_metadata<P: Platform>(
     read_only: bool,
     policy: &Policy,
     append_window: u64,
+    header_queue: &mut dyn FnMut() -> Option<(P::Queue, usize)>,
 ) -> Result<Opened, Error> {
     if layout.data_start() > container_len {
         return Err(corrupt());
@@ -635,6 +655,7 @@ pub(crate) fn open_metadata<P: Platform>(
             container_len,
             append_window,
             &mut report,
+            header_queue,
         )?
     };
     if let Some(v2) = meta.v2.as_deref_mut() {

@@ -422,6 +422,14 @@ impl<Q: Queue> QueueSet<Q> {
     }
 }
 
+/// A lane over `queue` for one caller alone, outside any set (its busy
+/// mark read by no one): the format-2 open's region header reads.
+pub(crate) fn solo_lane<Q>(queue: Q, depth: usize) -> Lane<Q> {
+    lane(queue, &Arc::new(LaneMark::new()), depth)
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A lane over `queue` with its completion buffer and busy mark.
 fn lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Mutex<Lane<Q>> {
     let depth = depth.max(1);

@@ -16,14 +16,14 @@ use store_io_format::meta2::{Entry2, EntryLimits, decode_region_header};
 use store_io_format::slot::FORMAT_2;
 use store_io_platform::Queue;
 
-use crate::exec::Lane;
+use crate::exec::{Lane, solo_lane};
 use crate::footprint::{Extent, FreeMap, Unavailable as Gone, Usable, settle, shares_reserved};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
 use crate::layout::Layout;
 use crate::slots::{PairAt, PairRead};
 use crate::store::*;
-use crate::v2::{Meta2, MetadataReport, read_retried};
+use crate::v2::{Meta2, MetadataReport, read_all_retried};
 
 /// The most items each list of [`MetadataReport`] the region checks fill
 /// holds; past it the report says it was cut.
@@ -91,8 +91,24 @@ fn reason_of(e: MetaError) -> Unavailable {
     }
 }
 
+/// Region header pairs read at a time: the reads in flight are bounded by
+/// the lane's depth; this bounds what a batch holds besides the pairs kept
+/// (their places, and each losing slot's payload until it is decided).
+const HEADER_BATCH: usize = 4096;
+
+/// Header pairs (entries that passed the entry checks) from which the open
+/// reads them on a queue of their own (`header_queue`): a blocking call's
+/// lane may run one operation at a time (on Linux, D-104), which would cost
+/// every pair a device round trip. Made as a parallel lane's queue is, so
+/// on Linux's synchronous tier it starts the platform's submit pool, as the
+/// first parallel read would.
+const OWN_QUEUE_FROM: usize = 16;
+
 /// Checks every region of the format-2 table in `v2` (steps 3-6), reading
-/// each header pair through `q`, and adds what it found to `report`.
+/// the header pairs many at a time, and adds what it found to `report`.
+/// The pairs are read through `q`, or, from [`OWN_QUEUE_FROM`] of them, on
+/// a queue `header_queue` makes (one that keeps several operations in flight;
+/// `None` if it cannot, and `q` serves).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_regions<Q: Queue>(
     q: &mut Lane<Q>,
@@ -104,6 +120,7 @@ pub(crate) fn check_regions<Q: Queue>(
     container_len: u64,
     append_window: u64,
     report: &mut MetadataReport,
+    header_queue: &mut dyn FnMut() -> Option<(Q, usize)>,
 ) -> Result<Regions2, Error> {
     let table_end = v2.volume.table_end();
     let block = layout.block();
@@ -120,6 +137,9 @@ pub(crate) fn check_regions<Q: Queue>(
     let mut truncated = false;
     // Whether every region header on a stale page agrees with its entry.
     let mut agrees = vec![true; v2.pages.len()];
+    // Entries that passed the entry checks, their header pairs to read:
+    // (id, page, entry, limits).
+    let mut pending: Vec<(u64, usize, Entry2, EntryLimits)> = Vec::new();
     for (p, page) in v2.pages.iter().enumerate() {
         if !matches!(page.standing, Standing::Confirmed | Standing::Unconfirmed) {
             // A Lost page's regions are unknown (allocation is frozen).
@@ -198,7 +218,22 @@ pub(crate) fn check_regions<Q: Queue>(
                     what: Capability::FormatVersion,
                 });
             }
-            let at = PairAt {
+            pending.push((id, p, entry, lim));
+        }
+    }
+    let mut own = if pending.len() >= OWN_QUEUE_FROM {
+        header_queue().map(|(queue, depth)| solo_lane(queue, depth))
+    } else {
+        None
+    };
+    let lane = match own.as_mut() {
+        Some(own) => own,
+        None => &mut *q,
+    };
+    for batch in pending.chunks(HEADER_BATCH) {
+        let ats: Vec<PairAt> = batch
+            .iter()
+            .map(|&(id, _, entry, _)| PairAt {
                 volume: *volume.as_bytes(),
                 object: layout.region_object(id),
                 a: entry.header_a,
@@ -206,8 +241,11 @@ pub(crate) fn check_regions<Q: Queue>(
                 log2: layout.log2_block,
                 format: FORMAT_2,
                 numbered: false,
-            };
-            let header = read_retried(q, file, pool, &at, &mut report.retried_reads)?;
+            })
+            .collect();
+        let headers = read_all_retried(lane, file, pool, &ats, &mut report.retried_reads)?;
+        for (&(id, p, entry, lim), header) in batch.iter().zip(headers) {
+            let page = &v2.pages[p];
             let mut c = Checked {
                 id,
                 page: p,

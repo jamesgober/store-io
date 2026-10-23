@@ -61,6 +61,8 @@ F2P = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "format
 F2X = ["-p", "store-io-engine", "--test", "format2_release"]
 # Format-2 recycle and slot commit.
 F2C = ["-p", "store-io-engine", "--test", "format2_recycle"]
+# The format-2 open's batched region header reads.
+F2O = ["-p", "store-io-engine", "--test", "format2_open"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -135,8 +137,8 @@ M = [
  ("crates/store-io-engine/src/scan.rs", "let unit = if len > block { block } else { sector };", "let unit = if len > block && false { block } else { sector };"),
  ("crates/store-io-engine/src/open.rs", "                Err(raw) if !crate::slots::unreadable(raw) => return Err(io(raw)),", "                Err(raw) if !crate::slots::unreadable(raw) && false => return Err(io(raw)),"),
  ("crates/store-io-engine/src/io.rs", ".unwrap_or((start, end));", "?;"),
- # Final review: read_one classification on its own; volume search reports media errors
- ("crates/store-io-engine/src/slots.rs", "        Err(raw) if !unreadable(raw) => return Err(fail(raw)),", "        Err(raw) if !unreadable(raw) && false => return Err(fail(raw)),"),
+ # Final review: the slot read classification (`landed`, shared by read_one and read_pairs); volume search reports media errors
+ ("crates/store-io-engine/src/slots.rs", "        Err(raw) if !unreadable(raw) => Err(Error::Io {", "        Err(raw) if !unreadable(raw) && false => Err(Error::Io {"),
  ("crates/store-io-engine/src/open.rs", "                    media_error |= store_io_core::errno::is_media_error(raw);", "                    media_error |= store_io_core::errno::is_media_error(raw) && false;"),
  ("crates/store-io-engine/src/open.rs", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN {", "            if bytes.len() > store_io_format::meta::VOLUME_META_LEN && false {"),
  ("crates/store-io-engine/src/open.rs", "store_io_format::meta::MetaError::Field(\"features\") => newer,", "store_io_format::meta::MetaError::Field(\"features\") if false => newer,"),
@@ -455,6 +457,19 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E2b/E3 C8: the open reads a pair whose B follows A in one read, every
+ # other pair slot by slot, a short read never judged, a failed read of
+ # both read again slot by slot, each header matched to its own entry
+ ('crates/store-io-engine/src/slots.rs', '        if at.a.checked_add(at.size() as u64) == Some(at.b) {', '        if at.a.checked_add(at.size() as u64) == Some(at.b) || at.log2 > 0 {', F2O),
+ ('crates/store-io-engine/src/slots.rs', '        if at.a.checked_add(at.size() as u64) == Some(at.b) {', '        if at.a.checked_add(at.size() as u64) == Some(at.b) && at.log2 == 0 {', F2O),
+ ('crates/store-io-engine/src/slots.rs', '        Ok(n) if n == len => Ok(got.ok_or(media)),', '        Ok(n) if n <= len => Ok(got.ok_or(media)),', F2O),
+ ('crates/store-io-engine/src/slots.rs', '                            Some(OneSlot::unreadable(media)),\n                            Some(OneSlot::unreadable(media)),', '                            Some(judge_slot(at, SlotIndex::A, &vec![0u8; at.size()])),\n                            Some(OneSlot::unreadable(media)),', F2O),
+ ('crates/store-io-engine/src/open2.rs', '        for (&(id, p, entry, lim), header) in batch.iter().zip(headers) {', '        for (&(id, p, entry, lim), header) in batch.iter().zip(headers.into_iter().rev()) {', F2O),
+ # E2b/E3 C8 review: completions matched by tag (out of order too); the
+ # open's own queue from 16 header pairs
+ ('crates/store-io-engine/src/slots.rs', '            let (i, part) = reads[c.tag as usize];', '            let (i, part) = reads[(c.tag as usize).min(arrived - 1)];', F2O),
+ ('crates/store-io-engine/src/open2.rs', '    let mut own = if pending.len() >= OWN_QUEUE_FROM {', '    let mut own = if pending.len() > OWN_QUEUE_FROM {', F2O),
+ ('crates/store-io-engine/src/open.rs', 'platform.queue(cfg).ok().map(|q| (q, cfg.depth as usize))', '(cfg.depth == 0).then(|| platform.queue(cfg).ok()).flatten().map(|q| (q, cfg.depth as usize))', F2O),
  # E2b/E3 C7 review: a header version newer than the winner's that does
  # not read is reported as a possibly lost recycle or slot commit
  ('crates/store-io-engine/src/open2.rs', '                if newer {', '                if newer && false {', F2C),

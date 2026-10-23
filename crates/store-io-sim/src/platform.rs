@@ -542,6 +542,7 @@ impl Platform for SimPlatform {
     }
 
     fn queue(&self, cfg: QueueConfig) -> RawResult<SimQueue> {
+        lock(&self.world).queue_made();
         Ok(SimQueue {
             world: Arc::clone(&self.world),
             in_flight: Vec::new(),

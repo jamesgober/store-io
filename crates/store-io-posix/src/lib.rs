@@ -176,8 +176,9 @@ mod platform {
         /// Rings the kernel refused with an error to the caller (every
         /// refusal under an explicit `Uring`; under `Auto`, one a
         /// synchronous queue cannot get around): a submitter is not created,
-        /// a parallel lane's operations run on the store's lone-operation
-        /// lanes. `last_refusal` holds the latest code of either kind.
+        /// a parallel lane's operations (or an open's header reads) run on
+        /// the store's lone-operation lanes. `last_refusal` holds the latest
+        /// code of either kind.
         refused: Arc<AtomicU64>,
         last_refusal: Arc<core::sync::atomic::AtomicI32>,
         /// Rings asked to register (D-078) and what they got.
@@ -490,7 +491,7 @@ mod platform {
             }
             if refused > 0 {
                 reason.push_str(&format!(
-                    "; {refused} ring(s) refused by the kernel ({}): a submitter needing one was not created, a parallel lane's operations ran one at a time",
+                    "; {refused} ring(s) refused by the kernel ({}): a submitter needing one was not created, or a parallel lane's (or an open's header reads') operations ran one at a time",
                     sys::errno(code)
                 ));
             }

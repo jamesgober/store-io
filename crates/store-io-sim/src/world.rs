@@ -235,6 +235,7 @@ pub struct World {
     flushes_completed: u64,
     dir_syncs: u64,
     reopens: u64,
+    queues: u64,
     set_lens: u64,
     allocated: u64,
     trace: Vec<TraceEvent>,
@@ -265,6 +266,7 @@ impl World {
             flushes_completed: 0,
             dir_syncs: 0,
             reopens: 0,
+            queues: 0,
             set_lens: 0,
             allocated: 0,
             trace: Vec::new(),
@@ -375,6 +377,17 @@ impl World {
     #[must_use]
     pub fn reopens(&self) -> u64 {
         self.reopens
+    }
+
+    /// Queues made so far (`Platform::queue`).
+    #[must_use]
+    pub fn queues(&self) -> u64 {
+        self.queues
+    }
+
+    /// Counts a queue made.
+    pub(crate) fn queue_made(&mut self) {
+        self.queues += 1;
     }
 
     /// Reads completed so far, successful or not (misaligned ones excepted:

@@ -214,6 +214,19 @@ impl BufPool {
         self.take_within(len, usize::MAX)
     }
 
+    /// The size of the smallest class that holds `len` bytes (`None` when
+    /// none does): with [`Self::take_within`], a buffer of exactly that
+    /// class.
+    #[must_use]
+    pub fn class_len(&self, len: usize) -> Option<usize> {
+        self.inner
+            .classes
+            .iter()
+            .map(|c| c.size)
+            .filter(|&s| s >= len)
+            .min()
+    }
+
     /// As [`Self::take`], but never from a class larger than `max` bytes:
     /// a caller that never needs the largest buffers does not use them up
     /// when the classes it needs run out.
@@ -440,6 +453,16 @@ mod tests {
         drop(b);
         let free: usize = p.occupancy().iter().map(|c| c.1).sum();
         assert_eq!(free, 2 * 5);
+    }
+
+    #[test]
+    fn test_class_len_is_the_smallest_class_that_holds_the_length() {
+        let p = pool(1);
+        assert_eq!(p.class_len(1), Some(4096));
+        assert_eq!(p.class_len(4096), Some(4096));
+        assert_eq!(p.class_len(4097), Some(8192));
+        assert_eq!(p.class_len(65536), Some(65536));
+        assert_eq!(p.class_len(65537), None);
     }
 
     #[test]

@@ -177,9 +177,6 @@ fn read_one<Q: Queue>(
         },
         None => pool_err(ErrorContext::default()),
     })?;
-    // A media error, a short read or a read past the end of the file leaves
-    // the slot unreadable, which the pair decision weighs. Any other failure
-    // is returned with its code (see [`unreadable`]).
     let fail = |raw| Error::Io {
         op: Op::Read,
         raw,
@@ -192,30 +189,7 @@ fn read_one<Q: Queue>(
         // overwrite the newer one).
         Ran::Abandoned(raw) => return Err(fail(raw)),
     };
-    let media = matches!(result, Err(raw) if is_media_error(raw));
-    let Some(buf) = got else {
-        return match result {
-            Err(raw) if !unreadable(raw) => Err(fail(raw)),
-            _ => Ok(OneSlot::unreadable(media)),
-        };
-    };
-    match result {
-        Ok(n) if n == at.size() => {}
-        Err(raw) if !unreadable(raw) => return Err(fail(raw)),
-        _ => return Ok(OneSlot::unreadable(media)),
-    }
-    let expect = at.expect(i);
-    let status = validate(buf.as_slice(), &expect);
-    let payload = match status {
-        SlotStatus::Valid(info) => Some(info.payload(buf.as_slice()).to_vec()),
-        _ => None,
-    };
-    Ok(OneSlot {
-        status,
-        payload,
-        media: false,
-        facts: header_facts(buf.as_slice(), &expect),
-    })
+    finish_one(at, i, got, result)
 }
 
 /// Reads and decides a pair. Never writes.
@@ -225,30 +199,213 @@ pub(crate) fn read_pair<Q: Queue>(
     pool: &BufPool,
     at: &PairAt,
 ) -> Result<PairRead, Error> {
-    let OneSlot {
-        status: a,
-        payload: pa,
-        media: ma,
-        facts: fa,
-    } = read_one(q, file, pool, at, SlotIndex::A)?;
-    let OneSlot {
-        status: b,
-        payload: pb,
-        media: mb,
-        facts: fb,
-    } = read_one(q, file, pool, at, SlotIndex::B)?;
-    let report = decide(a, b);
+    let a = read_one(q, file, pool, at, SlotIndex::A)?;
+    let b = read_one(q, file, pool, at, SlotIndex::B)?;
+    Ok(assemble(a, b))
+}
+
+/// The bytes of a completed read of `len` bytes, or `Ok(Err(media))` when
+/// they cannot be read: a media error, a short read or a read past the end
+/// of the file leaves the slot unreadable, which the pair decision weighs
+/// (`media`: whether by a media error). Any other failure is returned with
+/// its code as `Io` (see [`unreadable`]).
+fn landed(
+    got: Option<store_io_buf::IoBuf>,
+    result: Result<usize, OsError>,
+    len: usize,
+) -> Result<Result<store_io_buf::IoBuf, bool>, Error> {
+    let media = matches!(result, Err(raw) if is_media_error(raw));
+    match result {
+        Err(raw) if !unreadable(raw) => Err(Error::Io {
+            op: Op::Read,
+            raw,
+            ctx: ErrorContext::default(),
+        }),
+        Ok(n) if n == len => Ok(got.ok_or(media)),
+        _ => Ok(Err(media)),
+    }
+}
+
+/// One slot's bytes, validated.
+fn judge_slot(at: &PairAt, i: SlotIndex, bytes: &[u8]) -> OneSlot {
+    let expect = at.expect(i);
+    let status = validate(bytes, &expect);
+    let payload = match status {
+        SlotStatus::Valid(info) => Some(info.payload(bytes).to_vec()),
+        _ => None,
+    };
+    OneSlot {
+        status,
+        payload,
+        media: false,
+        facts: header_facts(bytes, &expect),
+    }
+}
+
+/// What one slot read came to: a media error, a short read or end of file
+/// makes it [`SlotStatus::ReadError`]; any other failure is returned as
+/// `Io` (see [`unreadable`]).
+fn finish_one(
+    at: &PairAt,
+    i: SlotIndex,
+    got: Option<store_io_buf::IoBuf>,
+    result: Result<usize, OsError>,
+) -> Result<OneSlot, Error> {
+    Ok(match landed(got, result, at.size())? {
+        Ok(buf) => judge_slot(at, i, buf.as_slice()),
+        Err(media) => OneSlot::unreadable(media),
+    })
+}
+
+/// The pair decision over two slots as read.
+fn assemble(a: OneSlot, b: OneSlot) -> PairRead {
+    let report = decide(a.status, b.status);
     let payload = match report.winner_info() {
-        Some((SlotIndex::A, _)) => pa,
-        Some((SlotIndex::B, _)) => pb,
+        Some((SlotIndex::A, _)) => a.payload,
+        Some((SlotIndex::B, _)) => b.payload,
         None => None,
     };
-    Ok(PairRead {
+    PairRead {
         report,
         payload,
-        media_error: ma || mb,
-        facts: [fa, fb],
-    })
+        media_error: a.media || b.media,
+        facts: [a.facts, b.facts],
+    }
+}
+
+/// What one read of [`read_pairs`] covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    One(SlotIndex),
+    /// Both slots, B right after A: one device read for the pair.
+    Both,
+}
+
+/// Reads every pair in `ats` with up to `depth` reads in flight on `q` (fewer
+/// when the lane's rows or the pool's buffers run out), a pair whose slot B
+/// follows its slot A (every header pair provisioning writes) in one read of
+/// both. Read one at a time, every slot costs a device round trip:
+/// an open of 65,536 regions read 131,072 header slots in 9 s (E2b/E3 C8).
+/// Each slot is judged by the same rules as [`read_pair`]; the result is in
+/// `ats`'s order. A slot whose read failed is returned as such (both, when
+/// they were read as one) for the caller's one re-read, slot by slot
+/// ([`reread_failed`]).
+///
+/// # Errors
+///
+/// As [`read_pair`]: `Io` for a read failure that is not an unreadable slot
+/// or a failed wait (the queue keeps what is in flight: the lane's next
+/// holder clears it, or, for a lane of the caller's own, the queue's drop
+/// waits for it), a pool error if no buffer can be had with nothing in
+/// flight.
+pub(crate) fn read_pairs<Q: Queue>(
+    q: &mut Lane<Q>,
+    file: &Q::File,
+    pool: &BufPool,
+    ats: &[PairAt],
+    depth: usize,
+) -> Result<Vec<PairRead>, Error> {
+    let io = |raw| Error::Io {
+        op: Op::Read,
+        raw,
+        ctx: ErrorContext::default(),
+    };
+    crate::exec::clear_stale(q).map_err(io)?;
+    let mut reads: Vec<(usize, Part)> = Vec::with_capacity(ats.len());
+    for (i, at) in ats.iter().enumerate() {
+        if at.a.checked_add(at.size() as u64) == Some(at.b) {
+            reads.push((i, Part::Both));
+        } else {
+            reads.push((i, Part::One(SlotIndex::A)));
+            reads.push((i, Part::One(SlotIndex::B)));
+        }
+    }
+    let mut slots: Vec<[Option<OneSlot>; 2]> = (0..ats.len()).map(|_| [None, None]).collect();
+    let (mut next, mut arrived, mut in_flight) = (0usize, 0usize, 0usize);
+    // The class each read's buffer comes from while reads are in flight.
+    let own_class = |len: usize| pool.class_len(len).unwrap_or(len);
+    let depth = depth.max(1);
+    while arrived < reads.len() {
+        while next < reads.len() && in_flight < depth {
+            let (i, part) = reads[next];
+            let (offset, len) = match part {
+                Part::One(s) => (ats[i].offset(s), ats[i].size()),
+                Part::Both => (ats[i].a, 2 * ats[i].size()),
+            };
+            // A buffer of the read's own class while reads are in flight (a
+            // completion gives one back); with none in flight, any class, as
+            // `read_one` (a metadata read uses a large buffer rather than fail).
+            let taken = if in_flight > 0 {
+                pool.take_within(len, own_class(len))
+            } else {
+                pool.take(len)
+            };
+            let Ok(buf) = taken else {
+                if in_flight > 0 {
+                    break;
+                }
+                return Err(pool_err(ErrorContext::default()));
+            };
+            match q.submit(IoOp::Read { file, offset, buf }, next as u64) {
+                Ok(()) => {
+                    next += 1;
+                    in_flight += 1;
+                }
+                // The lane's rows are full: wait for one.
+                Err(r) if r.raw.is_none() && in_flight > 0 => break,
+                Err(r) => {
+                    return Err(match r.raw {
+                        Some(raw) => io(raw),
+                        None => pool_err(ErrorContext::default()),
+                    });
+                }
+            }
+        }
+        let _arrived = q.wait(1).map_err(io)?;
+        for c in q.done.drain() {
+            debug_assert!(
+                c.buf.is_some() || c.result.is_err(),
+                "a read succeeded without its buffer (platform contract 1)"
+            );
+            in_flight -= 1;
+            arrived += 1;
+            let (i, part) = reads[c.tag as usize];
+            let at = &ats[i];
+            match part {
+                Part::One(s) => {
+                    slots[i][usize::from(s.as_u8())] = Some(finish_one(at, s, c.buf, c.result)?);
+                }
+                Part::Both => match landed(c.buf, c.result, 2 * at.size())? {
+                    Ok(buf) => {
+                        let (a, b) = buf.as_slice().split_at(at.size());
+                        slots[i] = [
+                            Some(judge_slot(at, SlotIndex::A, a)),
+                            Some(judge_slot(at, SlotIndex::B, b)),
+                        ];
+                    }
+                    Err(media) => {
+                        slots[i] = [
+                            Some(OneSlot::unreadable(media)),
+                            Some(OneSlot::unreadable(media)),
+                        ];
+                    }
+                },
+            }
+        }
+    }
+    debug_assert!(
+        slots.iter().all(|s| s.iter().all(Option::is_some)),
+        "a slot read never arrived"
+    );
+    Ok(slots
+        .into_iter()
+        .map(|[a, b]| {
+            assemble(
+                a.unwrap_or_else(|| OneSlot::unreadable(false)),
+                b.unwrap_or_else(|| OneSlot::unreadable(false)),
+            )
+        })
+        .collect())
 }
 
 /// Reads again, once, each slot of `first` whose read failed, and decides

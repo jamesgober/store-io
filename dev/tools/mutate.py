@@ -12,6 +12,7 @@ Entries whose packages are Linux-only are skipped on other systems, and
 reported as skipped.
 
 Usage: python3 dev/tools/mutate.py [index ...]
+       python3 dev/tools/mutate.py --shard K/N   (entries whose index is K mod N)
        python3 dev/tools/mutate.py --check   (every pattern occurs exactly once; nothing built)
 """
 import os
@@ -799,7 +800,21 @@ def check_patterns():
 def main():
     if sys.argv[1:] == ["--check"]:
         check_patterns()
-    only = [int(a) for a in sys.argv[1:]]
+    if len(sys.argv) == 3 and sys.argv[1] == "--shard":
+        # Every N-th entry from K: neighbouring entries (one file's, often
+        # with the same slow tests) spread over the shards.
+        try:
+            k, n = (int(x) for x in sys.argv[2].split("/"))
+        except ValueError:
+            sys.exit(f"--shard {sys.argv[2]}: expected K/N")
+        if not 0 <= k < n:
+            sys.exit(f"--shard {k}/{n}: K must be below N")
+        only = [i for i in range(len(M)) if i % n == k]
+        if not only:
+            print(f"--shard {k}/{n}: no entries", flush=True)
+            sys.exit(0)
+    else:
+        only = [int(a) for a in sys.argv[1:]]
     survived, missing, invalid = [], [], []
     skipped = []
     for i, entry in enumerate(M):

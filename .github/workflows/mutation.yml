@@ -35,16 +35,33 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# A newer push to the same branch supersedes a run still going (it checks
+# everything the older one would).
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   mutation:
-    name: Mutation check (engine and simulator)
+    name: Mutation check (engine and simulator, shard ${{ matrix.shard }}/${{ matrix.total }})
     runs-on: ubuntu-latest
+    # The whole list takes about five hours on one runner: `total` shards of
+    # every `total`-th entry, each well inside the limit (`shard` lists
+    # 0 to total - 1).
     timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        total: [4]
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # One shard saves the cache the others restore.
+          save-if: ${{ matrix.shard == 0 }}
       - name: Build the tests once
         run: cargo test -q -p store-io-engine -p store-io-sim -p store-io-posix --no-run
       - name: Every mutation is killed
-        run: python3 dev/tools/mutate.py
+        run: python3 dev/tools/mutate.py --shard ${{ matrix.shard }}/${{ matrix.total }}

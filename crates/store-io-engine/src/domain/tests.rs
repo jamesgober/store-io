@@ -181,7 +181,7 @@ fn test_a_later_flush_finishing_first_waits_for_the_earlier_one() {
             let need = d.ticket();
             d.barrier(need, |slot, _| {
                 let _sent = started.send(slot);
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
                 Ok(())
             })
         })
@@ -229,7 +229,7 @@ fn test_an_earlier_flush_failing_poisons_a_later_success() {
             let need = d.ticket();
             d.barrier(need, |_, _| {
                 let _sent = started.send(());
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
                 Err(Some(EIO))
             })
         })
@@ -263,7 +263,7 @@ fn test_a_main_handle_barrier_leads_only_on_slot_zero() {
         std::thread::spawn(move || {
             d.exclusive_main(|| {
                 let _sent = inside.send(());
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
             });
         })
     };
@@ -389,7 +389,7 @@ fn test_flushes_behind_an_unfinished_one_stay_within_the_window() {
             let need = d.ticket();
             d.barrier(need, |_, _| {
                 let _sent = started.send(());
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
                 Ok(())
             })
         })
@@ -407,6 +407,9 @@ fn test_flushes_behind_an_unfinished_one_stay_within_the_window() {
     }
     // `issued - done` never reached past the window: flush 1 and 31 more.
     assert_eq!(d.stats().flushes, WINDOW, "issued past the window");
+    // The next flush's barrier waits behind the window as the designate,
+    // and is woken to lead it when flush 1 finishes.
+    assert_eq!(d.lock().designate, Some(WINDOW + 1));
     let _sent = go.send(());
     assert!(matches!(first.join(), Ok(Ok(()))));
     for h in later {
@@ -437,7 +440,7 @@ fn test_exclusive_main_holds_slot_zero() {
         std::thread::spawn(move || {
             d.exclusive_main(|| {
                 let _sent = inside.send(());
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
             });
         })
     };
@@ -490,7 +493,7 @@ fn test_exclusive_main_waits_for_a_data_flush_on_slot_zero() {
             let need = d2.ticket();
             d2.barrier(need, |slot, _| {
                 let _sent = started.send(slot);
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
                 Ok(())
             })
         }));
@@ -545,7 +548,7 @@ fn test_a_waiting_full_flush_goes_before_new_leaders() {
         std::thread::spawn(move || {
             d.exclusive_main(|| {
                 push(&order, "full");
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
             });
             let _sent = full_done.send(());
         })
@@ -564,9 +567,8 @@ fn test_a_waiting_full_flush_goes_before_new_leaders() {
             let _sent = data_done.send(r.is_ok());
         })
     };
-    // (A spurious wake of the full flush before the data barrier parks
-    // would let it run first and the data barrier lead after it: then this
-    // wait times out. Condvars allow it; it is not seen in practice.)
+    // (A sleeper leaves only when a waker moved its word, so the full flush
+    // cannot run before the data barrier parks: D-126.)
     until_waiting(&d, 2);
     assert_eq!(
         d.stats().flushes,

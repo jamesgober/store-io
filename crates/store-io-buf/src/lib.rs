@@ -20,10 +20,12 @@ pub mod pool;
 mod queue;
 mod stack;
 mod sync;
+mod wait;
 mod wipe;
 
 pub use pad::CachePadded;
 pub use pool::{BufPool, ClassSpec, Exhausted, IoBuf, PoolConfig, PoolError};
 pub use queue::IndexQueue;
 pub use stack::IndexStack;
+pub use wait::WaitWord;
 pub use wipe::wipe;

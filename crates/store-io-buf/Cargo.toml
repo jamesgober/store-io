@@ -24,13 +24,14 @@ store-io-core = { path = "../store-io-core", version = "0.4.1" }
 
 # Anonymous page-aligned mappings with MADV_DONTFORK (an O_DIRECT buffer
 # shared with a forked child corrupts I/O), mlock and MADV_DONTDUMP for the
-# sensitive class.
+# sensitive class; futex(2) for `WaitWord` on Linux.
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.190", default-features = false }
 
-# VirtualAlloc / VirtualLock for arenas and the sensitive class.
+# VirtualAlloc / VirtualLock for arenas and the sensitive class;
+# WaitOnAddress for `WaitWord`.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 # Model checker, compiled only with RUSTFLAGS="--cfg loom" (never in a
 # normal build) so dependent crates' loom runs model these atomics too.

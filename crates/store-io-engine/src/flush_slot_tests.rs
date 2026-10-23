@@ -116,7 +116,7 @@ fn test_a_metadata_flush_waits_for_slot_zero() {
         scope.spawn(move || {
             d.exclusive_main(|| {
                 let _sent = inside.send(());
-                let _released = wait_go.recv_timeout(LONG);
+                let _released = wait_go.recv_timeout(3 * LONG); // outlasts the test's waits
             });
         });
         assert_eq!(on_inside.recv_timeout(LONG), Ok(()));

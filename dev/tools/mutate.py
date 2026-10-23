@@ -39,6 +39,8 @@ LOOM_ENGINE = ["-p", "store-io-engine", "--lib", "--release", "loom"]
 # their 10 s waits, where suites that join stuck threads would hang to the
 # timeout.
 DOMAIN = ["-p", "store-io-engine", "--lib", "domain::wake_tests"]
+# Every domain test, for a mutant only the full-flush tests see.
+DOMAIN_ALL = ["-p", "store-io-engine", "--lib", "domain::"]
 LOOM = {"RUSTFLAGS": "--cfg loom", "LOOM_MAX_PREEMPTIONS": "3",
         "CARGO_TARGET_DIR": os.path.join(ROOT, "target", "loom")}
 STACK = "crates/store-io-buf/src/stack.rs"
@@ -265,8 +267,8 @@ M = [
  # release keeps the metadata lock until its space is deallocated (no
  # provisioning can reuse the extent under its late writes)
  ('crates/store-io-engine/src/lifecycle.rs', '        // 2. The header, for tools that list regions from headers.', '        drop(meta);\n        // 2. The header, for tools that list regions from headers.'),
- # G1: a flush leader notifies only when a follower is registered
- ('crates/store-io-engine/src/domain/mod.rs', '        if st.waiters > 0 {', '        if st.waiters > 1 {'),
+ # G1: a flush leader wakes a word only when a sleeper is registered on it
+ ('crates/store-io-engine/src/domain/mod.rs', '        if st.shared > 0 {', '        if st.shared > 1 {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '    fn poison_unknown_flush(&self, slot: u32) {\n        let _first_cause_kept = self.poison.set(FirstCause {', '    fn poison_unknown_flush(&self, slot: u32) {\n        let _first_cause_kept = Some(FirstCause {'),
  # The pool's LIFO free list: a head without its tag lets a pop install a
  # stale `next` after another thread popped and pushed back (ABA), handing
@@ -439,19 +441,26 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
- # D-125 targeted wakes: a covered barrier passes the wake on; a jump in
- # done wakes every bucket it covered; the next flush's barrier is woken;
- # a barrier whose bucket holds another need, or that may lead on fewer
- # slots than the domain has, sleeps on the shared condvar, which every
- # finished flush wakes; poison wakes every bucket
- ('crates/store-io-engine/src/domain/mod.rs', '            st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need\n', '            st.buckets[b].waiting > 0 && self.done.load(Ordering::SeqCst) >= need && false\n', DOMAIN),
+ # D-125/D-126 wakes: a finished flush wakes every bucket it covered (a
+ # jump in done wakes each), then the designate and the shared sleepers;
+ # a barrier needing the next flush sleeps as the designate when there is
+ # none, its fellows in that flush's bucket; a narrow barrier, or one whose
+ # bucket holds another need, sleeps on the shared word; a waker
+ # deregisters whom it wakes; a sleeper leaves only when its word moved;
+ # poison and a freed slot 0 wake whom they must
+ ('crates/store-io-engine/src/domain/mod.rs', '            if w.waiting > 0 && w.need > before && w.need <= after {', '            if w.waiting > 0 && w.need > before && w.need <= after && false {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '            wakes.send(self);', '            wakes.len = 0;\n            wakes.shared = false;\n            wakes.send(self);', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        for d in before + 1..=after.min(before + BUCKETS as u64) {', '        for d in after..=after {', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '        if st.buckets[b].waiting > 0 && st.buckets[b].need == next {', '        if st.buckets[b].waiting > 0 && st.buckets[b].need == next && false {', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '        let own = !narrow && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', '        let own = !(narrow && false) && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '        let own = !narrow && (st.buckets[b].waiting == 0 || st.buckets[b].need == need);', '        let own = !narrow;', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '        if st.overflow > 0 || st.main_waiting > 0 {', '        if st.main_waiting > 0 {', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '                if w.waiting > 0 {\n                    self.bucket_wake[b].notify_all();', '                if w.waiting > 0 && false {\n                    self.bucket_wake[b].notify_all();', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                // shared sleepers include those that wait for a slot.\n                self.take_designate(&mut st, &mut wakes);', '                // shared sleepers include those that wait for a slot.', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if narrow {\n            return Bed::Shared;', '        if narrow && false {\n            return Bed::Shared;', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if need > issued && st.designate.is_none() {', '        if need > issued && st.designate.is_none() && false {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        let covered_later = need <= issued || st.designate == Some(need);', '        let covered_later = need <= issued;', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if covered_later && (bucket.waiting == 0 || bucket.need == need) {', '        if covered_later && (bucket.waiting == 0 || bucket.need == need || true) {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        st.buckets[b].waiting = 0;\n        self.bucket_words[b].bump();', '        st.buckets[b].waiting -= 0;\n        self.bucket_words[b].bump();', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            if st.buckets[b].waiting > 0 {\n                self.take_bucket(st, b, wakes);', '            if st.buckets[b].waiting > 0 && false {\n                self.take_bucket(st, b, wakes);', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        while word.load() == seen {\n            word.wait(seen);', '        if word.load() == seen {\n            word.wait(seen);', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        // Slot 0 is free: whoever waits for a slot.\n        let mut wakes = Wakes::new();\n        d.take_designate(&mut st, &mut wakes);', '        // Slot 0 is free: whoever waits for a slot.\n        let mut wakes = Wakes::new();', DOMAIN_ALL),
+ ('crates/store-io-buf/src/wait.rs', '            if self.word.load(Ordering::SeqCst) == seen {', '            if self.word.load(Ordering::SeqCst) == seen || true {', LOOM_BUF, LOOM),
  # D-124 review: done never jumps to the highest finished flush; every
  # flush lane is a flush to the watchdog; a full flush of the main handle
  # waits for slot 0 and gives it back

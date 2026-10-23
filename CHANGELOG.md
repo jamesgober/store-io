@@ -154,6 +154,29 @@
   two buckets, so the shared fallback runs often; a loom model of three
   barriers of one need (the pass-on); 8 new mutation entries, run on the
   domain's wake tests.
+- Engine: **waiting barriers sleep without the slot lock and a finished
+  flush wakes each covered need with one call** (D-126). A barrier still
+  registers under the lock, then sleeps on a word of its own bed (a
+  per-need bucket; the designate, the one barrier that will lead the next
+  flush; or a shared word), without the lock: `futex` on Linux,
+  `WaitOnAddress` on Windows, a mutex and condvar elsewhere (new
+  `store_io_buf::WaitWord`). A leader deregisters and bumps every bed it
+  wakes under the lock and wakes each with one call after releasing it;
+  a covered barrier returns on reading `done`, never re-taking the lock,
+  where before each woken barrier re-took it to pass the wake to the next.
+  Measured on CI's loop-device runners at 8, 16 and 64 writers: within
+  2-3% of D-125 (that device is not limited by the wake chain); see D-126
+  for where the remaining time goes. Receipts, poison and the join rule
+  are unchanged. Tests: a stray wake leaves a barrier asleep and
+  registered once; the designate leads once for its bucket; a jump past
+  more needs than buckets wakes each; a bucket collision on three slots;
+  the window's designate; loom models of tickets taken while flushes run,
+  a full flush beside the designate, narrow and wide barriers on two
+  slots, and outside poison against sleepers; `WaitWord` unit tests and a
+  loom model. The held flushes in the domain tests now outlast every
+  wait of the test, so a stranded barrier always fails (a mutant of
+  D-125's routing survived at random because a held flush released
+  itself just in time). 15 mutation entries replace D-125's.
 - **Breaking** (`Directory`): a replace takes the directory's `.sio-lock`
   file (created on first use and kept) and fails `Locked`, not waiting,
   while another handle or process replaces there; the caller retries. A

@@ -141,7 +141,7 @@ where
         //    submitted leaves the data in place instead (that rollback would
         //    find the region whole); one that failed after submission has
         //    poisoned the store. Either way the release is committed.
-        match self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed) {
+        match self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed, None) {
             Ok(_) => {}
             Err(Error::NotWritten { .. }) => return Ok(()),
             Err(e) => return Err(e),
@@ -170,14 +170,16 @@ where
                 .map(|e| usize::from(e.extent_count))
                 .ok_or_else(corrupt)?
         };
-        self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)
+        self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed, None)
     }
 
     /// Writes the region's header again with `state` and its region
     /// generation moved on by `generation_step`: its first `committed`
-    /// extents (the entry's count, never an extra one), its fill and key,
-    /// its may-ignore flags and its object as they were. The caller holds
-    /// the region lock (`header`).
+    /// extents (the entry's count, never an extra one a header may list),
+    /// then `append` (a growth beyond capacity: the header is one extent
+    /// ahead of its entry until the page commits), its fill and key, its
+    /// may-ignore flags and its object as they were. The caller holds the
+    /// region lock (`header`).
     pub(crate) fn rewrite_header2(
         &self,
         r: &LiveRegion,
@@ -185,6 +187,7 @@ where
         state: RegionState,
         generation_step: u64,
         committed: usize,
+        append: Option<(u64, u64)>,
     ) -> Result<Generation, Error> {
         let inner = &self.inner;
         let c = ctx(r);
@@ -195,7 +198,8 @@ where
         let bytes = header.payload.as_deref().ok_or_else(metadata)?;
         let view = decode_region_header(bytes, inner.layout.log2_block, u64::MAX)
             .map_err(|_| metadata())?;
-        let extents: Vec<(u64, u64)> = view.extents().take(committed).collect();
+        let mut extents: Vec<(u64, u64)> = view.extents().take(committed).collect();
+        extents.extend(append);
         let mut h = view.header;
         h.state = state;
         h.extent_count = extents.len() as u16;

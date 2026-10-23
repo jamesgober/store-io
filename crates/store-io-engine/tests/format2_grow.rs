@@ -85,9 +85,7 @@ fn test_a_page_region_grows_within_its_capacity() {
         .write_durable(pages.pos(CAP / 2).unwrap(), &[9u8; 4096])
         .unwrap();
     pages.write_durable(before, &[1u8; 4096]).unwrap();
-    // Past the capacity: growth beyond it is not built yet.
-    let e = pages.grow(CAP + B).unwrap_err();
-    assert!(is_cause(&e, NotWrittenCause::TooLarge), "{e:?}");
+    // (Past the capacity is growth beyond it: tests/format2_grow_beyond.rs.)
     drop((pages, s));
     let s = open(&p);
     let pages = s.page_region("p").unwrap();

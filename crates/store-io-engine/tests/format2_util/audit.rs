@@ -22,6 +22,14 @@ pub(crate) struct Found {
     pub(crate) id: u64,
     pub(crate) data_offset: u64,
     pub(crate) data_size: u64,
+    pub(crate) capacity: u64,
+    /// The header pair's slots.
+    pub(crate) header_at: [u64; 2],
+    /// The committed extents, in data order.
+    pub(crate) extents: Vec<(u64, u64)>,
+    /// An extent the header lists past the entry's (only from
+    /// [`audit_allowing_extra`]).
+    pub(crate) extra: Option<(u64, u64)>,
     /// The entry's `footprint_seq`, and the `meta_seq` of its page's
     /// winning copy.
     pub(crate) footprint_seq: u64,
@@ -61,6 +69,17 @@ fn winner(
 /// Audits the container: panics, naming the broken rule, if any rule fails.
 /// Returns every region found, in table order.
 pub(crate) fn audit(pf: &SimPlatform) -> Vec<Found> {
+    audit_with(pf, false)
+}
+
+/// [`audit`], also allowing a region header one extent ahead of its entry
+/// (a growth beyond capacity that stopped before its commit): that extent
+/// is not the region's (it may hold anything, and overlap anything).
+pub(crate) fn audit_allowing_extra(pf: &SimPlatform) -> Vec<Found> {
+    audit_with(pf, true)
+}
+
+fn audit_with(pf: &SimPlatform, allow_extra: bool) -> Vec<Found> {
     let m = media(pf);
     let b = block(pf);
     let volume: [u8; 16] = m[32..48].try_into().unwrap();
@@ -109,10 +128,12 @@ pub(crate) fn audit(pf: &SimPlatform) -> Vec<Found> {
             .unwrap_or_else(|| panic!("region {id:#x}: no valid header"));
             let view = decode_region_header(&hbytes, 12, file_len)
                 .unwrap_or_else(|err| panic!("region {id:#x}: header {err}"));
-            assert_eq!(
-                view.header.extent_count, e.extent_count,
-                "region {id:#x}: extra extent"
-            );
+            if !allow_extra {
+                assert_eq!(
+                    view.header.extent_count, e.extent_count,
+                    "region {id:#x}: extra extent"
+                );
+            }
             let fp = check_region(id, &e, &view, &lim, &mut scratch)
                 .unwrap_or_else(|err| panic!("region {id:#x}: {err}"));
             let r = &scratch[..fp.ranges];
@@ -138,6 +159,10 @@ pub(crate) fn audit(pf: &SimPlatform) -> Vec<Found> {
                 id,
                 data_offset: view.extents().next().map_or(e.span_end, |x| x.0),
                 data_size: e.data_size,
+                capacity: e.capacity,
+                header_at: [e.header_a, e.header_b],
+                extents: view.extents().take(usize::from(e.extent_count)).collect(),
+                extra: fp.extra,
                 footprint_seq: e.footprint_seq,
                 page_meta_seq,
             });

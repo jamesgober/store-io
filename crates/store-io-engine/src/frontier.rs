@@ -88,7 +88,9 @@ const MAX_RING: u64 = 1 << 20;
 /// window is the bound, its blocks rounded down to a power of two, so the
 /// window never holds more than was asked; when the region is no larger, the
 /// region's blocks rounded up, so a region never limits its own appends and
-/// a small region never pays for a large ring.
+/// a small region never pays for a large ring. A growth keeps the ring: a
+/// region grown past the size its frontier was made for allows at most the
+/// old ring's blocks in flight until it is reopened or recycled.
 #[must_use]
 pub(crate) fn ring_for(window: u64, limit: u64, shift: u32) -> usize {
     let (w, r) = (window >> shift, limit.div_ceil(1 << shift));

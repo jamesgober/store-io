@@ -593,7 +593,7 @@ where
         while (done as u64) < len {
             // One run at a time: a piece never crosses a run's end.
             let at = offset + done as u64;
-            let piece = chunk.min(len - done as u64).min(r.map.run_end(at) - at);
+            let piece = chunk.min(len - done as u64).min(r.map.run_left(at));
             let piece_len =
                 usize::try_from(piece).map_err(|_| not_written(NotWrittenCause::TooLarge, c))?;
             let buf = self.take(piece_len, c)?;

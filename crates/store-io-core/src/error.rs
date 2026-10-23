@@ -277,13 +277,23 @@ pub enum Named {
     Slot,
 }
 
-/// A space-accounting tag (tenant, class, or store-io's own table).
+/// What ran out: a space-accounting tag (tenant, class), store-io's own
+/// table, or a region's own limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReserveTag {
     /// A caller-defined tag.
     Caller(u32),
     /// The region table is full.
     Table,
+    /// The region is capped (its `max_size`): it cannot grow past its
+    /// capacity.
+    RegionLimit,
+    /// The region's header lists as many extents as it can hold: it cannot
+    /// grow past its capacity.
+    Extents,
+    /// The device or file system ran out of space during a growth.
+    Growth,
 }
 
 /// Every error store-io returns.
@@ -402,7 +412,7 @@ impl fmt::Display for Error {
                 }
                 f.write_str("; reopen and recover")
             }
-            Self::NoSpace { tag, ctx } => write!(f, "no space for {tag:?}{ctx}; nothing written"),
+            Self::NoSpace { tag, ctx } => write!(f, "no space for {tag:?}{ctx}; nothing committed"),
             Self::Corruption { kind, ctx } => write!(f, "corruption: {kind:?}{ctx}"),
             Self::UnsafeDevice { reasons } => {
                 write_reasons(f, "device is unsafe for durable writes", reasons)

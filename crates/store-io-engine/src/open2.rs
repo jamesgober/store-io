@@ -408,7 +408,10 @@ pub(crate) fn check_regions<Q: Queue>(
                 crate::frontier::ring_for(append_window, e.capacity, u32::from(layout.log2_block)),
             )
         });
-        let map = crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size);
+        // Room for every run the header may list (a growth adds them).
+        let room = store_io_format::meta2::max_extents(layout.log2_block) - 1;
+        let map =
+            crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size).with_room(room);
         live.push(Arc::new(LiveRegion {
             id: RegionId::from_raw(c.id),
             name: e.name,

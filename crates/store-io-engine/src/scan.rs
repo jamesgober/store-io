@@ -212,9 +212,7 @@ where
             while failure.is_none() && !out.sum.stopped && next < to {
                 let Some(mut buf) = free.pop() else { break };
                 // Never across a run's end (one device operation each).
-                let len = (to - next)
-                    .min(chunk as u64)
-                    .min(r.map.run_end(next) - next) as usize;
+                let len = (to - next).min(chunk as u64).min(r.map.run_left(next)) as usize;
                 // `len ≤ chunk ≤ capacity`.
                 let _fits = buf.set_len(len);
                 let op = IoOp::Read {

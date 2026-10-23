@@ -71,8 +71,8 @@ pub struct MetadataReport {
     /// can leave a Ready header over reused space.
     pub stale_page_agreement: Vec<(u32, bool)>,
     /// Regions whose header pair shows a newer, unreadable version than the
-    /// one the open uses (spec §8): a recycle or slot commit possibly lost
-    /// to a crash. The older version is served.
+    /// one the open uses (spec §8): a recycle, slot commit or growth's
+    /// header possibly lost to a crash. The older version is served.
     pub lost_header_writes: Vec<RegionId>,
     /// A list above was cut at its limit (256 items).
     pub truncated: bool,

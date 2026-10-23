@@ -125,7 +125,7 @@ enum Req {
 /// ([`Split`]). Returns its file offset.
 fn first_piece(state: &LiveRegion, start: u64, buf: &mut IoBuf) -> (u64, Option<Split>) {
     let total = buf.len();
-    let piece = ((state.map.run_end(start) - start) as usize).min(total);
+    let piece = (state.map.run_left(start) as usize).min(total);
     let split = (piece < total).then(|| {
         let fits = buf.set_len(piece);
         debug_assert!(fits, "a piece longer than its buffer");

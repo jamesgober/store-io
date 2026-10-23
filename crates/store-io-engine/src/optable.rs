@@ -336,7 +336,7 @@ impl Table {
                 (whole, left > 0, region(live), buf.as_mut())
             {
                 let pos = start_of(live.kind) + (split.done + piece) as u64;
-                let next = ((state.map.run_end(pos) - pos) as usize).min(left);
+                let next = (state.map.run_left(pos) as usize).min(left);
                 // The rest to the front: the next piece starts at the start.
                 let fits = b.set_len(split.total);
                 debug_assert!(fits, "a split buffer shorter than its operation");

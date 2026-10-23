@@ -287,6 +287,12 @@ impl FreeMap {
         Some((self.tail.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew)
     }
 
+    /// Whether `[at, at + len)` is free inside the container.
+    pub(crate) fn fits_at(&self, at: u64, len: u64) -> bool {
+        at.checked_add(len)
+            .is_some_and(|end| self.free.iter().any(|&(s, e)| s <= at && end <= e))
+    }
+
     /// The end of the last allocated byte (at least the table's end).
     pub(crate) fn end(&self) -> u64 {
         self.tail
@@ -602,5 +608,19 @@ mod tests {
         // Skewed: `at + 100` aligned to 4096 inside [4196, 8192).
         assert_eq!(f.first_fit(90, 4096, 100), Some(8192 - 100));
         assert_eq!(f.first_fit(4000, 4096, 100), Some(12288 - 100 + 4096));
+    }
+
+    /// A range is free when one free range holds all of it: touching an
+    /// allocation is fine, crossing one or the container's end is not.
+    #[test]
+    fn test_fits_at_needs_one_free_range_holding_it() {
+        let f = FreeMap::complement(100, 1000, &mut [(200, 100)]);
+        assert_eq!(f.free, [(100, 200), (300, 1000)]);
+        assert!(f.fits_at(100, 100) && f.fits_at(300, 700) && f.fits_at(150, 1));
+        assert!(!f.fits_at(150, 100), "crosses an allocation");
+        assert!(!f.fits_at(250, 10), "inside one");
+        assert!(!f.fits_at(300, 701), "past the container");
+        assert!(!f.fits_at(50, 10), "inside the table area");
+        assert!(!f.fits_at(u64::MAX, 2), "past u64::MAX");
     }
 }

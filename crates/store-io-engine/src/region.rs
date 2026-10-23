@@ -451,28 +451,34 @@ where
     }
 
     /// How far the data area can grow without new space: the region's
-    /// capacity in bytes (its data size until format 2's growth).
+    /// capacity in bytes (the sum of its extents).
     #[must_use]
     pub fn capacity(&self) -> u64 {
         self.state.map.capacity()
     }
 
     /// Grows the data area to at least `new_size` bytes (rounded up to the
-    /// block size) within the capacity: the new range is filled, flushed
-    /// and verified before one table page write commits the new size (spec
-    /// §12, growth within capacity). Returns the new size; on a writable
-    /// store a size at most the current one writes nothing and returns it.
-    /// Positions and tickets taken before stay valid.
+    /// block size): the new range is filled, flushed and verified before
+    /// one table page write commits the new size (spec §12). Within the
+    /// capacity nothing else moves; past it the region gains one extent of
+    /// at least 1 MiB and an eighth of its capacity (after its last one
+    /// when that space is free), listed in its header before the commit.
+    /// Returns the new size; on a writable store a size at most the current
+    /// one writes nothing and returns it. Positions and tickets taken
+    /// before stay valid.
     ///
     /// # Errors
     ///
     /// `Unsupported` in container format 1; `NotWritten` (`TooLarge` past
-    /// the capacity; `ReadOnly`; `Frozen` while a table page is stale or
+    /// 2^32 blocks; `ReadOnly`; `Frozen` while a table page is stale or
     /// lost; `NotReady` if the filled range does not verify;
-    /// `StaleGeneration` for a recycled region; `QueueFull`); `NoSpace`;
-    /// `Io` if the range could not be probed; `Corruption` for metadata
-    /// that does not decode; `Poisoned`; `DurabilityUnknown` (a fill, a
-    /// flush or the page write failed after submission: poisoned).
+    /// `StaleGeneration` for a recycled region; `QueueFull`); `NoSpace`
+    /// (`RegionLimit` for a capped region, `Extents` when its header lists
+    /// as many extents as it can hold, `Caller` past the tag's cap,
+    /// `Growth` when the device runs out); `Io` if the range could not be
+    /// probed or allocated; `Corruption` for metadata that does not decode;
+    /// `Poisoned`; `DurabilityUnknown` (a fill, a flush, the header or the
+    /// page write failed after submission: poisoned).
     pub fn grow(&self, new_size: u64) -> Result<u64, Error> {
         let _pass = self.pass()?;
         self.store.grow_region2(&self.state, new_size)
@@ -742,28 +748,34 @@ where
     }
 
     /// How far the data area can grow without new space: the region's
-    /// capacity in bytes (its data size until format 2's growth).
+    /// capacity in bytes (the sum of its extents).
     #[must_use]
     pub fn capacity(&self) -> u64 {
         self.state.map.capacity()
     }
 
     /// Grows the data area to at least `new_size` bytes (rounded up to the
-    /// block size) within the capacity: the new range is filled, flushed
-    /// and verified before one table page write commits the new size (spec
-    /// §12, growth within capacity). Returns the new size; on a writable
-    /// store a size at most the current one writes nothing and returns it.
-    /// Positions and tickets taken before stay valid.
+    /// block size): the new range is filled, flushed and verified before
+    /// one table page write commits the new size (spec §12). Within the
+    /// capacity nothing else moves; past it the region gains one extent of
+    /// at least 1 MiB and an eighth of its capacity (after its last one
+    /// when that space is free), listed in its header before the commit.
+    /// Returns the new size; on a writable store a size at most the current
+    /// one writes nothing and returns it. Positions and tickets taken
+    /// before stay valid.
     ///
     /// # Errors
     ///
     /// `Unsupported` in container format 1; `NotWritten` (`TooLarge` past
-    /// the capacity; `ReadOnly`; `Frozen` while a table page is stale or
+    /// 2^32 blocks; `ReadOnly`; `Frozen` while a table page is stale or
     /// lost; `NotReady` if the filled range does not verify;
-    /// `StaleGeneration` for a recycled region; `QueueFull`); `NoSpace`;
-    /// `Io` if the range could not be probed; `Corruption` for metadata
-    /// that does not decode; `Poisoned`; `DurabilityUnknown` (a fill, a
-    /// flush or the page write failed after submission: poisoned).
+    /// `StaleGeneration` for a recycled region; `QueueFull`); `NoSpace`
+    /// (`RegionLimit` for a capped region, `Extents` when its header lists
+    /// as many extents as it can hold, `Caller` past the tag's cap,
+    /// `Growth` when the device runs out); `Io` if the range could not be
+    /// probed or allocated; `Corruption` for metadata that does not decode;
+    /// `Poisoned`; `DurabilityUnknown` (a fill, a flush, the header or the
+    /// page write failed after submission: poisoned).
     pub fn grow(&self, new_size: u64) -> Result<u64, Error> {
         let _pass = self.pass()?;
         self.store.grow_region2(&self.state, new_size)

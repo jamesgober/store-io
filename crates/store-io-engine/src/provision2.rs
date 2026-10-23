@@ -260,7 +260,8 @@ where
             name: rname,
             kind,
             generation: Generation::FIRST,
-            map: crate::regionmap::RegionMap::single(offset + 2 * block, data_size),
+            map: crate::regionmap::RegionMap::single(offset + 2 * block, data_size)
+                .with_room(store_io_format::meta2::max_extents(inner.layout.log2_block) - 1),
             header_at: [offset, offset + block],
             header: Mutex::new(header),
             frontier: (kind == RegionKind::Append).then(|| {

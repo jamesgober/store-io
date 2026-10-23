@@ -71,6 +71,8 @@ SUBMITTER_TEST = ["-p", "store-io-engine", "--test", "submitter"]
 F2E = ["-p", "store-io-engine", "--test", "format2_extents"]
 # Format-2 growth within capacity.
 F2G = ["-p", "store-io-engine", "--test", "format2_grow"]
+# Format-2 growth beyond capacity.
+F2B = ["-p", "store-io-engine", "--test", "format2_grow_beyond"]
 # The append frontier's unit tests.
 FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 # The region map's unit tests; the format crate's footprint tests.
@@ -474,17 +476,54 @@ M = [
  # commit; the capacity bound; published after the commit (the map, then
  # the frontier's limit); the fill keyed by region offset; the usage and
  # accounting follow
- ('crates/store-io-engine/src/grow2.rs', '        self.flush_all_accounted()?;\n        for &(file, _, n) in &pieces {', '        for &(file, _, n) in &pieces {', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        self.flush_all_accounted()?;\n        for &(file, _, n) in pieces {', '        for &(file, _, n) in pieces {', F2G),
  ('crates/store-io-engine/src/grow2.rs', '            self.verify_ready(file, n)?;', '            let _ = (file, n);', F2G),
- ('crates/store-io-engine/src/grow2.rs', 'if new > r.map.capacity() || new / block >= u64::from(u32::MAX) {', 'if new >= r.map.capacity() || new / block >= u64::from(u32::MAX) {', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        if new > r.map.capacity() {\n            return self.grow_beyond2(', '        if new >= r.map.capacity() {\n            return self.grow_beyond2(', F2G),
  ('crates/store-io-engine/src/grow2.rs', '        // 2. The commit: the page with the entry\'s new data size.', '        r.map.publish_len(new);\n        // 2. The commit: the page with the entry\'s new data size.', F2G),
- ('crates/store-io-engine/src/grow2.rs', '        if let Some(f) = &r.frontier {\n            f.raise_limit(new);', '        if let Some(f) = r.frontier.as_ref().filter(|_| false) {\n            f.raise_limit(new);', F2G),
- ('crates/store-io-engine/src/grow2.rs', '            self.fill_range(file, n, 0, fill, &key, at)?;', '            self.fill_range(file, n, 0, fill, &key, file + (at & 0))?;', F2G),
- ('crates/store-io-engine/src/grow2.rs', '                u.1 = new;', '                u.1 = u.1.max(0);', F2G),
- ('crates/store-io-engine/src/grow2.rs', '            acct.add_usage(entry.tag, new, 0);', '            acct.add_usage(entry.tag, entry.data_size, 0);', F2G),
- ('crates/store-io-engine/src/grow2.rs', '            entry.data_size = new;', '            entry.data_size = len;', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        if let Some(f) = &r.frontier {\n            f.raise_limit(new);\n        }\n        drop(header);', '        if let Some(f) = r.frontier.as_ref().filter(|_| false) {\n            f.raise_limit(new);\n        }\n        drop(header);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', 'self.fill_range(file, n, 0, fill, key, at)', 'self.fill_range(file, n, 0, fill, key, file + (at & 0))', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '*u = (old.tag, new, physical.saturating_add(extra));', '*u = (old.tag, old.data_size, physical.saturating_add(extra));', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        acct.add_usage(old.tag, new, extra);', '        acct.add_usage(old.tag, old.data_size, extra);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', 'the map\'s length is the entry\'s");\n            e.data_size = new;', 'the map\'s length is the entry\'s");\n            e.data_size = len;', F2G),
  # C8 review: refused while frozen (stricter than the spec)
  ('crates/store-io-engine/src/grow2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2G),
+ # E4 C9: growth beyond capacity. Refusals before any I/O (capped, a
+ # full extent list, the tag's cap); at least 1 MiB; after the last
+ # extent when free or the tail, else first fit; the slack allocated
+ # (Windows: the whole extent filled); the header lists the extent
+ # before the page commits every entry field; memory after the commit
+ # (the extent allocated, the usage, the run, the length); running out
+ # of space is NoSpace(Growth)
+ ('crates/store-io-engine/src/grow2.rs', '        if old.flags & FLAG_CAPPED != 0 {', '        if old.flags & FLAG_CAPPED != 0 && false {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        if usize::from(old.extent_count) >= max_extents(', '        if usize::from(old.extent_count) > max_extents(', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        if !lock_acct(&inner.acct).fits(old.tag, ext_len) {', '        if !lock_acct(&inner.acct).fits(old.tag, ext_len) && false {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', 'align_up(MIN_EXTENT.max(old_cap / 8)', 'align_up((MIN_EXTENT & 0).max(old_cap / 8)', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            let at = if v2.free.fits_at(last_end, ext_len) || last_end == v2.free.end() {', '            let at = if v2.free.fits_at(last_end, ext_len) && false {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            let at = if v2.free.fits_at(last_end, ext_len) || last_end == v2.free.end() {', '            let at = if (v2.free.fits_at(last_end, ext_len) && false) || last_end == v2.free.end() {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.data_size = new;\n            e.capacity = capacity;', '            e.data_size = len;\n            e.capacity = capacity;', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.capacity = capacity;', '            e.capacity = old_cap + (capacity & 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.extent_count += 1;', '            e.extent_count += 0;', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.span_start = e.span_start.min(at);', '            e.span_start = e.span_start.min(at | u64::MAX);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.span_end = e.span_end.max(at + ext_len);', '            e.span_end = e.span_end.max(at & 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.footprint_seq = meta_seq;', '            e.footprint_seq = e.footprint_seq.max(meta_seq & 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        let filled = if inner.report.evidence.platform == PlatformKind::Windows {', '        let filled = if inner.report.evidence.platform == PlatformKind::Windows && false {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        if filled < ext_len {', '        if filled < ext_len && false {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        pieces.push((at, old_cap, filled));', '        pieces.push((at, old_cap, filled.min(0)));', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            RegionState::Ready,\n            0,\n            committed,\n            Some((at, ext_len)),', '            RegionState::Ready,\n            1,\n            committed,\n            Some((at, ext_len)),', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            Some((at, ext_len)),\n        )?;', '            Some((at, ext_len)).filter(|_| false),\n        )?;', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            v2.allocated.push((at, ext_len));', '            let _ = (at, ext_len);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            v2.rebuild_free(container);\n        }\n        self.count_growth', '            let _ = (v2, container);\n        }\n        self.count_growth', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        self.count_growth(&mut meta, &old, new, ext_len);', '        self.count_growth(&mut meta, &old, new, 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            tag: ReserveTag::Growth,', '            tag: ReserveTag::Caller(0),', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        if listed > committed {', '        if listed > committed && false {', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        r.map.extend(at, ext_len);', '        r.map.extend(at, 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        if let Some(f) = &r.frontier {\n            f.raise_limit(new);\n        }\n        Ok(new)', '        if let Some(f) = r.frontier.as_ref().filter(|_| false) {\n            f.raise_limit(new);\n        }\n        Ok(new)', F2B),
+ ('crates/store-io-engine/src/open2.rs', '            allocated.extend(c.extra);', '            let _ = &c.extra;', F2B),
+ ('crates/store-io-engine/src/lifecycle2.rs', '        extents.extend(append);', '        extents.extend(append.filter(|_| false));', F2B),
+ ('crates/store-io-engine/src/footprint.rs', '            .is_some_and(|end| self.free.iter().any(|&(s, e)| s <= at && end <= e))', '            .is_some_and(|end| self.free.iter().any(|&(s, e)| s <= at && end < e))', FOOTPRINT),
+ ('crates/store-io-engine/src/regionmap.rs', '        if at.checked_add(cap - start) != Some(file) {', '        if at.checked_add(cap - start) != Some(file) || true {', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', 'get_or_init(|| slots(1 << c))', 'get_or_init(|| slots((1 << c) / 2 + 1))', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', '            s.start.store(cap, Ordering::Relaxed);\n            s.file.store(file, Ordering::Relaxed);\n            self.count.store(count as u64 + 1, Ordering::Release);', '            self.count.store(count as u64 + 1, Ordering::Release);\n            s.start.store(cap, Ordering::Relaxed);\n            s.file.store(file, Ordering::Relaxed);', LOOM_ENGINE, LOOM),
  # E4 C7: the completion ring allocated at the first completion, never at
  # construction (outside loom); a resume_at that moves the tail has the
  # ring through get_or_init (a plain look races a first completion)
@@ -511,7 +550,7 @@ M = [
  # rotation after each piece and at the end; settled once, over the whole
  # operation; a refused next piece settles over what was done; a refused
  # first piece gives the buffer back whole
- ('crates/store-io-engine/src/submitter/mod.rs', 'let piece = ((state.map.run_end(start) - start) as usize).min(total);', 'let piece = total;', F2E),
+ ('crates/store-io-engine/src/submitter/mod.rs', 'let piece = (state.map.run_left(start) as usize).min(total);', 'let piece = total;', F2E),
  ('crates/store-io-engine/src/optable.rs', 'b.as_mut_slice().rotate_left(piece);', 'b.as_mut_slice().rotate_left(0);', F2E),
  ('crates/store-io-engine/src/optable.rs', '                b.as_mut_slice().rotate_left(split.total - split.done);\n            }\n            result', '                b.as_mut_slice().rotate_left(0);\n            }\n            result', F2E),
  ('crates/store-io-engine/src/optable.rs', '(whole, left > 0, region(live), buf.as_mut())', '(whole, false, region(live), buf.as_mut())', F2E),
@@ -529,21 +568,21 @@ M = [
  # E4 C4: blocking writes split at runs (the piece, the rest moved to the
  # front, the split buffer kept until its last piece, the source waiting
  # for it)
- ('crates/store-io-engine/src/mapped.rs', 'let piece = (self.map.run_end(pos) - pos).min(left as u64);', 'let piece = left as u64;', F2E),
+ ('crates/store-io-engine/src/mapped.rs', 'let piece = self.map.run_left(pos).min(left as u64);', 'let piece = left as u64;', F2E),
  ('crates/store-io-engine/src/mapped.rs', '.copy_within(written..written + left, 0);', '.copy_within(written - 4096..written + left - 4096, 0);', F2E),
  ('crates/store-io-engine/src/mapped.rs', 'let Some(k) = self.parts.iter().position(|p| p.addr == addr) else {', 'let Some(k) = self.parts.iter().position(|p| p.addr == addr && false) else {', F2E),
  ('crates/store-io-engine/src/mapped.rs', 'Next::Done if !self.parts.is_empty() => Next::Wait,', 'Next::Done if false => Next::Wait,', F2E),
  # E4 C3: regions of several extents open; reads and scans stop at a
  # run's end
- ('crates/store-io-engine/src/io.rs', 'let piece = chunk.min(len - done as u64).min(r.map.run_end(at) - at);', 'let piece = chunk.min(len - done as u64);', F2E),
- ('crates/store-io-engine/src/scan.rs', '                    .min(chunk as u64)\n                    .min(r.map.run_end(next) - next) as usize;', '                    .min(chunk as u64) as usize;', F2E),
- ('crates/store-io-engine/src/regionmap.rs', 'let more: Box<[(u64, u64)]> = all.map(|r| (r.start, r.file)).collect();', 'let more: Box<[(u64, u64)]> = all.take(0).map(|r| (r.start, r.file)).collect();', F2E),
+ ('crates/store-io-engine/src/io.rs', 'let piece = chunk.min(len - done as u64).min(r.map.run_left(at));', 'let piece = chunk.min(len - done as u64);', F2E),
+ ('crates/store-io-engine/src/scan.rs', 'let len = (to - next).min(chunk as u64).min(r.map.run_left(next)) as usize;', 'let len = (to - next).min(chunk as u64) as usize;', F2E),
+ ('crates/store-io-engine/src/regionmap.rs', 'let more: Vec<(u64, u64)> = all.map(|r| (r.start, r.file)).collect();', 'let more: Vec<(u64, u64)> = all.take(0).map(|r| (r.start, r.file)).collect();', F2E),
  # E4 C2: runs coalesce adjacent extents in data order; a range never
  # crosses a run; the run search; the runs cover the capacity
  ('crates/store-io-format/src/footprint.rs', '(Some(end), Some(total)) if end == next => len = total,', '(Some(end), Some(total)) if end <= next => len = total,', FOOTPRINT_FMT),
  ('crates/store-io-engine/src/regionmap.rs', '            pos + len <= end,', '            pos + len <= end || true,', REGIONMAP),
- ('crates/store-io-engine/src/regionmap.rs', 'let k = self.more.partition_point(|r| r.0 <= pos);', 'let k = self.more.partition_point(|r| r.0 < pos);', REGIONMAP),
- ('crates/store-io-engine/src/regionmap.rs', '.chain(core::iter::once(self.capacity));', '.chain(core::iter::once(self.len()));', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', '            if self.run(mid).0 <= pos {', '            if self.run(mid).0 < pos {', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', '            .chain(core::iter::once(cap))\n            .collect();', '            .chain(core::iter::once(self.len().min(cap | u64::MAX)))\n            .collect();', REGIONMAP),
  # E4 C1: a release tries every extent (a failed trim on Windows is no
  # error); a submitter's reservation is held under a poisoning guard until
  # its row holds it
@@ -569,14 +608,14 @@ M = [
  # E2b/E3 C7: recycle in format 2 moves the region generation on and
  # writes the entry's extents only; a slot commit in format 2 carries
  # the object after the fixed part; neither takes format 1's path
- ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed)', F2C),
+ ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed, None)', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed, None)', F2C),
  ('crates/store-io-engine/src/lifecycle2.rs', '                .map(|e| usize::from(e.extent_count))', '                .map(|e| usize::from(e.extent_count) + 1)', F2C),
  ('crates/store-io-engine/src/lifecycle.rs', '        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 {', '        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 && r.id.get() == u64::MAX {', F2C),
  ('crates/store-io-engine/src/slot_handle.rs', '        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 {', '        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 && data.is_empty() {', F2C),
  # E2b/E3 C6 review: the footprint is the header's committed extents (by
  # capacity); a release whose header write is refused after the commit
  # still stands
- ('crates/store-io-engine/src/lifecycle2.rs', '        let extents = committed_extents(&header, inner.layout.log2_block, committed);', '        let extents: Vec<(u64, u64)> = r.map.extents().chain(committed_extents(&header, inner.layout.log2_block, 0)).collect();', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '        let extents = committed_extents(&header, inner.layout.log2_block, committed);', '        let extents: Vec<(u64, u64)> = r.map.extents().chain(committed_extents(&header, inner.layout.log2_block, 0)).collect();', F2X + ['--test', 'format2_grow_beyond']),
  ('crates/store-io-engine/src/lifecycle2.rs', '            Err(Error::NotWritten { .. }) => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Err(corrupt()),', F2X),
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
@@ -586,7 +625,7 @@ M = [
  ('crates/store-io-engine/src/lifecycle2.rs', '                    let _gone = v2.allocated.swap_remove(i);', '                    let _gone = i;', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '                let _gone = v2.usage.swap_remove(i);', '                let _gone = i;', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '            v2.rebuild_free(len);', '            let _ = (v2, len);', F2X),
- ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed)', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed)', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed, None)', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed, None)', F2X),
  ('crates/store-io-engine/src/lifecycle.rs', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {\n            return self.release_region2(r);', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 && r.id.get() == u64::MAX {\n            return self.release_region2(r);', F2X),
  # E2b/E3 C5: provisioning in format 2: frozen refuses provisioning
  # and reservations; a name held by an unavailable or unknown-kind entry

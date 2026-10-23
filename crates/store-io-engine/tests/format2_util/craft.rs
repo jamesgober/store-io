@@ -226,23 +226,45 @@ pub(crate) fn lose_page(pf: &SimPlatform, p: u32) {
     super::tear(pf, page_at(pf, p, 1));
 }
 
-/// Writes a newer copy of page `p` into slot A, chained to slot B, torn:
-/// the page becomes stale (Unconfirmed), its winner the copy in slot B.
+/// Writes a newer copy of page `p` into its older slot, chained to the
+/// newer one, torn: the page becomes stale (Unconfirmed), its winner the
+/// newer copy.
 pub(crate) fn tear_newer_copy_of(pf: &SimPlatform, p: u32) {
     let m = media(pf);
-    let b = page_at(pf, p, 1) as usize;
+    let (a, b) = (page_at(pf, p, 0) as usize, page_at(pf, p, 1) as usize);
+    // Slot A newer (a valid copy of a higher generation): the torn copy
+    // goes to B.
+    let a_newer = u64_at(&m, a + 56) > u64_at(&m, b + 56)
+        && store_io_format::slot::validate(
+            &m[a..a + (1 << LOG2_TABLE)],
+            &store_io_format::slot::Expect {
+                volume_uuid: m[32..48].try_into().unwrap(),
+                object_id: (1 << 61) | u64::from(p),
+                slot_offset: a as u64,
+                slot_index: SlotIndex::A,
+                log2_slot_size: LOG2_TABLE,
+                format_major: FORMAT_2,
+                numbered: true,
+            },
+        )
+        .is_valid();
+    let (from, to, index) = if a_newer {
+        (a, b, SlotIndex::B)
+    } else {
+        (b, a, SlotIndex::A)
+    };
     let mut s = slot(
         pf,
         (1 << 61) | u64::from(p),
-        page_at(pf, p, 0),
-        SlotIndex::A,
+        to as u64,
+        index,
         LOG2_TABLE,
-        u64_at(&m, b + 56) + 1,
-        u32_at(&m, b + 8),
+        u64_at(&m, from + 56) + 1,
+        u32_at(&m, from + 8),
         max_meta_seq(pf) + 1,
         &super::empty_page(p),
         0,
     );
     s[128] ^= 0xff;
-    put(pf, page_at(pf, p, 0), &s);
+    put(pf, to as u64, &s);
 }

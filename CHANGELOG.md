@@ -13,6 +13,33 @@
 
 ### Added
 
+- Engine: **growth beyond capacity** in format 2 (v0.5 E4 C9, still
+  behind the hidden `StoreOptions::container_format`): `grow` past the
+  capacity adds one extent of at least 1 MiB and an eighth of the
+  capacity, placed after the region's last extent when that space is free
+  (one run: I/O there is never split), else by first fit, else past
+  everything allocated. Under the region lock and the metadata lock the
+  new range is filled with the region's pattern, flushed and verified (the
+  rest of the extent allocated, unwritten; on Windows the whole extent is
+  written); the region header is written listing the extent, then one
+  table page write commits the new `data_size`, `capacity`,
+  `extent_count`, span and `footprint_seq`. A crash before the commit
+  leaves the old size, the header possibly one extent ahead (that extent
+  reported in `extra_extents`; free, unless the region's page is stale);
+  the next growth first rewrites such a header with the committed extents
+  only, so a copy listing an extent the region does not have is only ever
+  one extent ahead of the entry, which the open ignores. Refused before
+  any write: a
+  capped region `NoSpace(RegionLimit)`, a header listing as many extents
+  as it can hold `NoSpace(Extents)`, the tag's cap `NoSpace(Caller)`;
+  running out of space during the growth is `NoSpace(Growth)`; after any
+  refusal the space accounting is as it was (the container may have
+  grown). The region map gains runs while I/O runs on it (append-only
+  atomics in chunks that double, so its memory follows its runs; loom
+  models of readers racing growths). An append region keeps the completion
+  ring sized when it was opened, provisioned or recycled: grown past that
+  size, it allows at most the old ring's blocks in flight until it is
+  reopened or recycled.
 - Engine: **growth within capacity** in format 2 (v0.5 E4 C8, still
   behind the hidden `StoreOptions::container_format`):
   `AppendRegion::grow`, `PageRegion::grow` (to at least `new_size`,
@@ -22,8 +49,7 @@
   flushed and verified; one table page write commits the new `data_size`
   (`footprint_seq` unchanged); then the region map's length and the
   append frontier's limit are raised. A crash before the commit leaves the
-  old size. Growth past the capacity is `NotWritten(TooLarge)` until E4
-  C9; while a table page is stale or lost it is `NotWritten(Frozen)`
+  old size. While a table page is stale or lost it is `NotWritten(Frozen)`
   (stricter than the spec, which freezes only growth beyond the
   capacity); format 1 returns `Unsupported`. Space accounting follows
   (logical bytes; the capacity was already counted).
@@ -236,6 +262,10 @@
 
 ### Changed
 
+- `store-io-core`: **`ReserveTag` is `#[non_exhaustive]`** and gains
+  `RegionLimit`, `Extents` and `Growth` (the reasons a growth beyond
+  capacity runs out). Breaking: a `match` on it outside the crate needs a
+  wildcard arm.
 - Engine: **an append region's completion ring is allocated at its first
   completed append** (or a `resume_at` that moves its tail), not when the
   region is opened, provisioned or recycled: a store of many append
@@ -376,6 +406,11 @@
 
 ### Fixed
 
+- Engine: an operation split at a run's end (a `Submitter` read or
+  write, a buffered write, `read_at`, a scan) that reached past the data's
+  end, which only a bounds-check bug could cause, went on as empty pieces
+  for ever; every split now refuses an empty piece, in release builds too
+  (`RegionMap::run_left`).
 - Engine: **a release stopped deallocating at the first extent that
   failed.** The rest of the region's data stayed allocated (on Windows,
   where a failed trim is no error, silently). Every extent is now tried;

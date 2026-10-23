@@ -47,10 +47,8 @@ impl<'a, S: Source> Mapped<'a, S> {
     /// `buf`, whose first byte is at region offset `pos`, at its run: the
     /// whole of it, or the piece up to its run's end (the rest recorded).
     fn place(&mut self, pos: u64, mut buf: IoBuf, left: usize) -> (u64, IoBuf) {
-        let piece = (self.map.run_end(pos) - pos).min(left as u64);
-        // Never empty: a buffer past the data's end (a caller's bug) would
-        // otherwise be retried as empty pieces for ever.
-        assert!(piece > 0, "a write at {pos} past the data's end");
+        // Never empty (`run_left` refuses a buffer past the data's end).
+        let piece = self.map.run_left(pos).min(left as u64);
         if piece < left as u64 {
             self.parts.push(Part {
                 addr: buf.as_ptr() as usize,

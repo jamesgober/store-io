@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use store_io_core::error::{Capability, Error};
+use store_io_core::error::Error;
 use store_io_core::id::{Generation, RegionId, VolumeId};
 use store_io_format::footprint::{check_region, footprint_len};
 use store_io_format::judge::Standing;
@@ -212,12 +212,6 @@ pub(crate) fn check_regions<Q: Queue>(
                 entry.data_size,
                 entry.capacity.saturating_add(2 * block),
             ));
-            if entry.extent_count > 1 {
-                // Regions of several extents arrive with E4.
-                return Err(Error::Unsupported {
-                    what: Capability::FormatVersion,
-                });
-            }
             pending.push((id, p, entry, lim));
         }
     }
@@ -414,20 +408,23 @@ pub(crate) fn check_regions<Q: Queue>(
                 crate::frontier::ring_for(append_window, e.data_size, u32::from(layout.log2_block)),
             )
         });
+        let map = crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size);
+        let several_runs = map.runs() > 1;
         live.push(Arc::new(LiveRegion {
             id: RegionId::from_raw(c.id),
             name: e.name,
             kind: e.kind,
             generation,
-            map: crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size),
+            map,
             header_at: [e.header_a, e.header_b],
             header: Mutex::new(c.header),
             frontier,
             positioned: std::sync::atomic::AtomicBool::new(false),
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // On a stale page, possibly superseded, or with a header whose
-            // winner carries a feature this version may not write.
-            read_only: unconfirmed || s.superseded || !writable,
+            // winner carries a feature this version may not write; and, until
+            // writes split at runs (E4 C4, C5), a region in several runs.
+            read_only: unconfirmed || s.superseded || !writable || several_runs,
             gate: Gate::new(),
         }));
     }

@@ -12,11 +12,9 @@
 
 mod format2_util;
 
-use std::path::Path;
-
 use format2_util::craft::{Region, lose_page, region, tear_newer_copy_of, write_regions};
 use format2_util::*;
-use store_io_core::error::{Capability, Error, NotWrittenCause};
+use store_io_core::error::{Error, NotWrittenCause};
 use store_io_engine::{Store, Unavailable};
 use store_io_format::meta::{RegionKind, RegionState};
 use store_io_format::slot::SlotIndex;
@@ -200,28 +198,6 @@ fn test_an_extra_extent_is_reported_and_the_region_usable() {
     let extra = &s.report().metadata.extra_extents;
     assert_eq!(extra.len(), 1);
     assert_eq!(extra[0].1, (NEXT, 4 * B));
-}
-
-#[test]
-fn test_a_region_of_several_extents_is_not_yet_supported() {
-    let p = fresh(209);
-    let mut r = append(0, "split", BASE);
-    r.entry.extent_count = 2;
-    r.header.extent_count = 2;
-    r.entry.span_end += 4 * B;
-    r.entry.capacity += 4 * B;
-    r.extents.push((BASE + 2 * B + CAP, 4 * B));
-    write_regions(&p, 0, &[r]);
-    let e = Store::open(p.clone(), Path::new(DIR), opts()).map(|_| ());
-    assert!(
-        matches!(
-            e,
-            Err(Error::Unsupported {
-                what: Capability::FormatVersion
-            })
-        ),
-        "{e:?}"
-    );
 }
 
 /// A page whose newest copy is torn after a clean close is stale: its

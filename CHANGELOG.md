@@ -37,8 +37,13 @@
     possibly superseded (read-only). All of this happens before the open
     writes anything. Regions on a stale page, possibly superseded, or with
     an unknown read-only-compatible header feature open read-only; a
-    region of several extents is `Unsupported` until E4; a 512 B append
-    region opens the store read-only until §13.
+    region of several extents opens mapped by its runs (extents adjacent
+    in the file coalesced, spec §11): reads and scans cross runs in data
+    order, and until writes split at runs (E4 C4, C5) a region in several
+    runs is read-only (so neither released nor recycled; the report does
+    not say why) and a `Submitter` read across a run is refused
+    (`NotReady`); a 512 B append region opens the store read-only until
+    §13.
   - Free space is the complement of every footprint, unavailable span and
     (on a stale page) extra extent; `SpaceReport::released` in format 2
     is that free space less what reservations hold.

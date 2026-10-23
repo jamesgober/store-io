@@ -65,6 +65,11 @@ impl RegionMap {
         self.len
     }
 
+    /// How many runs the data lies in.
+    pub(crate) fn runs(&self) -> usize {
+        1 + self.more.len()
+    }
+
     /// The runs' total length.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn capacity(&self) -> u64 {

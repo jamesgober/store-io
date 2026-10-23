@@ -384,8 +384,10 @@ where
     /// # Errors
     ///
     /// [`Rejected`], with the buffer: `NotWritten` (empty, misaligned, out
-    /// of range, submitter full, another store's region or buffer), or `Io`
-    /// if the OS refused it.
+    /// of range, submitter full, another store's region or buffer; or
+    /// `NotReady` for a range across two runs of a format-2 region, one
+    /// device read each, which a `Submitter` does not split yet), or `Io` if
+    /// the OS refused it.
     pub fn read_append(
         &mut self,
         region: &AppendRegion<P>,
@@ -447,6 +449,11 @@ where
         }
         if offset.checked_add(len).is_none_or(|e| e > state.map.len()) {
             return Err(rejected(not_written(NotWrittenCause::OutOfBounds, c), buf));
+        }
+        // One operation is one device read: across a run's end it would be
+        // two (a Submitter does not split one until E4 C5).
+        if state.map.run_end(offset) < offset + len {
+            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
         }
         let req = Req::Read {
             offset: state.map.locate(offset, len),

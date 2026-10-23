@@ -249,6 +249,55 @@ fn test_a_write_failing_in_flight_poisons() {
     assert_eq!(&c.buf.unwrap().as_slice()[..500], &data(0, 500)[..]);
 }
 
+/// A panic between an append's reservation and its submission (here a
+/// backend's `submit` panicking) poisons the store at once and wakes what
+/// waits: a durable append past the hole, already waiting on it while the
+/// submitter lives, returns `Poisoned` instead of waiting until the
+/// submitter drops.
+#[test]
+fn test_a_panic_after_the_reservation_poisons_and_wakes_at_once() {
+    let (p, s) = store(740, false);
+    let wal = s.provision_append_region("wal", 4 * MIB).unwrap();
+    let mut sub = sub(&s, 8);
+    let buf = filled(&sub, &data(1, 500));
+    let main = std::thread::current().id();
+    let (tx, rx) = mpsc::channel();
+    let later = wal.clone();
+    let world = p.clone();
+    let tx = std::sync::Mutex::new(Some(tx));
+    p.with_world(|w| {
+        w.set_submit_probe(Some(std::sync::Arc::new(move || {
+            if std::thread::current().id() != main {
+                return;
+            }
+            // With the hole reserved: a durable append past it, on another
+            // thread, until its write has landed (it then waits on the hole).
+            let Some(tx) = tx.lock().unwrap().take() else {
+                return;
+            };
+            let landed = world.with_world(|w| w.writes()) + 1;
+            let later = later.clone();
+            std::thread::spawn(move || tx.send(later.append_durable(b"after").map(|_| ())));
+            while world.with_world(|w| w.writes()) < landed {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            panic!("a backend's submit panicked");
+        })));
+    });
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sub.append(&wal, buf, WriteMode::Plain, 1)
+    }));
+    p.with_world(|w| w.set_submit_probe(None));
+    assert!(r.is_err(), "the probe did not panic");
+    assert!(s.poisoned().is_some(), "not poisoned");
+    let got = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("a durable append waited on the hole");
+    assert!(matches!(got, Err(Error::Poisoned { .. })), "{got:?}");
+    drop(sub);
+}
+
 /// A short page write: `DurabilityUnknown`, poisoned, no ticket.
 #[test]
 fn test_a_short_write_is_unknown_and_poisons() {

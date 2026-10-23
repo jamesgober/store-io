@@ -146,10 +146,12 @@ impl<I: Iterator<Item = (u64, IoBuf)>> Source for Placed<I> {
 }
 
 /// An append reservation that poisons the device domain unless it is handed
-/// to the settle step ([`Self::disarm`], then [`crate::settle`], which
-/// completes it or poisons): a reserved range left unwritten is a hole no
-/// later append may be acknowledged past. Dropping it before then (an error,
-/// or a panic while it is held) poisons and wakes every waiter.
+/// on ([`Self::disarm`]) to the settle step ([`crate::settle`], which
+/// completes it or poisons) or to a `Submitter` row (whose completion does,
+/// the submission's refusal poisoning through `Store::unknown`): a reserved
+/// range left unwritten is a hole no later append may be acknowledged past.
+/// Dropping it before then (an error, or a panic while it is held) poisons
+/// and wakes every waiter.
 pub(crate) struct Reserved<'a, P: Platform>
 where
     P::Queue: Send,
@@ -171,9 +173,10 @@ where
         })
     }
 
-    /// Hands the reservation to the settle step ([`crate::settle`]), which
-    /// completes it or poisons: call it immediately before settling, with
-    /// nothing that can fail in between.
+    /// Hands the reservation on: to the settle step ([`crate::settle`]),
+    /// which completes it or poisons, called immediately before settling
+    /// with nothing that can fail in between; or, in a `Submitter`'s
+    /// append, once its row holds it (or its refusal has poisoned).
     pub(crate) fn disarm(mut self) -> Reservation {
         let r = self.range();
         self.r = None;
@@ -402,6 +405,16 @@ where
             if let Some(f) = &r.frontier {
                 f.wake_all();
             }
+        }
+    }
+
+    /// `r`, reserved on an append frontier, under the guard that poisons
+    /// unless it is disarmed (a `Submitter`'s append, until its row holds
+    /// the reservation).
+    pub(crate) fn hold_reservation(&self, r: Reservation) -> Reserved<'_, P> {
+        Reserved {
+            store: self,
+            r: Some(r),
         }
     }
 

@@ -235,6 +235,7 @@ pub struct World {
     flushes_completed: u64,
     dir_syncs: u64,
     reopens: u64,
+    releases: u64,
     queues: u64,
     set_lens: u64,
     allocated: u64,
@@ -266,6 +267,7 @@ impl World {
             flushes_completed: 0,
             dir_syncs: 0,
             reopens: 0,
+            releases: 0,
             queues: 0,
             set_lens: 0,
             allocated: 0,
@@ -377,6 +379,13 @@ impl World {
     #[must_use]
     pub fn reopens(&self) -> u64 {
         self.reopens
+    }
+
+    /// `Platform::release_range` calls so far, failed or not. Arm
+    /// `fail_release = Some((releases() + 1, code))` to fail the next one.
+    #[must_use]
+    pub fn releases(&self) -> u64 {
+        self.releases
     }
 
     /// Queues made so far (`Platform::queue`).
@@ -586,6 +595,15 @@ impl World {
     }
 
     pub(crate) fn release(&mut self, file: FileId, offset: u64, len: u64) -> Result<(), OsError> {
+        self.releases += 1;
+        if let Some((at, code)) = self.cfg.faults.fail_release {
+            if at == self.releases {
+                return Err(OsError {
+                    code,
+                    source: OsErrorSource::Sim,
+                });
+            }
+        }
         let f = self.files.get_mut(&file).ok_or(EBADF)?;
         let (s, e) = range(offset, len, f.visible.len()).ok_or(EINVAL)?;
         // Released contents are undefined: fill with a pattern no caller wrote.

@@ -75,4 +75,7 @@ pub struct FaultPlan {
     /// The n-th `Platform::reopen` of a writable file (1-based) makes no
     /// handle, as when the OS refuses another open of the file.
     pub fail_reopen: Option<u64>,
+    /// The n-th `Platform::release_range` (1-based) fails with this raw
+    /// code and releases nothing.
+    pub fail_release: Option<(u64, i32)>,
 }

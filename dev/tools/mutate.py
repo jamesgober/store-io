@@ -63,6 +63,10 @@ F2X = ["-p", "store-io-engine", "--test", "format2_release"]
 F2C = ["-p", "store-io-engine", "--test", "format2_recycle"]
 # The format-2 open's batched region header reads.
 F2O = ["-p", "store-io-engine", "--test", "format2_open"]
+# The engine's lifecycle unit tests (release, its extents).
+ENGINE_LIB_LIFECYCLE = ["-p", "store-io-engine", "--lib", "lifecycle::"]
+# The Submitter's tests.
+SUBMITTER_TEST = ["-p", "store-io-engine", "--test", "submitter"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -457,6 +461,12 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C1: a release tries every extent (a failed trim on Windows is no
+ # error); a submitter's reservation is held under a poisoning guard until
+ # its row holds it
+ ('crates/store-io-engine/src/lifecycle.rs', '        for (at, len) in extents.into_iter().filter(|x| x.1 > 0) {', '        for (at, len) in extents.into_iter().filter(|x| x.1 > 0).take(1) {', ENGINE_LIB_LIFECYCLE),
+ ('crates/store-io-engine/src/lifecycle.rs', '            Some(_) if windows => Ok(()),', '            Some(_) if windows && false => Ok(()),', ENGINE_LIB_LIFECYCLE),
+ ('crates/store-io-engine/src/io.rs', '            store: self,\n            r: Some(r),\n        }\n    }\n\n    /// Reserves', '            store: self,\n            r: Some(r).filter(|_| false),\n        }\n    }\n\n    /// Reserves', SUBMITTER_TEST),
  # E2b/E3 C8: the open reads a pair whose B follows A in one read, every
  # other pair slot by slot, a short read never judged, a failed read of
  # both read again slot by slot, each header matched to its own entry

@@ -223,30 +223,45 @@ where
         // new region (its header slot, and a hole punched through its data).
         // 2. The header, for tools that list regions from headers.
         let _generation = self.rewrite_header(r, RegionState::Released)?;
-        // 3. The data area (never the header, which must keep saying
-        //    "released"). Contents are undefined from here; provisioning
-        //    refills the range before any reuse.
-        //
-        //    Linux punches a hole. Windows trims in place: deallocating would
-        //    make the whole container sparse for good, and a sparse file may
-        //    allocate on overwrite, which costs the store its power-safe
-        //    class. A trim the device or file system does not support only
-        //    means the space stays as it was, so it is not an error there.
+        // 3. The data area. The metadata lock is released on return.
+        self.release_extents(r.map.extents(), c)
+    }
+
+    /// Deallocates a released region's data extents (never its header
+    /// blocks, which must keep saying "released"). Contents are undefined
+    /// from here; provisioning refills a range before any reuse.
+    ///
+    /// Linux punches a hole. Windows trims in place: deallocating would make
+    /// the whole container sparse for good, and a sparse file may allocate
+    /// on overwrite, which costs the store its power-safe class. A trim the
+    /// device or file system does not support only means the space stays as
+    /// it was, so it is not an error there.
+    ///
+    /// The release is committed before this, so a failure only means space
+    /// stays allocated: every extent is tried, also after one fails, and
+    /// elsewhere than Windows the first failure is returned after the last.
+    pub(crate) fn release_extents(
+        &self,
+        extents: impl IntoIterator<Item = (u64, u64)>,
+        c: ErrorContext,
+    ) -> Result<(), Error> {
+        let inner = &*self.inner;
         let windows = inner.report.evidence.platform == PlatformKind::Windows;
         let how = if windows {
             ReleaseHow::TrimInPlace
         } else {
             ReleaseHow::Deallocate
         };
-        let released_range = r
-            .map
-            .extents()
-            .try_for_each(|(at, len)| inner.platform.release_range(&inner.file, at, len, how));
-        // The metadata lock is released on return.
-        match released_range {
-            Ok(()) => Ok(()),
-            Err(_) if windows => Ok(()),
-            Err(raw) => Err(Error::Io {
+        let mut first = None;
+        for (at, len) in extents.into_iter().filter(|x| x.1 > 0) {
+            if let Err(raw) = inner.platform.release_range(&inner.file, at, len, how) {
+                first = first.or(Some(raw));
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some(_) if windows => Ok(()),
+            Some(raw) => Err(Error::Io {
                 op: Op::Release,
                 raw,
                 ctx: c,
@@ -259,12 +274,13 @@ where
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use store_io_sim::{SimConfig, SimPlatform};
 
+    use super::*;
     use crate::store::{Store, StoreOptions};
 
     /// A release keeps the metadata lock until its region's space is
@@ -302,6 +318,87 @@ mod tests {
             held.load(Ordering::Relaxed),
             "the space was deallocated without the metadata lock: a provisioning could have reused it"
         );
+    }
+
+    /// A page region of two blocks on `p` and its two blocks as extents (the
+    /// release of a region of several extents arrives with growth).
+    fn two_extents(
+        p: &SimPlatform,
+        opts: StoreOptions,
+    ) -> (Store<SimPlatform>, [(u64, u64); 2], u32) {
+        let s = Store::create(p.clone(), Path::new("/db"), opts).unwrap();
+        let _pages = s.provision_page_region("two", 8192).unwrap();
+        let r = s
+            .regions_snapshot()
+            .into_iter()
+            .find(|r| r.name.as_str() == "two")
+            .unwrap();
+        let (at, len) = r.map.extents().next().unwrap();
+        assert_eq!(len, 8192);
+        let file = p.with_world(|w| w.file_id(&PathBuf::from("/db"), crate::CONTAINER).unwrap());
+        (s, [(at, 4096), (at + 4096, 4096)], file)
+    }
+
+    /// Whether the simulator's release pattern covers `[at, at + 4096)`.
+    fn released(p: &SimPlatform, file: u32, at: u64) -> bool {
+        p.with_world(|w| {
+            let v = w.visible(file).unwrap();
+            v[at as usize..at as usize + 4096]
+                .iter()
+                .enumerate()
+                .all(|(i, &b)| b == 0xDE ^ (i as u8))
+        })
+    }
+
+    /// A release tries every extent: one that fails leaves the others
+    /// deallocated, and (off Windows) the first failure is returned after
+    /// the last extent was tried.
+    #[test]
+    fn test_every_extent_is_released_when_one_fails() {
+        let p = SimPlatform::new(SimConfig::volatile(9));
+        let (s, extents, file) = two_extents(&p, StoreOptions::default());
+        let ctx = store_io_core::error::ErrorContext::default();
+        let before = p.with_world(|w| w.releases());
+        p.with_world(|w| w.faults_mut().fail_release = Some((before + 1, 5)));
+        let r = s.release_extents(extents, ctx);
+        assert!(
+            matches!(r, Err(Error::Io { op: Op::Release, raw, .. }) if raw.code == 5),
+            "{r:?}"
+        );
+        assert_eq!(p.with_world(|w| w.releases()) - before, 2, "both tried");
+        assert!(!released(&p, file, extents[0].0), "the failed one stays");
+        assert!(released(&p, file, extents[1].0), "the second is released");
+        // Without a failure: both, and Ok.
+        p.with_world(|w| w.faults_mut().fail_release = None);
+        s.release_extents(extents, ctx).unwrap();
+        assert!(released(&p, file, extents[0].0));
+    }
+
+    /// On Windows a trim is advisory: a failed one is no error, and the
+    /// other extents are still trimmed.
+    #[test]
+    fn test_a_failed_trim_on_windows_is_no_error_and_the_rest_are_trimmed() {
+        let probe = SimPlatform::new(SimConfig::volatile(10));
+        let mut evidence = Store::create(probe, Path::new("/db"), StoreOptions::default())
+            .unwrap()
+            .report()
+            .evidence
+            .clone();
+        evidence.platform = PlatformKind::Windows;
+        let p = SimPlatform::new(SimConfig {
+            evidence: Some(evidence),
+            ..SimConfig::volatile(10)
+        });
+        let mut opts = StoreOptions::default();
+        // Borrowed evidence: not verifiable.
+        opts.trust.override_refusal = true;
+        let (s, extents, file) = two_extents(&p, opts);
+        let before = p.with_world(|w| w.releases());
+        p.with_world(|w| w.faults_mut().fail_release = Some((before + 1, 5)));
+        s.release_extents(extents, store_io_core::error::ErrorContext::default())
+            .unwrap();
+        assert_eq!(p.with_world(|w| w.releases()) - before, 2, "both tried");
+        assert!(released(&p, file, extents[1].0));
     }
 
     /// A region provisioned into the space of one just released keeps every

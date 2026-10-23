@@ -13,6 +13,8 @@
 
 ### Added
 
+- Simulator: `FaultPlan::fail_release` (the n-th `release_range` fails)
+  and `World::releases`.
 - Engine: **regions in container format 2** (v0.5 E2b/E3, still behind
   the hidden `StoreOptions::container_format`):
   - The open checks every region of every page that is not Lost (spec §9
@@ -320,6 +322,16 @@
 
 ### Fixed
 
+- Engine: **a release stopped deallocating at the first extent that
+  failed.** The rest of the region's data stayed allocated (on Windows,
+  where a failed trim is no error, silently). Every extent is now tried;
+  off Windows the first failure is still returned, after the last extent.
+  (Every region has one extent until format 2's growth.)
+- Engine: **a panic between a `Submitter` append's reservation and its
+  submission left a hole that a later barrier waited on.** Nothing
+  poisoned the store until the submitter was dropped, so a durable append
+  past the hole on another thread waited until then. The reservation is
+  now held under a guard that poisons and wakes every waiter at once.
 - Engine: **a `Submitter`'s durable writes could each get their own flush.**
   Completions collected together asked for their flushes one by one, so a
   flush thread quick enough to start between two asks flushed for each in

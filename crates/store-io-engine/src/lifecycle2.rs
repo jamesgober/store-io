@@ -8,7 +8,6 @@
 use std::sync::{Arc, PoisonError};
 
 use store_io_core::error::{Error, NotWrittenCause, Op};
-use store_io_core::evidence::PlatformKind;
 use store_io_core::id::Generation;
 use store_io_format::judge::Standing;
 use store_io_format::meta::RegionState;
@@ -16,7 +15,7 @@ use store_io_format::meta2::{
     PAGE_HEADER_LEN, PageHeader, decode_region_header, encode_page, encode_region_header,
 };
 use store_io_format::slot::FORMAT_2;
-use store_io_platform::{Platform, ReleaseHow};
+use store_io_platform::Platform;
 
 use crate::gate::Retire;
 use crate::io::{ctx, not_written};
@@ -147,28 +146,8 @@ where
             Err(Error::NotWritten { .. }) => return Ok(()),
             Err(e) => return Err(e),
         }
-        // 3. The data extents (never the header blocks, which must keep
-        //    saying released), as format 1 does; the release is committed,
-        //    so a failure here only means the space stays allocated.
-        let windows = inner.report.evidence.platform == PlatformKind::Windows;
-        let how = if windows {
-            ReleaseHow::TrimInPlace
-        } else {
-            ReleaseHow::Deallocate
-        };
-        let released = extents
-            .iter()
-            .filter(|x| x.1 > 0)
-            .try_for_each(|&(at, len)| inner.platform.release_range(&inner.file, at, len, how));
-        match released {
-            Ok(()) => Ok(()),
-            Err(_) if windows => Ok(()),
-            Err(raw) => Err(Error::Io {
-                op: Op::Release,
-                raw,
-                ctx: c,
-            }),
-        }
+        // 3. The data extents, as format 1 does: every one tried.
+        self.release_extents(extents.iter().copied(), c)
     }
 
     /// Recycles a format-2 region's header (spec §12): one header write

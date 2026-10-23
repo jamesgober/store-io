@@ -308,6 +308,11 @@ where
                 None => not_written(why, c),
             });
         let r = admit!(reserved, buf);
+        // Held until the row holds it: a panic before then (in `locate`, or
+        // a backend's `submit`) poisons and wakes every waiter at once,
+        // never a hole that a later barrier waits on until this submitter
+        // drops. The store is the region's (`admit` checked it is this one).
+        let held = region.store().hold_reservation(r);
         let padded = (r.end - r.start) as usize;
         buf.as_mut_capacity()[len..padded].fill(0);
         let _fits = buf.set_len(padded);
@@ -321,7 +326,9 @@ where
             offset: state.map.locate(r.start, r.end - r.start),
             buf,
         };
-        match self.issue(req, tag, Kind::Append(r), pass, mode == WriteMode::Durable) {
+        let issued = self.issue(req, tag, Kind::Append(r), pass, mode == WriteMode::Durable);
+        let _r = held.disarm();
+        match issued {
             Ok(()) => Ok(pos),
             // Past the reservation: a hole, as for a blocking append.
             Err((raw, buf)) => Err(Rejected {

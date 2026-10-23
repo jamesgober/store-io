@@ -22,6 +22,10 @@ pub(crate) struct Found {
     pub(crate) id: u64,
     pub(crate) data_offset: u64,
     pub(crate) data_size: u64,
+    /// The entry's `footprint_seq`, and the `meta_seq` of its page's
+    /// winning copy.
+    pub(crate) footprint_seq: u64,
+    pub(crate) page_meta_seq: u64,
 }
 
 /// The newer valid copy of a pair, as `(payload, meta_seq)`.
@@ -134,10 +138,21 @@ pub(crate) fn audit(pf: &SimPlatform) -> Vec<Found> {
                 id,
                 data_offset: view.extents().next().map_or(e.span_end, |x| x.0),
                 data_size: e.data_size,
+                footprint_seq: e.footprint_seq,
+                page_meta_seq,
             });
         }
         assert_eq!(count, page.header.count, "page {p}: count");
     }
+    // Every footprint change is its own page write: no two entries share
+    // a `footprint_seq` (`RawEntry::check` already bounds each by its
+    // page's write).
+    let mut seqs: Vec<u64> = found.iter().map(|f| f.footprint_seq).collect();
+    seqs.sort_unstable();
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "footprint_seq repeated: {seqs:?}"
+    );
     // No two regions share a byte.
     ranges.sort_unstable();
     for w in ranges.windows(2) {

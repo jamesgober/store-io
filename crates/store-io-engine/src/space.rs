@@ -51,7 +51,8 @@ pub struct SpaceReport {
     pub regions: u64,
     /// Format 1: bytes of released regions, reused by a later region of
     /// exactly the same size. Format 2: free bytes inside the container,
-    /// usable by any region (the complement of everything allocated).
+    /// usable by any region (the complement of everything allocated, less
+    /// what reservations hold).
     pub released: u64,
     /// Bytes reserved and not yet provisioned.
     pub reserved: u64,
@@ -366,7 +367,9 @@ where
             return SpaceReport {
                 container: meta.container_len,
                 regions: v2.usage.iter().map(|u| u.2).sum(),
-                released: v2.free.free_bytes(),
+                // The trailing free space holds the reservations: not
+                // free for anyone else.
+                released: v2.free.free_bytes().saturating_sub(acct.reserved()),
                 reserved: acct.reserved(),
                 tags: acct.tags.clone(),
             };

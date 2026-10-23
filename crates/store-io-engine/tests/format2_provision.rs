@@ -64,6 +64,11 @@ fn test_each_kind_is_provisioned_audited_and_reopened() {
     );
     // Ids `p << 32 | seq`, in order on page 0.
     assert_eq!(found.iter().map(|f| f.id).collect::<Vec<_>>(), [0, 1, 2]);
+    // The last provisioning's entry names the page write that committed
+    // it, and each earlier one an earlier write.
+    let last = found.last().unwrap();
+    assert_eq!(last.footprint_seq, last.page_meta_seq);
+    assert!(found[0].footprint_seq < found[1].footprint_seq);
     let s = open(&p);
     assert!(s.report().unavailable.is_empty());
     let mut out = vec![0u8; B as usize];
@@ -129,21 +134,26 @@ fn test_a_frozen_store_provisions_and_reserves_nothing() {
     assert!(frozen(s.provision_slot("x").map(|_| ()).unwrap_err()));
     assert!(frozen(s.reserve(B, 0).map(|_| ()).unwrap_err()));
     drop(s);
-    // Only the open's own writes (the volume record) changed the media.
+    // Only the open's and the close's volume-record writes changed the
+    // media: every byte past its two slots is as it was.
     let after = media(&p);
     assert_eq!(after.len(), before.len());
+    assert!(
+        after[2 * B as usize..] == before[2 * B as usize..],
+        "a frozen store wrote"
+    );
 }
 
 #[test]
 fn test_first_fit_reuses_a_hole() {
     let p = fresh(305);
+    // As two provisionings would leave them: distinct footprint sequences.
+    let mut a = region(0, RegionKind::Append, "a", BASE, CAP);
+    a.entry.footprint_seq = 1;
     write_regions(
         &p,
         0,
-        &[
-            region(0, RegionKind::Append, "a", BASE, CAP),
-            region(1, RegionKind::Append, "b", BASE + 2 * ONE, CAP),
-        ],
+        &[a, region(1, RegionKind::Append, "b", BASE + 2 * ONE, CAP)],
     );
     let s = open(&p);
     s.provision_page_region("hole", CAP).unwrap();
@@ -253,6 +263,13 @@ fn test_a_power_failure_at_any_point_of_a_provisioning() {
                 "{step}: {:?}",
                 s.report().unavailable
             );
+            // A crashed provisioning is the one write in flight: healed,
+            // never a stale page.
+            assert!(
+                !s.report().metadata.frozen,
+                "{step}: {:?}",
+                s.report().metadata
+            );
             if found.contains(&"new".to_owned()) {
                 assert!(s.append_region("new").is_ok(), "{step}");
             } else {
@@ -351,4 +368,96 @@ fn test_a_reservation_grows_past_everything_allocated() {
     let r = s.reserve(4 * CAP, 0).unwrap();
     assert!(s.space().container >= BASE + ONE + 4 * CAP);
     drop(r);
+}
+
+/// A page whose next copy spans several blocks (42 entries and more), so a
+/// power failure can tear it: the open heals the torn page write and the
+/// store is never left frozen, whatever was cached.
+#[test]
+fn test_a_torn_page_write_of_a_provisioning_heals() {
+    let mut torn_somewhere = false;
+    for seed in 0..12 {
+        let p = fresh(900 + seed);
+        let s = open(&p);
+        for i in 0..45 {
+            s.provision_slot(&format!("s{i}")).unwrap();
+        }
+        // The page write is a provisioning's last write: power fails at the
+        // next submission after it (its flush), with it still cached.
+        let before = p.with_world(|w| w.writes());
+        s.provision_slot("probe").unwrap();
+        let per = p.with_world(|w| w.writes()) - before;
+        let target = p.with_world(|w| w.writes()) + per;
+        let q = p.clone();
+        p.with_world(|w| {
+            w.set_submit_probe(Some(Arc::new(move || {
+                if q.with_world(|w| w.writes()) >= target {
+                    panic!("power fails after the page write's submission");
+                }
+            })));
+        });
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            s.provision_slot("new").map(|_| ())
+        }));
+        std::mem::forget(s);
+        p.with_world(|w| {
+            w.set_submit_probe(None);
+            w.crash(&CrashMode::Random);
+        });
+        let step = format!("seed {seed}: {:?}", r.map(|x| x.is_ok()));
+        let s = Store::open(p.clone(), Path::new(DIR), opts())
+            .unwrap_or_else(|e| panic!("{step}: {e:?}"));
+        let m = &s.report().metadata;
+        assert!(!m.frozen, "{step}: {m:?}");
+        torn_somewhere |= m.healed.is_some();
+        drop(s);
+        audit(&p);
+    }
+    assert!(
+        torn_somewhere,
+        "no seed tore the page write: the test proves nothing"
+    );
+}
+
+/// Provisioning from a reservation consumes it; a tag's cap refuses what
+/// would exceed it; the space report's free bytes leave reservations out.
+#[test]
+fn test_reservations_and_caps_in_format_2() {
+    let p = fresh(311);
+    let s = open(&p);
+    let free = s.space().released;
+    let mut r = s.reserve(4 * ONE, 7).unwrap();
+    // The container grew for the reservation; that space is promised, not
+    // free.
+    assert_eq!(s.space().released, free, "reserved bytes counted free");
+    r.provision_page_region("from", CAP).unwrap();
+    assert!(r.remaining() < 4 * ONE);
+    drop(r);
+    s.set_cap(9, Some(ONE));
+    let mut capped = s.reserve(ONE, 9).unwrap();
+    assert!(capped.provision_page_region("fits", CAP).is_ok());
+    assert!(matches!(s.reserve(B, 9), Err(Error::NoSpace { .. })));
+    drop(s);
+    audit(&p);
+}
+
+/// Keyed fill: the region opens again and its unwritten data reads as the
+/// keyed pattern, not zeros.
+#[test]
+fn test_keyed_fill_in_format_2() {
+    let p = SimPlatform::new(SimConfig::volatile(312));
+    let o = StoreOptions {
+        keyed_fill: true,
+        ..opts()
+    };
+    drop(Store::create(p.clone(), Path::new(DIR), o.clone()).unwrap());
+    let s = Store::open(p.clone(), Path::new(DIR), o.clone()).unwrap();
+    s.provision_page_region("keyed", 2 * B).unwrap();
+    drop(s);
+    audit(&p);
+    let s = Store::open(p.clone(), Path::new(DIR), o).unwrap();
+    let pr = s.page_region("keyed").unwrap();
+    let mut out = vec![0u8; B as usize];
+    pr.read(pr.pos(0).unwrap(), &mut out).unwrap();
+    assert!(out.iter().any(|&b| b != 0), "a keyed fill reads as zeros");
 }

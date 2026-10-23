@@ -447,6 +447,12 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
+ # E2b/E3 C5 review: the entry names its own page write; that write's
+ # meta_seq is the one chosen first (a torn one heals); free bytes leave
+ # reservations out
+ ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
+ ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
+ ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
  # header says Released; format 2 never takes format 1's path
@@ -499,7 +505,7 @@ M = [
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.outcome.is_err() {', F2R),
  ('crates/store-io-engine/src/open2.rs', '        if c.small {', '        if c.small && false {', F2R),
  ('crates/store-io-engine/src/open2.rs', '                    c.small = view.header.log2_block == 9;', '                    c.small = view.header.log2_block == 10;', F2R),
- ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes(),', '                released: 0,', F2R),
+ ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes().min(0),', F2R),
  ('crates/store-io-engine/src/open2.rs', '                let seq = if raw.footprint_seq == 0 || raw.footprint_seq > page_meta_seq {', '                let seq = if raw.footprint_seq == 0 {', F2R),
  # E2b/E3 C3: settling (the lower footprint_seq of two overlapping or
  # same-named usable regions loses, both on a tie; only a newer

@@ -38,12 +38,13 @@
     writes anything. Regions on a stale page, possibly superseded, or with
     an unknown read-only-compatible header feature open read-only; a
     region of several extents opens mapped by its runs (extents adjacent
-    in the file coalesced, spec §11): reads and scans cross runs in data
-    order, and until writes split at runs (E4 C4, C5) a region in several
-    runs is read-only (so neither released nor recycled; the report does
-    not say why) and a `Submitter` read across a run is refused
-    (`NotReady`); a 512 B append region opens the store read-only until
-    §13.
+    in the file coalesced, spec §11): reads, scans and blocking writes
+    cross runs in data order, each device operation inside one run (a
+    buffer across a run's end written in place, a piece at a time, no
+    buffer taken for a piece; one ticket for the write, never `untorn`);
+    until a `Submitter` splits its operations (E4 C5) one across a run is
+    refused (`NotReady`), and so is its append on a region in several
+    runs; a 512 B append region opens the store read-only until §13.
   - Free space is the complement of every footprint, unavailable span and
     (on a stale page) extra extent; `SpaceReport::released` in format 2
     is that free space less what reservations hold.

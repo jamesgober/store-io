@@ -41,6 +41,7 @@ mod io;
 mod layout;
 mod lifecycle;
 mod lifecycle2;
+mod mapped;
 mod open;
 mod open2;
 mod optable;

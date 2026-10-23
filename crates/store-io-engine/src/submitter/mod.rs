@@ -267,7 +267,9 @@ where
     /// [`Rejected`], with the buffer: `NotWritten` (`QueueFull`: the
     /// submitter is full; `TooManyInFlight`: the region's append ring is
     /// full, see [`Submitter`]; empty, region full, read-only, not
-    /// positioned, another store's region or buffer), `Poisoned`, or
+    /// positioned, another store's region or buffer; `NotReady` on a
+    /// format-2 region in several runs, where an append may cross one,
+    /// which a `Submitter` does not split yet), `Poisoned`, or
     /// `DurabilityUnknown` if the OS refused the write after its position
     /// was reserved (the store is then poisoned, as for a blocking append).
     pub fn append(
@@ -284,6 +286,11 @@ where
         let Some(f) = state.frontier.as_ref() else {
             return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
         };
+        // Its place is the reservation's: on a region in several runs it may
+        // cross one, which a Submitter does not split yet.
+        if state.map.runs() > 1 {
+            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
+        }
         if !state.positioned.load(std::sync::atomic::Ordering::Acquire) {
             return Err(rejected(
                 not_written(NotWrittenCause::NotPositioned, c),
@@ -347,8 +354,9 @@ where
     ///
     /// [`Rejected`], with the buffer: `NotWritten` (foreign, stale,
     /// misaligned, out of range, submitter full, read-only, another store's
-    /// buffer), `Poisoned`, or `Io` if the OS refused it (nothing reached
-    /// the device).
+    /// buffer; `NotReady` for a range across two runs of a format-2 region,
+    /// which a `Submitter` does not split yet), `Poisoned`, or `Io` if the
+    /// OS refused it (nothing reached the device).
     pub fn write(
         &mut self,
         region: &PageRegion<P>,
@@ -362,6 +370,9 @@ where
         admit!(self.store.ready_for(state), buf);
         let end = admit!(region.check(&pos, buf.len()), buf);
         let c = ctx_range(state, pos.offset, end);
+        if state.map.run_end(pos.offset) < end {
+            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
+        }
         let req = Req::Write {
             offset: state.map.locate(pos.offset, end - pos.offset),
             buf,

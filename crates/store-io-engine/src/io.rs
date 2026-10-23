@@ -50,7 +50,7 @@ pub(crate) struct Stream<'a> {
     data: &'a [u8],
     /// Next caller byte not yet staged.
     staged: usize,
-    /// Container offset of `data[0]`.
+    /// Region offset of `data[0]` (placed by [`crate::mapped::Mapped`]).
     base: u64,
     block: usize,
     chunk: usize,
@@ -59,7 +59,7 @@ pub(crate) struct Stream<'a> {
 }
 
 impl Stream<'_> {
-    /// Sets where the data goes (after the reservation).
+    /// Sets where the data goes (after the reservation): a region offset.
     pub(crate) fn at(&mut self, base: u64) {
         self.base = base;
     }
@@ -108,7 +108,7 @@ impl Source for Stream<'_> {
     }
 }
 
-/// Pooled buffers written in order from a container offset (a batch).
+/// Pooled buffers written in order from a region offset (a batch).
 pub(crate) struct Chunks<I> {
     pub(crate) bufs: I,
     pub(crate) offset: u64,
@@ -129,7 +129,7 @@ impl<I: Iterator<Item = IoBuf>> Source for Chunks<I> {
     fn recycle(&mut self, _buf: IoBuf) {}
 }
 
-/// Buffers written at their own container offsets (a page batch).
+/// Buffers written at their own region offsets (a page batch).
 pub(crate) struct Placed<I> {
     pub(crate) writes: I,
 }
@@ -529,6 +529,9 @@ where
             label: self.inner.policy.label,
             start,
             through,
+            // Never untorn: a write may be several device writes (pieces of
+            // one larger than a buffer, or across runs, spec §11), each
+            // durable or not on its own.
             untorn: false,
             need,
             prefix,
@@ -549,6 +552,7 @@ where
             label: self.inner.policy.label,
             start: t.start,
             through: t.end,
+            // As in `receipt`: never untorn.
             untorn: false,
             need,
             prefix: false,

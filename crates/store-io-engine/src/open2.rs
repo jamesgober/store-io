@@ -409,7 +409,6 @@ pub(crate) fn check_regions<Q: Queue>(
             )
         });
         let map = crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size);
-        let several_runs = map.runs() > 1;
         live.push(Arc::new(LiveRegion {
             id: RegionId::from_raw(c.id),
             name: e.name,
@@ -422,9 +421,8 @@ pub(crate) fn check_regions<Q: Queue>(
             positioned: std::sync::atomic::AtomicBool::new(false),
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // On a stale page, possibly superseded, or with a header whose
-            // winner carries a feature this version may not write; and, until
-            // writes split at runs (E4 C4, C5), a region in several runs.
-            read_only: unconfirmed || s.superseded || !writable || several_runs,
+            // winner carries a feature this version may not write.
+            read_only: unconfirmed || s.superseded || !writable,
             gate: Gate::new(),
         }));
     }

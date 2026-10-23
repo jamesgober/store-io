@@ -466,6 +466,15 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C4: blocking writes split at runs (the piece, the rest moved to the
+ # front, the split buffer kept until its last piece, the source waiting
+ # for it); a Submitter's append and page write stay in one run
+ ('crates/store-io-engine/src/mapped.rs', 'let piece = (self.map.run_end(pos) - pos).min(left as u64);', 'let piece = left as u64;', F2E),
+ ('crates/store-io-engine/src/mapped.rs', '.copy_within(written..written + left, 0);', '.copy_within(written - 4096..written + left - 4096, 0);', F2E),
+ ('crates/store-io-engine/src/mapped.rs', 'let Some(k) = self.parts.iter().position(|p| p.addr == addr) else {', 'let Some(k) = self.parts.iter().position(|p| p.addr == addr && false) else {', F2E),
+ ('crates/store-io-engine/src/mapped.rs', 'Next::Done if !self.parts.is_empty() => Next::Wait,', 'Next::Done if false => Next::Wait,', F2E),
+ ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.runs() > 1 {', '        if state.map.runs() > 1 && false {', F2E),
+ ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.run_end(pos.offset) < end {', '        if state.map.run_end(pos.offset) < end && false {', F2E),
  # E4 C3: regions of several extents open; reads and scans stop at a
  # run's end; a Submitter read stays in a run; several runs are read-only
  # until writes split
@@ -473,7 +482,6 @@ M = [
  ('crates/store-io-engine/src/scan.rs', '                    .min(chunk as u64)\n                    .min(r.map.run_end(next) - next) as usize;', '                    .min(chunk as u64) as usize;', F2E),
  ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.run_end(offset) < offset + len {', '        if state.map.run_end(offset) < offset + len && false {', F2E),
  ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.run_end(offset) < offset + len {', '        if state.map.run_end(offset) <= offset + len {', F2E),
- ('crates/store-io-engine/src/open2.rs', '|| !writable || several_runs,', '|| !writable || (several_runs && false),', F2E),
  ('crates/store-io-engine/src/regionmap.rs', 'let more: Box<[(u64, u64)]> = all.map(|r| (r.start, r.file)).collect();', 'let more: Box<[(u64, u64)]> = all.take(0).map(|r| (r.start, r.file)).collect();', F2E),
  # E4 C2: runs coalesce adjacent extents in data order; a range never
  # crosses a run; the run search; the runs cover the capacity
@@ -545,9 +553,9 @@ M = [
  # foreign-header regions are read-only; overlap and name demote; extra
  # extents are reported; several extents and 512 B blocks are refused
  # or read-only; every reserved overlap and stale page's agreement is said
- ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable || several_runs,', '            read_only: s.superseded || !writable || several_runs,', F2R),
- ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable || several_runs,', '            read_only: unconfirmed || !writable || several_runs,', F2R),
- ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable || several_runs,', '            read_only: unconfirmed || s.superseded || (!writable && false) || several_runs,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: s.superseded || !writable,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: unconfirmed || !writable,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: unconfirmed || s.superseded || (!writable && false),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.overlapped => Some(Unavailable::Overlaps),', '            (Ok(_), Some(s)) if s.overlapped && false => Some(Unavailable::Overlaps),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.renamed => Some(Unavailable::NameTaken),', '            (Ok(_), Some(s)) if s.renamed && false => Some(Unavailable::NameTaken),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.extra.is_some() && page.standing == Standing::Unconfirmed {', F2R),

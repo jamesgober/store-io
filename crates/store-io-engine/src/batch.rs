@@ -15,6 +15,7 @@ use store_io_core::error::{Error, NotWrittenCause, Op};
 use store_io_platform::{IoBuf, Platform};
 
 use crate::io::{Chunks, Placed, ctx, ctx_range, not_written};
+use crate::mapped::Mapped;
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::region::{AppendRegion, PageRegion};
 use crate::settle::{Wrote, settle_pumped};
@@ -267,9 +268,9 @@ where
         }
         let mut src = Chunks {
             bufs: self.chunks.drain(..),
-            offset: state.map.locate(r.start, r.end - r.start),
+            offset: r.start,
         };
-        let outcome = s.pump(&mut lane, &mut src);
+        let outcome = s.pump(&mut lane, &mut Mapped::new(&state.map, &mut src));
         drop(src);
         self.bytes = 0;
         self.records = 0;
@@ -444,12 +445,9 @@ where
             s.lane(state, Op::Write)?
         };
         let mut src = Placed {
-            writes: self
-                .writes
-                .drain(..)
-                .map(|(at, b)| (state.map.locate(at, b.len() as u64), b)),
+            writes: self.writes.drain(..),
         };
-        let outcome = s.pump(&mut lane, &mut src);
+        let outcome = s.pump(&mut lane, &mut Mapped::new(&state.map, &mut src));
         drop(src);
         // The whole span settles as one write; its receipt follows the
         // barrier below.

@@ -2,8 +2,9 @@
 //! by an independent writer: the open maps them by their runs (extents
 //! adjacent in the file coalesced), reads and scans cross runs with the
 //! bytes of each in data order, a media error is named at its region range,
-//! and (until writes split at runs, E4 C4 and C5) a region in several runs
-//! is read-only and a Submitter's read across a run is refused.
+//! blocking writes split at runs (each piece in one run, one ticket), and
+//! (until its operations split, E4 C5) a Submitter's operation across a run
+//! is refused.
 
 #![allow(
     clippy::unwrap_used,
@@ -20,9 +21,9 @@ use std::path::{Path, PathBuf};
 use format2_util::craft::{Region, region, write_regions};
 use format2_util::*;
 use store_io_core::error::{ByteRange, CorruptionKind, Error, NotWrittenCause};
-use store_io_engine::{CONTAINER, ScanItem, Store, StoreOptions, SubmitterConfig};
+use store_io_engine::{CONTAINER, ScanItem, Store, StoreOptions, SubmitterConfig, WriteMode};
 use store_io_format::meta::RegionKind;
-use store_io_sim::{SimConfig, SimPlatform};
+use store_io_sim::{CrashMode, SimConfig, SimPlatform};
 
 const B: u64 = 4096;
 /// The table's end for `opts()`: the volume pair, then three pages.
@@ -212,15 +213,15 @@ fn test_adjacent_extents_are_one_writable_run() {
     assert_eq!(&m[at..at + 2 * B as usize], &data[..]);
 }
 
-/// Until writes split at runs, a region in several runs is read-only, and a
-/// Submitter's read across a run is refused (one within a run is not).
+/// A Submitter's operation stays in one run (until it splits them, E4 C5):
+/// a read or a page write across a run is refused, one up to a run's end or
+/// from its start is not, and an append (placed by its reservation) is
+/// refused on a region in several runs.
 #[test]
-fn test_several_runs_are_read_only_and_a_submitter_read_stays_in_a_run() {
+fn test_a_submitter_stays_in_one_run() {
     let p = crafted(504);
     let s = reopen(&p);
     let two = s.page_region("two").unwrap();
-    let e = two.write(two.pos(0).unwrap(), &[7u8; 4096]).unwrap_err();
-    assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
     let mut sub = s.submitter(SubmitterConfig::default()).unwrap();
     let buf = sub.take_buf(2 * B as usize).unwrap();
     let r = sub
@@ -239,7 +240,201 @@ fn test_several_runs_are_read_only_and_a_submitter_read_stays_in_a_run() {
         assert!(c.outcome.is_ok(), "{:?}", c.outcome);
         assert_eq!(c.buf.unwrap().as_slice(), &expect(1, at, 2 * B)[..]);
     }
-    drop(r);
+    let buf = r.buf.unwrap();
+    let r = sub
+        .write(&two, two.pos(X - B).unwrap(), buf, WriteMode::Plain, 3)
+        .unwrap_err();
+    assert!(
+        is_cause(&r.error, NotWrittenCause::NotReady),
+        "{:?}",
+        r.error
+    );
+    let mut buf = r.buf.unwrap();
+    buf.as_mut_slice().fill(9);
+    sub.write(&two, two.pos(X).unwrap(), buf, WriteMode::Plain, 4)
+        .unwrap();
+    let c = sub.wait(1).unwrap().next().unwrap();
+    assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+    let three = s.append_region("three").unwrap();
+    three.resume_at(0).unwrap();
+    let buf = sub.take_buf(B as usize).unwrap();
+    let r = sub.append(&three, buf, WriteMode::Plain, 5).unwrap_err();
+    assert!(
+        is_cause(&r.error, NotWrittenCause::NotReady),
+        "{:?}",
+        r.error
+    );
+}
+
+/// A blocking write across runs lands in each, in data order: a page write
+/// (its receipt never `untorn`: two device writes), an append and both
+/// kinds of batch, each read back and found on the media where the runs
+/// say.
+#[test]
+fn test_blocking_writes_split_at_runs() {
+    let p = crafted(507);
+    let s = reopen(&p);
+    let two = s.page_region("two").unwrap();
+    let data: Vec<u8> = (0..4 * B).map(|i| (i % 241) as u8).collect();
+    let receipt = two
+        .write_durable(two.pos(X - 2 * B).unwrap(), &data)
+        .unwrap();
+    assert!(!receipt.untorn(), "two device writes are never untorn");
+    let mut out = vec![0u8; 4 * B as usize];
+    two.read(two.pos(X - 2 * B).unwrap(), &mut out).unwrap();
+    assert_eq!(out, data);
+    // "two": region [0, X) at BASE + 2B + X, [X, 2X) at BASE + 2B.
+    let m = media(&p);
+    let head = (BASE + 2 * B + X + X - 2 * B) as usize;
+    let tail = (BASE + 2 * B) as usize;
+    assert_eq!(&m[head..head + 2 * B as usize], &data[..2 * B as usize]);
+    assert_eq!(&m[tail..tail + 2 * B as usize], &data[2 * B as usize..]);
+    // A page batch: one write across the runs, one inside the first.
+    let mut batch = two.batch();
+    batch
+        .write(two.pos(X - B).unwrap(), &[5u8; 2 * B as usize])
+        .unwrap();
+    batch
+        .write(two.pos(0).unwrap(), &[6u8; B as usize])
+        .unwrap();
+    batch.commit().unwrap();
+    let mut out = vec![0u8; 2 * X as usize];
+    two.read(two.pos(0).unwrap(), &mut out).unwrap();
+    assert_eq!(&out[..B as usize], &[6u8; B as usize][..]);
+    assert_eq!(
+        &out[(X - B) as usize..(X + B) as usize],
+        &[5u8; 2 * B as usize][..]
+    );
+    // An append from just before the first run's end, then a batch across
+    // the second's.
+    let three = s.append_region("three").unwrap();
+    three.resume_at(X - 2 * B).unwrap();
+    let rec: Vec<u8> = (0..4 * B).map(|i| (i % 239) as u8).collect();
+    let t = three.append(&rec).unwrap();
+    assert_eq!(t.pos().offset(), X - 2 * B);
+    let mut b = three.batch();
+    b.append(&vec![7u8; (X - 3 * B) as usize]).unwrap();
+    b.append(&vec![8u8; 2 * B as usize]).unwrap();
+    let (at, _r) = b.commit().unwrap();
+    assert_eq!(at.offset(), X + 2 * B);
+    let mut got = vec![0u8; (2 * X) as usize];
+    three.read(X - 2 * B, &mut got).unwrap();
+    assert_eq!(&got[..4 * B as usize], &rec[..]);
+    let rest = &got[4 * B as usize..];
+    assert_eq!(
+        &rest[..(X - 3 * B) as usize],
+        &vec![7u8; (X - 3 * B) as usize][..]
+    );
+    assert_eq!(
+        &rest[(X - 3 * B) as usize..(X - B) as usize],
+        &[8u8; 2 * B as usize][..]
+    );
+}
+
+/// A write whose second piece fails, or transfers short, is unknown: the
+/// store is poisoned, and no ticket is returned.
+#[test]
+fn test_a_failed_or_short_second_piece_poisons() {
+    for short in [false, true] {
+        let p = crafted(508);
+        let s = reopen(&p);
+        let two = s.page_region("two").unwrap();
+        p.with_world(|w| {
+            let second = w.writes() + 2;
+            if short {
+                w.faults_mut().short_write = Some(second);
+            } else {
+                w.faults_mut().fail_write = Some(second);
+            }
+        });
+        let e = two
+            .write(two.pos(X - 2 * B).unwrap(), &[3u8; 4 * B as usize])
+            .unwrap_err();
+        assert!(
+            matches!(e, Error::DurabilityUnknown { .. }),
+            "short {short}: {e:?}"
+        );
+        assert!(s.poisoned().is_some());
+    }
+}
+
+/// An append of several buffers across all three runs (the stream's spare
+/// buffers flowing while a split one is in flight), made durable: power
+/// lost after its receipt keeps every byte, in every run.
+#[test]
+fn test_a_durable_append_across_three_runs_survives_power_loss() {
+    let p = crafted(511);
+    let s = reopen(&p);
+    let three = s.append_region("three").unwrap();
+    three.resume_at(0).unwrap();
+    // 160 KiB: two device buffers, across the run ends at X and 2X.
+    let rec: Vec<u8> = (0..40 * B).map(|i| (i % 233) as u8).collect();
+    let (pos, receipt) = three.append_durable(&rec).unwrap();
+    assert_eq!(pos.offset(), 0);
+    assert!(receipt.durable_through() >= 40 * B);
+    std::mem::forget((three, s));
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    let s = reopen(&p);
+    let three = s.append_region("three").unwrap();
+    let mut out = vec![0u8; 40 * B as usize];
+    three.read(0, &mut out).unwrap();
+    assert_eq!(out, rec);
+}
+
+/// A write across runs, then power lost with its two pieces cached: in
+/// every combination kept and lost, the store reopens and each run holds
+/// its old bytes or its new ones.
+#[test]
+fn test_a_crash_keeps_each_run_old_or_new() {
+    let new = vec![0xA5u8; 4 * B as usize];
+    for mask in 0..4u64 {
+        let p = crafted(509);
+        let s = reopen(&p);
+        let two = s.page_region("two").unwrap();
+        let before = p.with_world(|w| w.cached_writes());
+        two.write(two.pos(X - 2 * B).unwrap(), &new).unwrap();
+        assert_eq!(
+            p.with_world(|w| w.cached_writes()) - before,
+            2,
+            "two pieces"
+        );
+        std::mem::forget((two, s));
+        p.with_world(|w| w.crash(&CrashMode::Subset(mask)));
+        let s = reopen(&p);
+        let two = s.page_region("two").unwrap();
+        let mut out = vec![0u8; 4 * B as usize];
+        two.read(two.pos(X - 2 * B).unwrap(), &mut out).unwrap();
+        for (k, half) in out.chunks(2 * B as usize).enumerate() {
+            let from = X - 2 * B + k as u64 * 2 * B;
+            let old = expect(1, from, 2 * B);
+            assert!(
+                half == &old[..] || half == &new[..2 * B as usize],
+                "mask {mask}: piece {k} is neither old nor new"
+            );
+        }
+    }
+}
+
+/// A region in several runs is released (every extent) and recycled.
+#[test]
+fn test_a_region_in_several_runs_is_released_and_recycled() {
+    let p = crafted(510);
+    let s = reopen(&p);
+    let old = s.append_region("three").unwrap();
+    let three = old.recycle().unwrap();
+    drop(old);
+    three.resume_at(0).unwrap();
+    three.append(&[1u8; 4096]).unwrap();
+    s.page_region("two").unwrap().release().unwrap();
+    drop((three, s));
+    let s = reopen(&p);
+    assert!(s.page_region("two").is_err());
+    assert!(s.append_region("three").is_ok());
+    assert!(
+        s.report().unavailable.is_empty(),
+        "{:?}",
+        s.report().unavailable
+    );
 }
 
 /// A bad sector in the second run is named at its region range.

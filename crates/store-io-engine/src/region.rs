@@ -16,6 +16,7 @@ use crate::batch::{AppendBatch, PageBatch};
 use crate::gate::Pass;
 use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
+use crate::mapped::Mapped;
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::scan::{ScanItem, ScanSummary};
 use crate::settle::{Wrote, settle_pumped};
@@ -251,11 +252,11 @@ where
         let mut lane = s.lane(&self.state, Op::Write)?;
         let reserved = s.reserve_append(f, data.len() as u64, c)?;
         let r = reserved.range();
-        stream.at(self.state.map.locate(r.start, r.end - r.start));
+        stream.at(r.start);
         // Until the pump returns the guard poisons on any exit (a panic
         // included); then the settle step completes the reservation, or
         // poisons: past it every failure leaves a hole.
-        let outcome = s.pump(&mut lane, &mut stream);
+        let outcome = s.pump(&mut lane, &mut Mapped::new(&self.state.map, &mut stream));
         let r = reserved.disarm();
         settle_pumped(s, &self.state, Wrote::Append(r), outcome)
     }
@@ -594,9 +595,9 @@ where
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
         let mut stream = s.stage(data, c)?;
-        stream.at(self.state.map.locate(pos.offset, end - pos.offset));
+        stream.at(pos.offset);
         let mut lane = s.lane(&self.state, Op::Write)?;
-        let outcome = s.pump(&mut lane, &mut stream);
+        let outcome = s.pump(&mut lane, &mut Mapped::new(&self.state.map, &mut stream));
         let wrote = Wrote::Page {
             start: pos.offset,
             end,

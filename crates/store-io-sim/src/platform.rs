@@ -504,7 +504,11 @@ impl Platform for SimPlatform {
             } else {
                 0
             }),
-            valid_data: Tri::Yes,
+            valid_data: if w.past_valid_data(file.id, offset, len) {
+                Tri::No
+            } else {
+                Tri::Yes
+            },
         })
     }
 

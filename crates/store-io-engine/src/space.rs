@@ -23,6 +23,7 @@ use store_io_format::meta::{RegionKind, RegionState, TableEntry};
 use store_io_platform::Platform;
 
 use crate::io::not_written;
+use crate::options::RegionOptions;
 use crate::region::{AppendRegion, PageRegion, Slot};
 use crate::store::{Meta, Store, lock_meta};
 
@@ -261,8 +262,23 @@ where
         name: &str,
         size: u64,
     ) -> Result<AppendRegion<P>, Error> {
+        self.provision_append_region_with(name, RegionOptions::default().size(size))
+    }
+
+    /// Provisions an append region from this reservation as `opts` say (a
+    /// capped region takes its whole capacity from it).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::provision_append_region_with`]; `NoSpace` if the
+    /// reservation is too small.
+    pub fn provision_append_region_with(
+        &mut self,
+        name: &str,
+        opts: RegionOptions,
+    ) -> Result<AppendRegion<P>, Error> {
         let store = self.store.clone();
-        let state = store.provision(name, RegionKind::Append, size, Some(self))?;
+        let state = store.provision(name, RegionKind::Append, opts, Some(self))?;
         Ok(AppendRegion::from_parts(store, state))
     }
 
@@ -273,8 +289,21 @@ where
     /// As [`Store::provision_page_region`]; `NoSpace` if the reservation is
     /// too small.
     pub fn provision_page_region(&mut self, name: &str, size: u64) -> Result<PageRegion<P>, Error> {
+        self.provision_page_region_with(name, RegionOptions::default().size(size))
+    }
+
+    /// Provisions a page region from this reservation as `opts` say.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision_append_region_with`].
+    pub fn provision_page_region_with(
+        &mut self,
+        name: &str,
+        opts: RegionOptions,
+    ) -> Result<PageRegion<P>, Error> {
         let store = self.store.clone();
-        let state = store.provision(name, RegionKind::Page, size, Some(self))?;
+        let state = store.provision(name, RegionKind::Page, opts, Some(self))?;
         Ok(PageRegion::from_parts(store, state))
     }
 
@@ -286,7 +315,8 @@ where
     /// small.
     pub fn provision_slot(&mut self, name: &str) -> Result<Slot<P>, Error> {
         let store = self.store.clone();
-        let state = store.provision(name, RegionKind::Slot, 0, Some(self))?;
+        let state =
+            store.provision(name, RegionKind::Slot, RegionOptions::default(), Some(self))?;
         Ok(Slot::from_parts(store, state))
     }
 }

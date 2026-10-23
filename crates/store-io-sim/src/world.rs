@@ -96,6 +96,14 @@ pub struct SimConfig {
     pub faults: FaultPlan,
     /// Evidence returned by `probe` (defaults derived from `device`).
     pub evidence: Option<Evidence>,
+    /// Model NTFS's valid data length: each file's valid data ends where
+    /// its furthest write ended (a crash or a shrink cuts it back); the
+    /// bytes a real file system would zero before a write starting past it
+    /// are only counted, in [`World::gap_fill_bytes`] (neither zeroed nor
+    /// read back as zeros: reads past the valid data return what the file
+    /// holds), and `range_state` reports a range reaching past it not
+    /// valid.
+    pub valid_data_model: bool,
 }
 
 impl SimConfig {
@@ -109,6 +117,7 @@ impl SimConfig {
             reorder: false,
             faults: FaultPlan::default(),
             evidence: None,
+            valid_data_model: false,
         }
     }
 
@@ -121,6 +130,13 @@ impl SimConfig {
         }
     }
 }
+
+/// The most writes one simulated world completes, and the most it holds
+/// in a volatile cache at once (about 1 GiB of 4 KiB writes): no test comes
+/// near either, so a write that never stops (a bug, or a mutation of one)
+/// fails there instead of exhausting memory (see `complete_write`).
+const RUNAWAY_WRITES: u64 = 500_000;
+const RUNAWAY_CACHED: usize = 1 << 18;
 
 /// Identity of a simulated file.
 pub type FileId = u32;
@@ -135,6 +151,9 @@ struct FileState {
     /// the end), `(start, end)`, sorted and apart: `range_state` reports
     /// them unwritten, as a real file system's holes and unwritten extents.
     holes: Vec<(u64, u64)>,
+    /// Where the furthest write ended (NTFS's valid data length, see
+    /// `SimConfig::valid_data_model`).
+    valid_data: u64,
 }
 
 /// Adds `[s, e)` to `ranges` (sorted, apart), merging what it touches.
@@ -281,6 +300,7 @@ pub struct World {
     reopens: u64,
     releases: u64,
     range_allocations: u64,
+    gap_fill_bytes: u64,
     queues: u64,
     set_lens: u64,
     allocated: u64,
@@ -314,6 +334,7 @@ impl World {
             reopens: 0,
             releases: 0,
             range_allocations: 0,
+            gap_fill_bytes: 0,
             queues: 0,
             set_lens: 0,
             allocated: 0,
@@ -639,6 +660,7 @@ impl World {
         if let Some(f) = self.files.get_mut(&file) {
             f.visible.truncate(new_len);
             unmark(&mut f.holes, len, u64::MAX);
+            f.valid_data = f.valid_data.min(len);
         }
         Ok(())
     }
@@ -678,6 +700,24 @@ impl World {
         Ok(())
     }
 
+    /// Bytes a valid-data model's file system zeroed before writes that
+    /// started past a file's valid data (see `SimConfig::valid_data_model`;
+    /// counted whether or not the model is on).
+    #[must_use]
+    pub fn gap_fill_bytes(&self) -> u64 {
+        self.gap_fill_bytes
+    }
+
+    /// Whether `[offset, offset + len)` reaches past the file's valid data
+    /// (always false without the valid-data model).
+    pub(crate) fn past_valid_data(&self, file: FileId, offset: u64, len: u64) -> bool {
+        self.cfg.valid_data_model
+            && self
+                .files
+                .get(&file)
+                .is_some_and(|f| offset.saturating_add(len) > f.valid_data)
+    }
+
     /// `Platform::allocate_range`: inside the file, no byte changed (a
     /// hole stays unwritten, as an unwritten extent reads).
     pub(crate) fn allocate_range(
@@ -701,6 +741,14 @@ impl World {
             return Err(EINVAL);
         }
         Ok(())
+    }
+
+    /// Whether any of `[offset, offset + len)` of `file` reads as never
+    /// written (a hole, a growth not yet written, or past the end): what
+    /// `range_state` reports as `unwritten`.
+    #[must_use]
+    pub fn is_unwritten(&self, file: FileId, offset: u64, len: u64) -> bool {
+        self.unwritten(file, offset, len).unwrap_or(true)
     }
 
     /// Whether any of `[offset, offset + len)` is a hole (see `holes`) or
@@ -751,6 +799,10 @@ impl World {
     ) -> Result<usize, OsError> {
         self.writes_completed += 1;
         let n = self.writes_completed;
+        // No test writes this much: a write that never stops (a bug, or a
+        // mutation of one) fails here instead of exhausting memory with
+        // its trace and cached copies.
+        assert!(n <= RUNAWAY_WRITES, "{n} writes: a runaway");
         let faults = &self.cfg.faults;
         let fail = faults.fail_write == Some(n) || {
             let ppm = faults.write_eio_ppm;
@@ -778,6 +830,9 @@ impl World {
             });
             if let Some(f) = self.files.get_mut(&file) {
                 unmark(&mut f.holes, asked.0, asked.1);
+                let gap = asked.0.saturating_sub(f.valid_data);
+                f.valid_data = f.valid_data.max(asked.1);
+                self.gap_fill_bytes += gap;
             }
             return Ok(data.len());
         }
@@ -809,6 +864,8 @@ impl World {
         // Where the write was asked to go (a misdirected one lands
         // elsewhere, but its own range is what the file system marks).
         unmark(&mut f.holes, asked.0, asked.0.saturating_add(len as u64));
+        let gap = asked.0.saturating_sub(f.valid_data);
+        f.valid_data = f.valid_data.max(asked.0.saturating_add(len as u64));
         if durable_now {
             if f.media.len() < end {
                 f.media.resize(end, 0);
@@ -816,6 +873,11 @@ impl World {
             f.media[start..end].copy_from_slice(data);
         } else {
             self.completion_seq += 1;
+            assert!(
+                self.cache.len() < RUNAWAY_CACHED,
+                "{} writes cached, none flushed: a runaway",
+                self.cache.len()
+            );
             self.cache.push(CachedWrite {
                 seq: self.completion_seq,
                 file,
@@ -823,6 +885,7 @@ impl World {
                 data: data.to_vec(),
             });
         }
+        self.gap_fill_bytes += gap;
         self.trace.push(TraceEvent::Write {
             file,
             offset,
@@ -998,6 +1061,7 @@ impl World {
             f.media.resize(len, 0);
             f.visible = f.media.clone();
             unmark(&mut f.holes, f.durable_len, u64::MAX);
+            f.valid_data = f.valid_data.min(f.durable_len);
         }
         for d in self.dirs.values_mut() {
             d.entries = d.durable.clone();

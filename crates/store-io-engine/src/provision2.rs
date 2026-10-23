@@ -4,6 +4,12 @@
 //! committed by one table-page write carrying its entry, whose
 //! `footprint_seq` is that write's own `meta_seq`. Memory changes only after
 //! the commit is durable.
+//!
+//! A capped region (`RegionOptions::max_size`, v0.5 E4 C10) is one extent
+//! of its cap, flagged `FLAG_CAPPED`, charged whole: its data filled and
+//! verified as any region's; the rest (the slack) allocated without being
+//! written, or written too where the system cannot allocate it unwritten or
+//! pays for it later (Windows, macOS: [`Store::writes_slack`]).
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -12,8 +18,8 @@ use store_io_core::id::{Generation, RegionId};
 use store_io_format::judge::Standing;
 use store_io_format::meta::{FillPattern, RegionKind, RegionName, RegionState};
 use store_io_format::meta2::{
-    Entry2, PAGE_HEADER_LEN, PageHeader, RegionHeader2, encode_page, encode_region_header,
-    entries_per_page,
+    Entry2, FLAG_CAPPED, PAGE_HEADER_LEN, PageHeader, RegionHeader2, encode_page,
+    encode_region_header, entries_per_page,
 };
 use store_io_format::slot::FORMAT_2;
 use store_io_platform::Platform;
@@ -36,10 +42,11 @@ where
         &self,
         name: &str,
         kind: RegionKind,
-        data_size: u64,
+        opts: crate::RegionOptions,
         from: Option<&mut Reservation<P>>,
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
+        let data_size = opts.size_bytes();
         let tag = from.as_ref().map_or(0, |r| r.tag());
         // Refusals before any I/O (spec §9 step 2, §10).
         if inner.report.metadata.frozen {
@@ -58,10 +65,18 @@ where
         } else {
             store_io_core::align::align_up(data_size.max(1), block).ok_or_else(too_large)?
         };
-        if data_size / block >= u64::from(u32::MAX) {
+        // A capped region: one extent of its cap (at least its size).
+        let capped = opts.max_size_bytes().filter(|_| !slot);
+        let capacity = match capped {
+            Some(cap) => store_io_core::align::align_up(cap, block)
+                .ok_or_else(too_large)?
+                .max(data_size),
+            None => data_size,
+        };
+        if capacity / block >= u64::from(u32::MAX) {
             return Err(too_large());
         }
-        let extent = data_size.checked_add(2 * block).ok_or_else(too_large)?;
+        let extent = capacity.checked_add(2 * block).ok_or_else(too_large)?;
         let mut meta = lock_meta(&inner.meta);
         self.name_taken2(&meta, &rname)?;
         let (p, seq) = {
@@ -104,7 +119,7 @@ where
                 None => acct.reserved(),
             }
         };
-        let mut align = if data_size >= DATA_ALIGN {
+        let mut align = if capacity >= DATA_ALIGN {
             DATA_ALIGN
         } else {
             block
@@ -138,22 +153,37 @@ where
         } else {
             [0; 16]
         };
-        // 1-3. Fill, make durable, verify (as format 1).
-        self.fill(offset, extent, block, fill, &fill_key)?;
+        // 1-3. Fill, make durable, verify (as format 1); a capped region's
+        // slack allocated, not written (but where the slack is written),
+        // never verified.
+        let filled = match capped {
+            Some(_) if !self.writes_slack() => 2 * block + data_size,
+            _ => extent,
+        };
+        self.fill(offset, filled, block, fill, &fill_key)?;
+        if filled < extent {
+            inner
+                .platform
+                .allocate_range(&inner.file, offset + filled, extent - filled)
+                .map_err(|raw| {
+                    crate::store::space_err(store_io_core::error::Op::Allocate, raw, tag)
+                })?;
+        }
         self.flush_all_accounted()?;
-        self.verify_ready(offset, extent)?;
+        self.verify_ready(offset, filled)?;
         // 4. The header in slot A, generation 1, Ready.
         let extents: Vec<(u64, u64)> = if slot {
             Vec::new()
         } else {
-            vec![(offset + 2 * block, data_size)]
+            vec![(offset + 2 * block, capacity)]
         };
+        let flags = if capped.is_some() { FLAG_CAPPED } else { 0 };
         let h = RegionHeader2 {
             region_id: id,
             kind,
             state: RegionState::Ready,
             fill,
-            flags: 0,
+            flags,
             compat_flags: 0,
             log2_block: inner.layout.log2_block,
             extent_count: extents.len() as u16,
@@ -192,7 +222,7 @@ where
         let entry = Entry2 {
             seq,
             kind,
-            flags: 0,
+            flags,
             compat_flags: 0,
             name: rname,
             tag,
@@ -200,7 +230,7 @@ where
             header_a: offset,
             header_b: offset + block,
             data_size,
-            capacity: data_size,
+            capacity,
             span_start: offset,
             span_end: offset + extent,
             footprint_seq: meta_seq,
@@ -260,8 +290,11 @@ where
             name: rname,
             kind,
             generation: Generation::FIRST,
-            map: crate::regionmap::RegionMap::single(offset + 2 * block, data_size)
-                .with_room(store_io_format::meta2::max_extents(inner.layout.log2_block) - 1),
+            map: match slot {
+                true => crate::regionmap::RegionMap::single(offset + 2 * block, 0),
+                false => crate::regionmap::RegionMap::from_extents(&extents, data_size),
+            }
+            .with_room(store_io_format::meta2::max_extents(inner.layout.log2_block) - 1),
             header_at: [offset, offset + block],
             header: Mutex::new(header),
             frontier: (kind == RegionKind::Append).then(|| {
@@ -271,7 +304,7 @@ where
                     u32::from(inner.layout.log2_block),
                     crate::frontier::ring_for(
                         inner.opts.append_window,
-                        data_size,
+                        capacity,
                         u32::from(inner.layout.log2_block),
                     ),
                 )

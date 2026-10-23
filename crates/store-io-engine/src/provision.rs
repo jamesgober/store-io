@@ -33,9 +33,10 @@ where
         &self,
         name: &str,
         kind: RegionKind,
-        data_size: u64,
+        opts: crate::RegionOptions,
         from: Option<&mut Reservation<P>>,
     ) -> Result<Arc<LiveRegion>, Error> {
+        let data_size = opts.size_bytes();
         let _timed = self
             .inner
             .observer
@@ -51,8 +52,16 @@ where
         if let Some(first) = inner.domain.poisoned() {
             return Err(Error::Poisoned { first });
         }
+        // Before any I/O: options that contradict each other, and a cap
+        // format 1 cannot record.
+        opts.validate()?;
         if inner.layout.format == store_io_format::slot::FORMAT_2 {
-            return self.provision2(name, kind, data_size, from);
+            return self.provision2(name, kind, opts, from);
+        }
+        if opts.max_size_bytes().is_some() {
+            return Err(Error::Unsupported {
+                what: store_io_core::error::Capability::FormatVersion,
+            });
         }
         let rname = RegionName::new(name).map_err(|_| Error::NotWritten {
             cause: NotWrittenCause::InvalidName,
@@ -263,6 +272,20 @@ where
         // The two header blocks are always zero so no old header survives;
         // the data area gets the pattern from its first byte.
         self.fill_range(offset, extent, 2 * block, fill, key, 0)
+    }
+
+    /// Whether space a region holds but has no data in yet (a capped
+    /// region's slack, the rest of a growth's extent) is written with the
+    /// region's pattern rather than allocated unwritten: on Windows, where a
+    /// write past a file's valid data makes NTFS zero every byte below it
+    /// first (slack left unwritten would cost a later write that zeroing),
+    /// and on macOS, which cannot allocate inside a file.
+    pub(crate) fn writes_slack(&self) -> bool {
+        matches!(
+            self.inner.report.evidence.platform,
+            store_io_core::evidence::PlatformKind::Windows
+                | store_io_core::evidence::PlatformKind::MacOs
+        )
     }
 
     /// Writes `[offset, offset + extent)` of the container: its first `zeros`

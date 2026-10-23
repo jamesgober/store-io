@@ -28,7 +28,6 @@ use std::sync::PoisonError;
 
 use store_io_core::align::align_up;
 use store_io_core::error::{Capability, Error, NotWrittenCause, Op, ReserveTag};
-use store_io_core::evidence::PlatformKind;
 use store_io_format::judge::Standing;
 use store_io_format::meta::{FillPattern, RegionState};
 use store_io_format::meta2::{
@@ -94,7 +93,10 @@ where
         if new > r.map.capacity() {
             return self.grow_beyond2(r, &mut header, new, fill, &key);
         }
-        // 1. The new range, run by run: filled, flushed, verified.
+        // 1. The new range, run by run: filled, flushed, verified (also
+        // where provisioning wrote it: nothing on disk says the bytes there
+        // are this region's, e.g. after the container moved between
+        // systems).
         self.fill_pieces(&r.map.pieces(len, new), fill, &key)?;
         // 2. The commit: the page with the entry's new data size.
         let mut meta = lock_meta(&inner.meta);
@@ -197,12 +199,10 @@ where
             e.span_end = e.span_end.max(at + ext_len);
             e.footprint_seq = meta_seq;
         })?;
-        // 1. The slack and the new range. On Windows the whole extent is
-        // filled: a write past a file's valid data makes NTFS zero every
-        // byte below it first, so slack left unwritten would cost a later
-        // write (this region's, or one placed after it) that zeroing.
-        // Elsewhere the slack is allocated, unwritten (never verified).
-        let filled = if inner.report.evidence.platform == PlatformKind::Windows {
+        // 1. The slack and the new range: the whole extent filled where the
+        // slack is written (`writes_slack`), else the slack allocated,
+        // unwritten (never verified).
+        let filled = if self.writes_slack() {
             ext_len
         } else {
             new - old_cap

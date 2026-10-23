@@ -13,6 +13,33 @@
 
 ### Added
 
+- Engine: **`RegionOptions`** (`size`, `max_size`, `validate`) and
+  `Store::provision_{append,page}_region_with`,
+  `Reservation::provision_{append,page}_region_with` (v0.5 E4 C10; the
+  existing calls are `RegionOptions::default().size(bytes)`); re-exported
+  as `store_io::RegionOptions`. A region with `max_size` (container format
+  2, still behind the hidden `StoreOptions::container_format`; format 1
+  returns `Unsupported(FormatVersion)`) is one extent of its cap (at least
+  its size), flagged capped in its entry and header and charged whole to
+  its tag (and a reservation): it grows to the cap in one run with no new
+  space, and past it is `NoSpace(RegionLimit)`. Only the header blocks and
+  the data are filled and verified; the rest of the cap is allocated
+  without being written where the system can (Linux), and written with
+  the region's pattern on Windows (NTFS zeroes everything below a write
+  past a file's valid data, so unwritten slack would cost the next write
+  after it) and macOS (which cannot allocate inside a file), there at the
+  cost of writing the whole cap at provisioning (each growth within it
+  writes its range again, as everywhere). The same rule now covers
+  the rest of the extent a growth beyond capacity adds. A cap below the
+  size is `NotWritten(InvalidOptions)` before any I/O.
+- `store-io-core`: `NotWrittenCause::InvalidOptions`.
+- Simulator: `SimConfig::valid_data_model` (NTFS's valid data length: the
+  bytes a write starting past a file's valid data would have zeroed first
+  are counted in `World::gap_fill_bytes`; `range_state` reports a range
+  past it not valid; a crash or a shrink cuts it back);
+  `World::is_unwritten`; a world that completes 500,000 writes, or holds
+  262,144 unflushed in a volatile cache, panics (a write that never stops
+  fails its test instead of exhausting memory).
 - Engine: **growth beyond capacity** in format 2 (v0.5 E4 C9, still
   behind the hidden `StoreOptions::container_format`): `grow` past the
   capacity adds one extent of at least 1 MiB and an eighth of the
@@ -406,6 +433,9 @@
 
 ### Fixed
 
+- Engine: a `Submitter` operation split at a run's end now checks, in
+  release builds too, that every piece moves it on (a split that did not,
+  only through a bug, re-issued writes for ever).
 - Engine: an operation split at a run's end (a `Submitter` read or
   write, a buffered write, `read_at`, a scan) that reached past the data's
   end, which only a bounds-check bug could cause, went on as empty pieces

@@ -17,6 +17,7 @@ use crate::gate::Pass;
 use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
 use crate::mapped::Mapped;
+use crate::options::RegionOptions;
 use crate::receipt::{DurableReceipt, RegionPos, WriteTicket};
 use crate::scan::{ScanItem, ScanSummary};
 use crate::settle::{Wrote, settle_pumped};
@@ -48,7 +49,23 @@ where
     ///
     /// [`Error::AlreadyExists`], [`Error::NoSpace`], or a platform error.
     pub fn provision_append_region(&self, name: &str, size: u64) -> Result<AppendRegion<P>, Error> {
-        let state = self.provision(name, RegionKind::Append, size, None)?;
+        self.provision_append_region_with(name, RegionOptions::default().size(size))
+    }
+
+    /// Provisions a new append region as `opts` say (its size, and in
+    /// container format 2 its cap).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision_append_region`]; `NotWritten(InvalidOptions)`
+    /// for options [`RegionOptions::validate`] refuses; `Unsupported` for a
+    /// cap in container format 1.
+    pub fn provision_append_region_with(
+        &self,
+        name: &str,
+        opts: RegionOptions,
+    ) -> Result<AppendRegion<P>, Error> {
+        let state = self.provision(name, RegionKind::Append, opts, None)?;
         Ok(AppendRegion {
             store: self.clone(),
             state,
@@ -74,7 +91,21 @@ where
     ///
     /// [`Error::AlreadyExists`], [`Error::NoSpace`], or a platform error.
     pub fn provision_page_region(&self, name: &str, size: u64) -> Result<PageRegion<P>, Error> {
-        let state = self.provision(name, RegionKind::Page, size, None)?;
+        self.provision_page_region_with(name, RegionOptions::default().size(size))
+    }
+
+    /// Provisions a new page region as `opts` say (its size, and in
+    /// container format 2 its cap).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision_append_region_with`].
+    pub fn provision_page_region_with(
+        &self,
+        name: &str,
+        opts: RegionOptions,
+    ) -> Result<PageRegion<P>, Error> {
+        let state = self.provision(name, RegionKind::Page, opts, None)?;
         Ok(PageRegion {
             store: self.clone(),
             state,
@@ -98,7 +129,7 @@ where
     ///
     /// [`Error::AlreadyExists`], [`Error::NoSpace`], or a platform error.
     pub fn provision_slot(&self, name: &str) -> Result<Slot<P>, Error> {
-        let state = self.provision(name, RegionKind::Slot, 0, None)?;
+        let state = self.provision(name, RegionKind::Slot, RegionOptions::default(), None)?;
         Ok(Slot::from_parts(self.clone(), state))
     }
 }

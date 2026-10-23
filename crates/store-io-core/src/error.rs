@@ -191,6 +191,8 @@ pub enum NotWrittenCause {
     /// lost, so no region may be provisioned, grown past its capacity or
     /// released until it is repaired (spec §9 step 2).
     Frozen,
+    /// The options contradict each other (a region's cap below its size).
+    InvalidOptions,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -217,6 +219,7 @@ impl fmt::Display for NotWrittenCause {
             Self::Overlap => "two writes in one batch overlap",
             Self::ForeignBuffer => "the buffer is not from this store's pool",
             Self::Frozen => "allocation is frozen: a table page is stale or lost",
+            Self::InvalidOptions => "the options contradict each other",
         })
     }
 }

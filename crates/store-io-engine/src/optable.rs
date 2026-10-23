@@ -344,10 +344,17 @@ impl Table {
                 let _fits = b.set_len(next);
                 let offset = state.map.locate(pos, next as u64);
                 let write = !matches!(live.kind, Kind::Read { .. });
-                live.split = Some(Split {
+                let next_split = Split {
                     total: split.total,
                     done: split.done + piece,
-                });
+                };
+                // Every piece moves the operation on (one that did not would
+                // be re-issued for ever): checked in release builds too.
+                assert!(
+                    next_split.done > split.done && next_split.done < split.total,
+                    "a split operation that does not move on"
+                );
+                live.split = Some(next_split);
                 if let Some(buf) = buf.take() {
                     return Finish::Next {
                         qtag,

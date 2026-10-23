@@ -226,6 +226,13 @@ pub(crate) fn shares_reserved(usable: &[Usable<'_>], spans: &[Extent]) -> Vec<bo
     out
 }
 
+/// The first offset from `at` whose `offset + skew` is a multiple of
+/// `align` (a power of two); `None` past `u64::MAX`.
+pub(crate) fn aligned(at: u64, align: u64, skew: u64) -> Option<u64> {
+    debug_assert!(align.is_power_of_two());
+    Some((at.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew)
+}
+
 /// Free space as the complement of everything allocated (spec §9 step 6,
 /// §10): never built by adding a range back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -283,8 +290,7 @@ impl FreeMap {
     /// a clamped unavailable span may end anywhere). `None` past
     /// `u64::MAX`.
     pub(crate) fn tail(&self, align: u64, skew: u64) -> Option<u64> {
-        debug_assert!(align.is_power_of_two());
-        Some((self.tail.checked_add(skew)?.checked_add(align - 1)? & !(align - 1)) - skew)
+        aligned(self.tail, align, skew)
     }
 
     /// Whether `[at, at + len)` is free inside the container.

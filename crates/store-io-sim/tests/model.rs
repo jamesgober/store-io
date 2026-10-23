@@ -426,6 +426,46 @@ fn test_holes_read_unwritten_until_written_and_allocate_range_keeps_bytes() {
     assert_eq!(state(8192, 4096), Tri::No);
 }
 
+/// The valid-data model (NTFS): valid data ends where the furthest write
+/// ended; a write past it costs the zeroing of the gap; a range reaching
+/// past it is reported not valid. Without the model the gap is still
+/// counted and every range is valid.
+#[test]
+fn test_the_valid_data_model() {
+    use store_io_core::evidence::Tri;
+    for model in [true, false] {
+        let (p, _d, f, pool) = setup(SimConfig {
+            valid_data_model: model,
+            ..SimConfig::volatile(93)
+        });
+        let mut q = p.queue(QueueConfig::default()).unwrap();
+        let valid = |off: u64, len: u64| p.range_state(&f, off, len).unwrap().valid_data;
+        let gap = || p.with_world(|w| w.gap_fill_bytes());
+        let past = if model { Tri::No } else { Tri::Yes };
+        let before = gap();
+        write(&mut q, &f, &pool, 0, 1, false);
+        drain(&mut q);
+        assert_eq!(gap(), before, "a write from the start: no gap");
+        assert_eq!(valid(0, 4096), Tri::Yes);
+        assert_eq!(valid(4096, 4096), past);
+        // Allocation moves nothing.
+        p.allocate_range(&f, 0, 16384).unwrap();
+        assert_eq!(valid(8192, 4096), past);
+        write(&mut q, &f, &pool, 12288, 2, false);
+        drain(&mut q);
+        assert_eq!(gap(), before + 8192, "the gap zeroed first");
+        assert_eq!(valid(0, 16384), Tri::Yes);
+        // A write below the valid data costs nothing.
+        write(&mut q, &f, &pool, 4096, 3, false);
+        drain(&mut q);
+        assert_eq!(gap(), before + 8192);
+        // A shrink cuts the valid data.
+        p.set_len(&f, 8192).unwrap();
+        p.set_len(&f, 16384).unwrap();
+        assert_eq!(valid(8192, 4096), past);
+    }
+}
+
 /// A crash takes a file back to its durable length: growth, holes and
 /// writes past it are gone, and a later growth over those bytes is new
 /// (unwritten until written).

@@ -103,9 +103,9 @@ pub use store_io_core::id::{Generation, RegionId, VolumeId};
 /// The observer's types: `Store::observe()` returns an [`observe::Snapshot`].
 pub use store_io_core::observe;
 pub use store_io_engine::{
-    CONTAINER, DomainStats, DurableReceipt, Outstanding, RegionKind, RegionPos, ScanItem,
-    ScanSummary, SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable, UnavailableRegion,
-    WriteTicket,
+    CONTAINER, DomainStats, DurableReceipt, Outstanding, RegionKind, RegionOptions, RegionPos,
+    ScanItem, ScanSummary, SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable,
+    UnavailableRegion, WriteTicket,
 };
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 

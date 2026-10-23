@@ -222,11 +222,13 @@ fn test_a_page_naming_another_page_is_lost() {
     assert!(s.report().metadata.frozen);
 }
 
+/// An entry whose kind and name do not decode (all zero but its sequence)
+/// makes only itself unavailable: it is reported by its place, and the
+/// store opens.
 #[test]
-fn test_a_page_holding_regions_is_not_yet_supported() {
+fn test_an_entry_that_does_not_decode_is_reported_not_refused() {
     let p = SimPlatform::new(SimConfig::volatile(84));
     drop(create(&p));
-    // One entry (seq 0, otherwise zero): the page checks pass.
     let mut payload = vec![0u8; store_io_format::meta2::PAGE_HEADER_LEN + 96];
     payload[4] = 1;
     payload[8] = 1;
@@ -235,17 +237,9 @@ fn test_a_page_holding_regions_is_not_yet_supported() {
         page_at(&p, 0, 1),
         &page_copy_b_of(&p, 0, &payload, false),
     );
-    let r = Store::open(p.clone(), Path::new(DIR), opts());
-    assert!(
-        matches!(
-            r,
-            Err(Error::Unsupported {
-                what: Capability::FormatVersion
-            })
-        ),
-        "{:?}",
-        r.map(|_| ())
-    );
+    let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
+    assert_eq!(s.report().metadata.invalid_entries, vec![(0, 0)]);
+    assert!(s.report().unavailable.is_empty());
 }
 
 #[test]

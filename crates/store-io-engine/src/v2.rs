@@ -1,11 +1,10 @@
 //! Container format 2 (`.dev/design/format2-draft.md`): the paged region
-//! table's metadata, create, the open's tear judgement and healing, and the
-//! clean close. Built beside format 1 (D-116 makes format 1 read-only once
-//! creation switches, v0.5 E5); regions in format 2 arrive with E2b/E3, so a
-//! page holding entries is refused for now.
+//! table's metadata, create, the open's tear judgement, region checks
+//! (`open2`) and healing, and the clean close. Built beside format 1 (D-116
+//! makes format 1 read-only once creation switches, v0.5 E5).
 
 use store_io_core::error::{Capability, Error, ErrorContext, Op};
-use store_io_core::id::VolumeId;
+use store_io_core::id::{RegionId, VolumeId};
 use store_io_format::judge::{self, PairVerdict, SlotVerdict, Standing};
 use store_io_format::meta::VolumeMeta;
 use store_io_format::meta2::{
@@ -52,6 +51,27 @@ pub struct MetadataReport {
     /// Metadata pairs read a second time because a slot read failed
     /// (each failed read is retried once).
     pub retried_reads: u32,
+    /// Table entries whose kind or name do not decode, as `(page, seq)`:
+    /// unavailable, their spans reserved (the regions with a readable name
+    /// are in `StoreReport::unavailable`).
+    pub invalid_entries: Vec<(u32, u32)>,
+    /// Extents a region header lists past its entry's count (a growth
+    /// beyond capacity cut short): not part of the region; allocated while
+    /// the region's page is stale.
+    pub extra_extents: Vec<(RegionId, (u64, u64))>,
+    /// Regions that may read another region's bytes (spec §9 step 4): an
+    /// unavailable region with a newer footprint overlaps them. Read-only.
+    pub superseded: Vec<RegionId>,
+    /// Regions an unavailable region's span overlaps (those bytes stay
+    /// reserved).
+    pub shares_reserved: Vec<RegionId>,
+    /// For each stale page, whether every region header on it agrees with
+    /// its entry. Agreement does not prove nothing was lost (spec §9): a
+    /// growth within capacity changes only the entry, and a lost release
+    /// can leave a Ready header over reused space.
+    pub stale_page_agreement: Vec<(u32, bool)>,
+    /// A list above was cut at its limit (256 items).
+    pub truncated: bool,
 }
 
 /// Which metadata write a format-2 open healed.
@@ -88,6 +108,25 @@ impl core::fmt::Display for MetadataReport {
         }
         if self.retried_reads > 0 {
             writeln!(f, "retried reads    {}", self.retried_reads)?;
+        }
+        if !self.invalid_entries.is_empty() {
+            writeln!(f, "invalid entries  {:?}", self.invalid_entries)?;
+        }
+        for (id, (off, len)) in &self.extra_extents {
+            writeln!(f, "extra extent     region {id}: {len} bytes at {off}")?;
+        }
+        if !self.superseded.is_empty() {
+            writeln!(f, "superseded       {:?}", self.superseded)?;
+        }
+        if !self.shares_reserved.is_empty() {
+            writeln!(f, "shares reserved  {:?}", self.shares_reserved)?;
+        }
+        for (p, agrees) in &self.stale_page_agreement {
+            let word = if *agrees { "agree" } else { "disagree" };
+            writeln!(f, "stale page {p}     headers {word} with entries")?;
+        }
+        if self.truncated {
+            writeln!(f, "(lists cut at 256 items)")?;
         }
         Ok(())
     }
@@ -128,6 +167,18 @@ pub(crate) struct Page2 {
 pub(crate) struct Meta2 {
     pub(crate) volume: VolumeMeta2,
     pub(crate) pages: Vec<Page2>,
+    /// Free space past the table area, rebuilt as a complement on every
+    /// change (spec §9 step 6).
+    pub(crate) free: crate::footprint::FreeMap,
+    /// Per-tag usage `(tag, logical, physical)` found at open.
+    pub(crate) usage: Vec<(u32, u64, u64)>,
+    /// Names of entries that failed the entry checks with a kind this
+    /// version does not know (not in `StoreReport::unavailable`): reserved
+    /// all the same.
+    pub(crate) reserved_names: Vec<store_io_format::meta::RegionName>,
+    /// An entry names space past the file's end: growth is refused (it
+    /// would make zeros of the lost tail).
+    pub(crate) cut_short: bool,
 }
 
 /// The `meta_seq` a slot of `pair` counts for (`Valid`, or `BadPayloadCrc`
@@ -287,7 +338,18 @@ pub(crate) fn create_metadata<P: Platform>(
         next_region_id: 0,
         entries: Vec::new(),
         container_len: layout.data_start(),
-        v2: Some(Box::new(Meta2 { volume: vm, pages })),
+        v2: Some(Box::new(Meta2 {
+            volume: vm,
+            pages,
+            free: crate::footprint::FreeMap::complement(
+                layout.data_start(),
+                layout.data_start(),
+                &mut [],
+            ),
+            usage: Vec::new(),
+            reserved_names: Vec::new(),
+            cut_short: false,
+        })),
     })
 }
 
@@ -307,6 +369,8 @@ pub(crate) struct Opened {
     pub(crate) owner_generation: u64,
     pub(crate) read_only: bool,
     pub(crate) report: MetadataReport,
+    pub(crate) regions: Vec<std::sync::Arc<LiveRegion>>,
+    pub(crate) unavailable: Vec<UnavailableRegion>,
 }
 
 /// Decodes a format-2 volume record: a longer record, or a `features` or
@@ -329,7 +393,7 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<VolumeMeta2, Error> {
 
 /// Reads a metadata pair, each slot whose read failed again once (spec
 /// §7), counting the retries.
-fn read_retried<Q: store_io_platform::Queue>(
+pub(crate) fn read_retried<Q: store_io_platform::Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,
     pool: &store_io_buf::BufPool,
@@ -356,8 +420,10 @@ fn judge_read(p: &PairRead) -> judge::PairRead {
 }
 
 /// The format-2 open after the volume record was found (spec §9): reads
-/// every page, judges the metadata, heals the one torn write, and (when
-/// writable) writes the volume record with the next owner generation.
+/// every page, judges the metadata, checks every region (`open2`), and only
+/// then, when writable, heals the one torn write and writes the volume
+/// record with the next owner generation: a read-only verdict from the
+/// region checks comes before anything is written.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn open_metadata<P: Platform>(
     file: &P::File,
@@ -370,6 +436,7 @@ pub(crate) fn open_metadata<P: Platform>(
     container_len: u64,
     read_only: bool,
     policy: &Policy,
+    append_window: u64,
 ) -> Result<Opened, Error> {
     if layout.data_start() > container_len {
         return Err(corrupt());
@@ -436,12 +503,6 @@ pub(crate) fn open_metadata<P: Platform>(
                     .map(|d| (d.header, d.entries().collect::<Vec<_>>()))
             }) {
                 Some(Ok((h, entries))) => {
-                    if !entries.is_empty() {
-                        // Format-2 regions arrive with E2b/E3.
-                        return Err(Error::Unsupported {
-                            what: Capability::FormatVersion,
-                        });
-                    }
                     page.header = Some(h);
                     page.entries = entries;
                 }
@@ -485,15 +546,43 @@ pub(crate) fn open_metadata<P: Platform>(
         next_region_id: 0,
         entries: Vec::new(),
         container_len,
-        v2: Some(Box::new(Meta2 { volume: vm, pages })),
+        v2: Some(Box::new(Meta2 {
+            volume: vm,
+            pages,
+            free: crate::footprint::FreeMap::default(),
+            usage: Vec::new(),
+            reserved_names: Vec::new(),
+            cut_short: false,
+        })),
     };
+    // Steps 3-6, before anything is written.
+    let regions = {
+        let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
+        crate::open2::check_regions(
+            q,
+            file,
+            pool,
+            layout,
+            volume,
+            v2,
+            container_len,
+            append_window,
+            &mut report,
+        )?
+    };
+    if let Some(v2) = meta.v2.as_deref_mut() {
+        v2.free = regions.free;
+        v2.usage = regions.usage;
+        v2.reserved_names = regions.reserved_names;
+        v2.cut_short = regions.cut_short;
+    }
     let read_only = read_only || {
         report.read_only_reason = if !j.writable {
             Some("the volume record is damaged and a table page holds a damaged copy")
         } else if foreign {
             Some("the metadata carries a feature this version may read but not write")
         } else {
-            None
+            regions.read_only_reason
         };
         report.read_only_reason.is_some()
     };
@@ -503,6 +592,8 @@ pub(crate) fn open_metadata<P: Platform>(
             owner_generation: 0,
             read_only,
             report,
+            regions: regions.live,
+            unavailable: regions.unavailable,
         });
     }
     let og = vm
@@ -529,6 +620,8 @@ pub(crate) fn open_metadata<P: Platform>(
         owner_generation: og,
         read_only,
         report,
+        regions: regions.live,
+        unavailable: regions.unavailable,
     })
 }
 

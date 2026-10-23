@@ -461,6 +461,13 @@ fn test_more_entry_rules() {
         f(&mut r);
         r.check(&lim)
     };
+    // The capacity fits the span (it is the extents' sum, and they lie in
+    // it): one block more is refused, a capacity filling the span is not.
+    assert_eq!(
+        check(&|r| r.capacity = r.span_end - r.span_start + B),
+        Err(MetaError::Field("capacity"))
+    );
+    assert!(check(&|r| r.capacity = r.span_end - r.span_start).is_ok());
     assert_eq!(
         check(&|r| {
             r.span_start = r.header_a + B;

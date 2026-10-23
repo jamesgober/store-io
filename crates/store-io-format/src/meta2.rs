@@ -427,6 +427,11 @@ impl RawEntry {
         if self.span_start >= self.span_end || self.span_end > lim.file_len {
             return Err(MetaError::Field("span"));
         }
+        // The extents lie in the span (checked with the header), so their
+        // sum, the capacity, cannot exceed it.
+        if self.capacity > self.span_end - self.span_start {
+            return Err(MetaError::Field("capacity"));
+        }
         if self.span_start % block != 0 || self.span_end % block != 0 {
             return Err(MetaError::Unaligned);
         }
@@ -479,6 +484,23 @@ impl RawEntry {
             span_end: self.span_end,
             footprint_seq: self.footprint_seq,
         })
+    }
+
+    /// The entry's name, when it decodes (whatever else fails): a name
+    /// an unavailable entry keeps reserved.
+    #[must_use]
+    pub fn name(&self) -> Option<RegionName> {
+        RegionName::from_padded(self.name).ok()
+    }
+
+    /// The entry's name and kind, when both decode (so an entry that fails
+    /// the per-entry checks can still be named in a report).
+    #[must_use]
+    pub fn name_and_kind(&self) -> Option<(RegionName, RegionKind)> {
+        Some((
+            RegionName::from_padded(self.name).ok()?,
+            RegionKind::from_u8(self.kind).ok()?,
+        ))
     }
 
     /// The bytes an unavailable entry keeps reserved: its span widened to

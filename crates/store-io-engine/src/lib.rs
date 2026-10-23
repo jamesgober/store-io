@@ -35,7 +35,10 @@ extern crate self as store_io_engine;
 mod flusher;
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the format-2 open uses it from E2b/E3 C4")
+    expect(
+        dead_code,
+        reason = "placement (first_fit, tail) arrives with E2b/E3 C5"
+    )
 )]
 mod footprint;
 mod force;
@@ -45,6 +48,7 @@ mod io;
 mod layout;
 mod lifecycle;
 mod open;
+mod open2;
 mod optable;
 mod provision;
 pub(crate) mod queue_core;

@@ -86,6 +86,16 @@ pub enum Unavailable {
     HeaderMismatch,
     /// The header says the region was released while the table says ready.
     HeaderReleased,
+    /// Format 2: the table entry itself holds impossible values (its span
+    /// stays reserved).
+    EntryInvalid,
+    /// Format 2: the header's extents do not match the entry (their sum,
+    /// the span, the table area, or an overlap within the region).
+    ExtentsInvalid,
+    /// Format 2: a region with a newer (or equal) footprint overlaps it.
+    Overlaps,
+    /// Format 2: a region with a newer (or equal) footprint has its name.
+    NameTaken,
 }
 
 impl Unavailable {
@@ -95,9 +105,13 @@ impl Unavailable {
         match self {
             Self::ContainerShort { .. } => CorruptionKind::Truncated,
             Self::HeaderUnreadable => CorruptionKind::HeaderCrc,
-            Self::HeaderInvalid | Self::HeaderMismatch | Self::HeaderReleased => {
-                CorruptionKind::Metadata
-            }
+            Self::HeaderInvalid
+            | Self::HeaderMismatch
+            | Self::HeaderReleased
+            | Self::EntryInvalid
+            | Self::ExtentsInvalid
+            | Self::Overlaps
+            | Self::NameTaken => CorruptionKind::Metadata,
         }
     }
 }
@@ -115,6 +129,10 @@ impl core::fmt::Display for Unavailable {
             Self::HeaderReleased => {
                 f.write_str("its header says released while the table says ready")
             }
+            Self::EntryInvalid => f.write_str("its table entry holds impossible values"),
+            Self::ExtentsInvalid => f.write_str("its extents do not match its table entry"),
+            Self::Overlaps => f.write_str("a newer region overlaps it"),
+            Self::NameTaken => f.write_str("a newer region has its name"),
         }
     }
 }

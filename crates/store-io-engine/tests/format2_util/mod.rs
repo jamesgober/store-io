@@ -13,6 +13,8 @@ use store_io_format::slot::{FORMAT_2, SlotFields, SlotIndex, encode};
 use store_io_platform::{CompletionBuf, FileMode, FileName, IoOp, Platform, Queue, QueueConfig};
 use store_io_sim::{CrashMode, SimPlatform};
 
+pub(crate) mod craft;
+
 pub(crate) const DIR: &str = "/db";
 pub(crate) const CHUNK: usize = 4096;
 /// Table pages are 16 KiB (the default `log2_table_slot`).

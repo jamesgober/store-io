@@ -53,6 +53,8 @@ META2 = "crates/store-io-format/src/meta2.rs"
 JUDGE = "crates/store-io-format/src/judge.rs"
 # Format 2 in the engine: its own tests (the format-1 suites never reach it).
 F2 = ["-p", "store-io-engine", "--test", "format2", "--test", "format2_create"]
+# The format-2 open's region checks, on crafted media.
+F2R = ["-p", "store-io-engine", "--test", "format2_regions", "--test", "format2"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -442,6 +444,34 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
+ # E2b/E3 C4: the format-2 open's regions: stale, superseded and
+ # foreign-header regions are read-only; overlap and name demote; extra
+ # extents are reported; several extents and 512 B blocks are refused
+ # or read-only; every reserved overlap and stale page's agreement is said
+ ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: s.superseded || !writable,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: unconfirmed || !writable,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: unconfirmed || s.superseded || (!writable && false),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.overlapped => Some(Unavailable::Overlaps),', '            (Ok(_), Some(s)) if s.overlapped && false => Some(Unavailable::Overlaps),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.renamed => Some(Unavailable::NameTaken),', '            (Ok(_), Some(s)) if s.renamed && false => Some(Unavailable::NameTaken),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            if entry.extent_count > 1 {', '            if entry.extent_count > 2 {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.extra.is_some() && page.standing == Standing::Unconfirmed {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '        if shares {', '        if shares && false {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '                    if usize::from(view.header.extent_count) == committed + 1 {', '                    if usize::from(view.header.extent_count) == committed + 2 {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '                c.outcome = Err(Unavailable::HeaderInvalid);\n', '', F2R),
+ # E2b/E3 C4 review: the capacity fits the span; format 1's recycle,
+ # release and slot commit refuse format 2; a format-2 slot reads its
+ # object after the fixed part; a stale page's extra extent disagrees;
+ # only a usable 512 B region makes the store read-only; format 2's
+ # space report gives the free bytes
+ ('crates/store-io-format/src/meta2.rs', '        if self.capacity > self.span_end - self.span_start {', '        if self.capacity > self.span_end - self.span_start && false {', FORMAT),
+ ('crates/store-io-engine/src/lifecycle.rs', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {\n            return Err(Error::Unsupported {', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 && false {\n            return Err(Error::Unsupported {', F2R),
+ ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // The object follows', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // The object follows', F2R),
+ ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // After the format-2', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // After the format-2', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.outcome.is_err() {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '        if c.small {', '        if c.small && false {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '                    c.small = view.header.log2_block == 9;', '                    c.small = view.header.log2_block == 10;', F2R),
+ ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes(),', '                released: 0,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '                let seq = if raw.footprint_seq == 0 || raw.footprint_seq > page_meta_seq {', '                let seq = if raw.footprint_seq == 0 {', F2R),
  # E2b/E3 C3: settling (the lower footprint_seq of two overlapping or
  # same-named usable regions loses, both on a tie; only a newer
  # unavailable region's own extents supersede; the sweep's stab, inside

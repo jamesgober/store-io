@@ -137,6 +137,7 @@ where
                         container_len,
                         read_only,
                         &policy,
+                        opts.append_window,
                     )?
                 };
                 let report = StoreReport {
@@ -149,7 +150,7 @@ where
                     owner_generation: opened.owner_generation,
                     read_only: opened.read_only,
                     io: platform.io_path(),
-                    unavailable: Vec::new(),
+                    unavailable: opened.unavailable,
                     format: store_io_format::slot::FORMAT_2,
                     metadata: opened.report,
                     flushes_in_flight: 1,
@@ -165,7 +166,7 @@ where
                     pool,
                     queues,
                     opened.meta,
-                    Vec::new(),
+                    opened.regions,
                     report,
                     opened.read_only,
                     opened.owner_generation,
@@ -350,7 +351,10 @@ where
         owner_generation: u64,
         opts: StoreOptions,
     ) -> Self {
-        let acct = Accounting::from_entries(&meta.entries, layout.block());
+        let acct = match meta.v2.as_deref() {
+            Some(v2) => Accounting::from_usage(&v2.usage),
+            None => Accounting::from_entries(&meta.entries, layout.block()),
+        };
         // Every flush lane past the first needs a handle of its own. A store
         // that flushes nothing (read-only: asked for, or found so by a
         // format-2 open after its queues were made; or on a device that

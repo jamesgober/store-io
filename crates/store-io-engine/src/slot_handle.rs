@@ -50,7 +50,13 @@ where
     /// Largest payload a commit accepts.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.store.inner.layout.block() as usize - HEADER_LEN - REGION_META_LEN
+        let l = &self.store.inner.layout;
+        if l.format == store_io_format::slot::FORMAT_2 {
+            // After the format-2 header's 64-byte fixed part.
+            store_io_format::meta2::max_object(l.log2_block)
+        } else {
+            l.block() as usize - HEADER_LEN - REGION_META_LEN
+        }
     }
 
     fn at(&self) -> PairAt {
@@ -82,6 +88,18 @@ where
         if info.generation <= 1 {
             return None;
         }
+        let l = &self.store.inner.layout;
+        if l.format == store_io_format::slot::FORMAT_2 {
+            // The object follows the header's fixed part, `object_len` long.
+            // A slot region lists no extents, so the file length bounds
+            // nothing here (and the metadata lock is not taken under the
+            // header's: release takes them the other way round).
+            let payload = h.payload.as_deref()?;
+            let view =
+                store_io_format::meta2::decode_region_header(payload, l.log2_block, u64::MAX)
+                    .ok()?;
+            return Some(view.object().to_vec());
+        }
         h.payload
             .as_ref()
             .and_then(|p| p.get(REGION_META_LEN..))
@@ -97,6 +115,7 @@ where
     /// `DurabilityUnknown` (the domain is now poisoned).
     pub fn commit(&self, data: &[u8]) -> Result<DurableReceipt, Error> {
         let s = &self.store;
+        s.refuse_format_2()?;
         s.ready_for(&self.state)?;
         let _timed = s
             .inner

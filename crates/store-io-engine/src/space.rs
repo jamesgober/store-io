@@ -49,8 +49,9 @@ pub struct SpaceReport {
     pub container: u64,
     /// Bytes held by ready regions, headers included.
     pub regions: u64,
-    /// Bytes of released regions: reused by a later region of exactly the
-    /// same size.
+    /// Format 1: bytes of released regions, reused by a later region of
+    /// exactly the same size. Format 2: free bytes inside the container,
+    /// usable by any region (the complement of everything allocated).
     pub released: u64,
     /// Bytes reserved and not yet provisioned.
     pub reserved: u64,
@@ -72,6 +73,29 @@ impl Accounting {
         let mut a = Self::default();
         for e in entries.iter().filter(|e| e.state == RegionState::Ready) {
             a.add(e, block);
+        }
+        a
+    }
+
+    /// Usage `(tag, logical, physical)` per format-2 entry.
+    /// Sorted first, so many tags cost O(n log n), not an insertion each.
+    pub(crate) fn from_usage(usage: &[(u32, u64, u64)]) -> Self {
+        let mut sorted = usage.to_vec();
+        sorted.sort_unstable_by_key(|u| u.0);
+        let mut a = Self::default();
+        for (tag, logical, physical) in sorted {
+            match a.tags.last_mut() {
+                Some(t) if t.tag == tag => {
+                    t.logical = t.logical.saturating_add(logical);
+                    t.physical = t.physical.saturating_add(physical);
+                }
+                _ => a.tags.push(TagSpace {
+                    tag,
+                    logical,
+                    physical,
+                    ..TagSpace::default()
+                }),
+            }
         }
         a
     }
@@ -323,6 +347,15 @@ where
                 .filter_map(|e| e.extent_len(block))
                 .sum()
         };
+        if let Some(v2) = meta.v2.as_deref() {
+            return SpaceReport {
+                container: meta.container_len,
+                regions: v2.usage.iter().map(|u| u.2).sum(),
+                released: v2.free.free_bytes(),
+                reserved: acct.reserved(),
+                tags: acct.tags.clone(),
+            };
+        }
         SpaceReport {
             container: meta.container_len,
             regions: sum(RegionState::Ready),
@@ -349,6 +382,14 @@ where
             return Ok(());
         }
         let inner = &self.inner;
+        // A format-2 entry past the file's end whose name does not decode
+        // has no listed region; growing would make zeros of its lost tail.
+        if meta.v2.as_deref().is_some_and(|v| v.cut_short) {
+            return Err(Error::Corruption {
+                kind: store_io_core::error::CorruptionKind::Truncated,
+                ctx: ErrorContext::default(),
+            });
+        }
         if let Some(cut) = inner
             .report
             .unavailable

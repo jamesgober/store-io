@@ -153,7 +153,7 @@ where
                     u32::from(self.inner.layout.log2_block),
                     crate::frontier::ring_for(
                         self.inner.opts.append_window,
-                        r.map.len(),
+                        r.map.capacity(),
                         u32::from(self.inner.layout.log2_block),
                     ),
                 )

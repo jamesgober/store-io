@@ -69,6 +69,8 @@ ENGINE_LIB_LIFECYCLE = ["-p", "store-io-engine", "--lib", "lifecycle::"]
 SUBMITTER_TEST = ["-p", "store-io-engine", "--test", "submitter"]
 # Format-2 regions of several extents.
 F2E = ["-p", "store-io-engine", "--test", "format2_extents"]
+# The append frontier's unit tests.
+FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 # The region map's unit tests; the format crate's footprint tests.
 REGIONMAP = ["-p", "store-io-engine", "--lib", "regionmap::"]
 FOOTPRINT_FMT = ["-p", "store-io-format", "--test", "footprint"]
@@ -168,7 +170,7 @@ M = [
  # D-097: every lane holder starts on an empty queue; an abandoned operation is never success nor a media verdict
  ("crates/store-io-engine/src/exec.rs", "    if let Err(raw) = clear_stale(slot) {", "    if let Err(raw) = Ok::<(), OsError>(()) {"),
  ("crates/store-io-engine/src/io.rs", "        clear_stale(&mut lane).map_err(|raw| Error::Io {", "        { let _never = clear_stale::<P::Queue>; let _keep = &mut lane; Ok::<(), OsError>(()) }.map_err(|raw| Error::Io {"),
- ("crates/store-io-engine/src/slots.rs", "        Ran::Abandoned(raw) => return Err(fail(raw)),", "        Ran::Abandoned(raw) => (None, Err(raw)),"),
+ ("crates/store-io-engine/src/slots.rs", "        Ran::Abandoned(raw) => return Err(fail(raw)),", "        Ran::Abandoned(raw) => {\n            let _ = &fail;\n            (None, Err(raw))\n        }"),
  ("crates/store-io-engine/src/io.rs", "                Ran::Abandoned(raw) => {\n                    return Err(Error::Io {\n                        op: Op::Read,\n                        raw,\n                        ctx: c,\n                    });\n                }", "                Ran::Abandoned(raw) => (None, Err(raw)),"),
  ("crates/store-io-engine/src/open.rs", "                Ok(Ran::Abandoned(raw)) | Err((_, Some(raw))) => return Err(io(raw)),", "                Ok(Ran::Abandoned(raw)) => (None, Err(raw)),\n                Err((_, Some(raw))) => return Err(io(raw)),"),
  ("crates/store-io-engine/src/store.rs", "        Ok(Ran::Abandoned(raw)) => Err(Some(raw)),", "        Ok(Ran::Abandoned(_raw)) => Ok(()),"),
@@ -466,6 +468,11 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C7: the completion ring allocated at the first completion, never at
+ # construction (outside loom); a resume_at that moves the tail has the
+ # ring through get_or_init (a plain look races a first completion)
+ ('crates/store-io-engine/src/frontier.rs', '        #[cfg(loom)]\n        let _set = cell.set(slots(ring));', '        #[cfg(not(loom))]\n        let _set = cell.set(slots(ring));', FRONTIER),
+ ('crates/store-io-engine/src/frontier.rs', '        let _moved = self.advance(self.ring());', '        let _moved = self.ring.get().is_some_and(|r| self.advance(r));', FRONTIER),
  # E4 C6: allocate_range inside the file only, at its own range (Linux);
  # the simulator's holes (punched by a deallocation, filled by a write) and
  # its bounds
@@ -601,7 +608,7 @@ M = [
  ('crates/store-io-format/src/meta2.rs', '        if self.capacity > self.span_end - self.span_start {', '        if self.capacity > self.span_end - self.span_start && false {', FORMAT),
  ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // The object follows', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // The object follows', F2R),
  ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // After the format-2', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // After the format-2', F2R),
- ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.outcome.is_err() {', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed && false) {', F2R),
  ('crates/store-io-engine/src/open2.rs', '        if c.small {', '        if c.small && false {', F2R),
  ('crates/store-io-engine/src/open2.rs', '                    c.small = view.header.log2_block == 9;', '                    c.small = view.header.log2_block == 10;', F2R),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes().min(0),', F2R),
@@ -676,7 +683,7 @@ M = [
  ('crates/store-io-engine/src/frontier.rs', '                    if !self.wait_completed(p + 1, &give_up) {', '                    if !self.wait_completed(p.max(self.prefix.load(Ordering::SeqCst)) + 1, &give_up) {', LOOM_ENGINE, LOOM),
  ('crates/store-io-engine/src/frontier.rs', '        if self.waiters.fetch_or(0, Ordering::AcqRel) > 0 {', '        if self.waiters.load(Ordering::SeqCst) > 0 {', LOOM_ENGINE, LOOM),
  # resume_at advances over an append that raced it, and wakes waiters
- ('crates/store-io-engine/src/frontier.rs', '        let _moved = self.advance();\n        self.wake_if_waiting();\n        // A writable', '        // A writable', LOOM_ENGINE, LOOM),
+ ('crates/store-io-engine/src/frontier.rs', '        let _moved = self.advance(self.ring());\n        self.wake_if_waiting();\n        // A writable', '        // A writable', LOOM_ENGINE, LOOM),
  # audit: one replace at a time in a directory across handles (remove
  # takes no lock); no commit on a handle poisoned meanwhile; names that
  # could resolve to another file refused (too long, aliases, the

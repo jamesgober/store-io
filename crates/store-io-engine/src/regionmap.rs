@@ -66,7 +66,6 @@ impl RegionMap {
     }
 
     /// The runs' total length.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn capacity(&self) -> u64 {
         self.capacity
     }

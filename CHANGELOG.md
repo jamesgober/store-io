@@ -222,6 +222,13 @@
 
 ### Changed
 
+- Engine: **an append region's completion ring is allocated at its first
+  completed append** (or a `resume_at` that moves its tail), not when the
+  region is opened, provisioned or recycled: a store of many append
+  regions (65,536 in format 2) pays for none until each is used (up to
+  8 MiB a region; at the default window, 32 KiB for one of 16 MiB or more
+  at 4 KiB blocks). The ring is sized from the region's capacity (v0.5 E4
+  C7).
 - Engine: **a finished flush wakes only the barriers it covered** (D-125).
   Every finished flush used to wake every waiting barrier, on the leader's
   path, including those needing a later flush; on a virtual machine each

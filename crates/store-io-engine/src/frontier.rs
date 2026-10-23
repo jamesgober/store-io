@@ -9,11 +9,19 @@
 //! barrier waits for the prefix to pass its ticket, then flushes; the
 //! **durable frontier** is published after the flush succeeds.
 //!
+//! The ring is allocated at the region's first completed append (or a
+//! `resume_at` that moves its tail), so a store of many append regions
+//! (65,536 in format 2) pays for none until each is used: at most 8 MiB of
+//! ring per region (`MAX_RING` slots); at the default window, 32 KiB for one
+//! of 16 MiB or more at 4 KiB blocks (256 KiB at 512 B).
+//!
 //! Space is reserved only after the write's buffer is ready and every check
 //! has passed, immediately before submission. Any failure after a reservation
 //! poisons the device domain (the reserved range is a hole that later appends
 //! must never be acknowledged past), so the frontier never needs to undo a
 //! reservation.
+
+use std::sync::OnceLock;
 
 #[cfg(loom)]
 use loom::sync::{Condvar, Mutex};
@@ -35,7 +43,10 @@ pub struct AppendFrontier {
     /// Contiguously durable bytes made so by a data flush (a forced region
     /// on a power-safe store reads its prefix from here, D-102).
     synced: AtomicU64,
-    ring: Box<[AtomicU64]>,
+    /// The completion ring, `mask + 1` slots, allocated at the first
+    /// completion (at construction under loom, which does not model the
+    /// cell).
+    ring: OnceLock<Box<[AtomicU64]>>,
     mask: u64,
     waiters: AtomicU64,
     wait: Mutex<()>,
@@ -52,6 +63,11 @@ pub struct Reservation {
     pub data_end: u64,
     /// One past the reserved range (next block boundary).
     pub end: u64,
+}
+
+/// A completion ring of `n` empty slots.
+fn slots(n: usize) -> Box<[AtomicU64]> {
+    (0..n).map(|_| AtomicU64::new(0)).collect()
 }
 
 fn pack(start_block: u64, end_block: u64) -> u64 {
@@ -95,6 +111,9 @@ impl AppendFrontier {
     #[must_use]
     pub fn new(resume: u64, limit: u64, shift: u32, ring: usize) -> Self {
         let ring = ring.max(2).next_power_of_two();
+        let cell = OnceLock::new();
+        #[cfg(loom)]
+        let _set = cell.set(slots(ring));
         Self {
             shift,
             limit,
@@ -102,7 +121,7 @@ impl AppendFrontier {
             prefix: AtomicU64::new(resume),
             durable: AtomicU64::new(resume),
             synced: AtomicU64::new(resume),
-            ring: (0..ring).map(|_| AtomicU64::new(0)).collect(),
+            ring: cell,
             mask: ring as u64 - 1,
             waiters: AtomicU64::new(0),
             wait: Mutex::new(()),
@@ -206,20 +225,34 @@ impl AppendFrontier {
     pub fn complete(&self, r: Reservation) {
         let sb = r.start >> self.shift;
         let eb = r.end >> self.shift;
-        let _previous = self.ring[(sb & self.mask) as usize].swap(pack(sb, eb), Ordering::AcqRel);
-        if self.advance() {
+        let ring = self.ring();
+        let _previous = ring[(sb & self.mask) as usize].swap(pack(sb, eb), Ordering::AcqRel);
+        if self.advance(ring) {
             self.wake_if_waiting();
         }
     }
 
+    /// The completion ring, allocated on first use (once, whoever asks
+    /// first: every other caller waits for it and sees it whole).
+    fn ring(&self) -> &[AtomicU64] {
+        self.ring.get_or_init(|| slots(self.mask as usize + 1))
+    }
+
+    /// Slots of the completion ring allocated so far: 0 before the first
+    /// completion.
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn ring_slots(&self) -> usize {
+        self.ring.get().map_or(0, |r| r.len())
+    }
+
     /// Advances the completed prefix over the contiguous marks from where it
     /// stands; whether it moved.
-    fn advance(&self) -> bool {
+    fn advance(&self, ring: &[AtomicU64]) -> bool {
         let mut advanced = false;
         loop {
             let p = self.prefix.load(Ordering::Acquire);
             let pb = p >> self.shift;
-            let slot = &self.ring[(pb & self.mask) as usize];
+            let slot = &ring[(pb & self.mask) as usize];
             let v = slot.fetch_or(0, Ordering::AcqRel);
             if v == 0 {
                 break;
@@ -385,8 +418,12 @@ impl AppendFrontier {
         // An append that reserved between the tail's move and this store
         // read the old prefix: its completion may be marked and stranded, or
         // a writer may wait for room. Advance over it and wake them, as a
-        // completion would.
-        let _moved = self.advance();
+        // completion would. The ring is had through `get_or_init`, never a
+        // plain look that may miss one a first completion is creating (both
+        // threads would then miss each other's write: a store-buffering
+        // race the slot protocol cannot see); so a `resume_at` that moves
+        // the tail allocates it.
+        let _moved = self.advance(self.ring());
         self.wake_if_waiting();
         // A writable open flushed the device before reading anything, so the
         // skipped range is on media; but bytes appended in this open and
@@ -404,8 +441,93 @@ impl AppendFrontier {
 
 #[cfg(all(test, not(loom)))]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use std::sync::Arc;
+
+    /// The ring is allocated at the first completion, or a `resume_at` that
+    /// moves the tail (its advance must order against a first completion):
+    /// not at construction, a reservation or a `resume_at` at the tail.
+    #[test]
+    fn test_the_ring_is_allocated_at_the_first_completion() {
+        let ring = ring_for(16 << 20, 64 << 20, 12);
+        let fr = AppendFrontier::new(0, 64 << 20, 12, ring);
+        assert_eq!(fr.ring_slots(), 0);
+        assert_eq!(fr.resume_at(0), Ok(0));
+        let r = fr.reserve(4096).unwrap();
+        assert_eq!(fr.ring_slots(), 0);
+        fr.complete(r);
+        assert_eq!(fr.ring_slots(), 4096);
+        assert_eq!(fr.completed(), 4096);
+        let moved = AppendFrontier::new(0, 64 << 20, 12, ring);
+        assert_eq!(moved.resume_at(8192), Ok(8192));
+        assert_eq!(moved.ring_slots(), 4096);
+    }
+
+    /// Sixteen appenders making their first appends at once share one ring,
+    /// and every append completes.
+    #[test]
+    fn test_first_appends_at_once_share_one_ring() {
+        let fr = Arc::new(AppendFrontier::new(0, 64 << 20, 12, 64));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let fr = Arc::clone(&fr);
+                std::thread::spawn(move || {
+                    for _ in 0..4 {
+                        let r = fr.reserve_wait(4096, || false).unwrap();
+                        fr.complete(r);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(fr.ring_slots(), 64);
+        assert_eq!(fr.completed(), 64 * 4096);
+    }
+
+    /// A store's append regions, reopened, have no ring until one of them is
+    /// appended to (then that one alone).
+    #[test]
+    fn test_reopened_append_regions_allocate_no_ring_until_used() {
+        use std::path::Path;
+
+        use store_io_sim::{SimConfig, SimPlatform};
+
+        use crate::store::{Store, StoreOptions};
+
+        let p = SimPlatform::new(SimConfig::volatile(61));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        for i in 0..64 {
+            let _r = s
+                .provision_append_region(&format!("a{i}"), 1 << 20)
+                .unwrap();
+        }
+        drop(s);
+        let s = Store::open(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        let rings = |s: &Store<SimPlatform>| -> Vec<(String, usize)> {
+            s.regions_snapshot()
+                .iter()
+                .map(|r| {
+                    let f = r.frontier.as_ref().unwrap();
+                    (r.name.as_str().to_owned(), f.ring_slots())
+                })
+                .collect()
+        };
+        assert!(rings(&s).iter().all(|r| r.1 == 0), "{:?}", rings(&s));
+        let a7 = s.append_region("a7").unwrap();
+        let _at = a7.resume_at(0).unwrap();
+        assert!(
+            rings(&s).iter().all(|r| r.1 == 0),
+            "resume_at allocated one"
+        );
+        let _t = a7.append(b"x").unwrap();
+        let used: Vec<_> = rings(&s).into_iter().filter(|r| r.1 > 0).collect();
+        assert_eq!(used.len(), 1, "{used:?}");
+        assert_eq!(used[0].0, "a7");
+    }
 
     fn f() -> AppendFrontier {
         AppendFrontier::new(0, 1 << 20, 12, 64)

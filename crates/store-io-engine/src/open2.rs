@@ -405,7 +405,7 @@ pub(crate) fn check_regions<Q: Queue>(
                 0,
                 e.data_size,
                 u32::from(layout.log2_block),
-                crate::frontier::ring_for(append_window, e.data_size, u32::from(layout.log2_block)),
+                crate::frontier::ring_for(append_window, e.capacity, u32::from(layout.log2_block)),
             )
         });
         let map = crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size);

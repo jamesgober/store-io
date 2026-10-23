@@ -185,10 +185,10 @@ pub(crate) fn settle(usable: &[Usable<'_>], unavailable: &[Unavailable<'_>]) -> 
     let mut names: HashMap<&str, (u64, u32)> = HashMap::with_capacity(usable.len());
     for u in usable {
         let e = names.entry(u.name).or_insert((u.seq, 0));
-        if u.seq > e.0 {
-            *e = (u.seq, 1);
-        } else if u.seq == e.0 {
-            e.1 += 1;
+        match u.seq.cmp(&e.0) {
+            core::cmp::Ordering::Greater => *e = (u.seq, 1),
+            core::cmp::Ordering::Equal => e.1 += 1,
+            core::cmp::Ordering::Less => {}
         }
     }
     for (u, s) in usable.iter().zip(out.iter_mut()) {

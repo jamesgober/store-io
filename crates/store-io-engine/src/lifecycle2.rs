@@ -9,6 +9,7 @@ use std::sync::{Arc, PoisonError};
 
 use store_io_core::error::{Error, NotWrittenCause, Op};
 use store_io_core::evidence::PlatformKind;
+use store_io_core::id::Generation;
 use store_io_format::judge::Standing;
 use store_io_format::meta::RegionState;
 use store_io_format::meta2::{
@@ -168,6 +169,31 @@ where
                 ctx: c,
             }),
         }
+    }
+
+    /// Recycles a format-2 region's header (spec §12): one header write
+    /// under the region lock, Ready, its region generation one more, its
+    /// entry's extents (never an extra one) and everything else kept.
+    /// Returns the new region generation.
+    pub(crate) fn recycle_header2(&self, r: &LiveRegion) -> Result<Generation, Error> {
+        let c = ctx(r);
+        let mut header = r.header.lock().unwrap_or_else(PoisonError::into_inner);
+        // The entry's extent count, read under the metadata lock (taken
+        // after the region lock, D-113).
+        let committed = {
+            let meta = lock_meta(&self.inner.meta);
+            let id = r.id.get();
+            let p = usize::try_from(id >> 32).map_err(|_| corrupt())?;
+            let seq = (id & 0xFFFF_FFFF) as u32;
+            meta.v2
+                .as_deref()
+                .and_then(|v| v.pages.get(p))
+                .and_then(|page| page.entries.iter().find(|e| e.seq == seq))
+                .map(|e| usize::from(e.extent_count))
+                .ok_or_else(corrupt)?
+        };
+        let g = self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)?;
+        Generation::from_raw(g).ok_or_else(|| not_written(NotWrittenCause::TooLarge, c))
     }
 
     /// Writes the region's header again with `state` and its region

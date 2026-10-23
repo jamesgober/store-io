@@ -4,14 +4,14 @@
 
 use std::sync::{Arc, PoisonError};
 
-use store_io_core::error::{CorruptionKind, Error, NotWrittenCause, Op};
+use store_io_core::error::{CorruptionKind, Error, ErrorContext, NotWrittenCause, Op};
 use store_io_format::meta::{REGION_META_LEN, RegionMeta, RegionState as Lifecycle};
 use store_io_format::slot::HEADER_LEN;
 use store_io_platform::Platform;
 
 use crate::io::ctx;
 use crate::receipt::DurableReceipt;
-use crate::slots::{PairAt, plan_next};
+use crate::slots::{PairAt, PairRead, plan_next};
 use crate::store::{LiveRegion, Store, durable_slot};
 
 /// A small object (a manifest, a superblock) committed atomically: after any
@@ -115,7 +115,6 @@ where
     /// `DurabilityUnknown` (the domain is now poisoned).
     pub fn commit(&self, data: &[u8]) -> Result<DurableReceipt, Error> {
         let s = &self.store;
-        s.refuse_format_2()?;
         s.ready_for(&self.state)?;
         let _timed = s
             .inner
@@ -133,28 +132,11 @@ where
             .header
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let meta_bytes = header
-            .payload
-            .as_ref()
-            .and_then(|p| p.get(..REGION_META_LEN))
-            .map(<[u8]>::to_vec)
-            .ok_or(Error::Corruption {
-                kind: CorruptionKind::Metadata,
-                ctx: c,
-            })?;
-        let rm = RegionMeta::decode(&meta_bytes).map_err(|_| Error::Corruption {
-            kind: CorruptionKind::Metadata,
-            ctx: c,
-        })?;
-        if rm.state != Lifecycle::Ready {
-            return Err(Error::NotWritten {
-                cause: NotWrittenCause::NotReady,
-                ctx: c,
-            });
-        }
-        let mut payload = Vec::with_capacity(REGION_META_LEN + data.len());
-        payload.extend_from_slice(&meta_bytes);
-        payload.extend_from_slice(data);
+        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 {
+            format2_payload(&header, s.inner.layout.log2_block, data, c)?
+        } else {
+            format1_payload(&header, data, c)?
+        };
         let next = plan_next(&header, &payload, s.inner.owner_generation)?;
         let generation = next.generation;
         let at = self.at();
@@ -190,4 +172,58 @@ impl<P: Platform> core::fmt::Debug for Slot<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_tuple("Slot").field(&*self.state).finish()
     }
+}
+
+fn metadata(c: ErrorContext) -> Error {
+    Error::Corruption {
+        kind: CorruptionKind::Metadata,
+        ctx: c,
+    }
+}
+
+/// A format-1 slot payload: the region record as it is, then the object.
+fn format1_payload(header: &PairRead, data: &[u8], c: ErrorContext) -> Result<Vec<u8>, Error> {
+    let meta_bytes = header
+        .payload
+        .as_ref()
+        .and_then(|p| p.get(..REGION_META_LEN))
+        .ok_or_else(|| metadata(c))?;
+    let rm = RegionMeta::decode(meta_bytes).map_err(|_| metadata(c))?;
+    if rm.state != Lifecycle::Ready {
+        return Err(Error::NotWritten {
+            cause: NotWrittenCause::NotReady,
+            ctx: c,
+        });
+    }
+    let mut payload = Vec::with_capacity(REGION_META_LEN + data.len());
+    payload.extend_from_slice(meta_bytes);
+    payload.extend_from_slice(data);
+    Ok(payload)
+}
+
+/// A format-2 slot payload (spec §8): the header's fixed part as it is
+/// (region generation, fill, flags kept), `object_len` the new object's
+/// length, then the object.
+fn format2_payload(
+    header: &PairRead,
+    log2_block: u8,
+    data: &[u8],
+    c: ErrorContext,
+) -> Result<Vec<u8>, Error> {
+    let bytes = header.payload.as_deref().ok_or_else(|| metadata(c))?;
+    let view = store_io_format::meta2::decode_region_header(bytes, log2_block, u64::MAX)
+        .map_err(|_| metadata(c))?;
+    if view.header.state != Lifecycle::Ready {
+        return Err(Error::NotWritten {
+            cause: NotWrittenCause::NotReady,
+            ctx: c,
+        });
+    }
+    let mut h = view.header;
+    h.object_len = u32::try_from(data.len()).map_err(|_| metadata(c))?;
+    let mut out = vec![0u8; store_io_format::meta2::REGION_HEADER2_LEN + data.len()];
+    let n = store_io_format::meta2::encode_region_header(&mut out, &h, &[], data)
+        .map_err(|_| metadata(c))?;
+    out.truncate(n);
+    Ok(out)
 }

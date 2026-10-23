@@ -39,8 +39,12 @@
   - Release: the region drained, its lock (the header mutex) before the
     metadata lock; the page written without the entry (the commit;
     `next_seq` never reused), then the header Released, the data
-    deallocated, free space recomputed. Recycle and slot commit are still
-    refused (`Unsupported`) in format 2 until C7.
+    deallocated, free space recomputed.
+  - Recycle: one header write under the region lock, the region
+    generation one more, exactly the entry's extents (an extra one
+    dropped), fill, key and flags kept. Slot commit: the object after the
+    header's 64-byte fixed part (`object_len` bytes, capacity B - 192),
+    the fixed part kept; a slot reads its object back from it.
   - New: `NotWrittenCause::Frozen` (allocation refused while a page is
     stale or lost); `Unavailable::{EntryInvalid, ExtentsInvalid,
     Overlaps, NameTaken}`; `MetadataReport::{invalid_entries,

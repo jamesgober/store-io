@@ -59,6 +59,8 @@ F2R = ["-p", "store-io-engine", "--test", "format2_regions", "--test", "format2"
 F2P = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "format2"]
 # Format-2 release, audited on the raw media.
 F2X = ["-p", "store-io-engine", "--test", "format2_release"]
+# Format-2 recycle and slot commit.
+F2C = ["-p", "store-io-engine", "--test", "format2_recycle"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -453,6 +455,13 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E2b/E3 C7: recycle in format 2 moves the region generation on and
+ # writes the entry's extents only; a slot commit in format 2 carries
+ # the object after the fixed part; neither takes format 1's path
+ ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 1, committed)?', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed)?', F2C),
+ ('crates/store-io-engine/src/lifecycle2.rs', '                .map(|e| usize::from(e.extent_count))', '                .map(|e| usize::from(e.extent_count) + 1)', F2C),
+ ('crates/store-io-engine/src/lifecycle.rs', '        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 {', '        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 && r.id.get() == u64::MAX {', F2C),
+ ('crates/store-io-engine/src/slot_handle.rs', '        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 {', '        let payload = if s.inner.layout.format == store_io_format::slot::FORMAT_2 && data.is_empty() {', F2C),
  # E2b/E3 C6 review: the footprint is the header's committed extents (by
  # capacity); a release whose header write is refused after the commit
  # still stands
@@ -504,7 +513,6 @@ M = [
  # only a usable 512 B region makes the store read-only; format 2's
  # space report gives the free bytes
  ('crates/store-io-format/src/meta2.rs', '        if self.capacity > self.span_end - self.span_start {', '        if self.capacity > self.span_end - self.span_start && false {', FORMAT),
- ('crates/store-io-engine/src/lifecycle.rs', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {\n            return Err(Error::Unsupported {', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 && false {\n            return Err(Error::Unsupported {', F2R),
  ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // The object follows', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // The object follows', F2R),
  ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // After the format-2', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // After the format-2', F2R),
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.outcome.is_err() {', F2R),

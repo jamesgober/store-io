@@ -165,3 +165,48 @@ pub(crate) fn audit(pf: &SimPlatform) -> Vec<Found> {
     }
     found
 }
+
+/// A region header as its pair's winning copy holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct Header {
+    /// The winning slot's generation (commits count here).
+    pub(crate) slot_generation: u64,
+    pub(crate) header: store_io_format::meta2::RegionHeader2,
+    pub(crate) extents: Vec<(u64, u64)>,
+    pub(crate) object: Vec<u8>,
+}
+
+/// Region `id`'s header, read straight from the media at `at` (its two
+/// slots); `None` if neither copy is valid.
+pub(crate) fn header_of(pf: &SimPlatform, id: u64, at: [u64; 2]) -> Option<Header> {
+    let m = media(pf);
+    let volume: [u8; 16] = m[32..48].try_into().unwrap();
+    let mut best: Option<Header> = None;
+    for (i, &off) in at.iter().enumerate() {
+        let slot = m.get(off as usize..off as usize + 4096)?;
+        let e = Expect {
+            volume_uuid: volume,
+            object_id: (1 << 62) | id,
+            slot_offset: off,
+            slot_index: if i == 0 { SlotIndex::A } else { SlotIndex::B },
+            log2_slot_size: 12,
+            format_major: FORMAT_2,
+            numbered: false,
+        };
+        if let SlotStatus::Valid(info) = validate(slot, &e) {
+            let v = decode_region_header(info.payload(slot), 12, u64::MAX).ok()?;
+            if best
+                .as_ref()
+                .is_none_or(|b| info.generation > b.slot_generation)
+            {
+                best = Some(Header {
+                    slot_generation: info.generation,
+                    header: v.header,
+                    extents: v.extents().collect(),
+                    object: v.object().to_vec(),
+                });
+            }
+        }
+    }
+    best
+}

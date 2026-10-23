@@ -333,42 +333,6 @@ fn test_a_header_that_does_not_decode_is_invalid() {
     assert_eq!(reason(&s, "newer"), Some(Unavailable::HeaderInvalid));
 }
 
-fn unsupported(e: &Error) -> bool {
-    matches!(
-        e,
-        Error::Unsupported {
-            what: Capability::FormatVersion
-        }
-    )
-}
-
-/// Recycle and slot commit are format 1's until E2b/E3 C7: refused before
-/// anything is touched, and the region still serves.
-#[test]
-fn test_lifecycle_changes_are_refused_in_format_2_for_now() {
-    let p = fresh(216);
-    write_regions(
-        &p,
-        0,
-        &[
-            append(0, "log", BASE),
-            region(1, RegionKind::Slot, "slot", NEXT, 0),
-        ],
-    );
-    let s = open(&p);
-    let log = s.append_region("log").unwrap();
-    assert!(unsupported(&log.recycle().err().unwrap()));
-    assert!(unsupported(
-        &s.slot("slot").unwrap().commit(b"x").unwrap_err()
-    ));
-    assert_eq!(log.resume_at(0).unwrap(), 0);
-    assert!(log.append_durable(&[3u8; B as usize]).is_ok());
-    drop(log);
-    drop(s);
-    let s = open(&p);
-    assert!(s.report().unavailable.is_empty());
-}
-
 /// A slot's object is read from the format-2 header: after its 64-byte
 /// fixed part, `object_len` long; the provisioning generation reads none.
 #[test]

@@ -113,21 +113,14 @@ where
     }
 
     /// Starts a new generation of `r` and returns its state.
-    /// Recycle and slot commit rewrite a format-1 header; their format-2
-    /// forms arrive with E2b/E3 C7. Refused before anything is touched.
-    pub(crate) fn refuse_format_2(&self) -> Result<(), Error> {
-        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {
-            return Err(Error::Unsupported {
-                what: store_io_core::error::Capability::FormatVersion,
-            });
-        }
-        Ok(())
-    }
-
     pub(crate) fn recycle_region(&self, r: &Arc<LiveRegion>) -> Result<Arc<LiveRegion>, Error> {
-        self.refuse_format_2()?;
         self.retire(r, Retire::Recycle)?;
-        let generation = match self.rewrite_header(r, RegionState::Ready) {
+        let rewritten = if self.inner.layout.format == store_io_format::slot::FORMAT_2 {
+            self.recycle_header2(r)
+        } else {
+            self.rewrite_header(r, RegionState::Ready)
+        };
+        let generation = match rewritten {
             Ok(g) => g,
             Err(e) => {
                 // Nothing changed on disk unless the write was submitted, in

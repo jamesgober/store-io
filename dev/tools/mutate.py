@@ -75,7 +75,7 @@ F2G = ["-p", "store-io-engine", "--test", "format2_grow"]
 # Format-2 growth beyond capacity.
 F2B = ["-p", "store-io-engine", "--test", "format2_grow_beyond"]
 # Format-2 region options (capped regions).
-F2O = ["-p", "store-io-engine", "--test", "format2_options"]
+F2OPT = ["-p", "store-io-engine", "--test", "format2_options"]
 # The append frontier's unit tests.
 FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 # The region map's unit tests; the format crate's footprint tests.
@@ -490,20 +490,26 @@ M = [
  ('crates/store-io-engine/src/grow2.rs', 'the map\'s length is the entry\'s");\n            e.data_size = new;', 'the map\'s length is the entry\'s");\n            e.data_size = len;', F2G),
  # C8 review: refused while frozen (stricter than the spec)
  ('crates/store-io-engine/src/grow2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2G),
+ # E4 C11: store-wide region defaults, used by the _default calls,
+ # refused when unset
+ ('crates/store-io-engine/src/space.rs', '        let opts = self.store.region_defaults()?;\n        self.provision_append_region_with(name, opts)', '        let opts = self.store.region_defaults().map(|_| RegionOptions::default())?;\n        self.provision_append_region_with(name, opts)', F2OPT),
+ ('crates/store-io-engine/src/region.rs', '        self.provision_append_region_with(name, self.region_defaults()?)', '        self.provision_append_region_with(name, self.region_defaults().map(|_| RegionOptions::default())?)', F2OPT),
+ ('crates/store-io-engine/src/region.rs', '        self.provision_page_region_with(name, self.region_defaults()?)', '        self.provision_page_region_with(name, self.region_defaults().map(|_| RegionOptions::default())?)', F2OPT),
+ ('crates/store-io-engine/src/region.rs', '        self.inner.opts.region_defaults.ok_or(Error::NotWritten {', '        Some(self.inner.opts.region_defaults.unwrap_or_default()).ok_or(Error::NotWritten {', F2OPT),
  # E4 C10: a capped region is one extent of its cap, flagged, charged
  # whole; its slack allocated unwritten, or written where writes_slack
  # (Windows, macOS); validated before any I/O
- ('crates/store-io-engine/src/provision2.rs', '        let flags = if capped.is_some() { FLAG_CAPPED } else { 0 };', '        let flags = if capped.is_some() { FLAG_CAPPED & 0 } else { 0 };', F2O),
- ('crates/store-io-engine/src/provision2.rs', '            Some(_) if !self.writes_slack() => 2 * block + data_size,', '            Some(_) => 2 * block + data_size,', F2O),
- ('crates/store-io-engine/src/provision.rs', '            store_io_core::evidence::PlatformKind::Windows\n                | store_io_core::evidence::PlatformKind::MacOs', '            store_io_core::evidence::PlatformKind::Windows', F2O),
- ('crates/store-io-engine/src/provision2.rs', '        if filled < extent {', '        if filled < extent && false {', F2O),
- ('crates/store-io-engine/src/provision2.rs', '        self.verify_ready(offset, filled)?;', '        self.verify_ready(offset, extent.max(filled))?;', F2O),
- ('crates/store-io-engine/src/provision2.rs', '                .ok_or_else(too_large)?\n                .max(data_size),', '                .ok_or_else(too_large)?\n                .min(data_size),', F2O),
- ('crates/store-io-engine/src/provision2.rs', '            capacity,\n            span_start: offset,', '            capacity: data_size + (capacity & 0),\n            span_start: offset,', F2O),
- ('crates/store-io-engine/src/provision.rs', '        opts.validate()?;', '        let _ = opts.validate();', F2O),
- ('crates/store-io-engine/src/provision.rs', '        if opts.max_size_bytes().is_some() {\n            return Err(Error::Unsupported {', '        if opts.max_size_bytes().is_some() && false {\n            return Err(Error::Unsupported {', F2O),
- ('crates/store-io-engine/src/options.rs', '            Some(cap) if cap < self.size => Err(Error::NotWritten {', '            Some(cap) if cap < self.size && false => Err(Error::NotWritten {', F2O),
- ('crates/store-io-engine/src/provision2.rs', '        lock_acct(&inner.acct).add_usage(tag, data_size, extent);', '        lock_acct(&inner.acct).add_usage(tag, data_size, 2 * block + data_size + (extent & 0));', F2O),
+ ('crates/store-io-engine/src/provision2.rs', '        let flags = if capped.is_some() { FLAG_CAPPED } else { 0 };', '        let flags = if capped.is_some() { FLAG_CAPPED & 0 } else { 0 };', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '            Some(_) if !self.writes_slack() => 2 * block + data_size,', '            Some(_) => 2 * block + data_size,', F2OPT),
+ ('crates/store-io-engine/src/provision.rs', '            store_io_core::evidence::PlatformKind::Windows\n                | store_io_core::evidence::PlatformKind::MacOs', '            store_io_core::evidence::PlatformKind::Windows', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '        if filled < extent {', '        if filled < extent && false {', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '        self.verify_ready(offset, filled)?;', '        self.verify_ready(offset, extent.max(filled))?;', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '                .ok_or_else(too_large)?\n                .max(data_size),', '                .ok_or_else(too_large)?\n                .min(data_size),', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '            capacity,\n            span_start: offset,', '            capacity: data_size + (capacity & 0),\n            span_start: offset,', F2OPT),
+ ('crates/store-io-engine/src/provision.rs', '        opts.validate()?;', '        let _ = opts.validate();', F2OPT),
+ ('crates/store-io-engine/src/provision.rs', '        if opts.max_size_bytes().is_some() {\n            return Err(Error::Unsupported {', '        if opts.max_size_bytes().is_some() && false {\n            return Err(Error::Unsupported {', F2OPT),
+ ('crates/store-io-engine/src/options.rs', '            Some(cap) if cap < self.size => Err(Error::NotWritten {', '            Some(cap) if cap < self.size && false => Err(Error::NotWritten {', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '        lock_acct(&inner.acct).add_usage(tag, data_size, extent);', '        lock_acct(&inner.acct).add_usage(tag, data_size, 2 * block + data_size + (extent & 0));', F2OPT),
  ('crates/store-io-sim/src/world.rs', '        let gap = asked.0.saturating_sub(f.valid_data);\n        f.valid_data = f.valid_data.max(asked.0.saturating_add(len as u64));', '        let gap = asked.0.saturating_sub(f.valid_data);\n        f.valid_data = f.valid_data.max(asked.0);', ['-p', 'store-io-sim', '--test', 'model']),
  # E4 C9: growth beyond capacity. Refusals before any I/O (capped, a
  # full extent list, the tag's cap); at least 1 MiB; after the last

@@ -133,6 +133,13 @@ pub struct StoreOptions {
     /// complete (v0.5): 1 by default.
     #[doc(hidden)]
     pub container_format: u16,
+    /// The options the `provision_{append,page}_region_default` calls (of
+    /// [`Store`] and [`Reservation`](crate::Reservation)) use (default
+    /// none: those calls are refused). An open-time choice, never stored: each open
+    /// may give others, and they apply to regions provisioned from then
+    /// on (an existing region keeps its size and cap). Checked when used,
+    /// so options a later call would refuse never fail an open.
+    pub region_defaults: Option<crate::RegionOptions>,
 }
 
 impl Default for StoreOptions {
@@ -155,6 +162,7 @@ impl Default for StoreOptions {
             flushes_in_flight: 1,
             region_capacity: 65_536,
             container_format: store_io_format::slot::FORMAT_1,
+            region_defaults: None,
         }
     }
 }

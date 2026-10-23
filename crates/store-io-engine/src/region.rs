@@ -72,6 +72,51 @@ where
         })
     }
 
+    /// Provisions a new append region with the store's
+    /// [`StoreOptions::region_defaults`](crate::StoreOptions::region_defaults).
+    ///
+    /// ```
+    /// # use std::path::Path;
+    /// # use store_io_engine::{RegionOptions, Store, StoreOptions};
+    /// # use store_io_sim::{SimConfig, SimPlatform};
+    /// let opts = StoreOptions {
+    ///     region_defaults: Some(RegionOptions::default().size(1 << 20)),
+    ///     ..StoreOptions::default()
+    /// };
+    /// let store = Store::create(SimPlatform::new(SimConfig::volatile(1)), Path::new("/db"), opts)?;
+    /// let log = store.provision_append_region_default("log")?;
+    /// assert_eq!(log.len(), 1 << 20);
+    /// # Ok::<(), store_io_core::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision_append_region_with`];
+    /// `NotWritten(InvalidOptions)` when the store has no defaults (before
+    /// any other refusal).
+    pub fn provision_append_region_default(&self, name: &str) -> Result<AppendRegion<P>, Error> {
+        self.provision_append_region_with(name, self.region_defaults()?)
+    }
+
+    /// Provisions a new page region with the store's
+    /// [`StoreOptions::region_defaults`](crate::StoreOptions::region_defaults).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision_append_region_default`].
+    pub fn provision_page_region_default(&self, name: &str) -> Result<PageRegion<P>, Error> {
+        self.provision_page_region_with(name, self.region_defaults()?)
+    }
+
+    /// The store's region defaults; refused when it has none (before any
+    /// I/O, and before the store's own refusals: read-only, poisoned).
+    pub(crate) fn region_defaults(&self) -> Result<RegionOptions, Error> {
+        self.inner.opts.region_defaults.ok_or(Error::NotWritten {
+            cause: NotWrittenCause::InvalidOptions,
+            ctx: store_io_core::error::ErrorContext::default(),
+        })
+    }
+
     /// Looks up an existing page region.
     ///
     /// # Errors

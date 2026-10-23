@@ -32,14 +32,22 @@
   writes its range again, as everywhere). The same rule now covers
   the rest of the extent a growth beyond capacity adds. A cap below the
   size is `NotWritten(InvalidOptions)` before any I/O.
+- Engine: **store-wide region defaults** (v0.5 E4 C11):
+  `StoreOptions::region_defaults` (an open-time choice, never stored;
+  each open may give others, applying to regions provisioned from then
+  on) and `Store::provision_{append,page}_region_default(name)` (and the
+  same on `Reservation`), refused with `NotWritten(InvalidOptions)` when
+  the store has none; checked when used, so defaults a call would refuse
+  never fail an open.
 - `store-io-core`: `NotWrittenCause::InvalidOptions`.
 - Simulator: `SimConfig::valid_data_model` (NTFS's valid data length: the
   bytes a write starting past a file's valid data would have zeroed first
   are counted in `World::gap_fill_bytes`; `range_state` reports a range
   past it not valid; a crash or a shrink cuts it back);
-  `World::is_unwritten`; a world that completes 500,000 writes, or holds
-  262,144 unflushed in a volatile cache, panics (a write that never stops
-  fails its test instead of exhausting memory).
+  `World::is_unwritten`; a world that completes more than 500,000 writes,
+  or holds more than 1 GiB of unflushed writes in a volatile cache,
+  panics (a write that never stops fails its test instead of exhausting
+  memory).
 - Engine: **growth beyond capacity** in format 2 (v0.5 E4 C9, still
   behind the hidden `StoreOptions::container_format`): `grow` past the
   capacity adds one extent of at least 1 MiB and an eighth of the
@@ -289,6 +297,9 @@
 
 ### Changed
 
+- Engine: `StoreOptions` gains a public field (`region_defaults`).
+  Breaking for a struct literal or pattern that names every field; one
+  with `..` is unaffected.
 - `store-io-core`: **`ReserveTag` is `#[non_exhaustive]`** and gains
   `RegionLimit`, `Extents` and `Growth` (the reasons a growth beyond
   capacity runs out). Breaking: a `match` on it outside the crate needs a

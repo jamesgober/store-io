@@ -292,6 +292,32 @@ where
         self.provision_page_region_with(name, RegionOptions::default().size(size))
     }
 
+    /// Provisions an append region from this reservation with the store's
+    /// [`StoreOptions::region_defaults`](crate::StoreOptions::region_defaults).
+    ///
+    /// # Errors
+    ///
+    /// As [`Store::provision_append_region_default`]; `NoSpace` if the
+    /// reservation is too small.
+    pub fn provision_append_region_default(
+        &mut self,
+        name: &str,
+    ) -> Result<AppendRegion<P>, Error> {
+        let opts = self.store.region_defaults()?;
+        self.provision_append_region_with(name, opts)
+    }
+
+    /// Provisions a page region from this reservation with the store's
+    /// [`StoreOptions::region_defaults`](crate::StoreOptions::region_defaults).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::provision_append_region_default`].
+    pub fn provision_page_region_default(&mut self, name: &str) -> Result<PageRegion<P>, Error> {
+        let opts = self.store.region_defaults()?;
+        self.provision_page_region_with(name, opts)
+    }
+
     /// Provisions a page region from this reservation as `opts` say.
     ///
     /// # Errors

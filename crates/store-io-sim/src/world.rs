@@ -131,12 +131,13 @@ impl SimConfig {
     }
 }
 
-/// The most writes one simulated world completes, and the most it holds
-/// in a volatile cache at once (about 1 GiB of 4 KiB writes): no test comes
-/// near either, so a write that never stops (a bug, or a mutation of one)
-/// fails there instead of exhausting memory (see `complete_write`).
+/// The most writes one simulated world completes in its life, and the most
+/// bytes it holds in a volatile cache at once (the cache's entries are
+/// bounded by the first): no test comes near either, so a write that never
+/// stops (a bug, or a mutation of one) fails there instead of exhausting
+/// memory (see `complete_write`).
 const RUNAWAY_WRITES: u64 = 500_000;
-const RUNAWAY_CACHED: usize = 1 << 18;
+const RUNAWAY_CACHED_BYTES: usize = 1 << 30;
 
 /// Identity of a simulated file.
 pub type FileId = u32;
@@ -281,6 +282,8 @@ pub struct World {
     next_file: FileId,
     dirs: BTreeMap<PathBuf, DirState>,
     cache: Vec<CachedWrite>,
+    /// The bytes `cache` holds.
+    cached_bytes: usize,
     completion_seq: u64,
     epoch: u64,
     /// Lock holders per file: `None` is an exclusive holder, `Some(n)` is
@@ -318,6 +321,7 @@ impl World {
             next_file: 1,
             dirs: BTreeMap::new(),
             cache: Vec::new(),
+            cached_bytes: 0,
             completion_seq: 0,
             epoch: 0,
             locks: BTreeMap::new(),
@@ -873,10 +877,11 @@ impl World {
             f.media[start..end].copy_from_slice(data);
         } else {
             self.completion_seq += 1;
+            self.cached_bytes += data.len();
             assert!(
-                self.cache.len() < RUNAWAY_CACHED,
-                "{} writes cached, none flushed: a runaway",
-                self.cache.len()
+                self.cached_bytes <= RUNAWAY_CACHED_BYTES,
+                "{} bytes cached, not flushed: a runaway",
+                self.cached_bytes
             );
             self.cache.push(CachedWrite {
                 seq: self.completion_seq,
@@ -996,6 +1001,7 @@ impl World {
         }
         let (lost, kept): (Vec<_>, Vec<_>) = self.cache.drain(..).partition(|w| w.seq <= cover);
         self.cache = kept;
+        self.cached_bytes = self.cache.iter().map(|w| w.data.len()).sum();
         for w in lost {
             if let Some(f) = self.files.get_mut(&w.file) {
                 let s = w.offset as usize;
@@ -1010,6 +1016,7 @@ impl World {
     fn persist_through(&mut self, cover: u64) {
         let (done, kept): (Vec<_>, Vec<_>) = self.cache.drain(..).partition(|w| w.seq <= cover);
         self.cache = kept;
+        self.cached_bytes = self.cache.iter().map(|w| w.data.len()).sum();
         for w in done {
             self.persist(&w, w.data.len());
         }
@@ -1031,6 +1038,7 @@ impl World {
     /// Simulates power loss.
     pub fn crash(&mut self, mode: &CrashMode) {
         let cached: Vec<CachedWrite> = std::mem::take(&mut self.cache);
+        self.cached_bytes = 0;
         let lb = self.cfg.logical_block.max(1) as usize;
         for (i, w) in cached.iter().enumerate() {
             let keep = match mode {

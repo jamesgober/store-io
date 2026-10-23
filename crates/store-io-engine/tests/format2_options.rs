@@ -245,6 +245,31 @@ fn test_options_are_checked_before_any_write() {
     // Without a cap format 1 provisions as before.
     s1.provision_page_region_with("q", RegionOptions::default().size(SIZE))
         .unwrap();
+    // A capped default is refused there too.
+    drop(s1);
+    let s1 = Store::open(
+        p1.clone(),
+        Path::new(DIR),
+        StoreOptions {
+            container_format: 1,
+            region_defaults: Some(capped()),
+            ..opts()
+        },
+    )
+    .unwrap();
+    let e = s1
+        .provision_page_region_default("r")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(
+            e,
+            Error::Unsupported {
+                what: Capability::FormatVersion
+            }
+        ),
+        "{e:?}"
+    );
 }
 
 /// A reservation pays for a capped region's whole capacity.
@@ -432,5 +457,73 @@ fn test_macos_writes_the_slack() {
     let mut r = s.reserve(CAP + 2 * B, 0).unwrap();
     r.provision_page_region_with("r", capped()).unwrap();
     assert_eq!(r.remaining(), 0);
+    audit(&p);
+}
+
+fn with_defaults(defaults: Option<RegionOptions>) -> StoreOptions {
+    StoreOptions {
+        region_defaults: defaults,
+        ..opts()
+    }
+}
+
+/// Store-wide defaults (an open-time choice, never stored): both kinds of
+/// region take them, capped or not; without them the calls are refused
+/// before any I/O; a later open with other defaults changes only regions
+/// provisioned from then on; defaults a call would refuse never fail the
+/// open, only the call.
+#[test]
+fn test_store_wide_region_defaults() {
+    let p = fresh(830);
+    let s = Store::open(p.clone(), Path::new(DIR), with_defaults(Some(capped()))).unwrap();
+    let a = s.provision_append_region_default("a").unwrap();
+    let pg = s.provision_page_region_default("p").unwrap();
+    assert_eq!((a.len(), a.capacity()), (SIZE, CAP));
+    assert_eq!((pg.len(), pg.capacity()), (SIZE, CAP));
+    drop((a, pg, s));
+    // Unset: refused, nothing written.
+    let s = open(&p);
+    let writes = p.with_world(|w| w.writes());
+    let e = s
+        .provision_page_region_default("q")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::InvalidOptions), "{e:?}");
+    let e = s
+        .provision_append_region_default("q")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::InvalidOptions), "{e:?}");
+    assert_eq!(p.with_world(|w| w.writes()), writes);
+    drop(s);
+    // Other defaults: only new regions change.
+    let s = Store::open(
+        p.clone(),
+        Path::new(DIR),
+        with_defaults(Some(RegionOptions::default().size(2 * SIZE))),
+    )
+    .unwrap();
+    assert_eq!(s.page_region("p").unwrap().capacity(), CAP);
+    let q = s.provision_page_region_default("q").unwrap();
+    assert_eq!((q.len(), q.capacity()), (2 * SIZE, 2 * SIZE));
+    drop((q, s));
+    // Defaults the call refuses: the open succeeds, the call does not.
+    let bad = RegionOptions::default().size(2 * B).max_size(B);
+    let s = Store::open(p.clone(), Path::new(DIR), with_defaults(Some(bad))).unwrap();
+    let e = s
+        .provision_page_region_default("r")
+        .map(|_| ())
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::InvalidOptions), "{e:?}");
+    // Explicit options still work beside them.
+    s.provision_page_region_with("r", RegionOptions::default().size(SIZE))
+        .unwrap();
+    drop(s);
+    // From a reservation: the defaults' whole cap.
+    let s = Store::open(p.clone(), Path::new(DIR), with_defaults(Some(capped()))).unwrap();
+    let mut r = s.reserve(2 * (CAP + 2 * B), 0).unwrap();
+    let a = r.provision_append_region_default("ra").unwrap();
+    let pg = r.provision_page_region_default("rp").unwrap();
+    assert_eq!((a.capacity(), pg.capacity(), r.remaining()), (CAP, CAP, 0));
     audit(&p);
 }

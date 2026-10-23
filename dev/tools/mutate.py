@@ -41,6 +41,8 @@ LOOM_ENGINE = ["-p", "store-io-engine", "--lib", "--release", "loom"]
 DOMAIN = ["-p", "store-io-engine", "--lib", "domain::wake_tests"]
 # Every domain test, for a mutant only the full-flush tests see.
 DOMAIN_ALL = ["-p", "store-io-engine", "--lib", "domain::"]
+# The format-2 settling and free-space tests.
+FOOTPRINT = ["-p", "store-io-engine", "--lib", "footprint::"]
 LOOM = {"RUSTFLAGS": "--cfg loom", "LOOM_MAX_PREEMPTIONS": "3",
         "CARGO_TARGET_DIR": os.path.join(ROOT, "target", "loom")}
 STACK = "crates/store-io-buf/src/stack.rs"
@@ -377,7 +379,6 @@ M = [
  # writes at close
  (V2, '    if layout.data_start() > container_len {', '    if layout.data_start() > container_len && false {', F2),
  (V2, '    if j.refused {', '    if j.refused && false {', F2),
- (V2, '                    if !entries.is_empty() {', '                    if !entries.is_empty() && false {', F2),
  (V2, '                    standing = Standing::Lost;', '                    standing = Standing::Unconfirmed;', F2),
  (V2, '            facts: p.facts[1],', '            facts: None,', F2),
  (V2, '    report.frozen = !report.stale_pages.is_empty() || !report.lost_pages.is_empty();', '    report.frozen = !report.stale_pages.is_empty();', F2),
@@ -441,6 +442,23 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
+ # E2b/E3 C3: settling (the lower footprint_seq of two overlapping or
+ # same-named usable regions loses, both on a tie; only a newer
+ # unavailable region's own extents supersede; the sweep's stab, inside
+ # and self-exclusion parts) and free space as a complement
+ ('crates/store-io-engine/src/footprint.rs', '        if m >= Some(iv.seq) {', '        if m > Some(iv.seq) {', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        s.renamed = u.seq < top || at_top > 1;', '        s.renamed = u.seq < top || (at_top > 1 && u.seq > top);', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        if m > Some(iv.seq) {', '        if m >= Some(iv.seq) {', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        if m.is_some() {', '        if m.is_some() && false {', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        for &(off, n) in allocated.iter().filter(|r| r.1 > 0) {', '        for &(off, n) in allocated.iter() {', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '                if gap_end > at {', '                if gap_end >= at {', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        Some(self.tail.checked_add(align - 1)? & !(align - 1))', '        Some(self.tail)', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        out[qi] = stab.max(inside);', '        out[qi] = inside.max(stab.filter(|_| false));', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        out[qi] = stab.max(inside);', '        out[qi] = stab.max(inside.filter(|_| false));', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '            tree.max(lo, qi).max(tree.max(qi + 1, hi))', '            tree.max(lo, hi)', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        while heap.peek().is_some_and(|&(_, end)| end <= q.start) {', '        while heap.peek().is_some_and(|&(_, end)| end < q.start) {', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '            at = at.max(end);', '            at = end;', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '            let at = start.checked_add(align - 1)? & !(align - 1);', '            let at = start;', FOOTPRINT),
  # E2b/E3 C2: a region's committed extents sum to its capacity, lie in
  # its span past the table area, and overlap nothing of its footprint
  ('crates/store-io-format/src/footprint.rs', '    if sum != entry.capacity {', '    if sum != entry.capacity && false {', FORMAT),

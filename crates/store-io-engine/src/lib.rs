@@ -33,6 +33,11 @@ mod flush_slot_tests;
 #[cfg(all(test, not(loom)))]
 extern crate self as store_io_engine;
 mod flusher;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the format-2 open uses it from E2b/E3 C4")
+)]
+mod footprint;
 mod force;
 pub mod frontier;
 mod gate;

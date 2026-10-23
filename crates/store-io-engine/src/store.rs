@@ -229,8 +229,8 @@ pub(crate) struct LiveRegion {
     pub(crate) generation: Generation,
     /// Where the data lies in the container (every file offset of the
     /// region's data comes from it).
+    /// Its length is the region's data size.
     pub(crate) map: crate::regionmap::RegionMap,
-    pub(crate) data_size: u64,
     /// The header pair's slot offsets.
     pub(crate) header_at: [u64; 2],
     pub(crate) header: Mutex<PairRead>,

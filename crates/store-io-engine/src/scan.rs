@@ -165,7 +165,7 @@ where
         F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
     {
         let block = self.block();
-        let to = to.min(r.data_size);
+        let to = to.min(r.map.len());
         let c = ctx_range(r, from, to);
         if from % block != 0 {
             return Err(not_written(NotWrittenCause::Misaligned, c));
@@ -209,7 +209,10 @@ where
             // Keep the pipeline full.
             while failure.is_none() && !out.sum.stopped && next < to {
                 let Some(mut buf) = free.pop() else { break };
-                let len = (to - next).min(chunk as u64) as usize;
+                // Never across a run's end (one device operation each).
+                let len = (to - next)
+                    .min(chunk as u64)
+                    .min(r.map.run_end(next) - next) as usize;
                 // `len ≤ chunk ≤ capacity`.
                 let _fits = buf.set_len(len);
                 let op = IoOp::Read {

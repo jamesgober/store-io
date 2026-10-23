@@ -13,6 +13,14 @@
 
 ### Added
 
+- `store-io-format`: `footprint::{Run, runs}`, a region's extents in data
+  order coalesced into runs, extents adjacent in the file (spec §11). The
+  engine's region map is built from them (v0.5 E4 C2): a region in several
+  runs maps each range to its run, refuses one that crosses a run in every
+  build, and its reads and scans stop each device read at a run's end; a
+  region in one run (every region until format 2's growth) pays one
+  comparison more. The `meta2_decode` fuzz target checks the runs of every
+  header it accepts.
 - Simulator: `FaultPlan::fail_release` (the n-th `release_range` fails)
   and `World::releases`.
 - Engine: **regions in container format 2** (v0.5 E2b/E3, still behind

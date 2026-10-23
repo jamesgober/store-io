@@ -118,3 +118,38 @@ pub fn check_region(
         extra,
     })
 }
+
+/// A run of a region's data: extents adjacent in the file, in data order,
+/// coalesced (spec §11). Never stored: computed at open and at each growth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Run {
+    /// The region offset of its first byte.
+    pub start: u64,
+    /// The file offset of its first byte.
+    pub file: u64,
+    /// Its length in bytes.
+    pub len: u64,
+}
+
+/// The runs of `extents` (a region's committed extents, in data order):
+/// each a maximal sequence of extents, every one beginning in the file where
+/// the one before it ends. A zero-length extent (which the decoder refuses)
+/// is skipped; a run never passes `u64::MAX` (an extent that would carry it
+/// there begins the next run).
+pub fn runs<I: IntoIterator<Item = Extent>>(extents: I) -> impl Iterator<Item = Run> {
+    let mut it = extents.into_iter().filter(|e| e.1 > 0).peekable();
+    let mut start = 0u64;
+    core::iter::from_fn(move || {
+        let (file, mut len) = it.next()?;
+        while let Some(&(next, more)) = it.peek() {
+            match (file.checked_add(len), len.checked_add(more)) {
+                (Some(end), Some(total)) if end == next => len = total,
+                _ => break,
+            }
+            let _joined = it.next();
+        }
+        let run = Run { start, file, len };
+        start = start.saturating_add(len);
+        Some(run)
+    })
+}

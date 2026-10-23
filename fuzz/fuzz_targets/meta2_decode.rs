@@ -3,12 +3,14 @@
 //!
 //! Properties, beyond never panicking: whatever a decoder accepts encodes
 //! back to exactly the bytes it read (no field or reserved byte is accepted
-//! and then dropped), and an entry that passes its checks converts back to
-//! the raw entry it came from.
+//! and then dropped), an entry that passes its checks converts back to the
+//! raw entry it came from, and a header's extents coalesce into runs that
+//! map like them (`footprint::runs`).
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use store_io_format::footprint::{Run, runs};
 use store_io_format::meta2::{
     EntryLimits, RawEntry, VOLUME_META2_LEN, VolumeMeta2, decode_page, decode_region_header,
     encode_page, encode_region_header,
@@ -59,5 +61,37 @@ fuzz_target!(|data: &[u8]| {
         let n = encode_region_header(&mut out, &v.header, &ext, v.object())
             .expect("an accepted region header encodes");
         assert_eq!(&out[..n], data, "region header not canonical");
+        runs_map_like(&ext);
     }
 });
+
+/// The runs of any extent list (spec §11): together exactly the extents'
+/// bytes, contiguous in data order, maximal, and each extent's first and
+/// last bytes mapped where the extent says.
+fn runs_map_like(ext: &[(u64, u64)]) {
+    let r: Vec<Run> = runs(ext.iter().copied()).collect();
+    let total = ext.iter().try_fold(0u64, |t, e| t.checked_add(e.1));
+    let Some(total) = total else {
+        return;
+    };
+    assert_eq!(r.iter().map(|r| r.len).sum::<u64>(), total, "run lengths");
+    for w in r.windows(2) {
+        assert_eq!(w[0].start + w[0].len, w[1].start, "runs not contiguous");
+        assert_ne!(
+            w[0].file.checked_add(w[0].len),
+            Some(w[1].file),
+            "runs not maximal"
+        );
+    }
+    let mut at = 0u64;
+    for &(file, len) in ext.iter().filter(|e| e.1 > 0) {
+        for (pos, want) in [(at, file), (at + (len - 1), file + (len - 1))] {
+            let run = r
+                .iter()
+                .find(|r| pos >= r.start && pos - r.start < r.len)
+                .expect("an extent outside every run");
+            assert_eq!(run.file + (pos - run.start), want, "an extent mapped elsewhere");
+        }
+        at += len;
+    }
+}

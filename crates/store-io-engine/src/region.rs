@@ -379,7 +379,7 @@ where
     ) -> Result<ScanSummary, Error> {
         let _pass = self.pass()?;
         self.store
-            .scan_reported(&self.state, from, self.state.data_size, visit)
+            .scan_reported(&self.state, from, self.state.map.len(), visit)
     }
 
     /// Moves the append position forward to `offset` (rounded up to a block),
@@ -446,13 +446,13 @@ where
     /// Data-area size in bytes.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.state.data_size
+        self.state.map.len()
     }
 
     /// Whether the data area is empty (never for a provisioned region).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.state.data_size == 0
+        self.state.map.len() == 0
     }
 
     /// Block size: appends are padded to it and reads must be aligned to it.
@@ -502,7 +502,7 @@ where
         if offset % self.store.block() != 0 {
             return Err(not_written(NotWrittenCause::Misaligned, c));
         }
-        if offset >= self.state.data_size {
+        if offset >= self.state.map.len() {
             return Err(not_written(NotWrittenCause::OutOfBounds, c));
         }
         Ok(RegionPos {
@@ -529,7 +529,7 @@ where
             return Err(not_written(NotWrittenCause::Misaligned, c));
         }
         match pos.offset.checked_add(len as u64) {
-            Some(end) if end <= self.state.data_size => Ok(end),
+            Some(end) if end <= self.state.map.len() => Ok(end),
             _ => Err(not_written(NotWrittenCause::OutOfBounds, c)),
         }
     }
@@ -697,7 +697,7 @@ where
     ) -> Result<ScanSummary, Error> {
         let _pass = self.pass()?;
         self.store
-            .scan_reported(&self.state, from, self.state.data_size, visit)
+            .scan_reported(&self.state, from, self.state.map.len(), visit)
     }
 
     /// Block size: writes must be whole blocks.
@@ -709,13 +709,13 @@ where
     /// Data-area size in bytes.
     #[must_use]
     pub fn len(&self) -> u64 {
-        self.state.data_size
+        self.state.map.len()
     }
 
     /// Whether the data area is empty (never for a provisioned region).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.state.data_size == 0
+        self.state.map.len() == 0
     }
 }
 
@@ -726,7 +726,7 @@ impl core::fmt::Debug for LiveRegion {
             .field("id", &self.id)
             .field("kind", &self.kind)
             .field("generation", &self.generation)
-            .field("size", &self.data_size)
+            .field("size", &self.map.len())
             .finish()
     }
 }

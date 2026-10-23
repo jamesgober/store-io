@@ -5,7 +5,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use store_io_format::footprint::{Footprint, check_region, footprint_len};
+use store_io_format::footprint::{Footprint, Run, check_region, footprint_len, runs};
 use store_io_format::meta::{FillPattern, MetaError, RegionKind, RegionName, RegionState};
 use store_io_format::meta2::{
     Entry2, EntryLimits, Extent, RegionHeader2, decode_region_header, encode_region_header,
@@ -394,4 +394,101 @@ fn test_a_sum_that_overflows_is_refused() {
         check_region(ID, &e, &view, &lim, &mut scratch).err(),
         Some(MetaError::Field("capacity"))
     );
+}
+
+/// Adjacent extents coalesce into one run, in data order only (a later
+/// extent that precedes in the file starts a new run).
+#[test]
+fn test_runs_coalesce_adjacent_extents_in_data_order() {
+    let r: Vec<Run> = runs([
+        (100 * B, B),
+        (101 * B, 2 * B),
+        (50 * B, B),
+        (51 * B, B),
+        (10 * B, B),
+    ])
+    .collect();
+    assert_eq!(
+        r,
+        [
+            Run {
+                start: 0,
+                file: 100 * B,
+                len: 3 * B
+            },
+            Run {
+                start: 3 * B,
+                file: 50 * B,
+                len: 2 * B
+            },
+            Run {
+                start: 5 * B,
+                file: 10 * B,
+                len: B
+            },
+        ]
+    );
+    // Adjacent the other way round is not a run: data order decides.
+    assert_eq!(runs([(11 * B, B), (10 * B, B)]).count(), 2);
+    assert_eq!(runs([]).count(), 0);
+    // A run never passes u64::MAX.
+    let top = u64::MAX - B + 1;
+    assert_eq!(runs([(top - B, B), (top, B - 1)]).count(), 1);
+    assert_eq!(runs([(0, u64::MAX), (u64::MAX, 1)]).count(), 2);
+}
+
+/// Against the extents themselves: every region offset maps to the same
+/// file offset through the runs as through the extents, the runs are
+/// maximal (no run begins where the one before ends), and they cover the
+/// extents' total length.
+#[test]
+fn test_runs_map_like_their_extents() {
+    let mut x = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move |m: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % m
+    };
+    for _ in 0..500 {
+        let n = 1 + next(8);
+        let mut extents = Vec::new();
+        let mut at = next(64) * B;
+        for _ in 0..n {
+            let len = (1 + next(4)) * B;
+            // Half the time adjacent to the one before.
+            if next(2) == 0 {
+                at = next(256) * B;
+            }
+            extents.push((at, len));
+            at += len;
+        }
+        let r: Vec<Run> = runs(extents.iter().copied()).collect();
+        let total: u64 = extents.iter().map(|e| e.1).sum();
+        assert_eq!(r.iter().map(|r| r.len).sum::<u64>(), total);
+        for w in r.windows(2) {
+            assert_eq!(
+                w[0].start + w[0].len,
+                w[1].start,
+                "runs are contiguous in data order"
+            );
+            assert_ne!(w[0].file + w[0].len, w[1].file, "not maximal: {extents:?}");
+        }
+        let mut start = 0;
+        for &(file, len) in &extents {
+            for k in (0..len).step_by(B as usize) {
+                let pos = start + k;
+                let run = r
+                    .iter()
+                    .find(|r| (r.start..r.start + r.len).contains(&pos))
+                    .unwrap();
+                assert_eq!(
+                    run.file + (pos - run.start),
+                    file + k,
+                    "{extents:?} at {pos}"
+                );
+            }
+            start += len;
+        }
+    }
 }

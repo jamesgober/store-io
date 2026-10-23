@@ -406,8 +406,6 @@ pub(crate) fn check_regions<Q: Queue>(
         // generation is never 0.
         let (raw_generation, writable) = c.decoded.ok_or_else(corrupt)?;
         let generation = Generation::from_raw(raw_generation).ok_or_else(corrupt)?;
-        // Data starts at the first extent; a slot region has none.
-        let base = c.extents.first().map_or(e.span_end, |x| x.0);
         let frontier = (e.kind == RegionKind::Append).then(|| {
             AppendFrontier::new(
                 0,
@@ -421,8 +419,7 @@ pub(crate) fn check_regions<Q: Queue>(
             name: e.name,
             kind: e.kind,
             generation,
-            map: crate::regionmap::RegionMap::single(base, e.data_size),
-            data_size: e.data_size,
+            map: crate::regionmap::RegionMap::from_extents(&c.extents, e.data_size),
             header_at: [e.header_a, e.header_b],
             header: Mutex::new(c.header),
             frontier,

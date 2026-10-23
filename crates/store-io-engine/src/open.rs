@@ -260,7 +260,6 @@ where
                     e.offset + 2 * layout.block(),
                     e.data_size,
                 ),
-                data_size: e.data_size,
                 header_at: [e.offset, e.offset + layout.block()],
                 header: Mutex::new(header),
                 frontier,

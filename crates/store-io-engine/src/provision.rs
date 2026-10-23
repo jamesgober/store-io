@@ -225,7 +225,6 @@ where
             kind,
             generation: Generation::FIRST,
             map: crate::regionmap::RegionMap::single(offset + 2 * block, data_size),
-            data_size,
             header_at: [offset, offset + block],
             header: Mutex::new(header),
             frontier: (kind == RegionKind::Append).then(|| {

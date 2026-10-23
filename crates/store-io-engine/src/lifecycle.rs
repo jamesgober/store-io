@@ -143,18 +143,17 @@ where
             name: r.name,
             kind: r.kind,
             generation,
-            map: r.map,
-            data_size: r.data_size,
+            map: r.map.clone(),
             header_at: r.header_at,
             header: std::sync::Mutex::new(header),
             frontier: (r.kind == RegionKind::Append).then(|| {
                 AppendFrontier::new(
                     0,
-                    r.data_size,
+                    r.map.len(),
                     u32::from(self.inner.layout.log2_block),
                     crate::frontier::ring_for(
                         self.inner.opts.append_window,
-                        r.data_size,
+                        r.map.len(),
                         u32::from(self.inner.layout.log2_block),
                     ),
                 )

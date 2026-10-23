@@ -67,6 +67,9 @@ F2O = ["-p", "store-io-engine", "--test", "format2_open"]
 ENGINE_LIB_LIFECYCLE = ["-p", "store-io-engine", "--lib", "lifecycle::"]
 # The Submitter's tests.
 SUBMITTER_TEST = ["-p", "store-io-engine", "--test", "submitter"]
+# The region map's unit tests; the format crate's footprint tests.
+REGIONMAP = ["-p", "store-io-engine", "--lib", "regionmap::"]
+FOOTPRINT_FMT = ["-p", "store-io-format", "--test", "footprint"]
 V2 = "crates/store-io-engine/src/v2.rs"
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -461,6 +464,12 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C2: runs coalesce adjacent extents in data order; a range never
+ # crosses a run; the run search; the runs cover the capacity
+ ('crates/store-io-format/src/footprint.rs', '(Some(end), Some(total)) if end == next => len = total,', '(Some(end), Some(total)) if end <= next => len = total,', FOOTPRINT_FMT),
+ ('crates/store-io-engine/src/regionmap.rs', '            pos + len <= end,', '            pos + len <= end || true,', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', 'let k = self.more.partition_point(|r| r.0 <= pos);', 'let k = self.more.partition_point(|r| r.0 < pos);', REGIONMAP),
+ ('crates/store-io-engine/src/regionmap.rs', '.chain(core::iter::once(self.capacity));', '.chain(core::iter::once(self.len));', REGIONMAP),
  # E4 C1: a release tries every extent (a failed trim on Windows is no
  # error); a submitter's reservation is held under a poisoning guard until
  # its row holds it

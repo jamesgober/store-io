@@ -576,7 +576,7 @@ where
         }
         let len = align_up(out.len() as u64, block)
             .ok_or_else(|| not_written(NotWrittenCause::TooLarge, c))?;
-        if offset.checked_add(len).is_none_or(|e| e > r.data_size) {
+        if offset.checked_add(len).is_none_or(|e| e > r.map.len()) {
             return Err(not_written(NotWrittenCause::OutOfBounds, c));
         }
         let _timed = self.inner.observer.span(Stage::Read);
@@ -587,7 +587,9 @@ where
         let mut lane = self.lane(r, Op::Read)?;
         let mut done = 0usize;
         while (done as u64) < len {
-            let piece = chunk.min(len - done as u64);
+            // One run at a time: a piece never crosses a run's end.
+            let at = offset + done as u64;
+            let piece = chunk.min(len - done as u64).min(r.map.run_end(at) - at);
             let piece_len =
                 usize::try_from(piece).map_err(|_| not_written(NotWrittenCause::TooLarge, c))?;
             let buf = self.take(piece_len, c)?;
@@ -595,7 +597,7 @@ where
                 &mut lane,
                 IoOp::Read {
                     file: &self.inner.file,
-                    offset: r.map.locate(offset + done as u64, piece),
+                    offset: r.map.locate(at, piece),
                     buf,
                 },
             )

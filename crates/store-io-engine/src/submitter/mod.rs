@@ -445,7 +445,7 @@ where
         if offset % block != 0 || len % block != 0 {
             return Err(rejected(not_written(NotWrittenCause::Misaligned, c), buf));
         }
-        if offset.checked_add(len).is_none_or(|e| e > state.data_size) {
+        if offset.checked_add(len).is_none_or(|e| e > state.map.len()) {
             return Err(rejected(not_written(NotWrittenCause::OutOfBounds, c), buf));
         }
         let req = Req::Read {

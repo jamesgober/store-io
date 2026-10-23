@@ -441,6 +441,14 @@ M = [
  ('crates/store-io-engine/src/open.rs', '        queues.keep_flush_lanes(1 + flush_files.len());', '        queues.keep_flush_lanes(queues.flush_lanes());'),
  # E2b/E3 C1: a format-2 region's header object is 2^62 | id
  ('crates/store-io-engine/src/layout.rs', '            (1u64 << 62) | id', '            (1u64 << 32) | id'),
+ # E2b/E3 C2: a region's committed extents sum to its capacity, lie in
+ # its span past the table area, and overlap nothing of its footprint
+ ('crates/store-io-format/src/footprint.rs', '    if sum != entry.capacity {', '    if sum != entry.capacity && false {', FORMAT),
+ ('crates/store-io-format/src/footprint.rs', '        if off < entry.span_start || end > entry.span_end || off < lim.table_end {', '        if off < entry.span_start || end > entry.span_end {', FORMAT),
+ ('crates/store-io-format/src/footprint.rs', '        if off < entry.span_start || end > entry.span_end || off < lim.table_end {', '        if end > entry.span_end || off < lim.table_end {', FORMAT),
+ ('crates/store-io-format/src/footprint.rs', '        if off < entry.span_start || end > entry.span_end || off < lim.table_end {', '        if off < entry.span_start || end > entry.span_end.saturating_add(entry.capacity) || off < lim.table_end {', FORMAT),
+ ('crates/store-io-format/src/footprint.rs', '        if pair[1].0 - off < len {', '        if pair[1].0 - off < len && false {', FORMAT),
+ ('crates/store-io-format/src/footprint.rs', '    out.sort_unstable();\n', '', FORMAT),
  # D-125/D-126 wakes: a finished flush wakes every bucket it covered (a
  # jump in done wakes each), then the designate and the shared sleepers;
  # a barrier needing the next flush sleeps as the designate when there is

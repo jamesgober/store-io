@@ -453,6 +453,11 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E2b/E3 C6 review: the footprint is the header's committed extents (by
+ # capacity); a release whose header write is refused after the commit
+ # still stands
+ ('crates/store-io-engine/src/lifecycle2.rs', '        let extents = committed_extents(&header, inner.layout.log2_block, committed);', '        let extents: Vec<(u64, u64)> = r.map.extents().chain(committed_extents(&header, inner.layout.log2_block, 0)).collect();', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '            Err(Error::NotWritten { .. }) => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Err(corrupt()),', F2X),
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
  # header says Released; format 2 never takes format 1's path
@@ -461,7 +466,7 @@ M = [
  ('crates/store-io-engine/src/lifecycle2.rs', '                    let _gone = v2.allocated.swap_remove(i);', '                    let _gone = i;', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '                let _gone = v2.usage.swap_remove(i);', '                let _gone = i;', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '            v2.rebuild_free(len);', '            let _ = (v2, len);', F2X),
- ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Released, 0)?;', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0)?;', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', 'self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed)', 'self.rewrite_header2(r, &mut header, RegionState::Ready, 0, committed)', F2X),
  ('crates/store-io-engine/src/lifecycle.rs', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 {\n            return self.release_region2(r);', '        if self.inner.layout.format == store_io_format::slot::FORMAT_2 && r.id.get() == u64::MAX {\n            return self.release_region2(r);', F2X),
  # E2b/E3 C5: provisioning in format 2: frozen refuses provisioning
  # and reservations; a name held by an unavailable or unknown-kind entry

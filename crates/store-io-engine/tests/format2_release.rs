@@ -254,3 +254,107 @@ fn test_a_store_frozen_by_another_page_refuses_a_release() {
         "{e:?}"
     );
 }
+
+fn refuse_write_submission(p: &SimPlatform, nth: u64) {
+    p.with_world(|w| {
+        let at = w.write_submits() + nth;
+        w.faults_mut().fail_submit = Some((at, 5));
+    });
+}
+
+/// A region whose data is smaller than its capacity gives all of its
+/// capacity back: a region of the same capacity fills the hole.
+#[test]
+fn test_a_release_gives_back_the_whole_capacity() {
+    let p = fresh(605);
+    // The crafted region's data is half its capacity.
+    let r = region(0, RegionKind::Page, "half", BASE, CAP);
+    assert!(r.entry.data_size < r.entry.capacity);
+    write_regions(
+        &p,
+        0,
+        &[
+            r,
+            region(1, RegionKind::Page, "after", BASE + 2 * B + CAP, CAP),
+        ],
+    );
+    let s = open(&p);
+    let container = s.space().container;
+    s.page_region("half").unwrap().release().unwrap();
+    assert_eq!(s.space().released, 2 * B + CAP);
+    s.provision_page_region("again", CAP).unwrap();
+    assert_eq!(
+        s.space().container,
+        container,
+        "placed past the end, not in the hole"
+    );
+}
+
+/// A release takes the region's usage off its tag.
+#[test]
+fn test_a_release_takes_its_usage_off_the_tag() {
+    let p = fresh(606);
+    let s = open(&p);
+    let mut r = s.reserve(2 * (2 * B + CAP), 4).unwrap();
+    let a = r.provision_page_region("a", CAP).unwrap();
+    drop(r);
+    let tag = |s: &Store<SimPlatform>| s.space().tags.iter().find(|t| t.tag == 4).copied().unwrap();
+    assert_eq!(tag(&s).physical, 2 * B + CAP);
+    a.release().unwrap();
+    assert_eq!((tag(&s).physical, tag(&s).logical), (0, 0));
+}
+
+/// The commit's page write refused before submission: nothing changed,
+/// and the region serves again.
+#[test]
+fn test_a_refused_commit_gives_the_region_back() {
+    let p = fresh(607);
+    let s = open(&p);
+    let log = s.provision_append_region("log", CAP).unwrap();
+    refuse_write_submission(&p, 1);
+    assert!(log.clone().release().is_err());
+    assert!(
+        log.append_durable(&[1u8; B as usize]).is_ok(),
+        "the region was not given back"
+    );
+    drop(log);
+    drop(s);
+    assert_eq!(names(&p), ["log"]);
+}
+
+/// The Released header refused after the commit: the release still stands
+/// (it reports success), and its space is free again.
+#[test]
+fn test_a_refused_header_write_after_the_commit_still_releases() {
+    let p = fresh(608);
+    let s = open(&p);
+    s.provision_slot("keep").unwrap();
+    let gone = s.provision_page_region("gone", CAP).unwrap();
+    let free = s.space().released;
+    // The page write, then the header write: refuse the second.
+    refuse_write_submission(&p, 2);
+    gone.release().unwrap();
+    assert_eq!(s.space().released, free + 2 * B + CAP);
+    assert!(s.page_region("gone").is_err());
+    drop(s);
+    assert_eq!(names(&p), ["keep"]);
+}
+
+/// Why the header says Released: should the commit's page write be found
+/// damaged later, the older page copy names the region again, and its
+/// Released header makes it unavailable, not served.
+#[test]
+fn test_a_rolled_back_release_finds_the_region_released() {
+    let p = fresh(609);
+    write_regions(&p, 0, &[region(0, RegionKind::Append, "log", BASE, CAP)]);
+    let s = open(&p);
+    s.append_region("log").unwrap().release().unwrap();
+    drop(s);
+    // The crafter wrote page 0's slot B; the release wrote slot A.
+    tear(&p, page_at(&p, 0, 0));
+    let s = open(&p);
+    assert_eq!(s.report().metadata.stale_pages, vec![0]);
+    let u = &s.report().unavailable;
+    assert_eq!(u.len(), 1, "{u:?}");
+    assert_eq!(u[0].reason, store_io_engine::Unavailable::HeaderReleased);
+}

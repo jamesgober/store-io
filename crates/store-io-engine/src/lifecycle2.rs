@@ -40,17 +40,18 @@ where
         let mut header = r.header.lock().unwrap_or_else(PoisonError::into_inner);
         let mut meta = lock_meta(&inner.meta);
         let id = r.id.get();
-        let p = usize::try_from(id >> 32).map_err(|_| corrupt())?;
         let seq = (id & 0xFFFF_FFFF) as u32;
+        // Every return before the commit gives the region back.
         let refused = |e: Error| {
             r.gate.restore();
             e
         };
+        let p = usize::try_from(id >> 32).map_err(|_| refused(corrupt()))?;
         // 1. The commit: the page without the entry.
         let (payload, removed) = {
-            let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
-            let page = v2.pages.get(p).ok_or_else(corrupt)?;
-            let ph = page.header.ok_or_else(corrupt)?;
+            let v2 = meta.v2.as_deref().ok_or_else(|| refused(corrupt()))?;
+            let page = v2.pages.get(p).ok_or_else(|| refused(corrupt()))?;
+            let ph = page.header.ok_or_else(|| refused(corrupt()))?;
             if page.standing != Standing::Confirmed {
                 return Err(refused(not_written(NotWrittenCause::Frozen, c)));
             }
@@ -66,7 +67,7 @@ where
                 count: raws.len() as u16,
             };
             let mut buf = vec![0u8; PAGE_HEADER_LEN + 96 * raws.len()];
-            let n = encode_page(&mut buf, &next, &raws).map_err(|_| meta_err())?;
+            let n = encode_page(&mut buf, &next, &raws).map_err(|_| refused(meta_err()))?;
             buf.truncate(n);
             (buf, removed)
         };
@@ -98,7 +99,10 @@ where
         }
         // Committed: memory follows, before the header and the space.
         let block = inner.layout.block();
-        let footprint = footprint_of(&removed, r, block);
+        let committed = usize::from(removed.extent_count);
+        let extents = committed_extents(&header, inner.layout.log2_block, committed);
+        let mut footprint = vec![(removed.header_a, block), (removed.header_b, block)];
+        footprint.extend(extents.iter().copied());
         if let Some(v2) = meta.v2.as_deref_mut() {
             for range in &footprint {
                 if let Some(i) = v2.allocated.iter().position(|a| a == range) {
@@ -124,26 +128,37 @@ where
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|x| x.id != r.id);
-        // 2. The header says Released (for tools that list regions from
-        //    headers); its extents, fill and key as they were.
-        let _generation = self.rewrite_header2(r, &mut header, RegionState::Released, 0)?;
+        // Free space: the complement, recomputed now (the metadata lock,
+        // held until return, keeps it from reuse until the space is given
+        // back below).
+        let len = meta.container_len;
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            v2.rebuild_free(len);
+        }
+        // 2. The header says Released: should the commit's page ever be
+        //    rolled back (its newer copy found damaged), the region is then
+        //    unavailable, not served. A header write refused before it was
+        //    submitted leaves the data in place instead (that rollback would
+        //    find the region whole); one that failed after submission has
+        //    poisoned the store. Either way the release is committed.
+        match self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed) {
+            Ok(_) => {}
+            Err(Error::NotWritten { .. }) => return Ok(()),
+            Err(e) => return Err(e),
+        }
         // 3. The data extents (never the header blocks, which must keep
-        //    saying released), as format 1 does.
+        //    saying released), as format 1 does; the release is committed,
+        //    so a failure here only means the space stays allocated.
         let windows = inner.report.evidence.platform == PlatformKind::Windows;
         let how = if windows {
             ReleaseHow::TrimInPlace
         } else {
             ReleaseHow::Deallocate
         };
-        let released = r
-            .map
-            .extents()
-            .try_for_each(|(at, len)| inner.platform.release_range(&inner.file, at, len, how));
-        // 4. Free space: the complement, recomputed.
-        let len = meta.container_len;
-        if let Some(v2) = meta.v2.as_deref_mut() {
-            v2.rebuild_free(len);
-        }
+        let released = extents
+            .iter()
+            .filter(|x| x.1 > 0)
+            .try_for_each(|&(at, len)| inner.platform.release_range(&inner.file, at, len, how));
         match released {
             Ok(()) => Ok(()),
             Err(_) if windows => Ok(()),
@@ -156,16 +171,17 @@ where
     }
 
     /// Writes the region's header again with `state` and its region
-    /// generation moved on by `generation_step`: the extents it lists (the
-    /// entry's, never an extra one), its fill and key, its may-ignore
-    /// flags and its object as they were. The caller holds the region lock
-    /// (`header`).
+    /// generation moved on by `generation_step`: its first `committed`
+    /// extents (the entry's count, never an extra one), its fill and key,
+    /// its may-ignore flags and its object as they were. The caller holds
+    /// the region lock (`header`).
     pub(crate) fn rewrite_header2(
         &self,
         r: &LiveRegion,
         header: &mut PairRead,
         state: RegionState,
         generation_step: u64,
+        committed: usize,
     ) -> Result<u64, Error> {
         let inner = &self.inner;
         let c = ctx(r);
@@ -176,7 +192,7 @@ where
         let bytes = header.payload.as_deref().ok_or_else(metadata)?;
         let view = decode_region_header(bytes, inner.layout.log2_block, u64::MAX)
             .map_err(|_| metadata())?;
-        let extents: Vec<(u64, u64)> = view.extents().take(r.map.extents().count()).collect();
+        let extents: Vec<(u64, u64)> = view.extents().take(committed).collect();
         let mut h = view.header;
         h.state = state;
         h.extent_count = extents.len() as u16;
@@ -215,14 +231,12 @@ where
     }
 }
 
-/// The byte ranges a region occupies, as the open and provisioning record
-/// them: its two header blocks, then its data extents.
-fn footprint_of(
-    e: &store_io_format::meta2::RawEntry,
-    r: &LiveRegion,
-    block: u64,
-) -> Vec<(u64, u64)> {
-    let mut v = vec![(e.header_a, block), (e.header_b, block)];
-    v.extend(r.map.extents().filter(|x| x.1 > 0));
-    v
+/// The first `committed` extents the header in `pair` lists (the entry's;
+/// a slot region has none), as the open's footprint holds them.
+fn committed_extents(pair: &PairRead, log2_block: u8, committed: usize) -> Vec<(u64, u64)> {
+    pair.payload
+        .as_deref()
+        .and_then(|b| decode_region_header(b, log2_block, u64::MAX).ok())
+        .map(|v| v.extents().take(committed).collect())
+        .unwrap_or_default()
 }

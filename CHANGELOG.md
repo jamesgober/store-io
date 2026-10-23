@@ -13,6 +13,45 @@
 
 ### Added
 
+- Engine: **regions in container format 2** (v0.5 E2b/E3, still behind
+  the hidden `StoreOptions::container_format`):
+  - The open checks every region of every page that is not Lost (spec §9
+    steps 3-6): its entry, its header pair, and its footprint
+    (`store_io_format::footprint::check_region`: the header agrees with
+    the entry; the committed extents sum to the capacity, lie inside the
+    span and past the table area, overlap neither each other nor the
+    header blocks). Usable regions are then settled: of two that overlap
+    or share a name the one with the lower `footprint_seq` becomes
+    unavailable (both on a tie); an unavailable region never demotes, but
+    a usable one its own extents overlap with a newer sequence is
+    possibly superseded (read-only). All of this happens before the open
+    writes anything. Regions on a stale page, possibly superseded, or with
+    an unknown read-only-compatible header feature open read-only; a
+    region of several extents is `Unsupported` until E4; a 512 B append
+    region opens the store read-only until §13.
+  - Free space is the complement of every footprint, unavailable span and
+    (on a stale page) extra extent; `SpaceReport::released` in format 2
+    is that free space less what reservations hold.
+  - Provisioning: first fit over the free space, else the tail (large
+    data aligned as in format 1); fill, flush, verify; the header; then
+    one page write carrying the entry, whose `footprint_seq` is that
+    write's own `meta_seq`. Reservations work in format 2.
+  - Release: the region drained, its lock (the header mutex) before the
+    metadata lock; the page written without the entry (the commit;
+    `next_seq` never reused), then the header Released, the data
+    deallocated, free space recomputed. Recycle and slot commit are still
+    refused (`Unsupported`) in format 2 until C7.
+  - New: `NotWrittenCause::Frozen` (allocation refused while a page is
+    stale or lost); `Unavailable::{EntryInvalid, ExtentsInvalid,
+    Overlaps, NameTaken}`; `MetadataReport::{invalid_entries,
+    extra_extents, superseded, shares_reserved, stale_page_agreement,
+    truncated}`; `store_io_format::meta2::RawEntry::{name,
+    name_and_kind}`; `RawEntry::check` bounds the capacity by the span.
+  - Tests against media from an independent writer
+    (`tests/format2_util/craft.rs`) and judged by an independent audit of
+    the raw media (`tests/format2_util/audit.rs`): power failing at every
+    write of a provisioning and of a release, every write and flush
+    failing in turn, a torn page write healing.
 - `store-io-core`: `errno::is_lock_held` tells a lock another holder has
   from a file system that cannot lock.
 - `store-io-format`: **container format 2, first step: the slot header.**

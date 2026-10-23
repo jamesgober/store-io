@@ -39,6 +39,40 @@ pub(crate) enum Kind {
     Raw,
 }
 
+/// A `Submitter` operation across runs (format 2, spec §11): one device
+/// operation per run, one in flight at a time, under the operation's row.
+/// After each piece the caller's buffer is rotated so the next piece starts
+/// at its front; after the last the rotations add up to a whole turn, so
+/// the bytes are back in order (and so, rotated back, after a piece that
+/// failed or came back short).
+///
+/// The row's age (the busy mark, `Store::oldest_outstanding`) is the first
+/// piece's: it covers the whole operation.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Split {
+    /// The operation's length.
+    pub(crate) total: usize,
+    /// Bytes done before the piece in flight.
+    pub(crate) done: usize,
+}
+
+/// What an I/O completion came to.
+pub(crate) enum Finish {
+    /// Handed back (or matched nothing).
+    Done,
+    /// A durable write that completed in full, waiting for this flush:
+    /// `(qtag, need)`.
+    Flush(u64, u64),
+    /// A piece of an operation across runs completed in full: the next one,
+    /// to submit under the same tag.
+    Next {
+        qtag: u64,
+        offset: u64,
+        buf: IoBuf,
+        write: bool,
+    },
+}
+
 /// An operation in flight: everything its completion needs.
 struct Live {
     tag: u64,
@@ -53,6 +87,8 @@ struct Live {
     /// buffer, its ticket, and for an append whose region was complete up
     /// to its end, how far (the receipt is then a prefix receipt).
     held: Option<(Option<IoBuf>, WriteTicket, Option<u64>)>,
+    /// An operation across runs: where it stands.
+    split: Option<Split>,
 }
 
 /// One row. `generation` changes each time the row is freed, so a queue tag
@@ -219,9 +255,18 @@ impl Table {
             pass,
             durable,
             held: None,
+            split: None,
         });
         self.live += 1;
         self.publish();
+    }
+
+    /// Marks the operation just started in row `index` as one across runs,
+    /// its first piece the one submitted.
+    pub(crate) fn set_split(&mut self, index: u32, split: Split) {
+        if let Some(live) = self.rows[index as usize].live.as_mut() {
+            live.split = Some(split);
+        }
     }
 
     /// Publishes the busy mark (only the owner writes it).
@@ -257,18 +302,21 @@ impl Table {
             .filter(|r| r.generation == generation && r.live.is_some())
     }
 
-    /// Processes one I/O completion: settles the operation (ticket,
-    /// reservation or poison). A durable write that completed in full on a
-    /// flush-required store keeps its row and returns the flush it needs
-    /// (`(qtag, need)`); anything else is handed back now, after which its
-    /// row and pass are released.
+    /// Processes one I/O completion. A piece of an operation across runs
+    /// that completed in full, not its last, returns the next piece
+    /// ([`Finish::Next`]); the operation is settled only once (ticket,
+    /// reservation or poison), after its last piece or one that failed or
+    /// came back short. A durable write that completed in full on a
+    /// flush-required store keeps its row and returns the flush it needs;
+    /// anything else is handed back now, after which its row and pass are
+    /// released.
     pub(crate) fn finish<P: Platform>(
         &mut self,
         store: &Store<P>,
         qtag: u64,
         mut buf: Option<IoBuf>,
-        result: RawResult<usize>,
-    ) -> Option<(u64, u64)>
+        mut result: RawResult<usize>,
+    ) -> Finish
     where
         P::Queue: Send,
     {
@@ -277,7 +325,103 @@ impl Table {
         // one row: an unmatched completion cannot happen. Its buffer, if
         // any, is the device's no longer, so dropping it is safe.
         debug_assert!(row.is_some(), "a completion matched no operation");
-        let live = row?.live.as_mut()?;
+        let Some(live) = row.and_then(|r| r.live.as_mut()) else {
+            return Finish::Done;
+        };
+        if let Some(split) = live.split {
+            let piece = buf.as_ref().map_or(0, IoBuf::len);
+            let whole = buf.is_some() && matches!(result, Ok(n) if n == piece);
+            let left = split.total - split.done - piece.min(split.total - split.done);
+            if let (true, true, Some(state), Some(b)) =
+                (whole, left > 0, region(live), buf.as_mut())
+            {
+                let pos = start_of(live.kind) + (split.done + piece) as u64;
+                let next = ((state.map.run_end(pos) - pos) as usize).min(left);
+                // The rest to the front: the next piece starts at the start.
+                let fits = b.set_len(split.total);
+                debug_assert!(fits, "a split buffer shorter than its operation");
+                b.as_mut_slice().rotate_left(piece);
+                let _fits = b.set_len(next);
+                let offset = state.map.locate(pos, next as u64);
+                let write = !matches!(live.kind, Kind::Read { .. });
+                live.split = Some(Split {
+                    total: split.total,
+                    done: split.done + piece,
+                });
+                if let Some(buf) = buf.take() {
+                    return Finish::Next {
+                        qtag,
+                        offset,
+                        buf,
+                        write,
+                    };
+                }
+            }
+            // The last piece, or one that failed or came back short: the
+            // bytes back in order, the result over the whole operation.
+            if let Some(b) = buf.as_mut() {
+                let fits = b.set_len(split.total);
+                debug_assert!(fits, "a split buffer shorter than its operation");
+                b.as_mut_slice().rotate_left(split.total - split.done);
+            }
+            result = result.map(|n| split.done + n);
+            live.split = None;
+        }
+        self.conclude(store, qtag, buf, result)
+    }
+
+    /// The next piece of an operation across runs was refused before it
+    /// reached the device: the operation ends there, settled over the bytes
+    /// done (the buffer, rotated back, in order).
+    pub(crate) fn refused_next<P: Platform>(
+        &mut self,
+        store: &Store<P>,
+        qtag: u64,
+        mut buf: Option<IoBuf>,
+        raw: Option<store_io_core::error::OsError>,
+    ) -> Finish
+    where
+        P::Queue: Send,
+    {
+        let Some(live) = self.row(qtag).and_then(|r| r.live.as_mut()) else {
+            return Finish::Done;
+        };
+        let Some(split) = live.split.take() else {
+            return Finish::Done;
+        };
+        if let Some(b) = buf.as_mut() {
+            let fits = b.set_len(split.total);
+            debug_assert!(fits, "a split buffer shorter than its operation");
+            b.as_mut_slice().rotate_left(split.total - split.done);
+        }
+        // A read refused without a code (a full queue: not expected, a slot
+        // was just freed) is an error, never a short read of what was done.
+        if raw.is_none() {
+            if let Kind::Read { start, end } = live.kind {
+                let c = region(live).map_or_else(ErrorContext::default, |r| {
+                    crate::io::ctx_range(r, start, end)
+                });
+                self.release(qtag, buf, Err(not_written(NotWrittenCause::QueueFull, c)));
+                return Finish::Done;
+            }
+        }
+        self.conclude(store, qtag, buf, raw.map_or(Ok(split.done), Err))
+    }
+
+    /// Settles an operation whose I/O is over (see [`Self::finish`]).
+    fn conclude<P: Platform>(
+        &mut self,
+        store: &Store<P>,
+        qtag: u64,
+        mut buf: Option<IoBuf>,
+        result: RawResult<usize>,
+    ) -> Finish
+    where
+        P::Queue: Send,
+    {
+        let Some(live) = self.row(qtag).and_then(|r| r.live.as_mut()) else {
+            return Finish::Done;
+        };
         let mut prefix = None;
         let mut outcome = settle(store, live, buf.as_ref(), result, &mut prefix);
         // A flush-required store, or a region forcing data sync (D-102):
@@ -291,7 +435,7 @@ impl Table {
                 let need = w.ticket.need;
                 live.held = Some((buf, w.ticket, prefix));
                 self.flushing += 1;
-                return Some((qtag, need));
+                return Finish::Flush(qtag, need);
             }
         } else if live.durable {
             if let Ok(Done::Written(w)) = &mut outcome {
@@ -317,7 +461,7 @@ impl Table {
             let _shorter = b.set_len(*len);
         }
         self.release(qtag, buf, outcome);
-        None
+        Finish::Done
     }
 
     /// Processes a flush outcome for a row waiting for one: the durable
@@ -428,6 +572,15 @@ where
             receipt: None,
         })
     })
+}
+
+/// Where an I/O operation starts, in region bytes.
+fn start_of(kind: Kind) -> u64 {
+    match kind {
+        Kind::Append(r) => r.start,
+        Kind::Page { start, .. } | Kind::Read { start, .. } => start,
+        Kind::Sync(_) | Kind::All | Kind::Raw => 0,
+    }
 }
 
 /// The region a row's pass was admitted to (`None` for barriers).

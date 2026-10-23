@@ -266,7 +266,7 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '            settle_write(store, state, wrote, false, raw, &mut no_prefix)', '            settle_write(store, state, wrote, true, raw, &mut no_prefix)'),
  # A1 C3: a submitter operation is recorded (busy mark published) before it
  # is submitted, and a refused submission is aborted
- ('crates/store-io-engine/src/submitter/mod.rs', '        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = self.core.queue.submit(op, qtag) {', '        let refused = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Err(r) = refused {'),
+ ('crates/store-io-engine/src/submitter/mod.rs', '        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Some(s) = split {\n            self.core.table.set_split(index, s);\n        }\n        if let Err(r) = self.core.queue.submit(op, qtag) {', '        let refused = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Some(s) = split {\n            self.core.table.set_split(index, s);\n        }\n        if let Err(r) = refused {'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n        self.live -= 1;', '        drop(live);\n        self.free.push(index);'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n', '        drop(live);\n'),
  # A1 C5: a lane's operations live in its op table; a refused submission
@@ -466,22 +466,36 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
  ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
+ # E4 C5: a Submitter's operation across runs: its first piece; the
+ # rotation after each piece and at the end; settled once, over the whole
+ # operation; a refused next piece settles over what was done; a refused
+ # first piece gives the buffer back whole
+ ('crates/store-io-engine/src/submitter/mod.rs', 'let piece = ((state.map.run_end(start) - start) as usize).min(total);', 'let piece = total;', F2E),
+ ('crates/store-io-engine/src/optable.rs', 'b.as_mut_slice().rotate_left(piece);', 'b.as_mut_slice().rotate_left(0);', F2E),
+ ('crates/store-io-engine/src/optable.rs', '                b.as_mut_slice().rotate_left(split.total - split.done);\n            }\n            result', '                b.as_mut_slice().rotate_left(0);\n            }\n            result', F2E),
+ ('crates/store-io-engine/src/optable.rs', '(whole, left > 0, region(live), buf.as_mut())', '(whole, false, region(live), buf.as_mut())', F2E),
+ ('crates/store-io-engine/src/optable.rs', 'result = result.map(|n| split.done + n);', 'result = result.map(|n| n.max(split.done));', F2E),
+ ('crates/store-io-engine/src/optable.rs', 'raw.map_or(Ok(split.done), Err)', 'raw.map_or(Ok(split.total), |_| Ok(split.total))', F2E),
+ ('crates/store-io-engine/src/submitter/mod.rs', '            if let Some(s) = split {\n                let fits = buf.set_len(s.total);', '            if let Some(s) = split.filter(|_| false) {\n                let fits = buf.set_len(s.total);', F2E),
+ # C5 review: the split recorded at all; the restore after a refused next
+ # piece; a read never taken for a write; three pieces (the bytes done
+ # carried, and where the next piece starts)
+ ('crates/store-io-engine/src/submitter/mod.rs', '        if let Some(s) = split {\n            self.core.table.set_split(index, s);', '        if let Some(s) = split.filter(|_| false) {\n            self.core.table.set_split(index, s);', F2E),
+ ('crates/store-io-engine/src/optable.rs', '            b.as_mut_slice().rotate_left(split.total - split.done);\n        }\n        // A read refused', '            b.as_mut_slice().rotate_left(0);\n        }\n        // A read refused', F2E),
+ ('crates/store-io-engine/src/optable.rs', 'let write = !matches!(live.kind, Kind::Read { .. });', 'let write = !matches!(live.kind, Kind::Read { .. }) || true;', F2E),
+ ('crates/store-io-engine/src/optable.rs', '                    done: split.done + piece,', '                    done: piece,', F2E),
+ ('crates/store-io-engine/src/optable.rs', 'let pos = start_of(live.kind) + (split.done + piece) as u64;', 'let pos = start_of(live.kind) + piece as u64;', F2E),
  # E4 C4: blocking writes split at runs (the piece, the rest moved to the
  # front, the split buffer kept until its last piece, the source waiting
- # for it); a Submitter's append and page write stay in one run
+ # for it)
  ('crates/store-io-engine/src/mapped.rs', 'let piece = (self.map.run_end(pos) - pos).min(left as u64);', 'let piece = left as u64;', F2E),
  ('crates/store-io-engine/src/mapped.rs', '.copy_within(written..written + left, 0);', '.copy_within(written - 4096..written + left - 4096, 0);', F2E),
  ('crates/store-io-engine/src/mapped.rs', 'let Some(k) = self.parts.iter().position(|p| p.addr == addr) else {', 'let Some(k) = self.parts.iter().position(|p| p.addr == addr && false) else {', F2E),
  ('crates/store-io-engine/src/mapped.rs', 'Next::Done if !self.parts.is_empty() => Next::Wait,', 'Next::Done if false => Next::Wait,', F2E),
- ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.runs() > 1 {', '        if state.map.runs() > 1 && false {', F2E),
- ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.run_end(pos.offset) < end {', '        if state.map.run_end(pos.offset) < end && false {', F2E),
  # E4 C3: regions of several extents open; reads and scans stop at a
- # run's end; a Submitter read stays in a run; several runs are read-only
- # until writes split
+ # run's end
  ('crates/store-io-engine/src/io.rs', 'let piece = chunk.min(len - done as u64).min(r.map.run_end(at) - at);', 'let piece = chunk.min(len - done as u64);', F2E),
  ('crates/store-io-engine/src/scan.rs', '                    .min(chunk as u64)\n                    .min(r.map.run_end(next) - next) as usize;', '                    .min(chunk as u64) as usize;', F2E),
- ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.run_end(offset) < offset + len {', '        if state.map.run_end(offset) < offset + len && false {', F2E),
- ('crates/store-io-engine/src/submitter/mod.rs', '        if state.map.run_end(offset) < offset + len {', '        if state.map.run_end(offset) <= offset + len {', F2E),
  ('crates/store-io-engine/src/regionmap.rs', 'let more: Box<[(u64, u64)]> = all.map(|r| (r.start, r.file)).collect();', 'let more: Box<[(u64, u64)]> = all.take(0).map(|r| (r.start, r.file)).collect();', F2E),
  # E4 C2: runs coalesce adjacent extents in data order; a range never
  # crosses a run; the run search; the runs cover the capacity

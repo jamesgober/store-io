@@ -33,7 +33,7 @@ use crate::flusher::{Inbox, SubmitterWaker, WakerOf};
 use crate::gate::{Gate, Gated, OwnedPass};
 use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
-use crate::optable::Kind;
+use crate::optable::{Finish, Kind, Split};
 use crate::queue_core::Core;
 use crate::receipt::RegionPos;
 use crate::region::{AppendRegion, PageRegion};
@@ -117,6 +117,21 @@ where
 enum Req {
     Write { offset: u64, buf: IoBuf },
     Read { offset: u64, buf: IoBuf },
+}
+
+/// The first device operation of `[start, start + buf.len())`: all of it,
+/// or (format 2, across a run's end, spec §11) the piece up to the run's
+/// end, `buf` shortened to it, the rest following under the same row
+/// ([`Split`]). Returns its file offset.
+fn first_piece(state: &LiveRegion, start: u64, buf: &mut IoBuf) -> (u64, Option<Split>) {
+    let total = buf.len();
+    let piece = ((state.map.run_end(start) - start) as usize).min(total);
+    let split = (piece < total).then(|| {
+        let fits = buf.set_len(piece);
+        debug_assert!(fits, "a piece longer than its buffer");
+        Split { total, done: 0 }
+    });
+    (state.map.locate(start, piece as u64), split)
 }
 
 fn rejected(error: Error, buf: IoBuf) -> Rejected {
@@ -267,9 +282,7 @@ where
     /// [`Rejected`], with the buffer: `NotWritten` (`QueueFull`: the
     /// submitter is full; `TooManyInFlight`: the region's append ring is
     /// full, see [`Submitter`]; empty, region full, read-only, not
-    /// positioned, another store's region or buffer; `NotReady` on a
-    /// format-2 region in several runs, where an append may cross one,
-    /// which a `Submitter` does not split yet), `Poisoned`, or
+    /// positioned, another store's region or buffer), `Poisoned`, or
     /// `DurabilityUnknown` if the OS refused the write after its position
     /// was reserved (the store is then poisoned, as for a blocking append).
     pub fn append(
@@ -286,11 +299,6 @@ where
         let Some(f) = state.frontier.as_ref() else {
             return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
         };
-        // Its place is the reservation's: on a region in several runs it may
-        // cross one, which a Submitter does not split yet.
-        if state.map.runs() > 1 {
-            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
-        }
         if !state.positioned.load(std::sync::atomic::Ordering::Acquire) {
             return Err(rejected(
                 not_written(NotWrittenCause::NotPositioned, c),
@@ -329,11 +337,10 @@ where
             generation: state.generation,
             offset: r.start,
         };
-        let req = Req::Write {
-            offset: state.map.locate(r.start, r.end - r.start),
-            buf,
-        };
-        let issued = self.issue(req, tag, Kind::Append(r), pass, mode == WriteMode::Durable);
+        let (offset, split) = first_piece(state, r.start, &mut buf);
+        let req = Req::Write { offset, buf };
+        let durable = mode == WriteMode::Durable;
+        let issued = self.issue(req, tag, Kind::Append(r), pass, durable, split);
         let _r = held.disarm();
         match issued {
             Ok(()) => Ok(pos),
@@ -354,14 +361,13 @@ where
     ///
     /// [`Rejected`], with the buffer: `NotWritten` (foreign, stale,
     /// misaligned, out of range, submitter full, read-only, another store's
-    /// buffer; `NotReady` for a range across two runs of a format-2 region,
-    /// which a `Submitter` does not split yet), `Poisoned`, or `Io` if the
-    /// OS refused it (nothing reached the device).
+    /// buffer), `Poisoned`, or `Io` if the OS refused it (nothing reached
+    /// the device).
     pub fn write(
         &mut self,
         region: &PageRegion<P>,
         pos: RegionPos,
-        buf: IoBuf,
+        mut buf: IoBuf,
         mode: WriteMode,
         tag: u64,
     ) -> Result<(), Rejected> {
@@ -370,18 +376,13 @@ where
         admit!(self.store.ready_for(state), buf);
         let end = admit!(region.check(&pos, buf.len()), buf);
         let c = ctx_range(state, pos.offset, end);
-        if state.map.run_end(pos.offset) < end {
-            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
-        }
-        let req = Req::Write {
-            offset: state.map.locate(pos.offset, end - pos.offset),
-            buf,
-        };
+        let (offset, split) = first_piece(state, pos.offset, &mut buf);
+        let req = Req::Write { offset, buf };
         let kind = Kind::Page {
             start: pos.offset,
             end,
         };
-        self.issue(req, tag, kind, pass, mode == WriteMode::Durable)
+        self.issue(req, tag, kind, pass, mode == WriteMode::Durable, split)
             .map_err(|(raw, buf)| Rejected {
                 error: Store::<P>::refused(raw, c),
                 buf,
@@ -395,10 +396,8 @@ where
     /// # Errors
     ///
     /// [`Rejected`], with the buffer: `NotWritten` (empty, misaligned, out
-    /// of range, submitter full, another store's region or buffer; or
-    /// `NotReady` for a range across two runs of a format-2 region, one
-    /// device read each, which a `Submitter` does not split yet), or `Io` if
-    /// the OS refused it.
+    /// of range, submitter full, another store's region or buffer), or `Io`
+    /// if the OS refused it.
     pub fn read_append(
         &mut self,
         region: &AppendRegion<P>,
@@ -445,7 +444,7 @@ where
         store: &Store<P>,
         state: &Arc<LiveRegion>,
         offset: u64,
-        buf: IoBuf,
+        mut buf: IoBuf,
         tag: u64,
     ) -> Result<(), Rejected> {
         let pass = admit!(self.admit(store, state, &buf), buf);
@@ -461,20 +460,13 @@ where
         if offset.checked_add(len).is_none_or(|e| e > state.map.len()) {
             return Err(rejected(not_written(NotWrittenCause::OutOfBounds, c), buf));
         }
-        // One operation is one device read: across a run's end it would be
-        // two (a Submitter does not split one until E4 C5).
-        if state.map.run_end(offset) < offset + len {
-            return Err(rejected(not_written(NotWrittenCause::NotReady, c), buf));
-        }
-        let req = Req::Read {
-            offset: state.map.locate(offset, len),
-            buf,
-        };
+        let (at, split) = first_piece(state, offset, &mut buf);
+        let req = Req::Read { offset: at, buf };
         let kind = Kind::Read {
             start: offset,
             end: offset + len,
         };
-        self.issue(req, tag, kind, pass, false)
+        self.issue(req, tag, kind, pass, false, split)
             .map_err(|(raw, buf)| Rejected {
                 error: match raw {
                     Some(raw) => Error::Io {
@@ -497,13 +489,23 @@ where
         kind: Kind,
         pass: OwnedPass<LiveRegion>,
         durable: bool,
+        split: Option<Split>,
     ) -> Result<(), (Option<OsError>, Option<IoBuf>)> {
+        // A refusal gives the caller's buffer back whole (a split's first
+        // piece is its front: nothing was moved).
+        let whole = |mut buf: IoBuf| {
+            if let Some(s) = split {
+                let fits = buf.set_len(s.total);
+                debug_assert!(fits, "a split buffer shorter than its operation");
+            }
+            buf
+        };
         // `admit` checked there is room: a free row always exists here.
         let Some((index, qtag)) = self.core.table.claim() else {
             let buf = match req {
                 Req::Write { buf, .. } | Req::Read { buf, .. } => buf,
             };
-            return Err((None, Some(buf)));
+            return Err((None, Some(whole(buf))));
         };
         let inner = &*self.store.inner;
         let file = &inner.file;
@@ -523,12 +525,15 @@ where
         // Recorded (and the busy mark published) before the submission: a
         // queue may do the I/O inside `submit`.
         self.core.table.start(index, tag, kind, Some(pass), durable);
+        if let Some(s) = split {
+            self.core.table.set_split(index, s);
+        }
         if let Err(r) = self.core.queue.submit(op, qtag) {
             self.core.table.abort(index);
             if r.raw.is_none() {
                 inner.observer.add(Counter::Refused, 1);
             }
-            return Err((r.raw, r.buf));
+            return Err((r.raw, r.buf.map(whole)));
         }
         if let Some(bytes) = write {
             inner.observer.add(Counter::Writes, 1);
@@ -610,8 +615,47 @@ where
         let _unwind = PoisonOnUnwind::new(&self.store);
         for c in self.core.raw.drain() {
             // Only a write needing a flush asks (see `Table::finish`).
-            if let Some(ask) = self.core.table.finish(&self.store, c.tag, c.buf, c.result) {
-                self.core.table.asks.push(ask);
+            let mut finished = self.core.table.finish(&self.store, c.tag, c.buf, c.result);
+            while let Finish::Next {
+                qtag,
+                offset,
+                buf,
+                write,
+            } = finished
+            {
+                let inner = &*self.store.inner;
+                let file = &inner.file;
+                let bytes = buf.len() as u64;
+                let op = if write {
+                    IoOp::Write {
+                        file,
+                        offset,
+                        buf,
+                        dsync: inner.policy.dsync,
+                    }
+                } else {
+                    IoOp::Read { file, offset, buf }
+                };
+                finished = match self.core.queue.submit(op, qtag) {
+                    Ok(()) => {
+                        if write {
+                            inner.observer.add(Counter::Writes, 1);
+                            inner.observer.add(Counter::WriteBytes, bytes);
+                        }
+                        Finish::Done
+                    }
+                    Err(r) => {
+                        if r.raw.is_none() {
+                            inner.observer.add(Counter::Refused, 1);
+                        }
+                        self.core
+                            .table
+                            .refused_next(&self.store, qtag, r.buf, r.raw)
+                    }
+                };
+            }
+            if let Finish::Flush(qtag, need) = finished {
+                self.core.table.asks.push((qtag, need));
             }
         }
         // Asked once every completion of the pass is finished, the largest

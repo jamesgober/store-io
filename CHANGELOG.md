@@ -38,13 +38,17 @@
     writes anything. Regions on a stale page, possibly superseded, or with
     an unknown read-only-compatible header feature open read-only; a
     region of several extents opens mapped by its runs (extents adjacent
-    in the file coalesced, spec §11): reads, scans and blocking writes
-    cross runs in data order, each device operation inside one run (a
-    buffer across a run's end written in place, a piece at a time, no
-    buffer taken for a piece; one ticket for the write, never `untorn`);
-    until a `Submitter` splits its operations (E4 C5) one across a run is
-    refused (`NotReady`), and so is its append on a region in several
-    runs; a 512 B append region opens the store read-only until §13.
+    in the file coalesced, spec §11): reads, scans and writes cross runs
+    in data order, each device operation inside one run. A blocking
+    write's buffer across a run's end is written in place, a piece at a
+    time, no buffer taken for a piece; a `Submitter`'s operation across
+    runs keeps its row, one piece in flight at a time, the caller's
+    buffer rotated between pieces and handed back with its bytes in
+    order. One ticket and one completion either way, never `untorn`; a
+    piece that fails, comes back short or is refused ends the operation:
+    a write is `DurabilityUnknown` (poisoned), a read comes back with its
+    error, or short (trimmed to the bytes read, in order). A 512 B
+    append region opens the store read-only until §13.
   - Free space is the complement of every footprint, unavailable span and
     (on a stale page) extra extent; `SpaceReport::released` in format 2
     is that free space less what reservations hold.

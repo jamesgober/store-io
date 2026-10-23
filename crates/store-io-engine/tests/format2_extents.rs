@@ -2,9 +2,8 @@
 //! by an independent writer: the open maps them by their runs (extents
 //! adjacent in the file coalesced), reads and scans cross runs with the
 //! bytes of each in data order, a media error is named at its region range,
-//! blocking writes split at runs (each piece in one run, one ticket), and
-//! (until its operations split, E4 C5) a Submitter's operation across a run
-//! is refused.
+//! and writes split at runs, blocking or a Submitter's (each piece in one
+//! run; one ticket, one completion).
 
 #![allow(
     clippy::unwrap_used,
@@ -21,6 +20,7 @@ use std::path::{Path, PathBuf};
 use format2_util::craft::{Region, region, write_regions};
 use format2_util::*;
 use store_io_core::error::{ByteRange, CorruptionKind, Error, NotWrittenCause};
+use store_io_engine::completion::Done;
 use store_io_engine::{CONTAINER, ScanItem, Store, StoreOptions, SubmitterConfig, WriteMode};
 use store_io_format::meta::RegionKind;
 use store_io_sim::{CrashMode, SimConfig, SimPlatform};
@@ -213,57 +213,206 @@ fn test_adjacent_extents_are_one_writable_run() {
     assert_eq!(&m[at..at + 2 * B as usize], &data[..]);
 }
 
-/// A Submitter's operation stays in one run (until it splits them, E4 C5):
-/// a read or a page write across a run is refused, one up to a run's end or
-/// from its start is not, and an append (placed by its reservation) is
-/// refused on a region in several runs.
+/// A Submitter's operations across runs: a read, a page write (plain and
+/// durable) and an append, each one completion with its buffer back whole
+/// (its bytes in order), the data where the runs say; at depth 1 too.
 #[test]
-fn test_a_submitter_stays_in_one_run() {
-    let p = crafted(504);
+fn test_a_submitter_splits_its_operations_at_runs() {
+    for depth in [8, 1] {
+        let p = crafted(504);
+        let s = reopen(&p);
+        let two = s.page_region("two").unwrap();
+        let mut sub = s
+            .submitter(SubmitterConfig::default().with_depth(depth))
+            .unwrap();
+        let buf = sub.take_buf(4 * B as usize).unwrap();
+        sub.read_page(&two, two.pos(X - 2 * B).unwrap(), buf, 0)
+            .unwrap();
+        let c = sub.wait(1).unwrap().next().unwrap();
+        assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+        assert_eq!(c.buf.unwrap().as_slice(), &expect(1, X - 2 * B, 4 * B)[..]);
+        // Writes, plain then durable.
+        for (k, mode) in [(1u8, WriteMode::Plain), (2, WriteMode::Durable)] {
+            let data: Vec<u8> = (0..4 * B).map(|i| (i % 229) as u8 ^ k).collect();
+            let mut buf = sub.take_buf(data.len()).unwrap();
+            buf.as_mut_slice().copy_from_slice(&data);
+            sub.write(&two, two.pos(X - 2 * B).unwrap(), buf, mode, u64::from(k))
+                .unwrap();
+            let c = sub.wait(1).unwrap().next().unwrap();
+            let Ok(Done::Written(w)) = &c.outcome else {
+                panic!("{:?}", c.outcome);
+            };
+            assert_eq!(w.receipt.is_some(), mode == WriteMode::Durable);
+            if let Some(r) = &w.receipt {
+                assert!(!r.untorn());
+            }
+            assert_eq!(
+                c.buf.unwrap().as_slice(),
+                &data[..],
+                "the buffer back whole"
+            );
+            let mut out = vec![0u8; data.len()];
+            two.read(two.pos(X - 2 * B).unwrap(), &mut out).unwrap();
+            assert_eq!(out, data);
+            if mode == WriteMode::Durable {
+                // On the media (a plain write may still be in the cache).
+                let m = media(&p);
+                let head = (BASE + 2 * B + X + X - 2 * B) as usize;
+                let tail = (BASE + 2 * B) as usize;
+                assert_eq!(&m[head..head + 2 * B as usize], &data[..2 * B as usize]);
+                assert_eq!(&m[tail..tail + 2 * B as usize], &data[2 * B as usize..]);
+            }
+        }
+        // An append from just before the first run's end, across it.
+        let three = s.append_region("three").unwrap();
+        three.resume_at(X - 2 * B).unwrap();
+        let rec: Vec<u8> = (0..4 * B).map(|i| (i % 227) as u8).collect();
+        let mut buf = sub.take_buf(rec.len()).unwrap();
+        buf.as_mut_slice().copy_from_slice(&rec);
+        let pos = sub.append(&three, buf, WriteMode::Durable, 3).unwrap();
+        assert_eq!(pos.offset(), X - 2 * B);
+        let c = sub.wait(1).unwrap().next().unwrap();
+        assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+        let mut out = vec![0u8; rec.len()];
+        three.read(X - 2 * B, &mut out).unwrap();
+        assert_eq!(out, rec, "depth {depth}");
+    }
+}
+
+/// A Submitter operation across runs whose second piece fails, transfers
+/// short or is refused at submission: one completion. A write (page or
+/// append): `DurabilityUnknown`, the store poisoned (a blocking append past
+/// the hole refused, never left waiting), the buffer back with its bytes in
+/// order. A read: its error, or (short) the bytes read in order, the buffer
+/// back either way.
+#[test]
+fn test_a_failed_second_piece_of_a_submitter_operation() {
+    for fault in ["fail", "short", "submit", "append", "read", "short read"] {
+        let p = crafted(512);
+        let s = reopen(&p);
+        let two = s.page_region("two").unwrap();
+        let three = s.append_region("three").unwrap();
+        three.resume_at(X - 2 * B).unwrap();
+        let mut sub = s.submitter(SubmitterConfig::default()).unwrap();
+        let data: Vec<u8> = (0..4 * B).map(|i| (i % 223) as u8).collect();
+        let mut buf = sub.take_buf(data.len()).unwrap();
+        buf.as_mut_slice().copy_from_slice(&data);
+        p.with_world(|w| match fault {
+            "fail" | "append" => w.faults_mut().fail_write = Some(w.writes() + 2),
+            "short" => w.faults_mut().short_write = Some(w.writes() + 2),
+            "submit" => w.faults_mut().fail_submit = Some((w.write_submits() + 2, 5)),
+            "read" => w.faults_mut().fail_read = Some((w.reads() + 2, 22)),
+            _ => w.faults_mut().short_read = Some(w.reads() + 2),
+        });
+        let at = two.pos(X - 2 * B).unwrap();
+        match fault {
+            "read" | "short read" => sub.read_page(&two, at, buf, 0).unwrap(),
+            "append" => {
+                sub.append(&three, buf, WriteMode::Plain, 0).unwrap();
+            }
+            _ => sub.write(&two, at, buf, WriteMode::Plain, 0).unwrap(),
+        }
+        let done: Vec<_> = sub.wait(1).unwrap().collect();
+        assert_eq!(done.len(), 1, "{fault}: one completion");
+        let c = &done[0];
+        let back = c.buf.as_ref().expect("the buffer back").as_slice();
+        match fault {
+            "read" => {
+                assert!(
+                    matches!(c.outcome, Err(Error::Io { .. })),
+                    "{:?}",
+                    c.outcome
+                );
+                assert!(s.poisoned().is_none());
+            }
+            "short read" => {
+                let Ok(Done::Read { len }) = c.outcome else {
+                    panic!("{:?}", c.outcome);
+                };
+                assert!(len > 2 * B as usize && len < 4 * B as usize, "{len}");
+                assert_eq!(back, &expect(1, X - 2 * B, len as u64)[..]);
+            }
+            _ => {
+                assert!(
+                    matches!(c.outcome, Err(Error::DurabilityUnknown { .. })),
+                    "{fault}: {:?}",
+                    c.outcome
+                );
+                assert!(s.poisoned().is_some(), "{fault}");
+                assert_eq!(back, &data[..], "{fault}");
+                let e = three.append_durable(b"after").unwrap_err();
+                assert!(matches!(e, Error::Poisoned { .. }), "{fault}: {e:?}");
+            }
+        }
+    }
+}
+
+/// A Submitter append and read across all three runs (three pieces each).
+#[test]
+fn test_a_submitter_operation_across_three_runs() {
+    let p = crafted(515);
+    let s = reopen(&p);
+    let three = s.append_region("three").unwrap();
+    three.resume_at(X - 2 * B).unwrap();
+    let mut sub = s.submitter(SubmitterConfig::default()).unwrap();
+    // From two blocks before the first run's end to two after the second's.
+    let rec: Vec<u8> = (0..X + 4 * B).map(|i| (i % 221) as u8).collect();
+    let mut buf = sub.take_buf(rec.len()).unwrap();
+    buf.as_mut_slice().copy_from_slice(&rec);
+    let pos = sub.append(&three, buf, WriteMode::Durable, 0).unwrap();
+    assert_eq!(pos.offset(), X - 2 * B);
+    let c = sub.wait(1).unwrap().next().unwrap();
+    assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+    assert_eq!(c.buf.unwrap().as_slice(), &rec[..]);
+    let mut out = vec![0u8; rec.len()];
+    three.read(X - 2 * B, &mut out).unwrap();
+    assert_eq!(out, rec);
+    let buf = sub.take_buf(rec.len()).unwrap();
+    sub.read_append(&three, X - 2 * B, buf, 1).unwrap();
+    let c = sub.wait(1).unwrap().next().unwrap();
+    assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+    assert_eq!(c.buf.unwrap().as_slice(), &rec[..]);
+}
+
+/// A Submitter write across runs refused at its first piece's submission:
+/// nothing reached the device, the buffer comes back whole, nothing is
+/// poisoned.
+#[test]
+fn test_a_refused_first_piece_gives_the_buffer_back_whole() {
+    let p = crafted(514);
     let s = reopen(&p);
     let two = s.page_region("two").unwrap();
     let mut sub = s.submitter(SubmitterConfig::default()).unwrap();
-    let buf = sub.take_buf(2 * B as usize).unwrap();
+    let data: Vec<u8> = (0..4 * B).map(|i| (i % 211) as u8).collect();
+    let mut buf = sub.take_buf(data.len()).unwrap();
+    buf.as_mut_slice().copy_from_slice(&data);
+    p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + 1, 5)));
     let r = sub
-        .read_page(&two, two.pos(X - B).unwrap(), buf, 0)
+        .write(&two, two.pos(X - 2 * B).unwrap(), buf, WriteMode::Plain, 0)
         .unwrap_err();
-    assert!(
-        is_cause(&r.error, NotWrittenCause::NotReady),
-        "{:?}",
-        r.error
-    );
-    // Up to a run's end, and from a run's start: one device read each.
-    for (k, at) in [(1, X - 2 * B), (2, X)] {
-        let buf = sub.take_buf(2 * B as usize).unwrap();
-        sub.read_page(&two, two.pos(at).unwrap(), buf, k).unwrap();
-        let c = sub.wait(1).unwrap().next().unwrap();
-        assert!(c.outcome.is_ok(), "{:?}", c.outcome);
-        assert_eq!(c.buf.unwrap().as_slice(), &expect(1, at, 2 * B)[..]);
-    }
-    let buf = r.buf.unwrap();
-    let r = sub
-        .write(&two, two.pos(X - B).unwrap(), buf, WriteMode::Plain, 3)
-        .unwrap_err();
-    assert!(
-        is_cause(&r.error, NotWrittenCause::NotReady),
-        "{:?}",
-        r.error
-    );
-    let mut buf = r.buf.unwrap();
-    buf.as_mut_slice().fill(9);
-    sub.write(&two, two.pos(X).unwrap(), buf, WriteMode::Plain, 4)
+    assert!(matches!(r.error, Error::Io { .. }), "{:?}", r.error);
+    assert_eq!(r.buf.unwrap().as_slice(), &data[..]);
+    assert!(s.poisoned().is_none());
+}
+
+/// A Submitter dropped with an operation across runs in flight waits for
+/// its every piece.
+#[test]
+fn test_a_submitter_dropped_mid_split_waits_for_every_piece() {
+    let p = crafted(513);
+    let s = reopen(&p);
+    let two = s.page_region("two").unwrap();
+    let mut sub = s.submitter(SubmitterConfig::default()).unwrap();
+    let data = vec![0x3Cu8; 4 * B as usize];
+    let mut buf = sub.take_buf(data.len()).unwrap();
+    buf.as_mut_slice().copy_from_slice(&data);
+    sub.write(&two, two.pos(X - 2 * B).unwrap(), buf, WriteMode::Plain, 0)
         .unwrap();
-    let c = sub.wait(1).unwrap().next().unwrap();
-    assert!(c.outcome.is_ok(), "{:?}", c.outcome);
-    let three = s.append_region("three").unwrap();
-    three.resume_at(0).unwrap();
-    let buf = sub.take_buf(B as usize).unwrap();
-    let r = sub.append(&three, buf, WriteMode::Plain, 5).unwrap_err();
-    assert!(
-        is_cause(&r.error, NotWrittenCause::NotReady),
-        "{:?}",
-        r.error
-    );
+    drop(sub);
+    assert!(s.poisoned().is_none());
+    let mut out = vec![0u8; data.len()];
+    two.read(two.pos(X - 2 * B).unwrap(), &mut out).unwrap();
+    assert_eq!(out, data);
 }
 
 /// A blocking write across runs lands in each, in data order: a page write

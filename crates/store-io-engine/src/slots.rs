@@ -629,11 +629,16 @@ mod tests {
 
     /// The pair state a write computes in memory (`after`) is what a read
     /// of the device finds: the same statuses and header facts in each
-    /// slot, whichever slot was written.
+    /// slot, whichever slot was written (format 1's volume pair, written
+    /// directly).
     #[test]
     fn test_after_a_write_matches_a_fresh_read() {
         let p = SimPlatform::new(SimConfig::volatile(41));
-        let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        let opts = StoreOptions {
+            container_format: store_io_format::slot::FORMAT_1,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p, Path::new("/db"), opts).unwrap();
         let inner = &s.inner;
         let at = pair_volume(inner.volume, &inner.layout);
         let mut prev = {

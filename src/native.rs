@@ -84,7 +84,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// `NotFound`, `Locked`, `UnsafeDevice`, `Unverified`, `Corruption`, `Io`.
+    /// `NotFound`, `Locked`, `UnsafeDevice`, `Unverified`, `Corruption`,
+    /// `Io`; `Unsupported(FormatVersion)` for a newer format and for a
+    /// store of container format 1 (before 0.5), which opens read-only
+    /// ([`Self::open_readonly`]) and moves to format 2 by [`copy_store`]
+    /// (`store-io copy`).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         Self::open_with(path, StoreOptions::default())
     }

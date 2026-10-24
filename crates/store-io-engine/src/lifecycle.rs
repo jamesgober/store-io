@@ -429,10 +429,19 @@ mod tests {
             .write_durable(old.pos(0).unwrap(), &[1u8; 4096])
             .unwrap();
         old.release().unwrap();
+        let container = s.space().container;
         let new = s.provision_page_region("new", 1 << 20).unwrap();
         // The new region did reuse the released extent (else this test would
-        // prove nothing about reuse).
-        assert_eq!(s.space().released, 0, "the released extent was not reused");
+        // prove nothing about reuse): the container did not grow.
+        assert_eq!(
+            s.space().container,
+            container,
+            "the released extent was not reused"
+        );
+        assert!(
+            s.space().released < 1 << 20,
+            "the released extent is still free"
+        );
         let _r = new
             .write_durable(new.pos(0).unwrap(), &[2u8; 4096])
             .unwrap();

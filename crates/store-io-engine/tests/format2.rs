@@ -268,17 +268,25 @@ fn test_a_volume_record_of_a_newer_format_is_refused() {
     )
     .unwrap();
     put(&p, b, &slot);
-    let r = Store::open_readonly(p.clone(), Path::new(DIR), opts());
-    assert!(
-        matches!(
-            r,
-            Err(Error::Unsupported {
-                what: Capability::FormatVersion
-            })
-        ),
-        "{:?}",
-        r.map(|_| ())
-    );
+    let before = media(&p);
+    let writes = p.with_world(|w| w.writes());
+    for r in [
+        Store::open_readonly(p.clone(), Path::new(DIR), opts()),
+        Store::open(p.clone(), Path::new(DIR), opts()),
+    ] {
+        assert!(
+            matches!(
+                r,
+                Err(Error::Unsupported {
+                    what: Capability::FormatVersion
+                })
+            ),
+            "{:?}",
+            r.map(|_| ())
+        );
+    }
+    assert_eq!(p.with_world(|w| w.writes()), writes, "a refused open wrote");
+    assert!(media(&p) == before);
 }
 
 #[test]

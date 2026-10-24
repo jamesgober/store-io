@@ -44,7 +44,8 @@ pub struct StoreOptions {
     pub trust: Trust,
     /// Minimum block (slot) size in bytes; the device may require more.
     pub block_size: Option<u32>,
-    /// Region-table slot size as a power of two (14 = 16 KiB: 253 regions).
+    /// Region-table slot size as a power of two (14 = 16 KiB: a format-2
+    /// table page of 169 regions; format 1's single table, 253).
     pub log2_table_slot: u8,
     /// Largest single I/O of the blocking layers, and the batch buffer size
     /// (bytes; rounded up to a power of two, 128 KiB to 1 GiB).
@@ -130,12 +131,14 @@ pub struct StoreOptions {
     /// Regions a format-2 store can hold, fixed at create (default 65,536:
     /// a table of 12.1 MiB at 16 KiB table pages, written at create and
     /// read at every open; smaller stores may ask for fewer; at most
-    /// 4,194,304). Ignored by format 1. Internal until format 2 is the
-    /// default (v0.5).
+    /// 4,194,304). Ignored by format 1. Internal until the table's sizing
+    /// is settled (v0.5).
     #[doc(hidden)]
     pub region_capacity: u32,
-    /// The container format a create writes. Internal until format 2 is
-    /// complete (v0.5): 1 by default.
+    /// The container format a create writes: 2 (the default). Format 1 is
+    /// for tests and migration fixtures only: a writable open of a format-1
+    /// store is refused (`Unsupported(FormatVersion)`; copy it to format 2
+    /// with `copy_store`), a read-only open proceeds.
     #[doc(hidden)]
     pub container_format: u16,
     /// The options the `provision_{append,page}_region_default` calls (of
@@ -166,7 +169,7 @@ impl Default for StoreOptions {
             register_file: true,
             flushes_in_flight: 1,
             region_capacity: 65_536,
-            container_format: store_io_format::slot::FORMAT_1,
+            container_format: store_io_format::slot::FORMAT_2,
             region_defaults: None,
         }
     }

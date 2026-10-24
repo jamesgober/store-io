@@ -73,6 +73,7 @@ fn overwrite(p: &SimPlatform, offset: u64, bytes: &[u8]) {
     p.flush_all(&file).unwrap();
 }
 
+/// Format 1 (created for the test; format 1 opens read-only from 0.5).
 #[test]
 fn test_a_full_table_refuses_before_any_io_and_poisons_nothing() {
     let p = SimPlatform::new(SimConfig::volatile(71));
@@ -82,6 +83,7 @@ fn test_a_full_table_refuses_before_any_io_and_poisons_nothing() {
         Path::new(DIR),
         StoreOptions {
             log2_table_slot: 12,
+            container_format: store_io_format::slot::FORMAT_1,
             ..opts()
         },
     )
@@ -114,6 +116,48 @@ fn test_a_full_table_refuses_before_any_io_and_poisons_nothing() {
         .unwrap();
     // The same size reuses the released entry in place.
     s.provision_page_region("same-size", BLOCK).unwrap();
+}
+
+/// Format 2: a full table is refused before any I/O and poisons nothing;
+/// a released region's entry is free for a region of any size.
+#[test]
+fn test_a_full_format_2_table_refuses_before_any_io_and_poisons_nothing() {
+    let p = SimPlatform::new(SimConfig::volatile(73));
+    let s = Store::create(
+        p.clone(),
+        Path::new(DIR),
+        StoreOptions {
+            region_capacity: 64,
+            ..opts()
+        },
+    )
+    .unwrap();
+    let capacity = s.report().table_capacity;
+    assert!((64..1000).contains(&capacity), "{capacity}");
+    for i in 0..capacity {
+        s.provision_page_region(&format!("p{i}"), BLOCK).unwrap();
+    }
+    let full = |r: Result<_, Error>| {
+        matches!(
+            r,
+            Err(Error::NoSpace {
+                tag: ReserveTag::Table,
+                ..
+            })
+        )
+    };
+    let writes = p.with_world(|w| w.writes());
+    assert!(full(s.provision_page_region("one-more", BLOCK).map(|_| ())));
+    assert!(full(s.provision_slot("a-slot").map(|_| ())));
+    assert_eq!(p.with_world(|w| w.writes()), writes, "refused after I/O");
+    let pages = s.page_region("p1").unwrap();
+    pages
+        .write_durable(pages.pos(0).unwrap(), &[1; BLOCK as usize])
+        .unwrap();
+    s.page_region("p0").unwrap().release().unwrap();
+    s.provision_page_region("bigger", 2 * BLOCK).unwrap();
+    assert!(full(s.provision_page_region("again", BLOCK).map(|_| ())));
+    assert!(s.poisoned().is_none());
 }
 
 #[test]

@@ -317,7 +317,11 @@ fn test_frozen_and_stale_pages() {
 #[test]
 fn test_format_1_refuses_growth() {
     let p = SimPlatform::new(SimConfig::volatile(650));
-    let s = Store::create(p, Path::new(DIR), StoreOptions::default()).unwrap();
+    let opts = StoreOptions {
+        container_format: store_io_format::slot::FORMAT_1,
+        ..StoreOptions::default()
+    };
+    let s = Store::create(p, Path::new(DIR), opts).unwrap();
     let pages = s.provision_page_region("p", CAP).unwrap();
     let e = pages.grow(2 * CAP).unwrap_err();
     assert!(

@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use store_io_buf::{BufPool, PoolConfig};
-use store_io_core::error::{CorruptionKind, Error};
+use store_io_core::error::{CorruptionKind, Error, NotWrittenCause};
 use store_io_engine::{CONTAINER, Store, StoreOptions, Unavailable};
 use store_io_platform::{CompletionBuf, FileMode, FileName, IoOp, Platform, Queue, QueueConfig};
 use store_io_sim::{SimConfig, SimPlatform};
@@ -26,6 +26,16 @@ fn opts() -> StoreOptions {
         buffers_per_class: 8,
         append_window: 256 << 12,
         ..StoreOptions::default()
+    }
+}
+
+/// [`opts`] creating format 1: the tests of format 1's reader (format 1
+/// opens read-only from 0.5; its own media-error and newer-record rules
+/// still hold).
+fn opts1() -> StoreOptions {
+    StoreOptions {
+        container_format: store_io_format::slot::FORMAT_1,
+        ..opts()
     }
 }
 
@@ -186,8 +196,10 @@ fn test_a_region_cut_off_by_a_truncated_container_is_reported_as_truncated() {
 
 /// A truncated region is never brought back by growing the container over
 /// it: growth would zero-fill its missing tail, and the next open would find
-/// it whole, its lost records read as zeros (found by review). Provisioning
-/// and reserving are refused while it exists, and it stays reported.
+/// it whole, its lost records read as zeros (found by review). Format 2:
+/// anything that would grow the container is refused while it exists (a
+/// provisioning that fits inside, writing nothing past the end, proceeds),
+/// and it stays reported.
 #[test]
 fn test_growth_never_resurrects_a_truncated_region() {
     let p = SimPlatform::new(SimConfig::volatile(63));
@@ -219,8 +231,13 @@ fn test_growth_never_resurrects_a_truncated_region() {
         )
     };
     assert!(truncated(s.provision_append_region("c", 1 << 20).map(drop)));
-    assert!(truncated(s.provision_page_region("d", 64 << 10).map(drop)));
     assert!(truncated(s.reserve(1 << 20, 1).map(drop)));
+    // Inside the container: placed in its free space, the truncated span
+    // untouched.
+    let d = s.provision_page_region("d", 16 << 10).unwrap();
+    d.write_durable(d.pos(0).unwrap(), &[7; BLOCK as usize])
+        .unwrap();
+    drop(d);
     assert_eq!(
         media(&p).len() as u64,
         len - 16 * BLOCK,
@@ -236,6 +253,10 @@ fn test_growth_never_resurrects_a_truncated_region() {
         })
     ));
     assert_eq!(s.unavailable_regions().len(), 1);
+    let d = s.page_region("d").unwrap();
+    let mut back = vec![0u8; BLOCK as usize];
+    d.read(d.pos(0).unwrap(), &mut back).unwrap();
+    assert!(back == [7; BLOCK as usize]);
 }
 
 #[test]
@@ -299,14 +320,14 @@ fn put(p: &SimPlatform, at: u64, data: &[u8]) {
 #[test]
 fn test_a_media_error_at_the_volume_record_is_reported_as_one() {
     let p = SimPlatform::new(SimConfig::volatile(64));
-    drop(Store::create(p.clone(), Path::new(DIR), opts()).unwrap());
+    drop(Store::create(p.clone(), Path::new(DIR), opts1()).unwrap());
     let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
     p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 0, BLOCK)]);
     for read_only in [true, false] {
         let r = if read_only {
-            Store::open_readonly(p.clone(), Path::new(DIR), opts())
+            Store::open_readonly(p.clone(), Path::new(DIR), opts1())
         } else {
-            Store::open(p.clone(), Path::new(DIR), opts())
+            Store::open(p.clone(), Path::new(DIR), opts1())
         };
         assert!(
             matches!(
@@ -332,7 +353,7 @@ fn test_a_newer_volume_record_is_refused_as_unsupported() {
     use store_io_format::slot::{Expect, SlotFields, SlotIndex, SlotStatus, encode, validate};
     for newer in ["features", "longer", "features-and-reserved"] {
         let p = SimPlatform::new(SimConfig::volatile(65));
-        drop(Store::create(p.clone(), Path::new(DIR), opts()).unwrap());
+        drop(Store::create(p.clone(), Path::new(DIR), opts1()).unwrap());
         // Slot A holds the volume record as created; write a newer
         // generation into the blank slot B.
         let a = media(&p)[..BLOCK as usize].to_vec();
@@ -389,9 +410,9 @@ fn test_a_newer_volume_record_is_refused_as_unsupported() {
         let before = media(&p);
         for read_only in [true, false] {
             let r = if read_only {
-                Store::open_readonly(p.clone(), Path::new(DIR), opts())
+                Store::open_readonly(p.clone(), Path::new(DIR), opts1())
             } else {
-                Store::open(p.clone(), Path::new(DIR), opts())
+                Store::open(p.clone(), Path::new(DIR), opts1())
             };
             assert!(
                 matches!(
@@ -411,6 +432,92 @@ fn test_a_newer_volume_record_is_refused_as_unsupported() {
     }
 }
 
+/// Format 2: both copies of the volume record unreadable is a media error,
+/// never `HeaderCrc` corruption (which would invite recreating the store
+/// over its data), for both kinds of open, and nothing is written. (One
+/// unreadable copy opens from the other, the record taken as stale: the
+/// store is judged not closed cleanly.)
+#[test]
+fn test_a_format_2_volume_record_unreadable_is_a_media_error() {
+    let p = SimPlatform::new(SimConfig::volatile(68));
+    let s = Store::create(p.clone(), Path::new(DIR), opts()).unwrap();
+    s.provision_page_region("r", 16 << 10).unwrap();
+    drop(s);
+    let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
+    let before = media(&p);
+    let writes = p.with_world(|w| w.writes());
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 0, 2 * BLOCK)]);
+    for read_only in [true, false] {
+        let r = if read_only {
+            Store::open_readonly(p.clone(), Path::new(DIR), opts())
+        } else {
+            Store::open(p.clone(), Path::new(DIR), opts())
+        };
+        assert!(
+            matches!(
+                r,
+                Err(Error::Corruption {
+                    kind: CorruptionKind::MediaError,
+                    ..
+                })
+            ),
+            "read_only={read_only}: {:?}",
+            r.err()
+        );
+    }
+    assert_eq!(p.with_world(|w| w.writes()), writes);
+    assert!(media(&p) == before);
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 0, BLOCK)]);
+    let s = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+    assert!(
+        !s.report().metadata.clean_close,
+        "one copy unreadable: stale"
+    );
+    assert_eq!(s.regions().len(), 1);
+}
+
+/// Format 2: a table page whose two copies are unreadable is lost: the
+/// store opens with allocation frozen and the page reported, its regions
+/// unknown (never read as absent and their space reused).
+#[test]
+fn test_a_format_2_table_page_unreadable_is_lost_and_freezes() {
+    let p = SimPlatform::new(SimConfig::volatile(69));
+    let s = Store::create(p.clone(), Path::new(DIR), opts()).unwrap();
+    s.provision_page_region("r", 16 << 10).unwrap();
+    drop(s);
+    let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
+    // Page 0's pair, after the volume pair: two 16 KiB table slots.
+    p.with_world(|w| {
+        w.faults_mut().bad_ranges = vec![(file, 2 * BLOCK, 2 * BLOCK + 2 * (16 << 10))];
+    });
+    for read_only in [true, false] {
+        let s = if read_only {
+            Store::open_readonly(p.clone(), Path::new(DIR), opts())
+        } else {
+            Store::open(p.clone(), Path::new(DIR), opts())
+        }
+        .unwrap();
+        let m = &s.report().metadata;
+        assert_eq!(m.lost_pages, [0], "read_only={read_only}");
+        assert!(m.frozen, "read_only={read_only}");
+        assert!(s.page_region("r").is_err(), "read_only={read_only}");
+        let e = s
+            .provision_page_region("new", 16 << 10)
+            .map(drop)
+            .unwrap_err();
+        // Read-only refuses first; a writable store because it is frozen.
+        let want = if read_only {
+            NotWrittenCause::ReadOnly
+        } else {
+            NotWrittenCause::Frozen
+        };
+        assert!(
+            matches!(e, Error::NotWritten { cause, .. } if cause == want),
+            "read_only={read_only}: {e:?}"
+        );
+    }
+}
+
 /// With 16 KiB blocks, a media error inside the volume record's first slot
 /// where none of the search's 4 KiB probes reads (bytes 12-16 KiB) is also
 /// reported as a media error rather than `HeaderCrc`: the pair read counts
@@ -420,7 +527,7 @@ fn test_a_media_error_inside_the_volume_slot_is_reported_as_one() {
     let p = SimPlatform::new(SimConfig::volatile(66));
     let big = StoreOptions {
         block_size: Some(16384),
-        ..opts()
+        ..opts1()
     };
     drop(Store::create(p.clone(), Path::new(DIR), big.clone()).unwrap());
     let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
@@ -445,11 +552,11 @@ fn test_a_media_error_inside_the_volume_slot_is_reported_as_one() {
 #[test]
 fn test_a_media_error_in_the_region_table_is_reported_as_one() {
     let p = SimPlatform::new(SimConfig::volatile(67));
-    drop(Store::create(p.clone(), Path::new(DIR), opts()).unwrap());
+    drop(Store::create(p.clone(), Path::new(DIR), opts1()).unwrap());
     // Default layout: the volume pair at 0 and B, the table pair from 2B.
     let file = p.with_world(|w| w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap());
     p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, 2 * BLOCK, 3 * BLOCK)]);
-    let r = Store::open_readonly(p.clone(), Path::new(DIR), opts());
+    let r = Store::open_readonly(p.clone(), Path::new(DIR), opts1());
     assert!(
         matches!(
             r,

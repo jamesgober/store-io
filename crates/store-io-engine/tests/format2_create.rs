@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use store_io_core::error::Error;
-use store_io_engine::{Store, StoreOptions};
+use store_io_engine::{CONTAINER, Store, StoreOptions};
 use store_io_platform::{FileMode, FileName, Platform};
 use store_io_sim::{CrashMode, SimConfig, SimPlatform};
 
@@ -72,6 +72,88 @@ fn test_format_1_create_does_not_take_over_format_2_pages() {
         "{:?}",
         r.map(|_| ())
     );
+}
+
+/// A file past format 1's bound whose only verifying block is a crashed
+/// create's leftover (an empty page, a torn volume record) but not where
+/// any create writes one (in a damaged store's data, say), is never taken
+/// over; the same image where a create writes it is. The images say they
+/// are where they are (their slot offsets).
+#[test]
+fn test_a_leftover_image_out_of_place_proves_no_crashed_create() {
+    // (offset, object, torn, generation, the slot offset it states, slot
+    // B, taken): page 0 at 512 KiB, at 64 KiB (page 0's place at 32 KiB
+    // blocks: 2B = 64 KiB) and at its 4 KiB-block place; at that place but
+    // of generation 2 (a store's), stating another offset, or written as
+    // slot B (no create writes those); a torn volume record at 512 KiB and
+    // at 0.
+    let p0 = page_at_of(0, 0);
+    for (at, object, torn, generation, stated, slot_b, taken) in [
+        (512 << 10, 1 << 61, false, 1, 512 << 10, false, false),
+        (64 << 10, 1 << 61, false, 1, 64 << 10, false, true),
+        (p0, 1 << 61, false, 1, p0, false, true),
+        (p0, 1 << 61, false, 2, p0, false, false),
+        (p0, 1 << 61, false, 1, 512 << 10, false, false),
+        (p0, 1 << 61, false, 1, p0, true, false),
+        (512 << 10, 0, true, 1, 512 << 10, false, false),
+        (0, 0, true, 1, 0, false, true),
+    ] {
+        let p = SimPlatform::new(SimConfig::volatile(88));
+        let dir = p.open_dir(Path::new(DIR), true).unwrap();
+        let f = p
+            .create_file(&dir, &FileName::new(CONTAINER).unwrap())
+            .unwrap();
+        p.set_len(&f, 1 << 20).unwrap();
+        p.flush_all(&f).unwrap();
+        p.sync_dir(&dir).unwrap();
+        let mut slot = vec![0u8; TABLE as usize];
+        store_io_format::slot::encode(
+            &mut slot,
+            &store_io_format::slot::SlotFields {
+                volume_uuid: [7; 16],
+                object_id: object,
+                generation,
+                owner_generation: 1,
+                slot_offset: stated,
+                slot_index: if slot_b {
+                    store_io_format::slot::SlotIndex::B
+                } else {
+                    store_io_format::slot::SlotIndex::A
+                },
+                log2_slot_size: LOG2_TABLE,
+                prev_header_crc32c: 0,
+                format_major: store_io_format::slot::FORMAT_2,
+                meta_seq: 1,
+            },
+            &if object == 0 {
+                vec![1u8; store_io_format::meta2::VOLUME_META2_LEN]
+            } else {
+                empty_page(0)
+            },
+        )
+        .unwrap();
+        if torn {
+            slot[128] ^= 0xff;
+        }
+        put(&p, at, &slot);
+        let before = media(&p);
+        let r = Store::create(p.clone(), Path::new(DIR), opts_large());
+        if taken {
+            assert!(r.is_ok(), "at {at} gen {generation}: {:?}", r.map(|_| ()));
+        } else {
+            assert!(
+                matches!(r, Err(Error::AlreadyExists { .. })),
+                "at {at} gen {generation} stated {stated} B {slot_b}: {:?}",
+                r.map(|_| ())
+            );
+            assert!(media(&p) == before, "at {at}: the file changed");
+        }
+    }
+}
+
+/// Page `p`'s slot `s` at 4 KiB blocks.
+fn page_at_of(p: u64, s: u64) -> u64 {
+    2 * 4096 + 2 * p * TABLE + s * TABLE
 }
 
 #[test]
@@ -237,9 +319,16 @@ fn power_fails_in_create(p: &SimPlatform, opts: &StoreOptions, k: u64, settled: 
 fn test_a_power_failure_inside_a_create_is_taken_over() {
     // Up to and including the volume record's write: no store exists yet,
     // so the next create must take over whatever is left.
+    // 64 KiB blocks: the table's slots (and so a leftover's place) follow
+    // the block size.
+    let big = || StoreOptions {
+        block_size: Some(65536),
+        ..opts()
+    };
     let cases = (1..=u64::from(PAGES) + 1)
         .flat_map(|k| (0..6).map(move |seed| (opts(), k, seed)))
-        .chain((1..=3).flat_map(|k| (0..3).map(move |seed| (opts_large(), k, seed))));
+        .chain((1..=3).flat_map(|k| (0..3).map(move |seed| (opts_large(), k, seed))))
+        .chain((1..=2).flat_map(move |k| (0..3).map(move |seed| (big(), k, seed))));
     for ((o, k, seed), settled) in cases.flat_map(|c| [(c.clone(), false), (c, true)]) {
         let p = SimPlatform::new(SimConfig::volatile(300 + seed));
         power_fails_in_create(&p, &o, k, settled);

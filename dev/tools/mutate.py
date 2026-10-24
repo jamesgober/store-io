@@ -87,6 +87,8 @@ V2 = "crates/store-io-engine/src/v2.rs"
 # copy_store.
 COPY_SRC = "crates/store-io-engine/src/copy.rs"
 COPYT = ["-p", "store-io-engine", "--test", "copy"]
+# Format 1 read-only.
+F1T = ["-p", "store-io-engine", "--test", "format1"]
 CREATE = "crates/store-io-engine/src/create.rs"
 
 M = [
@@ -428,10 +430,10 @@ M = [
  # create takes over only a crashed format-2 create: the leftover rule is
  # format 2's; generation 1 only; a valid volume record is a store; a torn
  # page is a leftover; a file past the metadata is not
- (CREATE, '            _ if v2 && crashed_create_leftover(b.as_slice()) =>', '            _ if (v2 || true) && crashed_create_leftover(b.as_slice()) =>', F2),
- (CREATE, ' || u64_at(56) != 1 || ', ' || u64_at(56) == 0 || ', F2),
- (CREATE, '        return torn;', '        return true;', F2),
- (CREATE, '    torn || store_io_format::meta2::decode_page', '    false || store_io_format::meta2::decode_page', F2),
+ (CREATE, '            _ if v2.is_some_and(|t| crashed_create_leftover(b.as_slice(), at, t)) => {', '            _ if v2.or(Some(14)).is_some_and(|t| crashed_create_leftover(b.as_slice(), at, t)) => {', F2),
+ (CREATE, '        || u64_at(56) != 1\n', '        || u64_at(56) == 0\n', F2),
+ (CREATE, '        return torn && at == 0;', '        return true && at == 0;', F2),
+ (CREATE, '        && (torn\n            || store_io_format::meta2::decode_page', '        && (false\n            || store_io_format::meta2::decode_page', F2),
  (CREATE, '        let largest_metadata = if v2 {', '        let largest_metadata = if v2 && false {', F2),
  # review: the format is read only from a verifying header; a failed
  # metadata read is retried once; a page failing its checks stops a page
@@ -454,13 +456,13 @@ M = [
  (V2, '        layout.page_slots(0).1\n    })?;', '        layout.data_start()\n    })?;', F2),
  (V2, '        if p == 1 {\n            full_flush(platform, file)?;', '        if p == 1 {', F2),
  (CREATE, '        if holds != Some(false) || (len > v1_metadata && !leftovers) {', '        if holds != Some(false) {', F2),
- (CREATE, ' => *leftovers = true,', ' => *leftovers = false,', F2),
+ (CREATE, '                *leftovers = true;', '                *leftovers = false;', F2),
  # third review: a newer volume copy read on the retry is refused; a
  # one-page table is sized whole; the size bound before the probe covers
  # every block size
  (V2, '        vm = decode_volume(&crate::open::winner_payload(&volume_pair)?)?;', '        vm = decode_volume(volume_pair.payload.as_deref().ok_or_else(corrupt)?)?;', F2),
  (V2, '    allocate(if layout.pages == 1 {', '    allocate(if false {', F2),
- (CREATE, '(crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)', '(crate::layout::MAX_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)', F2),
+ (CREATE, '            (crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)\n                .map(', '            (crate::layout::MAX_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK)\n                .map(', F2),
  # D-124 flushes in flight: done advances only over an unbroken run of
  # successes; a main-handle barrier leads on slot 0 only; nothing is
  # recorded once poisoned; the issue window bounds the success mask; a
@@ -842,6 +844,13 @@ M = [
  (COPY_SRC, "        Err(raw) if is_not_found(raw) => Ok(()),\n        Err(raw) => Err(io(Op::Open, raw)),", "        Err(_) => Ok(()),", COPYT),
  (COPY_SRC, "if dst.report().block_size != block {", "if dst.report().block_size != block && false {", COPYT),
  (COPY_SRC, "if made.map.len() != f.data_size {", "if made.map.len() != f.data_size && false {", COPYT),
+ ('crates/store-io-engine/src/open.rs', '            Found::V1(_) if !read_only => {', '            Found::V1(_) if !read_only && false => {', F1T),
+ ('crates/store-io-engine/src/create.rs', '    placed\n        && (torn', '    (placed || true)\n        && (torn', F2),
+ ('crates/store-io-engine/src/create.rs', '        return torn && at == 0;', '        return torn;', F2),
+ ('crates/store-io-engine/src/create.rs', '        || u64_at(64) != at\n', '', F2),
+ ('crates/store-io-engine/src/create.rs', '        || b[76] != 0\n', '', F2),
+ ('crates/store-io-engine/src/create.rs', 'let placed = (crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK).any(', 'let placed = (crate::layout::MIN_LOG2_BLOCK..=crate::layout::MIN_LOG2_BLOCK).any(', F2),
+ ('crates/store-io-engine/src/store.rs', '            container_format: store_io_format::slot::FORMAT_2,', '            container_format: store_io_format::slot::FORMAT_1,', F1T),
  ('crates/store-io-engine/src/provision2.rs', 'let data_size = if slot || (data_size == 0 && copied.is_some()) {', 'let data_size = if slot || (data_size == 0 && copied.is_some() && false) {', COPYT),
  ('crates/store-io-sim/src/world.rs', '        if d.entries.contains_key(to) {\n            return Err(EEXIST);', '        if d.entries.contains_key(to) && false {\n            return Err(EEXIST);', COPYT),
  (COPY_SRC, "let _ticket = to.append(&buf[..got])?;", "let _ticket = to.append(&vec![0; got])?;", COPYT),

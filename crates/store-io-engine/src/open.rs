@@ -39,8 +39,11 @@ where
     /// [`Error::NotFound`], [`Error::Locked`] (another handle, in this or
     /// another process, holds the store), refusal errors,
     /// [`Error::Corruption`] for unreadable or foreign metadata,
-    /// [`Error::Unsupported`] for a newer format, [`Error::Io`] (`Io(Lock)`
-    /// on a file system that cannot lock).
+    /// [`Error::Unsupported`] (`FormatVersion`) for a newer format and for
+    /// a format-1 store (read-only in 0.5: open it with
+    /// [`Store::open_readonly`], or copy it to format 2 with
+    /// [`copy_store`](crate::copy_store)) before anything is written,
+    /// [`Error::Io`] (`Io(Lock)` on a file system that cannot lock).
     pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
         Self::open_inner(platform, path, opts, false)
     }
@@ -122,6 +125,13 @@ where
         };
         let pool = make_pool(&evidence, &layout, &opts, true)?;
         let vmeta = match found {
+            // Format 1 is read-only from 0.5 (D-112, D-116): refused before
+            // any write (nothing above wrote).
+            Found::V1(_) if !read_only => {
+                return Err(Error::Unsupported {
+                    what: store_io_core::error::Capability::FormatVersion,
+                });
+            }
             Found::V1(vm) => vm,
             Found::V2(vm) => {
                 let opened = {

@@ -255,7 +255,9 @@ pub enum CorruptionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Capability {
-    /// A newer on-disk format or incompatible feature flags.
+    /// A newer on-disk format or incompatible feature flags, or a format-1
+    /// store opened for writing (format 1 is read-only from 0.5: copy it to
+    /// format 2 with `copy_store`).
     FormatVersion,
     /// Directory flushes.
     DirectoryFlush,
@@ -430,6 +432,14 @@ impl fmt::Display for Error {
                 }
                 Ok(())
             }
+            Self::Unsupported {
+                what: Capability::FormatVersion,
+            } => write!(
+                f,
+                "unsupported: FormatVersion (a newer on-disk format, or a format-1 store \
+                 opened for writing: format 1 is read-only; copy it to format 2 with \
+                 copy_store or `store-io copy`)"
+            ),
             Self::Unsupported { what } => write!(f, "unsupported: {what:?}"),
             Self::Fenced { stale } => write!(
                 f,

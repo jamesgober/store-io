@@ -177,7 +177,14 @@ where
         let mut leftovers = false;
         let holds = {
             let mut q = queues.get(0);
-            holds_slot_header(&mut q, &file, &boot_pool, len, v2, &mut leftovers)
+            holds_slot_header(
+                &mut q,
+                &file,
+                &boot_pool,
+                len,
+                v2.then_some(opts.log2_table_slot),
+                &mut leftovers,
+            )
         };
         // Past format 1's bound, only a format-2 create's own remains
         // justify a takeover: a larger file with nothing that verifies may
@@ -321,17 +328,20 @@ where
 /// headers sit at block starts and blocks are at least 4 KiB, so every header
 /// starts on a 4 KiB boundary.
 ///
-/// With `v2` (a format-2 create), a crashed format-2 create's own leftovers
-/// do not count (spec §12): a generation-1 table page that is empty or torn,
-/// and a generation-1 volume record whose payload is torn (a valid one would
-/// make the file a store). Of any volume ids: an earlier crashed create may
-/// have left another. `leftovers` is set when one was seen.
+/// With `v2` (a format-2 create, its `log2_table_slot`), a crashed format-2
+/// create's own leftovers do not count (spec §12): a generation-1 table
+/// page that is empty or torn, and a generation-1 volume record whose
+/// payload is torn (a valid one would make the file a store), each only
+/// where a create of this table slot size puts it at some block size (an
+/// image elsewhere, in a damaged store's data, proves nothing). Of any
+/// volume ids: an earlier crashed create may have left another.
+/// `leftovers` is set when one was seen.
 fn holds_slot_header<Q: Queue>(
     q: &mut Lane<Q>,
     file: &Q::File,
     pool: &BufPool,
     len: u64,
-    v2: bool,
+    v2: Option<u8>,
     leftovers: &mut bool,
 ) -> Option<bool> {
     use store_io_format::slot::{Expect, SlotIndex, SlotStatus, validate};
@@ -373,7 +383,9 @@ fn holds_slot_header<Q: Queue>(
             | SlotStatus::BadHeaderCrc
             | SlotStatus::BadLength
             | SlotStatus::ReadError => {}
-            _ if v2 && crashed_create_leftover(b.as_slice()) => *leftovers = true,
+            _ if v2.is_some_and(|t| crashed_create_leftover(b.as_slice(), at, t)) => {
+                *leftovers = true;
+            }
             _ => return Some(true),
         }
         at += SCAN;
@@ -381,11 +393,14 @@ fn holds_slot_header<Q: Queue>(
     Some(false)
 }
 
-/// Whether a 4 KiB block whose slot header verifies is what a crashed
-/// format-2 create leaves behind (see [`holds_slot_header`]): format 2,
-/// generation 1, and either a table page whose payload is torn or an empty
-/// page, or a volume record whose payload is torn.
-fn crashed_create_leftover(b: &[u8]) -> bool {
+/// Whether a 4 KiB block whose slot header verifies, at `at`, is what a
+/// crashed format-2 create of table slots of `log2_table_slot` leaves
+/// behind (see [`holds_slot_header`]): format 2, generation 1, slot A, and
+/// either a table page whose payload is torn or an empty page, or a volume
+/// record whose payload is torn; written where a create writes that page's
+/// (or the volume record's) first copy at some block size, and saying so
+/// (its own slot offset).
+fn crashed_create_leftover(b: &[u8], at: u64, log2_table_slot: u8) -> bool {
     let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
     let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
     let u64_at = |i: usize| {
@@ -394,7 +409,14 @@ fn crashed_create_leftover(b: &[u8]) -> bool {
         u64::from_le_bytes(x)
     };
     let header_len = usize::from(u16_at(12));
-    if u16_at(14) != store_io_format::slot::FORMAT_2 || u64_at(56) != 1 || header_len != 128 {
+    // Format 2, generation 1, written at `at` as slot A (a create writes
+    // only the first copy of each pair).
+    if u16_at(14) != store_io_format::slot::FORMAT_2
+        || u64_at(56) != 1
+        || header_len != 128
+        || u64_at(64) != at
+        || b[76] != 0
+    {
         return false;
     }
     let object = u64_at(48);
@@ -407,12 +429,20 @@ fn crashed_create_leftover(b: &[u8]) -> bool {
     };
     let torn = store_io_format::crc32c::crc32c(payload) != u32_at(28);
     if object == 0 {
-        return torn;
+        // The volume record's first copy: block 0.
+        return torn && at == 0;
     }
     let page = object & !(1u64 << 61);
     if object >> 61 != 1 || page >= u64::from(store_io_format::meta2::MAX_TABLE_PAGES) {
         return false;
     }
-    torn || store_io_format::meta2::decode_page(payload, page as u32, u16::MAX)
-        .is_ok_and(|p| p.header.count == 0)
+    // Page `p`'s first copy: from block 2, two table slots a page.
+    let placed = (crate::layout::MIN_LOG2_BLOCK..=crate::layout::MAX_LOG2_BLOCK).any(|lb| {
+        let t = 1u64 << log2_table_slot.clamp(lb, 16);
+        at == (2u64 << lb) + 2 * page * t
+    });
+    placed
+        && (torn
+            || store_io_format::meta2::decode_page(payload, page as u32, u16::MAX)
+                .is_ok_and(|p| p.header.count == 0))
 }

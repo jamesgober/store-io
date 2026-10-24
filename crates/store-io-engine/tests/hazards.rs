@@ -24,6 +24,9 @@ fn opts() -> StoreOptions {
         queues: 2,
         buffers_per_class: 8,
         append_window: 256 << 12,
+        // A small table: the store stays inside a crashed create's
+        // takeover bound (format 2's is its table area).
+        region_capacity: 400,
         ..StoreOptions::default()
     }
 }
@@ -45,8 +48,8 @@ fn test_create_never_truncates_a_store_whose_volume_record_is_unreadable() {
         (id, len)
     });
     assert!(
-        size <= 256 << 10,
-        "store is {size} bytes; the takeover rule applies up to 256 KiB"
+        size <= 12 << 20,
+        "store is {size} bytes; the second create's takeover bound must cover it"
     );
     // Both copies of the volume record become unreadable for a while.
     p.with_world(|w| {
@@ -55,7 +58,14 @@ fn test_create_never_truncates_a_store_whose_volume_record_is_unreadable() {
             ..FaultPlan::default()
         };
     });
-    let created = Store::create(p.clone(), Path::new(DIR), opts());
+    // A create whose own bound covers the store (a table of 65,536
+    // regions, about 12.1 MiB), so the refusal comes from its scan of the
+    // unreadable blocks, not from the file's size.
+    let large = StoreOptions {
+        region_capacity: 65_536,
+        ..opts()
+    };
+    let created = Store::create(p.clone(), Path::new(DIR), large);
     assert!(
         matches!(created, Err(Error::AlreadyExists { .. })),
         "create must refuse an existing store, got {:?}",

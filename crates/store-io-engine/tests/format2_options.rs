@@ -245,10 +245,11 @@ fn test_options_are_checked_before_any_write() {
     // Without a cap format 1 provisions as before.
     s1.provision_page_region_with("q", RegionOptions::default().size(SIZE))
         .unwrap();
-    // A capped default is refused there too.
+    // A capped default is refused there too (format 1 opens read-only
+    // from 0.5: a store created with the default).
     drop(s1);
-    let s1 = Store::open(
-        p1.clone(),
+    let s1 = Store::create(
+        SimPlatform::new(SimConfig::volatile(806)),
         Path::new(DIR),
         StoreOptions {
             container_format: 1,

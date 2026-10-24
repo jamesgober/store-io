@@ -347,6 +347,29 @@
 
 ### Changed
 
+- **Breaking: container format 2 is the format** (v0.5 E5 C3, D-112,
+  D-116). `Store::create` writes format 2 by default; a writable open of
+  a format-1 store (every store made before 0.5) is refused with
+  `Unsupported(FormatVersion)` before anything is written, its message
+  naming `copy_store` / `store-io copy`; `Store::open_readonly` still
+  reads format 1. Move a store with `copy_store(old, new)` (or
+  `store-io copy <old> <new>`), then open the new one. Creating format 1
+  stays possible through the hidden `StoreOptions::container_format`
+  (tests and migration fixtures only). Tests that assumed format 1 are
+  pinned to it (its reader) or rewritten for format 2's own rule of the
+  same property: a full table (a released entry takes any size), a
+  truncated region (growth past it refused, space inside usable), a
+  reused extent (the container does not grow); format-2 tests added for a
+  full table, an unreadable volume record (a media error, both opens,
+  nothing written), an unreadable table page (lost, allocation frozen)
+  and a newer volume record refused for writing; `tests/format1.rs`.
+  With the flip a default create's takeover of a crashed create's file
+  scans up to its table area (about 12.1 MiB, was 256 KiB): a crashed
+  create's leftover now counts only where a create writes it, and only
+  if its header says so (the volume record's or a page's first copy, at
+  some block size), so an image of one in a damaged store's data never
+  gets the store truncated.
+
 - Engine: **format-2 provisioning and growth beyond capacity fill outside
   the metadata lock** (v0.5 E4 C13, spec §12's "choose and mark"): the
   space is placed and marked allocated (and charged to its tag, or taken

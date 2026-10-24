@@ -227,8 +227,11 @@ fn test_a_panicking_scan_visitor_leaves_nothing_behind() {
 #[test]
 fn test_an_open_with_a_failed_wait_never_opens_an_older_state() {
     let p = platform(500);
+    // A small table (format 2's default of 65,536 regions reads 388 pages:
+    // a wait failing at each of them is the same case 388 times).
     let opts = || StoreOptions {
         queues: 1,
+        region_capacity: 400,
         ..StoreOptions::default()
     };
     let s = Store::create(p.clone(), Path::new("/db"), opts()).unwrap();

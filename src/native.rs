@@ -7,7 +7,7 @@ use store_io_core::decide::{Trust, decide};
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsError};
 use store_io_platform::{FileName, LinuxTier, Platform};
 
-use crate::{NativePlatform, Probe, StoreOptions};
+use crate::{CopyOptions, CopyReport, NativePlatform, Probe, StoreOptions};
 
 /// The native platform on the kernel interface `tier` asks for (D-082;
 /// only Linux has a choice).
@@ -189,6 +189,46 @@ fn io(op: Op, raw: OsError) -> Error {
         raw,
         ctx: ErrorContext::default(),
     }
+}
+
+/// Copies the store in `from` into a new store (container format 2) in
+/// `to`, whose directory must hold no store: the way a format-1 store
+/// moves to format 2, and the way to compact a format-2 one. The source is
+/// opened read-only and never written; the copy is built under a temporary
+/// name and renamed into place only when whole and durable, so after a
+/// crash `to` holds nothing or the whole copy (run the copy again).
+///
+/// ```no_run
+/// use store_io::CopyOptions;
+///
+/// let r = store_io::copy_store("data/orders", "data/orders-2", CopyOptions::default())?;
+/// println!("{} regions, {} bytes", r.regions, r.bytes);
+/// # Ok::<(), store_io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`store_io_engine::copy_store`], among them: `AlreadyExists` if `to`
+/// holds a store; `Locked` while a writer holds `from` open or another
+/// copy into `to` runs;
+/// `NotWritten(NotReady | Frozen | TooLarge)` for a source it cannot copy
+/// whole, before anything is created; `NotWritten(Misaligned)` if `to`'s
+/// device needs larger blocks than the source's; `NotFound`, `Corruption`
+/// or `Unsupported` opening the source; `UnsafeDevice`, `Unverified` (the
+/// target's device refused: see `StoreOptions::trust`), `NoSpace`, `Io`;
+/// `DurabilityUnknown` if the final rename or directory flush failed (the
+/// copy may or may not be in place).
+pub fn copy_store(
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+    opts: CopyOptions,
+) -> Result<CopyReport, Error> {
+    store_io_engine::copy_store(
+        platform(opts.store.linux_tier)?,
+        path_of(&from),
+        path_of(&to),
+        opts,
+    )
 }
 
 /// Probes the device under the existing directory `dir`: the evidence

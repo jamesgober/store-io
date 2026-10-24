@@ -58,8 +58,8 @@ name = "store_io"
 path = "src/lib.rs"
 
 # The `store-io` command-line tool (`store-io probe <dir>`, `store-io info
-# <store>`). Off by default so libraries depending on store-io build no
-# binary.
+# <store>`, `store-io copy <old> <new>`). Off by default so libraries
+# depending on store-io build no binary.
 [[bin]]
 name = "store-io"
 path = "src/bin/store-io.rs"

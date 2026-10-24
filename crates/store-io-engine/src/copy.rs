@@ -86,7 +86,8 @@ struct Facts {
 /// # Errors
 ///
 /// As [`Store::open_readonly`] for the source and [`Store::create`] for
-/// the target; `Locked` while another copy into `to` runs;
+/// the target; `Locked` while a writer holds `from` open or another copy
+/// into `to` runs;
 /// `AlreadyExists` if `to` holds a container file (any `store.sio`, even
 /// one a crashed create left empty, which [`Store::create`] would take
 /// over: remove it to copy there), or one appears there during the copy
@@ -96,8 +97,10 @@ struct Facts {
 /// them all), `NotWritten(Frozen)` for one with a stale or lost table
 /// page, `NotWritten(TooLarge)` for a slot object larger than a format-2
 /// slot holds (that region in the context), all before anything is
-/// created (but the target directory); `Io` if whether `to` holds a store
-/// cannot be told (any failure to look but "not found"), likewise;
+/// created; `Io` if whether `to` holds a store cannot be told (any failure
+/// to look but "not found"), before anything but the target directory
+/// (and, on the second look under the lock, the copy lock's file) is
+/// created;
 /// `NotWritten(Misaligned)` if the target's device needs larger blocks
 /// than the source's, or a region's data size is not whole target blocks;
 /// then any error of provisioning, reading or writing (the target left

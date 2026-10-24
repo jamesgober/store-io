@@ -99,7 +99,7 @@ let (start, receipt) = batch.commit()?;
 store-io = "0.4"
 ```
 
-The `store-io` command-line tool (`store-io probe <dir>`, `store-io info <store>`) is behind the `cli` feature.
+The `store-io` command-line tool (`store-io probe <dir>`, `store-io info <store>`, `store-io copy <old> <new>`) is behind the `cli` feature.
 
 <hr>
 <br>

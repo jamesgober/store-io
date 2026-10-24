@@ -42,6 +42,16 @@
   `AlreadyExists`) and the directory flushed: after a crash the target
   name holds nothing or the whole copy (`DurabilityUnknown` if the rename
   or that flush failed: the copy may or may not be in place).
+- Facade: **`store_io::copy_store(from, to, CopyOptions)`** on the native
+  backend (its Linux tier from `opts.store.linux_tier`), and
+  `CopyOptions`, `CopyReport`, `COPYING`, `COPY_LOCK` re-exported (v0.5
+  E5 C2). CLI: **`store-io copy [--override-refusal] <old> <new>`**
+  copies a store and prints what it copied (`--override-refusal`
+  creates the copy even on a device store-io refuses; a refusal without
+  it names the flag); a test runs the binary on the real file system.
+  README, `docs/API.md` and `docs/GUIDE.md` list them.
+- CLI: output piped into a command that stops reading (`| head`) ends
+  the tool quietly instead of a "Broken pipe" panic.
 - Platform (**breaking** for outside implementers of `Platform`, who must
   add it): **`Platform::rename_noreplace`**, a rename that fails with the
   platform's "already exists" error rather than replace. Linux:

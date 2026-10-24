@@ -216,6 +216,7 @@ The report shows the evidence store-io read (device model and firmware, bus, wri
 cargo install store-io --features cli
 store-io probe /var/lib/mydb
 store-io info  /var/lib/mydb/orders
+store-io copy  /var/lib/mydb/orders /var/lib/mydb/orders-2
 ```
 
 When a device is refused, you have three ways forward, each recorded in every receipt's label:

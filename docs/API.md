@@ -215,6 +215,7 @@ None of these can be constructed outside store-io.
 | Item | Description |
 |---|---|
 | `probe(dir) -> Result<Probe>` | The `Evidence` and `ClassDecision` for the device under an existing directory (creates and removes a small temporary file). |
+| `copy_store(from, to, CopyOptions) -> Result<CopyReport>` | Copies a store (format 1 or 2) into a new format-2 store in `to`: the source opened read-only, every region recreated with its attributes and data, built under `COPYING` and renamed into place only when whole and durable (`to`'s `COPY_LOCK` held throughout). `CopyOptions::store` holds the target's `StoreOptions` (trust among them); `CopyReport` has `regions`, `bytes`, `source_format`. |
 | `DurabilityClass` | `PowerSafe`, `FlushRequired`, `Unverified`, `Unsafe`. |
 | `ReceiptLabel` | `Evidence`, `Certified(id)`, `Attested(id)`, `Overridden(reasons)`. |
 | `ClassDecision` | `class`, `label`, `durable_open: DurableOpen` (`Allowed`, `Overridden`, `RefusedUnsafe`, `RefusedUnverified`), `reasons: ReasonSet`, `missing: MissingSet`, `power_safe_candidate`. |
@@ -268,6 +269,8 @@ Built with the `cli` feature (`cargo install store-io --features cli`):
 ```text
 store-io probe <dir>    evidence and durability class of <dir>'s device
 store-io info <store>   a store's report, regions and space (read-only)
+store-io copy [--override-refusal] <old> <new>
+                        copy the store in <old> into a new format-2 store in <new>
 ```
 
 ---

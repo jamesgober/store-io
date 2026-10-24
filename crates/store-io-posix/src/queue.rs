@@ -256,12 +256,8 @@ impl<F: AsRawFd> Work<F> {
                 buf,
                 dsync,
             } => {
-                let raw = fd.as_raw_fd();
-                let flags: c_int = if dsync && !bdev { libc::RWF_DSYNC } else { 0 };
-                let mut result = sys::pwritev2(raw, buf.as_ptr(), buf.len(), offset, flags);
-                if dsync && bdev && result == Ok(buf.len()) {
-                    result = sys::fdatasync(raw).map(|()| buf.len());
-                }
+                let result =
+                    sys::write_data(fd.as_raw_fd(), buf.as_ptr(), buf.len(), offset, dsync, bdev);
                 drop(fd);
                 (Some(buf), result)
             }
@@ -271,12 +267,12 @@ impl<F: AsRawFd> Work<F> {
                 mut buf,
             } => {
                 let len = buf.len();
-                let result = sys::preadv2(fd.as_raw_fd(), buf.as_mut_ptr(), len, offset, 0);
+                let result = sys::read_data(fd.as_raw_fd(), buf.as_mut_ptr(), len, offset);
                 drop(fd);
                 (Some(buf), result)
             }
             Self::Flush { fd } => {
-                let result = sys::fdatasync(fd.as_raw_fd()).map(|()| 0);
+                let result = sys::flush_data(fd.as_raw_fd()).map(|()| 0);
                 drop(fd);
                 (None, result)
             }

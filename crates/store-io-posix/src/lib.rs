@@ -47,7 +47,7 @@
 //!
 //! Every module is gated on `target_os = "linux"`; on other operating systems
 //! the crate compiles to an empty shell so a workspace build succeeds
-//! everywhere. Every `unsafe` block lives in `sys.rs` and the io_uring
+//! everywhere. Every `unsafe` block lives in `sys.rs`, `posix.rs` and the io_uring
 //! binding (`uring/sys.rs`: its system calls and shared memory; `ring.rs`
 //! and `queue.rs`: pushing entries and the wake read's target), each preceded
 //! by a `SAFETY` comment citing the contract it relies on; tests aside.
@@ -68,6 +68,8 @@ pub mod fuzzing;
 mod lock;
 #[cfg(target_os = "linux")]
 mod pool;
+#[cfg(target_os = "linux")]
+mod posix;
 #[cfg(target_os = "linux")]
 mod probe;
 #[cfg(target_os = "linux")]

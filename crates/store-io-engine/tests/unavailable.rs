@@ -194,6 +194,53 @@ fn test_a_region_cut_off_by_a_truncated_container_is_reported_as_truncated() {
     assert_eq!(&buf[..15], b"A-RECORD-000001");
 }
 
+/// Format 1's reader (read-only from 0.5) reports a region cut off by a
+/// truncated container as such, and reads the region before the cut.
+#[test]
+fn test_a_format_1_region_cut_off_by_a_truncated_container_is_reported_as_truncated() {
+    let p = SimPlatform::new(SimConfig::volatile(162));
+    let s = Store::create(p.clone(), Path::new(DIR), opts1()).unwrap();
+    let a = s.provision_append_region("a", 64 << 10).unwrap();
+    let b = s.provision_append_region("b", 1 << 20).unwrap();
+    a.append_durable(&record("A-RECORD-000001")).unwrap();
+    b.append_durable(&record("B-RECORD-000001")).unwrap();
+    drop((a, b, s));
+    let len = media(&p).len() as u64;
+    {
+        let dir = p.open_dir(Path::new(DIR), false).unwrap();
+        let file = p
+            .open_file(
+                &dir,
+                &FileName::new(CONTAINER).unwrap(),
+                FileMode::ReadWrite,
+            )
+            .unwrap();
+        p.set_len(&file, len - 16 * BLOCK).unwrap();
+        p.flush_all(&file).unwrap();
+    }
+    let s = Store::open_readonly(p.clone(), Path::new(DIR), opts1()).unwrap();
+    assert_eq!(s.report().format, 1);
+    assert!(matches!(
+        s.append_region("b"),
+        Err(Error::Corruption {
+            kind: CorruptionKind::Truncated,
+            ..
+        })
+    ));
+    let u = s.unavailable_regions();
+    assert_eq!(u.len(), 1);
+    assert_eq!(u[0].name, "b");
+    assert!(matches!(
+        u[0].reason,
+        Unavailable::ContainerShort { actual, needed } if actual == len - 16 * BLOCK && needed > actual
+    ));
+    assert_eq!(s.report().unavailable.len(), 1);
+    let a = s.append_region("a").unwrap();
+    let mut buf = vec![0u8; BLOCK as usize];
+    a.read(0, &mut buf).unwrap();
+    assert_eq!(&buf[..15], b"A-RECORD-000001");
+}
+
 /// A truncated region is never brought back by growing the container over
 /// it: growth would zero-fill its missing tail, and the next open would find
 /// it whole, its lost records read as zeros (found by review). Format 2:

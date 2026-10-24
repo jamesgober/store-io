@@ -293,3 +293,66 @@ fn test_provisioning_with_a_failed_wait_never_succeeds_or_runs_out_of_space() {
         assert!(saw_ok, "provisioning has more than 24 waits now");
     }
 }
+
+/// A read-only open whose queue wait fails at any step fails `Io`: it
+/// writes nothing, so every wait is a read's, and a failed one is never
+/// taken for an unreadable location (the volume probe moving on to the next
+/// candidate) or an unreadable slot (a pair decided from its other copy, an
+/// older state). Both formats: format 1 opens read-only from 0.5. Without
+/// a failure it opens every region.
+#[test]
+fn test_a_read_only_open_with_a_failed_wait_fails_io() {
+    for (seed, format) in [
+        (610, store_io_format::slot::FORMAT_1),
+        (611, store_io_format::slot::FORMAT_2),
+    ] {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        // A small table (format 2's default reads 388 pages: a wait failing
+        // at each of them is the same case 388 times).
+        let opts = || StoreOptions {
+            queues: 1,
+            region_capacity: 400,
+            container_format: format,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p.clone(), Path::new("/db"), opts()).unwrap();
+        // Several generations of every pair: the table's (format 1) and the
+        // volume record's (format 2, by a writable reopen).
+        for name in ["r0", "r1", "r2"] {
+            s.provision_page_region(name, MIB as u64).unwrap();
+        }
+        drop(s);
+        if format == store_io_format::slot::FORMAT_2 {
+            drop(Store::open(p.clone(), Path::new("/db"), opts()).unwrap());
+        }
+        let mut clean = false;
+        for k in 1..=80u64 {
+            let at = p.with_world(|w| {
+                let at = w.waits() + k;
+                w.faults_mut().fail_wait = Some((at, EIO));
+                at
+            });
+            let r = Store::open_readonly(p.clone(), Path::new("/db"), opts());
+            let fired = p.with_world(|w| {
+                w.faults_mut().fail_wait = None;
+                w.waits() >= at
+            });
+            match r {
+                Err(Error::Io { raw, .. }) if fired => assert_eq!(raw.code, EIO),
+                Ok(s) if !fired => {
+                    let mut names: Vec<String> = s.regions().into_iter().map(|(n, _)| n).collect();
+                    names.sort();
+                    assert_eq!(names, ["r0", "r1", "r2"], "format {format}");
+                    clean = true;
+                    break;
+                }
+                Ok(_) => panic!("format {format}: opened after wait {k} failed"),
+                Err(e) => panic!("format {format}, wait {k} (fired: {fired}): {e:?}"),
+            }
+        }
+        assert!(
+            clean,
+            "format {format}: the open has more than 80 waits now"
+        );
+    }
+}

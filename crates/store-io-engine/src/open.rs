@@ -10,7 +10,7 @@ use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsEr
 use store_io_core::id::{Generation, RegionId, VolumeId};
 use store_io_core::observe::Observer;
 use store_io_format::meta::{
-    RegionKind, RegionMeta, RegionState, TableEntry, VOLUME_META_LEN, VolumeMeta, decode_table,
+    RegionKind, RegionMeta, RegionState, TableEntry, VolumeMeta, decode_table,
 };
 use store_io_format::pair::Winner;
 use store_io_platform::{FileMode, IoOp, Platform, Queue, QueueConfig};
@@ -20,7 +20,7 @@ use crate::exec::{Lane, QueueSet, Ran, run};
 use crate::frontier::AppendFrontier;
 use crate::gate::Gate;
 use crate::layout::Layout;
-use crate::slots::{PairRead, plan_next, read_pair};
+use crate::slots::{PairRead, read_pair};
 use crate::space::Accounting;
 use crate::store::*;
 
@@ -280,7 +280,7 @@ where
             }));
         }
         drop(q);
-        let mut meta = Meta {
+        let meta = Meta {
             volume: vmeta,
             volume_pair,
             table_pair,
@@ -289,35 +289,10 @@ where
             container_len,
             v2: None,
         };
-        let owner_generation = if read_only {
-            0
-        } else {
-            let og = meta
-                .volume
-                .owner_generation
-                .checked_add(1)
-                .ok_or_else(corrupt)?;
-            let mut vm = meta.volume;
-            vm.owner_generation = og;
-            let mut vbuf = [0u8; VOLUME_META_LEN];
-            let _len = vm.encode(&mut vbuf).map_err(|_| meta_err())?;
-            let vat = pair_volume(volume, &layout);
-            let mut q = queues.get(0);
-            let next = plan_next(&meta.volume_pair, &vbuf, og)?;
-            let domain = Domain::new();
-            meta.volume_pair = durable_slot::<P>(
-                &mut q,
-                &file,
-                &pool,
-                &vat,
-                &meta.volume_pair,
-                &next,
-                &policy,
-                &domain,
-            )?;
-            meta.volume = vm;
-            og
-        };
+        // Format 1 opens for reading only (a writable open was refused
+        // above): no owner generation is taken, nothing is written.
+        debug_assert!(read_only, "a writable format-1 open was refused");
+        let owner_generation = 0;
         let report = StoreReport {
             evidence,
             decision,

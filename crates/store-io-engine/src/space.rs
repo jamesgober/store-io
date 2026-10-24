@@ -475,31 +475,22 @@ where
     /// off by a short container exists: growth would zero-fill that region's
     /// missing tail, and the next open would find it whole and ready, its
     /// lost bytes read as zeros (an append region would silently end early).
+    ///
+    /// Only format 2 can have one here: a format-1 store with a region cut
+    /// short opens read-only (from 0.5 every open of format 1 does), and a
+    /// read-only store never grows; a store created as format 1 has none.
     pub(crate) fn grow_to(&self, meta: &mut Meta, target: u64, tag: u32) -> Result<(), Error> {
         if target <= meta.container_len {
             return Ok(());
         }
         let inner = &self.inner;
-        // A format-2 entry past the file's end whose name does not decode
-        // has no listed region; growing would make zeros of its lost tail.
+        // Any format-2 entry past the file's end: one listed as unavailable
+        // (`ContainerShort`) and one whose name does not decode, which has
+        // no listed region. Growing would make zeros of its lost tail.
         if meta.v2.as_deref().is_some_and(|v| v.cut_short) {
             return Err(Error::Corruption {
                 kind: store_io_core::error::CorruptionKind::Truncated,
                 ctx: ErrorContext::default(),
-            });
-        }
-        if let Some(cut) = inner
-            .report
-            .unavailable
-            .iter()
-            .find(|u| matches!(u.reason, crate::store::Unavailable::ContainerShort { .. }))
-        {
-            return Err(Error::Corruption {
-                kind: store_io_core::error::CorruptionKind::Truncated,
-                ctx: ErrorContext {
-                    region: Some(cut.id),
-                    ..ErrorContext::default()
-                },
             });
         }
         inner

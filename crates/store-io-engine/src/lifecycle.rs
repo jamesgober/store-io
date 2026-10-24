@@ -308,8 +308,24 @@ mod tests {
     /// reports the lock as held.
     #[test]
     fn test_a_release_holds_the_metadata_lock_until_its_space_is_deallocated() {
+        release_holds_the_metadata_lock(StoreOptions::default());
+    }
+
+    /// The same for format 1's release (a store created as format 1; from
+    /// 0.5 a format-1 store reopens read-only).
+    #[test]
+    fn test_a_format_1_release_holds_the_metadata_lock_until_its_space_is_deallocated() {
+        release_holds_the_metadata_lock(StoreOptions {
+            container_format: store_io_format::slot::FORMAT_1,
+            ..StoreOptions::default()
+        });
+    }
+
+    fn release_holds_the_metadata_lock(opts: StoreOptions) {
         let p = SimPlatform::new(SimConfig::volatile(7));
-        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let format = opts.container_format;
+        let s = Store::create(p.clone(), Path::new("/db"), opts).unwrap();
+        assert_eq!(s.inner.layout.format, format);
         let pages = s.provision_page_region("old", 1 << 20).unwrap();
         let (held, calls) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)));
         {

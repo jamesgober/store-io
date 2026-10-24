@@ -379,10 +379,10 @@ where
             let freed: Vec<(u64, u64)> = v2
                 .stale_extra
                 .iter()
-                .filter(|(at, _)| *at == p)
-                .map(|&(_, r)| r)
+                .filter(|(at, _, _)| *at == p)
+                .map(|&(_, _, r)| r)
                 .collect();
-            v2.stale_extra.retain(|(at, _)| *at != p);
+            v2.stale_extra.retain(|(at, _, _)| *at != p);
             for range in &freed {
                 if let Some(i) = v2.allocated.iter().position(|a| a == range) {
                     let _gone = v2.allocated.swap_remove(i);

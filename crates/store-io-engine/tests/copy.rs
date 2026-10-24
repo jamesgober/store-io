@@ -43,7 +43,10 @@ fn src_opts(format: u16) -> StoreOptions {
 }
 
 fn copy_opts() -> CopyOptions {
-    CopyOptions { store: opts() }
+    CopyOptions {
+        store: opts(),
+        ..CopyOptions::default()
+    }
 }
 
 /// The container names in `dir` (durable entries).

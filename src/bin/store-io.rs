@@ -3,7 +3,7 @@
 //! ```text
 //! store-io probe <dir>    what store-io learns about the device under <dir>
 //! store-io info <store>   a store's device report, regions and space (read-only)
-//! store-io copy [--override-refusal] <old> <new>
+//! store-io copy [--override-refusal] [--accept-stale-pages] <old> <new>
 //!                         copy a store into a new format-2 store
 //! ```
 
@@ -14,12 +14,16 @@ use std::process::ExitCode;
 const USAGE: &str = "usage:
   store-io probe <dir>    show the evidence and durability class of <dir>'s device
   store-io info <store>   show a store's report, regions and space (read-only)
-  store-io copy [--override-refusal] <old> <new>
+  store-io copy [--override-refusal] [--accept-stale-pages] <old> <new>
                           copy the store in <old> into a new format-2 store in <new>
                           (<old> is never written; <new> must hold no store);
                           --override-refusal creates the copy even on a device
                           store-io refuses (its durability is not established;
-                          later writable opens need the override too)";
+                          later writable opens need the override too);
+                          --accept-stale-pages copies a store whose table is
+                          damaged (frozen, or with unavailable regions) as far
+                          as it can, and lists what it left out or could not
+                          verify (exit status 3 when it lists anything)";
 
 /// `println!` that ends the program when stdout is gone instead of
 /// panicking: quietly for a closed pipe (output piped into `head`), with a
@@ -47,10 +51,17 @@ fn main() -> ExitCode {
     {
         ["probe", dir] => probe(dir),
         ["info", store] => info(store),
-        ["copy", "--override-refusal", from, to] if !is_flag(from) && !is_flag(to) => {
-            copy(from, to, true)
-        }
-        ["copy", from, to] if !is_flag(from) && !is_flag(to) => copy(from, to, false),
+        ["copy", rest @ ..] => match copy_args(rest) {
+            // A copy that left something out or unverified: exit status 3.
+            Some((from, to, flags)) => match copy(from, to, flags) {
+                Ok(true) => return ExitCode::from(3),
+                other => other.map(drop),
+            },
+            None => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        },
         ["--version" | "-V"] => {
             out!("store-io {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -133,28 +144,86 @@ fn info(path: &str) -> Result<(), store_io::Error> {
     Ok(())
 }
 
+/// `copy`'s flags.
+#[derive(Debug, Clone, Copy, Default)]
+struct CopyFlags {
+    override_refusal: bool,
+    accept_stale_pages: bool,
+}
+
+/// `copy`'s arguments: each flag at most once, in any order, before the
+/// two directories (neither one that looks like a flag).
+fn copy_args<'a>(args: &[&'a str]) -> Option<(&'a str, &'a str, CopyFlags)> {
+    let mut flags = CopyFlags::default();
+    let mut i = 0;
+    while let Some(&a) = args.get(i).filter(|a| is_flag(a)) {
+        let set = match a {
+            "--override-refusal" => &mut flags.override_refusal,
+            "--accept-stale-pages" => &mut flags.accept_stale_pages,
+            _ => return None,
+        };
+        if *set {
+            return None;
+        }
+        *set = true;
+        i += 1;
+    }
+    match args[i..] {
+        [from, to] if !is_flag(from) && !is_flag(to) => Some((from, to, flags)),
+        _ => None,
+    }
+}
+
+/// Copies; `Ok(true)` when the report lists anything left out or not
+/// verified.
 #[cfg(any(windows, target_os = "linux"))]
-fn copy(from: &str, to: &str, override_refusal: bool) -> Result<(), store_io::Error> {
+fn copy(from: &str, to: &str, flags: CopyFlags) -> Result<bool, store_io::Error> {
     let mut opts = store_io::CopyOptions::default();
-    opts.store.trust.override_refusal = override_refusal;
+    opts.store.trust.override_refusal = flags.override_refusal;
+    opts.accept_stale_pages = flags.accept_stale_pages;
     let r = store_io::copy_store(from, to, opts)?;
     out!(
         "copied {} regions, {} bytes, from format {} to format 2{}",
         r.regions,
         r.bytes,
         r.source_format,
-        if override_refusal {
+        if flags.override_refusal {
             " (device refusal overridden)"
         } else {
             ""
         }
     );
-    Ok(())
+    for id in &r.omitted {
+        out!("  left out: table entry {id} (see `store-io info` on the source)");
+    }
+    for page in &r.lost_pages {
+        out!(
+            "  lost: table page {page} (its regions are unknown, none copied; any region copied may be superseded by one)"
+        );
+    }
+    for page in &r.stale_pages {
+        out!(
+            "  stale: table page {page} (its newest commit given up: a region it created is missing, one it released is back)"
+        );
+    }
+    for (name, size) in &r.verified_up_to {
+        out!(
+            "  copied in full: {name} (its stale page recorded {size} bytes: only those are known to be its data)"
+        );
+    }
+    for name in &r.superseded {
+        out!("  possibly superseded: {name} (another region's newer data may cover its bytes)");
+    }
+    Ok(!(r.omitted.is_empty()
+        && r.lost_pages.is_empty()
+        && r.stale_pages.is_empty()
+        && r.verified_up_to.is_empty()
+        && r.superseded.is_empty()))
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-fn copy(_from: &str, _to: &str, _override: bool) -> Result<(), store_io::Error> {
-    probe("")
+fn copy(_from: &str, _to: &str, _flags: CopyFlags) -> Result<bool, store_io::Error> {
+    probe("").map(|()| false)
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

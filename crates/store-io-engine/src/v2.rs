@@ -201,8 +201,10 @@ pub(crate) struct Meta2 {
     /// `repair_unavailable` takes away no more and no less (v0.5 E6).
     pub(crate) holds: Vec<Hold>,
     /// The extra extents counted allocated because their page is stale
-    /// (spec §9 step 3): `(page, range)`, freed when the page is accepted.
-    pub(crate) stale_extra: Vec<(usize, (u64, u64))>,
+    /// (spec §9 step 3): `(page, region id, range)`, freed when the page is
+    /// accepted (and copied with its region by `copy_store` when it
+    /// overlaps nothing else).
+    pub(crate) stale_extra: Vec<(usize, u64, (u64, u64))>,
 }
 
 /// How far the open raises a page's `next_seq`, in memory, on every stale

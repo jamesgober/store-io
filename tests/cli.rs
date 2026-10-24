@@ -130,12 +130,33 @@ fn test_copy_copies_a_store_and_refuses_a_second_time() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("already exists"), "{stderr}");
-    // Wrong arguments, an option taken for a path among them: the usage,
-    // exit status 2.
+    // `--accept-stale-pages` (before or after the override) on a healthy
+    // store: an ordinary copy, nothing listed.
+    let third = t.path().join("third");
+    let third_s = third.to_str().unwrap();
+    let mut args = vec!["copy", "--accept-stale-pages"];
+    if refused {
+        args.insert(1, "--override-refusal");
+    }
+    args.extend([old_s, third_s]);
+    let (ok, stdout, stderr) = cli(&args);
+    assert!(ok, "{stdout}{stderr}");
+    assert!(stdout.starts_with("copied 3 regions"), "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    // Wrong arguments, an option taken for a path among them, an unknown
+    // or repeated option: the usage, exit status 2.
     for bad in [
         vec!["copy", old_s],
         vec!["copy", "--override-refusal", new_s],
         vec!["copy", old_s, new_s, "--override-refusal"],
+        vec!["copy", "--bogus", old_s, new_s],
+        vec![
+            "copy",
+            "--accept-stale-pages",
+            "--accept-stale-pages",
+            old_s,
+            new_s,
+        ],
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_store-io"))
             .args(&bad)

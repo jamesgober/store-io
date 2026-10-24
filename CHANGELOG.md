@@ -13,6 +13,27 @@
 
 ### Added
 
+- Engine: **`CopyOptions::accept_stale_pages`** (v0.5 E6 C4, spec §12
+  "What `copy_store` copies"; CLI `store-io copy --accept-stale-pages`):
+  `copy_store` copies a source its open left frozen (a stale or lost
+  table page) or with entries it cannot serve, instead of refusing it,
+  the way out of a store no repair can mend in place. Every usable
+  region by its recorded data size; a region of a stale page **in
+  full**, its whole capacity plus the extra extent its header lists when
+  that overlaps no other region's footprint, no reserved span and no
+  other extra extent, its recorded data size reported
+  (`CopyReport::verified_up_to`); unavailable regions and entries of an
+  unknown kind left out (`CopyReport::omitted`); a lost page's regions
+  unknown (`CopyReport::lost_pages`); every stale page reported
+  (`CopyReport::stale_pages`: its newest commit is given up, so a region
+  it created is missing and one it released is back); a region that may
+  hold another region's bytes copied and reported
+  (`CopyReport::superseded`: possibly superseded, or, D-130, of a stale or
+  possibly accepted page while another page is too or lost). A
+  slot's object is copied as committed. The CLI lists all of it and exits
+  with status 3 when it lists anything. **Breaking:** `CopyReport` gains those fields and is no
+  longer `Copy`; `CopyOptions` gains the field (construct it with
+  `..CopyOptions::default()`).
 - Engine: **`Store::repair_unavailable(id)`** (v0.5 E6 C2, Q6, D-112):
   releases an unavailable region's table entry (one
   `unavailable_regions()` lists, or, named by its id, an entry of a kind

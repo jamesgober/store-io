@@ -52,9 +52,9 @@ pub(crate) struct Regions2 {
     pub(crate) allocated: Vec<Extent>,
     /// What each unavailable or unknown-kind entry holds.
     pub(crate) holds: Vec<crate::v2::Hold>,
-    /// The extra extents counted allocated on stale pages: `(page,
-    /// range)`, as they are in `allocated`.
-    pub(crate) stale_extra: Vec<(usize, Extent)>,
+    /// The extra extents counted allocated on stale pages: `(page, region
+    /// id, range)`, as they are in `allocated`.
+    pub(crate) stale_extra: Vec<(usize, u64, Extent)>,
 }
 
 /// A region whose entry passed the entry checks.
@@ -424,10 +424,12 @@ pub(crate) fn check_regions<Q: Queue>(
             // file's end hold nothing: clamped, so free space never ends
             // there (a header is decoded without the file's length).
             if let Some((off, len)) = c.extra {
-                if off < container_len {
-                    let range = (off, len.min(container_len - off));
+                let block = 1u64 << layout.log2_block;
+                let within = len.min(container_len.saturating_sub(off)) / block * block;
+                if within > 0 {
+                    let range = (off, within);
                     allocated.push(range);
-                    stale_extra.push((c.page, range));
+                    stale_extra.push((c.page, c.id, range));
                 }
             }
         }

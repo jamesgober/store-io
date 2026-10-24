@@ -108,7 +108,10 @@ fn test_a_format_1_store_opens_read_only_and_copies_to_a_writable_one() {
         p.clone(),
         Path::new(DIR),
         Path::new(NEW),
-        CopyOptions { store: opts() },
+        CopyOptions {
+            store: opts(),
+            ..CopyOptions::default()
+        },
     )
     .unwrap();
     let s = Store::open(p.clone(), Path::new(NEW), opts()).unwrap();

@@ -92,6 +92,7 @@ F1T = ["-p", "store-io-engine", "--test", "format1"]
 # Repairs (v0.5 E6).
 REPAIR_SRC = "crates/store-io-engine/src/repair.rs"
 INLINE = ["-p", "store-io-engine", "--test", "inline"]
+COPYS = ["-p", "store-io-engine", "--test", "copy_stale"]
 EXEC_SRC = "crates/store-io-engine/src/exec.rs"
 F2REP = ["-p", "store-io-engine", "--test", "format2_repair"]
 CREATE = "crates/store-io-engine/src/create.rs"
@@ -834,7 +835,7 @@ M = [
  (COPY_SRC, "                fill_key,\n                tag,", "                fill_key: [fill_key[0] ^ 1; 16],\n                tag,", COPYT),
  (COPY_SRC, "(m.fill, m.fill_key, false)", "(m.fill, [0; 16], false)", COPYT),
  (COPY_SRC, "                tag,\n            },", "                tag: tag & 0,\n            },", COPYT),
- (COPY_SRC, "cap: capped.then(|| r.map.capacity()),", "cap: capped.then(|| r.map.capacity()).and(None),", COPYT),
+ (COPY_SRC, "cap: capped.then(|| r.map.capacity().max(data_size)),", "cap: capped.then(|| r.map.capacity().max(data_size)).and(None),", COPYT),
  (COPY_SRC, "        dst.flush_all_accounted()?;", "", COPYT),
  (COPY_SRC, "    match platform.unlink(&dir, &temp) {", "    match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
  (COPY_SRC, "    platform\n        .sync_dir(&dir)\n", "    Ok::<(), store_io_platform::OsError>(())\n", COPYT),
@@ -905,7 +906,7 @@ M = [
  (REPAIR_SRC, "                if let Some((seq, _)) = pg.ahead().next() {", "                if let Some((seq, _)) = pg.ahead().next().filter(|_| false) {", F2REP),
  (REPAIR_SRC, "                                (u64::from(page) << 32) | u64::from(seq),", "                                u64::from(seq),", F2REP),
  (REPAIR_SRC, "                if let Some(i) = v2.allocated.iter().position(|a| a == range) {", "                if let Some(i) = v2.allocated.iter().position(|a| a == range).filter(|_| false) {", F2B),
- (REPAIR_SRC, "                .filter(|(at, _)| *at == p)", "                .filter(|(at, _)| *at == p || true)", F2B),
+ (REPAIR_SRC, "                .filter(|(at, _, _)| *at == p)", "                .filter(|(at, _, _)| *at == p || true)", F2B),
  (REPAIR_SRC, "            v2.rebuild_free(len);", "            let _ = len;", F2B),
  (REPAIR_SRC, "                .filter(|r| !r.superseded && !r.foreign)", "                .filter(|r| !r.foreign)", F2REP),
  (REPAIR_SRC, "                .filter(|r| !r.superseded && !r.foreign)", "                .filter(|r| !r.superseded)", F2REP),
@@ -933,7 +934,34 @@ M = [
  ('crates/store-io-engine/src/open2.rs', "    let settled = v2.pages.iter().all(|p| p.standing == Standing::Confirmed);", "    let settled = v2.pages.iter().all(|p| p.standing != Standing::Unconfirmed);", F2REP),
  ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        self.twin || (!matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank) && false)", F2REP),
  ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", F2REP),
- ('crates/store-io-engine/src/open2.rs', "                    stale_extra.push((c.page, range));", "                    stale_extra.clear();\n                    let _ = range;", F2B),
+ ('crates/store-io-engine/src/open2.rs', "                    stale_extra.push((c.page, c.id, range));", "                    stale_extra.clear();\n                    let _ = range;", F2B),
+ # copy_store accept_stale_pages (v0.5 E6 C4).
+ (COPY_SRC, "    let accept = opts.accept_stale_pages;", "    let accept = false;", COPYS),
+ (COPY_SRC, "    let accept = opts.accept_stale_pages;", "    let accept = true;", COPYT),
+ (COPY_SRC, "        if v2.pages.get(page)?.standing != Standing::Unconfirmed {", "        if v2.pages.get(page)?.standing == Standing::Lost {", COPYS),
+ (COPY_SRC, "            if !others.any(|o| overlaps(extra, o)) {", "            if true || !others.any(|o| overlaps(extra, o)) {", COPYS),
+ (COPY_SRC, "            if !others.any(|o| overlaps(extra, o)) {", "            if false && !others.any(|o| overlaps(extra, o)) {", COPYS),
+ (COPY_SRC, ".chain(o.header_at.iter().map(|&h| (h, block)))", ".chain(o.header_at.iter().map(|&h| (h, block)).filter(|_| false))", COPYS),
+ (COPY_SRC, ".chain(v2.holds.iter().filter_map(|h| h.span))", ".chain(v2.holds.iter().filter_map(|h| h.span).filter(|_| false))", COPYS),
+ (COPY_SRC, ".chain(v2.holds.iter().flat_map(|h| h.own.iter().copied()))", ".chain(v2.holds.iter().flat_map(|h| h.own.iter().copied()).filter(|_| false))", COPYS),
+ (COPY_SRC, ".chain(core::iter::once((0, self.inner.layout.data_start())))", ".chain(core::iter::once((0, self.inner.layout.data_start())).filter(|_| false))", COPYS),
+ (COPY_SRC, "        if let Some(extra) = extra.filter(|_| !lost) {", "        if let Some(extra) = extra.filter(|_| !lost || true) {", COPYS),
+ (COPY_SRC, "            offset += piece.len() as u64;\n            at += piece.len() as u64;", "            offset += 0 * piece.len() as u64;\n            at += piece.len() as u64;", COPYS),
+ (COPY_SRC, "                    src.read_raw(&f.source, at, file + done, &mut buf[..n])?;", "                    src.read_raw(&f.source, at, file, &mut buf[..n])?;", COPYS),
+ (COPY_SRC, ".filter(|e| e.1 != r.id.get())", ".filter(|_| false)", COPYS),
+ (COPY_SRC, "a < b + m && b < a + n;", "a < b + m && n > 0;", COPYS),
+ (COPY_SRC, "a < b + m && b < a + n;", "b < a + n && m > 0;", COPYS),
+ (COPY_SRC, "        let full = if r.kind == RegionKind::Slot {", "        let full = if false {", COPYS),
+ (COPY_SRC, "            verified_up_to.push((f.name.clone(), *recorded));", "            verified_up_to.truncate(0);\n            let _ = recorded;", COPYS),
+ (COPY_SRC, "            superseded.push(f.name.clone());", "            superseded.truncate(0);", COPYS),
+ (COPY_SRC, "        omitted = src.omitted_for_copy();", "        omitted.truncate(0);\n        let _ = src.omitted_for_copy();", COPYS),
+ (COPY_SRC, "        lost_pages.clone_from(&report.metadata.lost_pages);", "        lost_pages.truncate(0);", COPYS),
+ (COPY_SRC, "        stale_pages.clone_from(&report.metadata.stale_pages);", "        stale_pages.truncate(0);", COPYS),
+ (COPY_SRC, "            superseded: r.superseded || self.at_risk(r),", "            superseded: r.superseded || (self.at_risk(r) && false),", COPYS),
+ (COPY_SRC, "            (pg.standing == Standing::Unconfirmed || pg.pair.possibly_accepted())", "            (pg.standing == Standing::Unconfirmed || (pg.pair.possibly_accepted() && false))", COPYS),
+ (COPY_SRC, "                    i != page && (o.standing", "                    (i != page || true) && (o.standing", COPYS),
+ (COPY_SRC, "(o.standing != Standing::Confirmed || o.pair.possibly_accepted())", "(o.standing != Standing::Confirmed || (o.pair.possibly_accepted() && false))", COPYS),
+ (COPY_SRC, "        if let Some((ranges, _)) = &f.full {", "        if let Some((ranges, _)) = f.full.as_ref().filter(|_| false) {", COPYS),
  # The inline fast path (G1 P1).
  (EXEC_SRC, "        self.core.table.busy();\n        let _idle", "        if false {\n            self.core.table.busy();\n        }\n        let _idle", INLINE),
  (EXEC_SRC, "                self.0.publish();", "                let _ = &self.0;", INLINE),

@@ -6,7 +6,10 @@
 //! volume record). A source with unavailable regions, table entries that do
 //! not decode, or a stale or lost table page is refused, as is one holding
 //! a slot object larger than a format-2 slot takes, before anything is
-//! created. The target directory's copy lock ([`COPY_LOCK`], held for the
+//! created; with [`CopyOptions::accept_stale_pages`] such a source is
+//! copied as far as it can be (spec §12 "What `copy_store` copies"): the
+//! regions of a stale page in full, what is left out or uncertain
+//! reported. The target directory's copy lock ([`COPY_LOCK`], held for the
 //! whole copy) keeps two copies into one directory apart. The target is
 //! created there under a temporary container name, every region recreated
 //! with its name, kind, data size, cap, tag, region generation, fill
@@ -21,10 +24,14 @@ use std::path::Path;
 use store_io_core::errno::{is_already_exists, is_lock_held, is_not_found};
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op};
 use store_io_core::id::RegionId;
+use store_io_format::judge::Standing;
 use store_io_format::meta::{FillPattern, REGION_META_LEN, RegionKind, RegionMeta};
 use store_io_format::meta2::{FLAG_CAPPED, decode_region_header, max_object};
 use store_io_format::slot::FORMAT_2;
-use store_io_platform::{FileMode, FileName, Platform};
+use store_io_platform::{FileMode, FileName, IoOp, Platform};
+
+use crate::exec::{Ran, clear_stale, run};
+use crate::settle::settle_read;
 
 use crate::RegionOptions;
 use crate::store::{CONTAINER, LiveRegion, Store, StoreOptions, io, lock_meta};
@@ -45,10 +52,36 @@ pub struct CopyOptions {
     /// size is the source's whatever this says, and its table holds at
     /// least the source's regions; the container format is 2.
     pub store: StoreOptions,
+    /// Copy a source the open left frozen (a stale or lost table page) or
+    /// with unavailable regions or entries this version cannot read,
+    /// instead of refusing it (spec §12, "What `copy_store` copies"; the
+    /// way out of a store no repair can mend in place):
+    /// - every usable region, by its recorded data size;
+    /// - a usable region of a stale page **in full**: its whole capacity,
+    ///   plus the extra extent its header lists when that overlaps no other
+    ///   region's footprint and no reserved span (a growth whose commit may
+    ///   be the page's lost one); the target's data size covers all of it,
+    ///   and its recorded data size is reported
+    ///   ([`CopyReport::verified_up_to`]): the bytes past it may never
+    ///   have been written, may be the newest, or (where no check can
+    ///   tell: a growth another damaged header never listed, an uncommitted
+    ///   one of a confirmed page's region) may never have been this
+    ///   region's;
+    /// - every stale page reported ([`CopyReport::stale_pages`]): its
+    ///   newest commit is given up, so a region it created is missing and
+    ///   one it released is back;
+    /// - unavailable regions and unreadable entries left out, reported
+    ///   ([`CopyReport::omitted`]); a lost page's regions are unknown,
+    ///   reported by page ([`CopyReport::lost_pages`]);
+    /// - a possibly superseded region copied and reported
+    ///   ([`CopyReport::superseded`]): it may read another region's bytes.
+    ///
+    /// Default false: such a source is refused.
+    pub accept_stale_pages: bool,
 }
 
 /// What [`copy_store`] copied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyReport {
     /// Regions recreated in the target (slots included).
     pub regions: usize,
@@ -56,6 +89,33 @@ pub struct CopyReport {
     pub bytes: u64,
     /// The source's container format.
     pub source_format: u16,
+    /// With `accept_stale_pages`: the source's table entries left out
+    /// (unavailable regions, entries of a kind or name this version cannot
+    /// read), by id; the source's report says why.
+    pub omitted: Vec<RegionId>,
+    /// With `accept_stale_pages`: the source's lost table pages (no copy
+    /// of them reads): their regions are unknown, none copied; a region
+    /// they may have taken the bytes of is listed in
+    /// [`Self::superseded`], and no extra extent is copied.
+    pub lost_pages: Vec<u32>,
+    /// With `accept_stale_pages`: the source's stale table pages (a newer
+    /// copy damaged): each one's newest commit is given up, so a region
+    /// that commit created is missing from the copy and one it released is
+    /// in it, whatever regions the page holds.
+    pub stale_pages: Vec<u32>,
+    /// With `accept_stale_pages`: each region of a stale page, copied in
+    /// full, with its recorded data size (name, bytes): only that much is
+    /// known to be the region's acknowledged data (unless it is also listed
+    /// in [`Self::superseded`]).
+    pub verified_up_to: Vec<(String, u64)>,
+    /// With `accept_stale_pages`: the regions copied that may hold another
+    /// region's bytes, by name: possibly superseded (spec §9 step 4:
+    /// another region's newer footprint may cover them), or of a stale or
+    /// possibly accepted page while another page is stale or lost (D-130:
+    /// a given-up commit may have released one, and another given-up
+    /// commit handed its space to a region it created). The source held
+    /// each read-only; the copy's is writable.
+    pub superseded: Vec<String>,
 }
 
 /// What a recreated region keeps of its source (internal: for the
@@ -72,12 +132,21 @@ pub(crate) struct CopyAttrs {
 struct Facts {
     name: String,
     kind: RegionKind,
+    /// The target's data size (the source's, or a full copy's length).
     data_size: u64,
     /// Its cap (format 2's capped regions): the target is capped there too.
     cap: Option<u64>,
     attrs: CopyAttrs,
     /// A slot's committed object, if any.
     object: Option<Vec<u8>>,
+    /// A region of a stale page, copied in full: the container ranges, in
+    /// data order (its capacity, then its extra extent if taken), and its
+    /// recorded data size.
+    full: Option<(Vec<(u64, u64)>, u64)>,
+    /// Possibly superseded (spec §9 step 4).
+    superseded: bool,
+    /// The source region (a full copy reads its runs and extra extent).
+    source: std::sync::Arc<LiveRegion>,
 }
 
 /// Copies the store in `from` into a new format-2 store in `to`, whose
@@ -95,7 +164,12 @@ struct Facts {
 /// for a source with unavailable regions or table entries that do not
 /// decode (the first in the error's context; the source's report lists
 /// them all), `NotWritten(Frozen)` for one with a stale or lost table
-/// page, `NotWritten(TooLarge)` for a slot object larger than a format-2
+/// page (both unless [`CopyOptions::accept_stale_pages`]: then copied as
+/// far as they can be; a full copy's read fails as a region read does:
+/// `Corruption(MediaError)` naming the region and range, `Io`,
+/// `NotWritten(Interrupted | QueueFull)`, or `Corruption(Metadata)` for a
+/// read cut short, `NotWritten(PoolExhausted)`), `NotWritten(TooLarge)` for
+/// a slot object larger than a format-2
 /// slot holds (that region in the context), all before anything is
 /// created; `Io` if whether `to` holds a store cannot be told (any failure
 /// to look but "not found"), before anything but the target directory
@@ -126,26 +200,45 @@ where
             ..ErrorContext::default()
         },
     };
-    // The source's state now (a read-only open: what its open found).
-    if let Some(u) = src.unavailable_regions().first() {
-        return Err(refused(NotWrittenCause::NotReady, Some(u.id)));
-    }
-    // An entry whose kind or name does not decode (a newer release's) is
-    // a region the copy cannot recreate (the list may be truncated: any).
-    if let Some(&(p, s)) = report.metadata.invalid_entries.first() {
-        let id = RegionId::from_raw((u64::from(p) << 32) | u64::from(s));
-        return Err(refused(NotWrittenCause::NotReady, Some(id)));
-    }
-    if src.frozen() {
-        return Err(refused(NotWrittenCause::Frozen, None));
+    let accept = opts.accept_stale_pages;
+    let (mut omitted, mut lost_pages, mut stale_pages) = (Vec::new(), Vec::new(), Vec::new());
+    if accept {
+        // Every entry the open holds space for without serving it: the
+        // unavailable regions and the entries of an unknown kind (format
+        // 2's holds are the whole list; format 1 has only the former).
+        omitted = src.omitted_for_copy();
+        lost_pages.clone_from(&report.metadata.lost_pages);
+        stale_pages.clone_from(&report.metadata.stale_pages);
+    } else {
+        // The source's state now (a read-only open: what its open found).
+        if let Some(u) = src.unavailable_regions().first() {
+            return Err(refused(NotWrittenCause::NotReady, Some(u.id)));
+        }
+        // An entry whose kind or name does not decode (a newer release's)
+        // is a region the copy cannot recreate (the list may be truncated:
+        // any).
+        if let Some(&(p, s)) = report.metadata.invalid_entries.first() {
+            let id = RegionId::from_raw((u64::from(p) << 32) | u64::from(s));
+            return Err(refused(NotWrittenCause::NotReady, Some(id)));
+        }
+        if src.frozen() {
+            return Err(refused(NotWrittenCause::Frozen, None));
+        }
     }
     let block = report.block_size;
     let log2 = block.trailing_zeros() as u8;
     let source_format = report.format;
     let regions = src.regions_snapshot();
     let mut facts = Vec::with_capacity(regions.len());
+    let (mut verified_up_to, mut superseded) = (Vec::new(), Vec::new());
     for r in &regions {
-        let f = src.facts_for_copy(r)?;
+        let f = src.facts_for_copy(r, &regions)?;
+        if let Some((_, recorded)) = &f.full {
+            verified_up_to.push((f.name.clone(), *recorded));
+        }
+        if f.superseded {
+            superseded.push(f.name.clone());
+        }
         if f.object
             .as_ref()
             .is_some_and(|o| o.len() > max_object(log2))
@@ -247,6 +340,11 @@ where
         regions: facts.len(),
         bytes,
         source_format,
+        omitted,
+        lost_pages,
+        stale_pages,
+        verified_up_to,
+        superseded,
     })
 }
 
@@ -264,8 +362,153 @@ impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
-    /// What `copy_store` keeps of region `r` (either format).
-    fn facts_for_copy(&self, r: &LiveRegion) -> Result<Facts, Error> {
+    /// The entries `copy_store` leaves out (`CopyReport::omitted`): format
+    /// 2's holds (every unavailable or unknown-kind entry), else the
+    /// unavailable regions.
+    fn omitted_for_copy(&self) -> Vec<RegionId> {
+        let meta = lock_meta(&self.inner.meta);
+        match meta.v2.as_deref() {
+            Some(v2) => {
+                let mut ids: Vec<RegionId> = v2
+                    .holds
+                    .iter()
+                    .map(|h| RegionId::from_raw(h.id()))
+                    .collect();
+                ids.sort_unstable_by_key(|id| id.get());
+                ids
+            }
+            None => {
+                let mut ids: Vec<RegionId> = meta.unavailable.iter().map(|u| u.id).collect();
+                ids.sort_unstable_by_key(|id| id.get());
+                ids
+            }
+        }
+    }
+
+    /// A region of a stale page, copied in full (format 2): its runs over
+    /// the whole capacity, then its extra extent when that overlaps nothing
+    /// any other bytes may belong to: the volume record and table, the
+    /// region's own header blocks and runs, every other region's (header
+    /// blocks and runs over the capacity, an extra extent), and every
+    /// unavailable entry's reserved span and possible writes; never while a
+    /// page is lost (its regions' footprints are unknown). `None` on a
+    /// confirmed page.
+    fn full_copy(
+        &self,
+        r: &LiveRegion,
+        regions: &[std::sync::Arc<LiveRegion>],
+    ) -> Option<(Vec<(u64, u64)>, u64)> {
+        let meta = lock_meta(&self.inner.meta);
+        let v2 = meta.v2.as_deref()?;
+        let page = usize::try_from(r.id.get() >> 32).ok()?;
+        if v2.pages.get(page)?.standing != Standing::Unconfirmed {
+            return None;
+        }
+        let block = self.block();
+        let mut ranges: Vec<(u64, u64)> = r.map.extents().collect();
+        let overlaps = |(a, n): (u64, u64), (b, m): (u64, u64)| a < b + m && b < a + n;
+        let extra = v2
+            .stale_extra
+            .iter()
+            .find(|e| e.1 == r.id.get())
+            .map(|e| e.2);
+        let lost = v2
+            .pages
+            .iter()
+            .any(|p| p.standing != Standing::Confirmed && p.standing != Standing::Unconfirmed);
+        if let Some(extra) = extra.filter(|_| !lost) {
+            let mut others = regions
+                .iter()
+                .flat_map(|o| {
+                    o.map
+                        .extents()
+                        .chain(o.header_at.iter().map(|&h| (h, block)))
+                        .collect::<Vec<_>>()
+                })
+                .chain(core::iter::once((0, self.inner.layout.data_start())))
+                .chain(v2.holds.iter().filter_map(|h| h.span))
+                .chain(v2.holds.iter().flat_map(|h| h.own.iter().copied()))
+                .chain(
+                    v2.stale_extra
+                        .iter()
+                        .filter(|e| e.1 != r.id.get())
+                        .map(|e| e.2),
+                );
+            if !others.any(|o| overlaps(extra, o)) {
+                ranges.push(extra);
+            }
+        }
+        Some((ranges, r.map.len()))
+    }
+
+    /// Reads `out.len()` bytes of the container at `offset` (both whole
+    /// blocks), whatever `r`'s data size says: a copy's full region, `at`
+    /// the region offset they stand for (named in an error, as a region
+    /// read's verdict is: `settle_read`).
+    fn read_raw(
+        &self,
+        r: &LiveRegion,
+        mut at: u64,
+        mut offset: u64,
+        out: &mut [u8],
+    ) -> Result<(), Error> {
+        let mut lane = self.inner.queues.get(0);
+        clear_stale(&mut lane).map_err(|raw| io(Op::Read, raw))?;
+        let chunk = self.chunk();
+        for piece in out.chunks_mut(chunk) {
+            let c = crate::io::ctx_range(r, at, at + piece.len() as u64);
+            let buf = self.take(piece.len(), c)?;
+            let op = IoOp::Read {
+                file: &self.inner.file,
+                offset,
+                buf,
+            };
+            let (got, result) = match run(&mut lane, op) {
+                Ok(Ran::Done { buf, result }) => (buf, result),
+                // The wait failed with the read in flight: the queue's
+                // failure, no verdict on the media.
+                Ok(Ran::Abandoned(raw)) | Err((_, Some(raw))) => return Err(io(Op::Read, raw)),
+                Err((_, None)) => {
+                    return Err(crate::io::not_written(NotWrittenCause::QueueFull, c));
+                }
+            };
+            let n = settle_read(self, r, at, at + piece.len() as u64, got.as_ref(), result)?;
+            match got {
+                Some(b) if n == piece.len() => piece.copy_from_slice(&b.as_slice()[..n]),
+                // Short: bytes the region's runs say exist are not there.
+                _ => return Err(crate::store::corrupt()),
+            }
+            offset += piece.len() as u64;
+            at += piece.len() as u64;
+        }
+        Ok(())
+    }
+
+    /// Whether `r`, on a stale or possibly accepted page while another page
+    /// is too (or lost), may hold another region's bytes (D-130): each
+    /// such page's newest commit may be given up, one releasing `r`, the
+    /// other handing its space to a region it created.
+    fn at_risk(&self, r: &LiveRegion) -> bool {
+        let meta = lock_meta(&self.inner.meta);
+        let Some(v2) = meta.v2.as_deref() else {
+            return false;
+        };
+        let page = usize::try_from(r.id.get() >> 32).unwrap_or(usize::MAX);
+        v2.pages.get(page).is_some_and(|pg| {
+            (pg.standing == Standing::Unconfirmed || pg.pair.possibly_accepted())
+                && v2.pages.iter().enumerate().any(|(i, o)| {
+                    i != page && (o.standing != Standing::Confirmed || o.pair.possibly_accepted())
+                })
+        })
+    }
+
+    /// What `copy_store` keeps of region `r` (either format); `regions` is
+    /// every region of the store (a full copy's overlap test).
+    fn facts_for_copy(
+        &self,
+        r: &std::sync::Arc<LiveRegion>,
+        regions: &[std::sync::Arc<LiveRegion>],
+    ) -> Result<Facts, Error> {
         let inner = &self.inner;
         let header = r
             .header
@@ -325,11 +568,21 @@ where
         } else {
             None
         };
+        // A slot's object is whole as committed: never copied "in full".
+        let full = if r.kind == RegionKind::Slot {
+            None
+        } else {
+            self.full_copy(r, regions)
+        };
+        let data_size = full
+            .as_ref()
+            .map_or(r.map.len(), |(ranges, _)| ranges.iter().map(|x| x.1).sum());
         Ok(Facts {
             name: r.name.as_str().to_owned(),
             kind: r.kind,
-            data_size: r.map.len(),
-            cap: capped.then(|| r.map.capacity()),
+            data_size,
+            // A capped region copied in full holds all of it.
+            cap: capped.then(|| r.map.capacity().max(data_size)),
             attrs: CopyAttrs {
                 generation,
                 fill,
@@ -337,6 +590,9 @@ where
                 tag,
             },
             object,
+            full,
+            superseded: r.superseded || self.at_risk(r),
+            source: std::sync::Arc::clone(r),
         })
     }
 
@@ -362,6 +618,28 @@ where
             });
         }
         let mut buf = vec![0u8; CHUNK];
+        if let Some((ranges, _)) = &f.full {
+            let mut at = 0u64;
+            for &(file, len) in ranges {
+                let mut done = 0u64;
+                while done < len {
+                    let n = (len - done).min(CHUNK as u64) as usize;
+                    src.read_raw(&f.source, at, file + done, &mut buf[..n])?;
+                    match f.kind {
+                        RegionKind::Page => {
+                            let to = self.page_region(&f.name)?;
+                            let _ticket = to.write(to.pos(at)?, &buf[..n])?;
+                        }
+                        _ => {
+                            let _ticket = self.append_region(&f.name)?.append(&buf[..n])?;
+                        }
+                    }
+                    done += n as u64;
+                    at += n as u64;
+                }
+            }
+            return Ok(f.data_size);
+        }
         match f.kind {
             RegionKind::Slot => {
                 let Some(object) = &f.object else {

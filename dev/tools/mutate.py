@@ -100,6 +100,7 @@ CREATE = "crates/store-io-engine/src/create.rs"
 SIMW = "crates/store-io-sim/src/world.rs"
 SIMP = "crates/store-io-sim/src/platform.rs"
 MODEL = ["-p", "store-io-sim", "--test", "model"]
+CRASH_OPEN = ["-p", "store-io-engine", "--test", "format2_crash_open"]
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -1013,6 +1014,12 @@ M = [
  (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        // A deallocation', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        // A deallocation', MODEL),
  (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate_range(', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate_range(', MODEL),
  (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.flush_all(', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.flush_all(', MODEL),
+ # E7 C3: a killed process's locks released and handles dead, its cache kept
+ (SIMW, '    pub fn kill(&mut self) {\n        self.locks.clear();\n        self.epoch += 1;', '    pub fn kill(&mut self) {\n        self.epoch += 1;', MODEL),
+ (SIMW, '    pub fn kill(&mut self) {\n        self.locks.clear();\n        self.epoch += 1;', '    pub fn kill(&mut self) {\n        self.locks.clear();', MODEL),
+ (SIMW, '    pub fn restore_power(&mut self) {\n        self.powered_off = false;', '    pub fn restore_power(&mut self) {\n        self.powered_off = true;', MODEL),
+ # E7 C3: the open drains a dead owner's cached writes before reading a slot
+ ('crates/store-io-engine/src/open.rs', '            platform\n                .flush_all(&file)\n                .map_err(|e| Error::DurabilityUnknown {', '            Ok::<(), OsError>(())\n                .map_err(|e| Error::DurabilityUnknown {', CRASH_OPEN),
 ]
 
 def kill_stuck_tests():

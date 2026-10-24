@@ -143,7 +143,7 @@ pub(crate) fn fates(blocks: &[usize], seed: u64) -> (Vec<Vec<Fate>>, bool) {
 
 /// What two opens must agree on: the regions, each one's length, and the
 /// stale and lost pages.
-fn summary(s: &Store<SimPlatform>) -> String {
+pub(crate) fn summary(s: &Store<SimPlatform>) -> String {
     let mut regions = s.regions();
     regions.sort_by(|a, b| a.0.cmp(&b.0));
     let lens: Vec<u64> = regions

@@ -814,3 +814,33 @@ fn test_a_lost_write_below_a_kept_one_is_unwritten_after_a_settled_crash() {
     assert_eq!(unwritten(vec![Torn(1), Kept]), [false, true, true, false]);
     assert_eq!(unwritten(vec![Kept, Kept]), [false, false, true, false]);
 }
+
+#[test]
+fn test_a_killed_process_leaves_its_cache_for_the_next_flush() {
+    let (p, d, f, pool) = setup(SimConfig::volatile(15));
+    let lock = p.lock_exclusive(&f).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &f, &pool, 0, 4, false);
+    drain(&mut q);
+    // Frozen by a power cut (its flush refused), then killed, the power
+    // back without a crash.
+    p.with_world(store_io_sim::World::cut_power);
+    assert!(p.flush_all(&f).is_err());
+    p.with_world(|w| {
+        w.kill();
+        w.restore_power();
+    });
+    assert!(!p.with_world(|w| w.powered_off()));
+    // Its handle is dead, its lock released, its write still cached.
+    assert!(p.flush_all(&f).is_err());
+    drop(lock);
+    let f = p
+        .open_file(&d, &FileName::new("f").unwrap(), FileMode::ReadWrite)
+        .unwrap();
+    let _lock = p.lock_exclusive(&f).unwrap();
+    assert_eq!(p.with_world(|w| w.cached_extents().len()), 1);
+    // Anyone's flush makes it durable.
+    p.flush_all(&f).unwrap();
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    assert_eq!(media(&p)[0], 4);
+}

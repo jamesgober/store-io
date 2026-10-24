@@ -610,6 +610,22 @@ impl World {
             .collect()
     }
 
+    /// The process dies and the machine stays up: its locks are released
+    /// and its handles stop working (as after a crash), but the cache and
+    /// the media stay as they are, so a write it completed still reaches
+    /// the media at the next flush of its file, by anyone.
+    pub fn kill(&mut self) {
+        self.locks.clear();
+        self.epoch += 1;
+    }
+
+    /// Turns the power back on without a crash, the cache intact: the
+    /// device a step probe stopped works again (a process frozen at a step,
+    /// then killed: [`World::kill`]).
+    pub fn restore_power(&mut self) {
+        self.powered_off = false;
+    }
+
     /// Cuts the power ([`World::set_step_probe`]): every step and every
     /// completion fails with EIO until the next crash.
     pub fn cut_power(&mut self) {

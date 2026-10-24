@@ -20,6 +20,7 @@
 12. [Tuning](#12-tuning)
 13. [Many operations from one thread: the Submitter](#13-many-operations-from-one-thread-the-submitter)
 14. [Stores made before 0.5](#14-stores-made-before-05)
+15. [A damaged region table: the three ways out](#15-a-damaged-region-table-the-three-ways-out)
 
 ---
 
@@ -389,11 +390,68 @@ println!("{} regions, {} bytes", report.regions, report.bytes);
 - **The source is never written.** It is opened read-only; a writer cannot hold it meanwhile (`Locked`).
 - **Everything comes across.** Every region keeps its name, kind, data size, cap, tag, generation, fill pattern and key; the slots keep their objects. Each region is laid out anew in one extent.
 - **All or nothing.** The copy is built under a temporary name in the target directory (`store.sio.copying`, beside the copy's lock file) and renamed into place only when it is whole and durable: after a crash the target holds no store (copy again: the leftover is removed) or the whole copy.
-- **Refused up front.** A source with unavailable regions or table entries that do not decode, a stale or lost table page, a slot object too large for format 2 (format 1's slots hold 16 bytes more), or a target directory that already holds a store is refused before anything is created. A target device that needs larger blocks than the source's is refused (`NotWritten(Misaligned)`) before any data is copied.
+- **Refused up front.** A source with unavailable regions or table entries that do not decode, or a stale or lost table page (all three unless `CopyOptions::accept_stale_pages`: section 15), a slot object too large for format 2 (format 1's slots hold 16 bytes more), or a target directory that already holds a store is refused before anything is created. A target device that needs larger blocks than the source's is refused (`NotWritten(Misaligned)`) before any data is copied.
 - **Append positions** are not stored on disk in either format: after the copy, as after any open, position each append region with `resume_at` from your own records.
 - **Trust.** The new store is created like any other: `CopyOptions::store` holds its options (`trust` among them; `store-io copy --override-refusal` for a device store-io refuses).
 
 Then open the new store, and keep the old one until you have checked it.
+
+---
+
+## 15. A damaged region table: the three ways out
+
+A format-2 store keeps its region table in pages, each written as two copies. When the newer copy of a page is damaged, store-io cannot tell whether that copy held a commit you were told was durable, so it never guesses:
+
+- **The page is stale** (`report().metadata.stale_pages`): its regions are served from the older copy, **read-only**; a page with no readable copy at all is **lost** (`lost_pages`), its regions unknown.
+- **Allocation is frozen** (`store.frozen()`): no provisioning, growth beyond capacity, release or repair, while any page is stale or lost.
+- **A region the open could not use** (a header that does not verify, an overlap, a name taken twice) is listed by `store.unavailable_regions()`, its space and name kept reserved.
+
+The store still opens: everything else is readable, and most regions of confirmed pages stay writable (not one possibly superseded, one whose header carries a feature this version may not write, or one whose page may hold an accepted rollback while another page is stale or lost: those are read-only too). Nothing is repaired automatically. You choose:
+
+**1. Release an unavailable region's entry: `repair_unavailable(id)`.** Allocation must not be frozen. The entry's table page is rewritten without it; its space becomes free where no other region uses it, its name reusable. Its bytes are not touched. Refused for an entry another verdict of the open rests on (`NotWritten(Overlap)`, naming the region to repair first, or the one it may have superseded), and while its page cannot be rewritten (`NotWritten(Frozen)`: the page not confirmed, or holding an entry newer than the page's own last write). Order matters: repair the region the error names first.
+
+```rust
+for u in store.unavailable_regions() {
+    // You decided its data is gone. `NotWritten(Overlap)` names the
+    // region to repair before this one.
+    store.repair_unavailable(u.id)?;
+}
+```
+
+**2. Accept a stale page as it is: `accept_page_rollback(&[page])`.** Its older copy becomes the page, written again over the damaged one and read back: whatever the page's newest commit did is given up (a region it created is gone, one it released is back). A page whose copies are both unreadable (lost) cannot be accepted, nor one holding an entry newer than the page's own last write (`NotWritten(Frozen)`: copy that store). The pages' regions become writable (not one possibly superseded, or with a header feature this version may not write), and allocation unfreezes, only once no page is stale or lost: until then a region of an accepted page may be one a given-up commit released, its space handed to a region of another stale page. Each accept is recorded (`store.repairs()`, for your own log).
+
+```rust
+let stale = store.report().metadata.stale_pages.clone();
+store.accept_page_rollback(&stale)?;
+// Unfrozen, unless a page is lost (then: copy the store).
+assert_eq!(store.frozen(), !store.report().metadata.lost_pages.is_empty());
+```
+
+**3. Copy what can be copied: `copy_store` with `accept_stale_pages`.** For a store no repair can mend in place (a lost page, an entry no removal may lift), copy it into a new one (section 14), reading it as far as it can be read:
+
+```text
+store-io copy --accept-stale-pages data/orders data/orders-2
+```
+
+```rust
+use store_io::CopyOptions;
+
+let report = store_io::copy_store(
+    "data/orders",
+    "data/orders-2",
+    CopyOptions { accept_stale_pages: true, ..CopyOptions::default() },
+)?;
+```
+
+Every usable region is copied by its data size. A region of a stale page is copied **in full** (its whole capacity, and a growth its header lists when that overlaps nothing else and no page is lost), because its newest data may lie past what the older copy recorded. The report says what the copy cannot vouch for, and the tool prints it and exits with status 3:
+
+- `verified_up_to`: each region copied in full, with the size its page recorded: only that much is known to be its data (unless it is also listed in `superseded`).
+- `stale_pages`: each one's newest commit is given up in the copy too.
+- `lost_pages`: their regions are unknown, none copied.
+- `omitted`: the entries left out (the source's report says why).
+- `superseded`: the regions that may hold another region's bytes. The source served them read-only; in the copy they are writable, so check them against your own records.
+
+Which way: a damaged header with nothing stale is (1); a page torn by a crash, where you accept losing its last commit, is (2), then (1) for what it leaves unavailable; anything with a lost page, or that (1) and (2) refuse, is (3). Keep the old store until you have checked the result.
 
 
 ---

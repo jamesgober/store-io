@@ -37,7 +37,11 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | `Store::open_with(path, StoreOptions) -> Result<Store>` | As `open`, with explicit options. |
 | `Store::open_readonly(path) -> Result<Store>` | Opens for reading and recovery with one handle that has no write rights, so it works on a read-only mount or a write-protected copy; nothing on disk changes. Takes the shared form of the ownership lock: other readers may open the store at the same time, and no writer runs meanwhile. |
 | `store.append_region(name)` / `page_region(name)` / `slot(name)` | Looks up an existing region or slot. Never creates one. A name the region table holds but open could not use returns `Corruption` naming the region (`Truncated`, `HeaderCrc` or `Metadata`), never `NotFound`. |
-| `store.unavailable_regions() -> Vec<UnavailableRegion>` | Regions the region table names that open could not use, each with its name, id, kind and reason (`Unavailable`): the container is too short, neither header copy is valid, the header holds impossible values, belongs to another region, or says released. Empty for a healthy store. Their names stay reserved. |
+| `store.unavailable_regions() -> Vec<UnavailableRegion>` | Regions the region table names that open could not use, each with its name, id, kind and reason (`Unavailable`): the container is too short, neither header copy is valid, the header holds impossible values, belongs to another region, or says released. Empty for a healthy store. Their names stay reserved. Live: a repair removes its entry. |
+| `store.frozen() -> bool` | Allocation frozen: a table page is stale or lost (format 2). No provisioning, growth beyond capacity, release or repair until no page is (`accept_page_rollback`), or copy the store (`copy_store` with `accept_stale_pages`). |
+| `store.repair_unavailable(id) -> Result<()>` | Releases an unavailable region's table entry (format 2, not frozen; an entry of an unknown kind too, by id). Its page is rewritten without it; its space becomes free where no other region uses it, its name reusable; its bytes are not touched. `NotWritten(Overlap)` (naming the region) for an entry another verdict of the open rests on; `NotWritten(Frozen)` while its page cannot be rewritten (not confirmed, or holding an entry newer than its own last write). See [GUIDE §15](GUIDE.md#15-a-damaged-region-table-the-three-ways-out). |
+| `store.accept_page_rollback(pages) -> Result<()>` | Accepts stale table pages as their older copies (format 2): each rewritten over its damaged copy and read back, its newest commit given up. Every page is checked first (a lost page: `NotWritten(NotReady)`; a page holding an entry newer than its last write: `NotWritten(Frozen)`). Regions become writable (not a possibly superseded one, or one with a header feature this version may not write) and allocation unfreezes once no page is stale or lost. A failure after the rewrite poisons the store (the next open decides the page). |
+| `store.repairs() -> Vec<Repair>` | What this handle's repairs and accepts did (`EntryReleased`, `InvalidEntryReleased`, `PageAccepted`), for your own log; store-io prints nothing. `store.report()` stays what the open found. |
 | `store.provision_append_region(name, bytes)` | Creates an append region with at least `bytes` of data area, writing and verifying every block first. |
 | `store.provision_page_region(name, bytes)` | Creates a page region likewise. |
 | `store.provision_slot(name)` | Creates a small-object slot. |
@@ -215,7 +219,7 @@ None of these can be constructed outside store-io.
 | Item | Description |
 |---|---|
 | `probe(dir) -> Result<Probe>` | The `Evidence` and `ClassDecision` for the device under an existing directory (creates and removes a small temporary file). |
-| `copy_store(from, to, CopyOptions) -> Result<CopyReport>` | Copies a store (format 1 or 2) into a new format-2 store in `to`: the source opened read-only, every region recreated with its attributes and data, built under `COPYING` and renamed into place only when whole and durable (`to`'s `COPY_LOCK` held throughout). `CopyOptions::store` holds the target's `StoreOptions` (trust among them); `CopyReport` has `regions`, `bytes`, `source_format`. |
+| `copy_store(from, to, CopyOptions) -> Result<CopyReport>` | Copies a store (format 1 or 2) into a new format-2 store in `to`: the source opened read-only, every region recreated with its attributes and data, built under `COPYING` and renamed into place only when whole and durable (`to`'s `COPY_LOCK` held throughout). `CopyOptions::store` holds the target's `StoreOptions` (trust among them). `CopyOptions::accept_stale_pages` copies a source with a stale or lost table page or unusable entries instead of refusing it: a stale page's regions in full. `CopyReport` has `regions`, `bytes`, `source_format`, and, for such a copy, `omitted`, `lost_pages`, `stale_pages`, `verified_up_to` and `superseded` (what the copy cannot vouch for: [GUIDE §15](GUIDE.md#15-a-damaged-region-table-the-three-ways-out)). |
 | `DurabilityClass` | `PowerSafe`, `FlushRequired`, `Unverified`, `Unsafe`. |
 | `ReceiptLabel` | `Evidence`, `Certified(id)`, `Attested(id)`, `Overridden(reasons)`. |
 | `ClassDecision` | `class`, `label`, `durable_open: DurableOpen` (`Allowed`, `Overridden`, `RefusedUnsafe`, `RefusedUnverified`), `reasons: ReasonSet`, `missing: MissingSet`, `power_safe_candidate`. |
@@ -269,8 +273,10 @@ Built with the `cli` feature (`cargo install store-io --features cli`):
 ```text
 store-io probe <dir>    evidence and durability class of <dir>'s device
 store-io info <store>   a store's report, regions and space (read-only)
-store-io copy [--override-refusal] <old> <new>
+store-io copy [--override-refusal] [--accept-stale-pages] <old> <new>
                         copy the store in <old> into a new format-2 store in <new>
+                        (--accept-stale-pages: a damaged table copied as far as it
+                        can be; exit status 3 when it lists what it could not vouch for)
 ```
 
 ---

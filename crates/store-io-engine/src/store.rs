@@ -556,9 +556,10 @@ where
         self.inner.frozen.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// What this handle's repairs did, in order
-    /// ([`Self::repair_unavailable`]): the store's log of them, for the
-    /// caller to record. The library prints nothing.
+    /// What this handle's repairs and accepts did, in order
+    /// ([`Self::repair_unavailable`], [`Self::accept_page_rollback`]): the
+    /// store's log of them, for the caller to record. The library prints
+    /// nothing.
     #[must_use]
     pub fn repairs(&self) -> Vec<crate::report::Repair> {
         lock_meta(&self.inner.meta).repairs.clone()

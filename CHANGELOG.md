@@ -13,6 +13,15 @@
 
 ### Added
 
+- Harness: `examples/g1probe.rs` (Linux), the probe that found where a QD1
+  durable write's time over the raw primitive went (G1): each side's
+  write and flush halves, their thread CPU, and buffer variants of the raw
+  side; its doc says how it was run (alternated on CI runners, and under
+  callgrind at two write counts).
+- Docs: GUIDE section 15, a damaged region table and its three ways out
+  (`repair_unavailable`, `accept_page_rollback`, `copy_store` with
+  `accept_stale_pages`); API.md rows for `frozen`, `repair_unavailable`,
+  `accept_page_rollback`, `repairs` and the copy's new report.
 - Engine: **`CopyOptions::accept_stale_pages`** (v0.5 E6 C4, spec §12
   "What `copy_store` copies"; CLI `store-io copy --accept-stale-pages`):
   `copy_store` copies a source its open left frozen (a stale or lost

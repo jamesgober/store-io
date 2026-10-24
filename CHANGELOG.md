@@ -428,9 +428,13 @@
   holds nothing, with no op-table row, ready ring or completion buffer:
   the same system call, checks, faults and outcome, the lane's busy mark
   published for the duration (a hung device stays visible to
-  `Store::oldest_outstanding`). One QD1 4 KiB durable write: 5,805 → 4,418
-  user-space instructions (callgrind); 0.7-1.1 µs less CPU per write on an
-  AMD EPYC 7763, 0.3-0.5 µs on newer CPUs. A write of several pieces on
+  `Store::oldest_outstanding`). With fewer instructions around it (a
+  one-piece write's stream holds no spare-buffer array; the write's piece
+  size computed once, at open; a clean lane cleared at once), one QD1
+  4 KiB durable write runs 3,547 user-space instructions, from 5,805
+  (callgrind; the raw `pwritev2` + `fdatasync` loop: 2,026): on an AMD
+  EPYC 7763 its p50 is now about 1-1.8 µs over the raw primitive, from
+  2-4 µs; on newer CPUs within noise of it. A write of several pieces on
   such a queue stops at its first failure. Simulator:
   `SimConfig::inline` (default false; `STORE_IO_SIM_INLINE` set makes it
   true for the whole suite, which CI and the pre-push check run once more).

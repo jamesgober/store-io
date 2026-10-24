@@ -55,7 +55,10 @@ pub(crate) struct Stream<'a> {
     block: usize,
     chunk: usize,
     first: Option<IoBuf>,
-    spare: [Option<IoBuf>; SPARES],
+    /// Free buffers for later pieces (a write of several only): at most
+    /// [`SPARES`] taken at the start, the first buffer joining them once its
+    /// piece is written; only buffers this stream handed out come back.
+    spare: Vec<IoBuf>,
 }
 
 impl Stream<'_> {
@@ -92,7 +95,7 @@ impl Source for Stream<'_> {
         if self.staged >= self.data.len() {
             return Next::Done;
         }
-        let Some(mut buf) = self.spare.iter_mut().find_map(Option::take) else {
+        let Some(mut buf) = self.spare.pop() else {
             return Next::Wait;
         };
         let at = self.fill(&mut buf);
@@ -101,9 +104,7 @@ impl Source for Stream<'_> {
 
     fn recycle(&mut self, buf: IoBuf) {
         if self.staged < self.data.len() {
-            if let Some(slot) = self.spare.iter_mut().find(|s| s.is_none()) {
-                *slot = Some(buf);
-            }
+            self.spare.push(buf);
         }
     }
 }
@@ -250,8 +251,7 @@ where
     /// ordinary pool buffer (`max_io`), in whole blocks. The larger buffers
     /// are for submitter operations (D-101).
     pub(crate) fn chunk(&self) -> usize {
-        let block = self.block() as usize;
-        (self.ordinary() / block * block).max(block)
+        self.inner.chunk
     }
 
     /// A submitter's largest single operation: the pool's largest buffer
@@ -314,7 +314,7 @@ where
     /// The largest ordinary pool buffer, as the pool was built: `max_io`
     /// (rounded and clamped), or the smallest class if that is larger.
     pub(crate) fn ordinary(&self) -> usize {
-        crate::store::io_max(&self.inner.opts).max(self.inner.pool.min_len())
+        self.inner.ordinary
     }
 
     /// A pooled buffer of at least `len` bytes, with its length set to `len`,
@@ -343,14 +343,13 @@ where
         let mut first = self.take(first_len, c)?;
         // A multi-chunk write's first buffer is a whole chunk (`first_len`),
         // so it can be reused for later chunks.
-        let mut spare: [Option<IoBuf>; SPARES] = std::array::from_fn(|_| None);
+        let mut spare = Vec::new();
         if data.len() > chunk {
             // Extra buffers are an optimisation (writes in flight together);
             // one buffer is enough, so a short pool never fails the write.
             let extra = data.len().div_ceil(chunk).saturating_sub(1).min(SPARES);
-            for slot in spare.iter_mut().take(extra) {
-                *slot = self.inner.pool.take_within(chunk, chunk).ok();
-            }
+            spare.reserve_exact(extra + 1);
+            spare.extend((0..extra).filter_map(|_| self.inner.pool.take_within(chunk, chunk).ok()));
         }
         let mut stream = Stream {
             data,

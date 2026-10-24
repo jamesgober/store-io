@@ -69,7 +69,7 @@ fn ending(p: &SimPlatform, s: Store<SimPlatform>, r: &Result<(), Error>) -> Stri
     });
     let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
     let pages = s.page_region("p").unwrap();
-    let mut back = vec![0u8; 1 << 20];
+    let mut back = vec![0u8; 2 << 20];
     pages.read(pages.pos(0).unwrap(), &mut back).unwrap();
     let sum = back
         .iter()
@@ -77,7 +77,7 @@ fn ending(p: &SimPlatform, s: Store<SimPlatform>, r: &Result<(), Error>) -> Stri
     format!("{kind} poisoned={poisoned} bytes={sum:x}")
 }
 
-/// Runs `scenario` (given the platform and region "p", 1 MiB, its first
+/// Runs `scenario` (given the platform and region "p", 2 MiB, its first
 /// 4 KiB written durably) on the slow path and the fast path (where it
 /// waits on no queue): both end the same, and that ending is returned.
 fn both(
@@ -88,7 +88,7 @@ fn both(
     for inline in [false, true] {
         let p = platform(seed, inline);
         let s = Store::create(p.clone(), Path::new(DIR), opts()).unwrap();
-        let pages = s.provision_page_region("p", 1 << 20).unwrap();
+        let pages = s.provision_page_region("p", 2 << 20).unwrap();
         pages
             .write_durable(pages.pos(0).unwrap(), &record(0, B))
             .unwrap();
@@ -104,11 +104,12 @@ fn both(
     endings.pop().unwrap()
 }
 
-/// A durable write, one piece and several: acknowledged, and on the media
-/// after power fails.
+/// A durable write, one piece and several (nine: more pieces than the pool
+/// has buffers to spare, so some spares are never taken): acknowledged, and
+/// on the media after power fails.
 #[test]
 fn test_durable_writes_end_the_same_on_both_paths() {
-    for len in [B, 3 * CHUNK] {
+    for len in [B, 3 * CHUNK, 9 * CHUNK] {
         let e = both(1500, |_, pages| {
             pages
                 .write_durable(pages.pos(0).unwrap(), &record(1, len))

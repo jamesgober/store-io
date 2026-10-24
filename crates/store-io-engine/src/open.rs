@@ -369,6 +369,9 @@ where
         let mut meta = meta;
         meta.unavailable = report.unavailable.clone();
         let frozen = std::sync::atomic::AtomicBool::new(report.metadata.frozen);
+        let block = layout.block() as usize;
+        let ordinary = crate::store::io_max(&opts).max(pool.min_len());
+        let chunk = (ordinary / block * block).max(block);
         Self {
             inner: Arc::new(Inner {
                 domain: Domain::with_slots(1 + flush_files.len()),
@@ -389,6 +392,8 @@ where
                 read_only,
                 owner_generation,
                 opts,
+                ordinary,
+                chunk,
                 acct: Mutex::new(acct),
                 epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 observer: Observer::new(),

@@ -240,9 +240,9 @@ M = [
  ('crates/store-io-engine/src/flusher.rs', '        if self.count.load(Ordering::SeqCst) > 0 || self.woken.load(Ordering::SeqCst) {', '        if (self.count.load(Ordering::SeqCst) > 0 || self.woken.load(Ordering::SeqCst)) && false {'),
  (SUB, '            if self.inbox.take_woken() {\n                break;', '            if self.inbox.take_woken() && false {\n                break;'),
  # D-101: the blocking layers keep max_io pieces; a submitter's largest operation is max_write
- ('crates/store-io-engine/src/io.rs', '        (self.ordinary() / block * block).max(block)', '        (self.inner.pool.max_len() / block * block).max(block)'),
+ ('crates/store-io-engine/src/open.rs', '        let chunk = (ordinary / block * block).max(block);', '        let chunk = (pool.max_len() / block * block).max(block);'),
  (SUB, '        if len > self.max_buf() {', '        if len > self.max_buf() && false {'),
- ('crates/store-io-engine/src/io.rs', '            .take_within(len, self.ordinary())', '            .take(len)'),
+ ('crates/store-io-engine/src/io.rs', '            .take_within(len, self.ordinary())', '            .take_within(len, self.ordinary().max(usize::MAX))'),
  # D-102: a forced region's barriers flush, and only flush-backed receipts say data_synced
  ('crates/store-io-engine/src/io.rs', '        if !self.inner.policy.flush && !r.forced() {', '        if !self.inner.policy.flush && (!r.forced() || true) {'),
  ('crates/store-io-engine/src/optable.rs', '            || store.inner.policy.flush || live.pass.as_ref().is_some_and(|p| p.get().forced());', '            || store.inner.policy.flush;'),
@@ -938,6 +938,7 @@ M = [
  (EXEC_SRC, "        self.core.table.busy();\n        let _idle", "        if false {\n            self.core.table.busy();\n        }\n        let _idle", INLINE),
  (EXEC_SRC, "                self.0.publish();", "                let _ = &self.0;", INLINE),
  (EXEC_SRC, "        let _idle = Idle(&self.core.table);", "        let _ = Idle(&self.core.table);", INLINE),
+ (EXEC_SRC, "    if lane.done.is_empty() && lane.in_flight() == 0 && lane.core.queue.in_flight() == 0 {", "    if lane.in_flight() == 0 && lane.core.queue.in_flight() == 0 {", ["-p", "store-io-engine", "--lib", "exec::"]),
  (EXEC_SRC, "|| !self.done.is_empty() || !self.core.queue.performs() {", "|| !self.done.is_empty() || true {", INLINE),
  (EXEC_SRC, "            return Ok(Ran::Done { buf, result });", "            return Ok(Ran::Done { buf, result: result.or(Ok(0)) });", INLINE),
  (EXEC_SRC, "                            (Ok(n), Some(buf)) if n == buf.len() => src.recycle(buf),\n                            (result, _) => failure = Some(result.err()),", "                            (Ok(_), Some(buf)) => src.recycle(buf),\n                            (result, _) => failure = Some(result.err()),", INLINE),

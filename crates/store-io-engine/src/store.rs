@@ -331,6 +331,11 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) read_only: bool,
     pub(crate) owner_generation: u64,
     pub(crate) opts: StoreOptions,
+    /// The largest ordinary pool buffer (`Store::ordinary`), fixed at open.
+    pub(crate) ordinary: usize,
+    /// One write's largest piece (`Store::chunk`): the ordinary buffer size,
+    /// in whole blocks; fixed at open.
+    pub(crate) chunk: usize,
     /// Space accounting (lock order: `meta`, then `acct`).
     pub(crate) acct: Mutex<Accounting>,
     /// Unique per open store in this process: tickets and receipts of one

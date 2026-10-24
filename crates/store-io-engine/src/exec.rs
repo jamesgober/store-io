@@ -487,14 +487,17 @@ pub(crate) enum Ran {
 /// when its wait failed, row by row, so that every holder starts with no
 /// operation in flight and no completion can ever be taken for another
 /// operation's. A completion means the device is done with its buffer, so
-/// dropping one is safe. One `in_flight` call when the queue is clean
-/// (every time, unless a wait has failed).
+/// dropping one is safe. Nothing to clear (every time, unless a wait has
+/// failed): three counts read, no call into the queue past `in_flight`.
 ///
 /// # Errors
 ///
 /// The raw error if waiting for them fails; nothing of the caller's has been
 /// submitted.
 pub(crate) fn clear_stale<Q: Queue>(lane: &mut Lane<Q>) -> Result<(), OsError> {
+    if lane.done.is_empty() && lane.in_flight() == 0 && lane.core.queue.in_flight() == 0 {
+        return Ok(());
+    }
     lane.done.drain().for_each(drop);
     while lane.core.queue.in_flight() > 0 {
         let n = lane.core.queue.in_flight();
@@ -745,6 +748,25 @@ mod tests {
     use store_io_sim::{SimConfig, SimPlatform};
 
     use crate::{Store, StoreOptions};
+
+    /// A completion left in the lane's buffer (a wait that collected it,
+    /// then failed) is discarded by the next holder even with nothing in
+    /// flight: never taken for another operation's.
+    #[test]
+    fn test_a_stale_completion_is_discarded_with_nothing_in_flight() {
+        let p = SimPlatform::new(SimConfig::volatile(41));
+        let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        let mut lane = s.inner.queues.get(0);
+        let stale = store_io_platform::Completion {
+            tag: 0x5110,
+            buf: None,
+            result: Ok(4096),
+        };
+        assert!(lane.done.push(stale).is_ok());
+        assert_eq!(lane.in_flight(), 0);
+        super::clear_stale(&mut lane).unwrap();
+        assert!(lane.done.is_empty(), "the stale completion was kept");
+    }
 
     /// A refused submission gives its row back at once, within the same
     /// hold of the lane (A1 C5): nothing is left in flight for a later

@@ -297,6 +297,24 @@
 
 ### Changed
 
+- Engine: **format-2 provisioning and growth beyond capacity fill outside
+  the metadata lock** (v0.5 E4 C13, spec §12's "choose and mark"): the
+  space is placed and marked allocated (and charged to its tag, or taken
+  from the reservation) under the lock, filled, flushed, verified and its
+  header written without it, then committed under it, the table page
+  taken as it is then (the region live in the same hold of the lock, so
+  its name passes to no one else). A reservation's bytes stay counted
+  reserved until the commit, so every placement meanwhile still sizes the
+  container past them. Meanwhile other provisionings, growths, releases,
+  reservations and `space()` run (it counts the marked space in use): a
+  1 GiB growth had held `space()` for 253 ms (Windows) and an 8 GiB one
+  for 7.4 s (Linux); now it waits at most 1.0 ms behind a 1 GiB growth
+  and 3.5 ms behind an 8 GiB one (Windows), 70 ms behind an 8 GiB one
+  (Linux; the container's own growth, still under the lock). A provisioning holds its
+  name and its table slot until it commits; a failure before the commit
+  gives back everything it held, a panic too (after a write was submitted
+  the store is poisoned and the space stays held). A failed flush of the
+  main handle now poisons the store before another flush may run.
 - Engine: **an append region in format 2 that may grow (no `max_size`)
   has a completion ring of the append window's size**, however small it
   is (v0.5 E4 C12): a ring sized for a small region held a region grown

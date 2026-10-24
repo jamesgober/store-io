@@ -76,6 +76,8 @@ F2G = ["-p", "store-io-engine", "--test", "format2_grow"]
 F2B = ["-p", "store-io-engine", "--test", "format2_grow_beyond"]
 # Format-2 region options (capped regions).
 F2OPT = ["-p", "store-io-engine", "--test", "format2_options"]
+# Format-2 provisioning and growth beside each other.
+F2CC = ["-p", "store-io-engine", "--test", "format2_concurrent"]
 # The append frontier's unit tests.
 FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 # The region map's unit tests; the format crate's footprint tests.
@@ -486,10 +488,31 @@ M = [
  ('crates/store-io-engine/src/grow2.rs', '        if let Some(f) = &r.frontier {\n            f.raise_limit(new);\n        }\n        drop(header);', '        if let Some(f) = r.frontier.as_ref().filter(|_| false) {\n            f.raise_limit(new);\n        }\n        drop(header);', F2G),
  ('crates/store-io-engine/src/grow2.rs', 'self.fill_range(file, n, 0, fill, key, at)', 'self.fill_range(file, n, 0, fill, key, file + (at & 0))', F2G),
  ('crates/store-io-engine/src/grow2.rs', '*u = (old.tag, new, physical.saturating_add(extra));', '*u = (old.tag, old.data_size, physical.saturating_add(extra));', F2G),
- ('crates/store-io-engine/src/grow2.rs', '        acct.add_usage(old.tag, new, extra);', '        acct.add_usage(old.tag, old.data_size, extra);', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        acct.add_usage(old.tag, new, 0);', '        acct.add_usage(old.tag, old.data_size, 0);', F2G),
  ('crates/store-io-engine/src/grow2.rs', 'the map\'s length is the entry\'s");\n            e.data_size = new;', 'the map\'s length is the entry\'s");\n            e.data_size = len;', F2G),
  # C8 review: refused while frozen (stricter than the spec)
  ('crates/store-io-engine/src/grow2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2G),
+ # E4 C13: provisioning and growth beyond capacity fill outside the
+ # metadata lock: the space marked (and charged, a reservation consumed)
+ # before, given back on a failure before the commit, settled after; a
+ # provisioning's name and table slot claimed; the commit takes the page
+ # as it is then
+ ('crates/store-io-engine/src/grow2.rs', '            v2.mark(&[(at, ext_len)], container);', '            let _ = (v2, container, at, ext_len);', F2CC),
+ ('crates/store-io-engine/src/grow2.rs', '        lock_acct(&inner.acct).add_usage(old.tag, 0, ext_len);', '        lock_acct(&inner.acct).add_usage(old.tag, 0, ext_len & 0);', F2B),
+ ('crates/store-io-engine/src/provision2.rs', '            v2.unmark(&self.ranges, container);', '            v2.unmark(&self.ranges[..0], container);', F2B),
+ ('crates/store-io-engine/src/provision2.rs', '            lock_acct(&inner.acct).remove_usage(self.tag, 0, self.charged);', '            lock_acct(&inner.acct).remove_usage(self.tag, 0, self.charged & 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            v2.settle(ext_len);', '            v2.settle(ext_len & 0);', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '                    let seq = held.map(|c| c.seq + 1).fold(h.next_seq, u32::max);', '                    let seq = held.map(|c| c.seq + 1).fold(h.next_seq, |a, _| a);', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '                        && usize::from(h.count) + claimed < usize::from(per_page)', '                        && usize::from(h.count) + (claimed & 0) < usize::from(per_page)', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '            v2.mark(&footprint, container);', '            let _ = (&footprint, container);', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '                v2.claims.retain(|c| !(c.page == page && c.seq == seq));', '                v2.claims.retain(|c| c.page != usize::MAX || (page, seq) != (c.page, c.seq));', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '            r.unhold(bytes);', '            r.unhold(bytes & 0);', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '                next_seq: ph.next_seq.max(pl.seq + 1),', '                next_seq: ph.next_seq.min(0).max(pl.seq + 1),', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '            v2.settle(pl.extent);', '            v2.settle(pl.extent & 0);', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '                v.reserved_names.contains(name) || v.claims.iter().any(|c| c.name == *name)', '                v.reserved_names.contains(name) || v.claims.iter().any(|c| c.name == *name && false)', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '                acct.unreserve(pl.tag, pl.extent);', '                acct.unreserve(pl.tag, pl.extent & 0);', F2CC),
+ ('crates/store-io-engine/src/provision2.rs', '        holds.armed = false;\n        if let Some(v2) = meta.v2.as_deref_mut() {\n            v2.settle(pl.extent);', '        holds.armed = true;\n        if let Some(v2) = meta.v2.as_deref_mut() {\n            v2.settle(pl.extent);', F2CC),
+ ('crates/store-io-engine/src/grow2.rs', '        holds.armed = false;', '        holds.armed = true;', F2B),
  # E4 C12: a format-2 region that may grow has a ring of the window's
  # size (a small region's ring held a grown one to a tenth of the rate)
  ('crates/store-io-engine/src/frontier.rs', '    if flags & store_io_format::meta2::FLAG_CAPPED != 0 {\n        capacity', '    if flags & store_io_format::meta2::FLAG_CAPPED != 0 || flags == 0 {\n        capacity', FRONTIER),
@@ -503,16 +526,16 @@ M = [
  # whole; its slack allocated unwritten, or written where writes_slack
  # (Windows, macOS); validated before any I/O
  ('crates/store-io-engine/src/provision2.rs', '        let flags = if capped.is_some() { FLAG_CAPPED } else { 0 };', '        let flags = if capped.is_some() { FLAG_CAPPED & 0 } else { 0 };', F2OPT),
- ('crates/store-io-engine/src/provision2.rs', '            Some(_) if !self.writes_slack() => 2 * block + data_size,', '            Some(_) => 2 * block + data_size,', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '            fill_whole: capped.is_none() || self.writes_slack(),', '            fill_whole: capped.is_none(),', F2OPT),
  ('crates/store-io-engine/src/provision.rs', '            store_io_core::evidence::PlatformKind::Windows\n                | store_io_core::evidence::PlatformKind::MacOs', '            store_io_core::evidence::PlatformKind::Windows', F2OPT),
- ('crates/store-io-engine/src/provision2.rs', '        if filled < extent {', '        if filled < extent && false {', F2OPT),
- ('crates/store-io-engine/src/provision2.rs', '        self.verify_ready(offset, filled)?;', '        self.verify_ready(offset, extent.max(filled))?;', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '        if filled < pl.extent {', '        if filled < pl.extent && false {', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '        self.verify_ready(pl.offset, filled)?;', '        self.verify_ready(pl.offset, pl.extent.max(filled))?;', F2OPT),
  ('crates/store-io-engine/src/provision2.rs', '                .ok_or_else(too_large)?\n                .max(data_size),', '                .ok_or_else(too_large)?\n                .min(data_size),', F2OPT),
- ('crates/store-io-engine/src/provision2.rs', '            capacity,\n            span_start: offset,', '            capacity: data_size + (capacity & 0),\n            span_start: offset,', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '            capacity: pl.capacity,\n            span_start: pl.offset,', '            capacity: pl.data_size + (pl.capacity & 0),\n            span_start: pl.offset,', F2OPT),
  ('crates/store-io-engine/src/provision.rs', '        opts.validate()?;', '        let _ = opts.validate();', F2OPT),
  ('crates/store-io-engine/src/provision.rs', '        if opts.max_size_bytes().is_some() {\n            return Err(Error::Unsupported {', '        if opts.max_size_bytes().is_some() && false {\n            return Err(Error::Unsupported {', F2OPT),
  ('crates/store-io-engine/src/options.rs', '            Some(cap) if cap < self.size => Err(Error::NotWritten {', '            Some(cap) if cap < self.size && false => Err(Error::NotWritten {', F2OPT),
- ('crates/store-io-engine/src/provision2.rs', '        lock_acct(&inner.acct).add_usage(tag, data_size, extent);', '        lock_acct(&inner.acct).add_usage(tag, data_size, 2 * block + data_size + (extent & 0));', F2OPT),
+ ('crates/store-io-engine/src/provision2.rs', '        lock_acct(&inner.acct).add_usage(tag, 0, extent);', '        lock_acct(&inner.acct).add_usage(tag, 0, 2 * block + data_size + (extent & 0));', F2OPT),
  ('crates/store-io-sim/src/world.rs', '        let gap = asked.0.saturating_sub(f.valid_data);\n        f.valid_data = f.valid_data.max(asked.0.saturating_add(len as u64));', '        let gap = asked.0.saturating_sub(f.valid_data);\n        f.valid_data = f.valid_data.max(asked.0);', ['-p', 'store-io-sim', '--test', 'model']),
  # E4 C9: growth beyond capacity. Refusals before any I/O (capped, a
  # full extent list, the tag's cap); at least 1 MiB; after the last
@@ -527,20 +550,18 @@ M = [
  ('crates/store-io-engine/src/grow2.rs', 'align_up(MIN_EXTENT.max(old_cap / 8)', 'align_up((MIN_EXTENT & 0).max(old_cap / 8)', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            let at = if v2.free.fits_at(last_end, ext_len) || last_end == v2.free.end() {', '            let at = if v2.free.fits_at(last_end, ext_len) && false {', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            let at = if v2.free.fits_at(last_end, ext_len) || last_end == v2.free.end() {', '            let at = if (v2.free.fits_at(last_end, ext_len) && false) || last_end == v2.free.end() {', F2B),
- ('crates/store-io-engine/src/grow2.rs', '            e.data_size = new;\n            e.capacity = capacity;', '            e.data_size = len;\n            e.capacity = capacity;', F2B),
- ('crates/store-io-engine/src/grow2.rs', '            e.capacity = capacity;', '            e.capacity = old_cap + (capacity & 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.data_size = g.new;\n            e.capacity = g.capacity;', '            e.data_size = g.len;\n            e.capacity = g.capacity;', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '            e.capacity = g.capacity;', '            e.capacity = g.old_cap + (g.capacity & 0);', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            e.extent_count += 1;', '            e.extent_count += 0;', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            e.span_start = e.span_start.min(at);', '            e.span_start = e.span_start.min(at | u64::MAX);', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            e.span_end = e.span_end.max(at + ext_len);', '            e.span_end = e.span_end.max(at & 0);', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            e.footprint_seq = meta_seq;', '            e.footprint_seq = e.footprint_seq.max(meta_seq & 0);', F2B),
  ('crates/store-io-engine/src/grow2.rs', '        let filled = if self.writes_slack() {', '        let filled = if self.writes_slack() && false {', F2B),
  ('crates/store-io-engine/src/grow2.rs', '        if filled < ext_len {', '        if filled < ext_len && false {', F2B),
- ('crates/store-io-engine/src/grow2.rs', '        pieces.push((at, old_cap, filled));', '        pieces.push((at, old_cap, filled.min(0)));', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        pieces.push((at, g.old_cap, filled));', '        pieces.push((at, g.old_cap, filled.min(0)));', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            RegionState::Ready,\n            0,\n            committed,\n            Some((at, ext_len)),', '            RegionState::Ready,\n            1,\n            committed,\n            Some((at, ext_len)),', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            Some((at, ext_len)),\n        )?;', '            Some((at, ext_len)).filter(|_| false),\n        )?;', F2B),
- ('crates/store-io-engine/src/grow2.rs', '            v2.allocated.push((at, ext_len));', '            let _ = (at, ext_len);', F2B),
- ('crates/store-io-engine/src/grow2.rs', '            v2.rebuild_free(container);\n        }\n        self.count_growth', '            let _ = (v2, container);\n        }\n        self.count_growth', F2B),
- ('crates/store-io-engine/src/grow2.rs', '        self.count_growth(&mut meta, &old, new, ext_len);', '        self.count_growth(&mut meta, &old, new, 0);', F2B),
+ ('crates/store-io-engine/src/grow2.rs', '        self.count_growth(&mut meta, &g.old, g.new, ext_len);', '        self.count_growth(&mut meta, &g.old, g.new, 0);', F2B),
  ('crates/store-io-engine/src/grow2.rs', '            tag: ReserveTag::Growth,', '            tag: ReserveTag::Caller(0),', F2B),
  ('crates/store-io-engine/src/grow2.rs', '        if listed > committed {', '        if listed > committed && false {', F2B),
  ('crates/store-io-engine/src/grow2.rs', '        r.map.extend(at, ext_len);', '        r.map.extend(at, 0);', F2B),
@@ -663,11 +684,10 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2P),
  ('crates/store-io-engine/src/space.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2P),
  ('crates/store-io-engine/src/provision2.rs', '                .any(|u| u.name == name.as_str())', '                .any(|u| u.name == name.as_str() && false)', F2P),
- ('crates/store-io-engine/src/provision2.rs', '                .is_some_and(|v| v.reserved_names.contains(name))', '                .is_some_and(|v| v.reserved_names.contains(name) && false)', F2P),
- ('crates/store-io-engine/src/provision2.rs', '                        && h.count < per_page', '                        && h.count <= per_page', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '                v.reserved_names.contains(name) || v.claims.iter().any(|c| c.name == *name)', '                (v.reserved_names.contains(name) && false) || v.claims.iter().any(|c| c.name == *name)', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '                        && usize::from(h.count) + claimed < usize::from(per_page)', '                        && usize::from(h.count) + claimed <= usize::from(per_page)', F2P),
  ('crates/store-io-engine/src/provision2.rs', '            let offset = match v2.free.first_fit(extent, align, 2 * block) {', '            let offset = match v2.free.first_fit(extent, align, 2 * block).filter(|_| false) {', ['-p', 'store-io-engine', '--test', 'format2_provision', '--test', 'format2']),
  ('crates/store-io-engine/src/provision2.rs', '        let mut align = if capacity >= DATA_ALIGN {\n            DATA_ALIGN', '        let mut align = if capacity >= DATA_ALIGN && false {\n            DATA_ALIGN', ['-p', 'store-io-engine', '--test', 'format2_provision', '--test', 'format2']),
- ('crates/store-io-engine/src/provision2.rs', '            v2.rebuild_free(len);', '            let _ = (v2, len);', F2P),
  ('crates/store-io-engine/src/space.rs', '        if meta.v2.as_deref().is_some_and(|v| v.cut_short) {', '        if meta.v2.as_deref().is_some_and(|v| v.cut_short && false) {', F2P),
  ('crates/store-io-engine/src/space.rs', '            Some(v2) => v2.free.end(),', '            Some(v2) => v2.free.end().min(self.inner.layout.tail(&meta.entries)),', F2P),
  # E2b/E3 C4: the format-2 open's regions: stale, superseded and
@@ -751,7 +771,7 @@ M = [
  # D-124 second review: a metadata flush leads only on slot 0;
  # provisioning's full flush holds slot 0; data leaders take slot 0 last
  ('crates/store-io-engine/src/store.rs', '        domain.barrier_main(need, || flush_data(q, file))?;', '        domain.barrier(need, |_, _| flush_data(q, file))?;'),
- ('crates/store-io-engine/src/provision.rs', '            .exclusive_main(|| inner.platform.flush_all(&inner.file));', '            .poisoned()\n            .map_or_else(|| inner.platform.flush_all(&inner.file), |_| inner.platform.flush_all(&inner.file));'),
+ ('crates/store-io-engine/src/provision.rs', '        let flushed = inner.domain.exclusive_main(|| {\n            let r = inner.platform.flush_all(&inner.file);', '        let flushed = (|f: &dyn Fn() -> _| f())(&|| {\n            let r = inner.platform.flush_all(&inner.file);'),
  ('crates/store-io-engine/src/domain/mod.rs', '            let slot = 31 - free.leading_zeros();', '            let slot = free.trailing_zeros();'),
  # a full flush waiting for slot 0 has it before new leaders
  ('crates/store-io-engine/src/domain/mod.rs', '            if st.main_waiting > 0 {', '            if st.main_waiting > 0 && false {'),

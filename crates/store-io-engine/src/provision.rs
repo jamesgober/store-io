@@ -377,19 +377,24 @@ where
         let inner = &self.inner;
         // Holding slot 0, so no data flush runs on the main handle at the
         // same time (each flush's failure report stays its own, D-124).
-        let flushed = inner
-            .domain
-            .exclusive_main(|| inner.platform.flush_all(&inner.file));
-        flushed.map_err(|raw| {
-            inner.domain.poison(FirstCause {
-                op: Some(Op::FlushAll),
-                raw: Some(raw),
-            });
-            Error::DurabilityUnknown {
-                op: Op::FlushAll,
-                raw: Some(raw),
-                ctx: ErrorContext::default(),
+        // A failure poisons before slot 0 is given back: the next flush on
+        // the main handle (another fill, now that fills run outside the
+        // metadata lock) could otherwise succeed past the error this one
+        // consumed, and its caller go on before the poison.
+        let flushed = inner.domain.exclusive_main(|| {
+            let r = inner.platform.flush_all(&inner.file);
+            if let Err(raw) = r {
+                inner.domain.poison(FirstCause {
+                    op: Some(Op::FlushAll),
+                    raw: Some(raw),
+                });
             }
+            r
+        });
+        flushed.map_err(|raw| Error::DurabilityUnknown {
+            op: Op::FlushAll,
+            raw: Some(raw),
+            ctx: ErrorContext::default(),
         })
     }
 

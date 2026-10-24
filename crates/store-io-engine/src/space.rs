@@ -35,7 +35,8 @@ pub struct TagSpace {
     /// Data bytes of the tag's ready regions.
     pub logical: u64,
     /// Bytes the tag's ready regions occupy in the container, headers
-    /// included.
+    /// included, and those its provisionings and growths filling now hold
+    /// (format 2: charged before their commit).
     pub physical: u64,
     /// Bytes reserved for the tag and not yet provisioned.
     pub reserved: u64,
@@ -48,7 +49,8 @@ pub struct TagSpace {
 pub struct SpaceReport {
     /// Bytes the container file holds.
     pub container: u64,
-    /// Bytes held by ready regions, headers included.
+    /// Bytes held by ready regions, headers included, and by provisionings
+    /// and growths filling now (format 2: marked before their commit).
     pub regions: u64,
     /// Format 1: bytes of released regions, reused by a later region of
     /// exactly the same size. Format 2: free bytes inside the container,
@@ -241,6 +243,24 @@ where
         self.bytes
     }
 
+    /// Sets `extent` bytes aside for a format-2 provisioning in flight: no
+    /// longer this reservation's to give, still counted reserved in the
+    /// store's accounting until the commit moves them to the region (so
+    /// every placement meanwhile sizes the container past them).
+    pub(crate) fn hold(&mut self, extent: u64) -> Result<(), Error> {
+        if extent > self.bytes {
+            return Err(no_space(self.tag));
+        }
+        self.bytes -= extent;
+        Ok(())
+    }
+
+    /// Gives back `extent` bytes [`Self::hold`] set aside (a provisioning
+    /// that failed before its commit).
+    pub(crate) fn unhold(&mut self, extent: u64) {
+        self.bytes += extent;
+    }
+
     /// Takes `extent` bytes for a region being provisioned.
     pub(crate) fn consume(&mut self, extent: u64) -> Result<(), Error> {
         if extent > self.bytes {
@@ -422,7 +442,8 @@ where
         if let Some(v2) = meta.v2.as_deref() {
             return SpaceReport {
                 container: meta.container_len,
-                regions: v2.usage.iter().map(|u| u.2).sum(),
+                // Marked by provisionings and growths filling now: in use.
+                regions: v2.usage.iter().map(|u| u.2).sum::<u64>() + v2.marked,
                 // The trailing free space holds the reservations: not
                 // free for anyone else.
                 released: v2.free.free_bytes().saturating_sub(acct.reserved()),

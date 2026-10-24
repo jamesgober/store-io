@@ -707,6 +707,14 @@ impl World {
         Ok(())
     }
 
+    /// Bytes every file has grown by through allocation so far, the total
+    /// `FaultPlan::capacity` is compared with (set it to this to fail any
+    /// further growth).
+    #[must_use]
+    pub fn allocated_bytes(&self) -> u64 {
+        self.allocated
+    }
+
     /// Bytes a valid-data model's file system zeroed before writes that
     /// started past a file's valid data (see `SimConfig::valid_data_model`;
     /// counted whether or not the model is on).

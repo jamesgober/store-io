@@ -10,19 +10,21 @@
 //! size (the filled bytes are past it, with no defined contents); after it,
 //! the new one.
 //!
-//! Beyond its capacity, under the region lock and the metadata lock
-//! throughout (as provisioning: no other placement, reservation or space
-//! report runs meanwhile, so the chosen extent needs no mark and a failure
-//! no undo): a new extent is placed (after the region's last one when that
-//! space is free, else by first fit, else past everything allocated), its
-//! slack allocated, the range from the data size to the new size filled,
-//! flushed and verified; then the header is written listing the extent
-//! after the entry's (one extent ahead of its entry: an open finds that
-//! extent free and reports it); then one table page write carries the new
-//! `data_size`, `capacity`, `extent_count`, span and a `footprint_seq` of
-//! its own `meta_seq` (the commit); then memory follows: the extent
-//! allocated and charged, then the map's new run, its length and the
-//! frontier's limit.
+//! Beyond its capacity, under the region lock, in three phases (v0.5 E4
+//! C13; spec §12's "choose and mark"): under the metadata lock, a new
+//! extent placed (after the region's last one when that space is free,
+//! else by first fit, else past everything allocated), marked allocated
+//! and charged to the tag; without it (other provisionings, growths,
+//! releases, reservations and space reports meanwhile), its slack
+//! allocated, the range from the data size to the new size filled, flushed
+//! and verified, then the header written listing the extent after the
+//! entry's (one extent ahead of its entry: an open finds that extent free
+//! and reports it); under the lock again, one table page write (the page
+//! as it is then) carries the new `data_size`, `capacity`, `extent_count`,
+//! span and a `footprint_seq` of its own `meta_seq` (the commit), and
+//! memory follows; then the map's new run, its length and the frontier's
+//! limit. A failure before the commit unmarks the extent and refunds the
+//! tag ([`Holds`]; a panic too).
 
 use std::sync::PoisonError;
 
@@ -39,6 +41,7 @@ use store_io_platform::Platform;
 
 use crate::io::{ctx, not_written};
 use crate::layout::DATA_ALIGN;
+use crate::provision2::Holds;
 use crate::slots::PairRead;
 use crate::space::lock_acct;
 use crate::store::*;
@@ -158,9 +161,6 @@ where
         if !lock_acct(&inner.acct).fits(old.tag, ext_len) {
             return Err(no_space(ReserveTag::Caller(old.tag)));
         }
-        // The commit's `meta_seq` (overflow refused here, before any I/O):
-        // the entry's new `footprint_seq`.
-        let meta_seq = crate::v2::next_meta_seq_of(&meta)?;
         // Placement (spec §10, §12): after the last extent when that space
         // is free or the tail (one run: I/O there is never split), else
         // first fit, else past everything allocated, aligned as a large
@@ -191,31 +191,83 @@ where
             }
         };
         let capacity = old_cap.checked_add(ext_len).ok_or_else(too_large)?;
-        let (p, payload, _) = page_with(&meta, r, |e| {
-            e.data_size = new;
-            e.capacity = capacity;
-            e.extent_count += 1;
-            e.span_start = e.span_start.min(at);
-            e.span_end = e.span_end.max(at + ext_len);
-            e.footprint_seq = meta_seq;
-        })?;
+        // The mark (spec §12, "choose and mark"): the extent allocated and
+        // the tag charged now, so the fill can run without the metadata
+        // lock (other provisionings, growths, releases, reservations and
+        // space reports meanwhile); every failure before the commit undoes
+        // it.
+        let container = meta.container_len;
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            v2.mark(&[(at, ext_len)], container);
+        }
+        lock_acct(&inner.acct).add_usage(old.tag, 0, ext_len);
+        // Every return (or panic) before the commit gives the mark and the
+        // charge back.
+        drop(meta);
+        let mut holds = Holds {
+            store: self,
+            ranges: vec![(at, ext_len)],
+            claim: None,
+            tag: old.tag,
+            charged: ext_len,
+            from: None,
+            armed: true,
+        };
+        let grown = Beyond {
+            new,
+            fill,
+            key,
+            old,
+            at,
+            ext_len,
+            capacity,
+            len,
+            old_cap,
+        };
+        self.fill_and_commit_beyond2(r, header, &grown, &mut holds)?;
+        // Published after the commit: the run, then the size (the map
+        // before the frontier).
+        r.map.extend(at, ext_len);
+        r.map.publish_len(new);
+        if let Some(f) = &r.frontier {
+            f.raise_limit(new);
+        }
+        Ok(new)
+    }
+
+    /// Phases 2 and 3 of a growth beyond capacity marked by phase 1: the
+    /// slack and the new range filled, flushed and verified, the header
+    /// written listing the extent, all without the metadata lock; then,
+    /// under it, the commit (the page as it is now, at the next
+    /// `meta_seq`: the entry's new `footprint_seq`) and memory (the mark
+    /// is the footprint, the usage counted). The caller holds the region
+    /// lock (`header`).
+    fn fill_and_commit_beyond2(
+        &self,
+        r: &LiveRegion,
+        header: &mut PairRead,
+        g: &Beyond<'_>,
+        holds: &mut Holds<'_, P>,
+    ) -> Result<(), Error> {
+        let inner = &*self.inner;
+        let (at, ext_len) = (g.at, g.ext_len);
         // 1. The slack and the new range: the whole extent filled where the
         // slack is written (`writes_slack`), else the slack allocated,
         // unwritten (never verified).
         let filled = if self.writes_slack() {
             ext_len
         } else {
-            new - old_cap
+            g.new - g.old_cap
         };
         if filled < ext_len {
             inner
                 .platform
                 .allocate_range(&inner.file, at + filled, ext_len - filled)
-                .map_err(|raw| growth_space(space_err(Op::Allocate, raw, old.tag)))?;
+                .map_err(|raw| growth_space(space_err(Op::Allocate, raw, g.old.tag)))?;
         }
-        let mut pieces = r.map.pieces(len, old_cap);
-        pieces.push((at, old_cap, filled));
-        self.fill_pieces(&pieces, fill, key)?;
+        let mut pieces = r.map.pieces(g.len, g.old_cap);
+        pieces.push((at, g.old_cap, filled));
+        self.fill_pieces(&pieces, g.fill, g.key)?;
         // 2. The header lists the extent after the entry's (refused before
         // submission: nothing on disk changed). A header one extent ahead
         // already (an earlier growth whose commit was lost) is first written
@@ -224,7 +276,7 @@ where
         // the older one an extent the region never had (another region's by
         // now, perhaps), and a damaged newer copy would let an open take
         // the older one as the region's.
-        let committed = usize::from(old.extent_count);
+        let committed = usize::from(g.old.extent_count);
         let listed = header
             .payload
             .as_deref()
@@ -241,25 +293,30 @@ where
             committed,
             Some((at, ext_len)),
         )?;
-        // 3. The commit. Refused before submission, the header stays one
-        // extent ahead (on disk and here); every later header write lists
-        // the entry's extents only, and an open finds the extent free.
+        // 3. The commit: the page as it is now (other operations may have
+        // written it meanwhile), at the next `meta_seq`. Refused before
+        // submission, the header stays one extent ahead (on disk and here);
+        // every later header write lists the entry's extents only, and an
+        // open finds the extent free.
+        let mut meta = lock_meta(&inner.meta);
+        let meta_seq = crate::v2::next_meta_seq_of(&meta)?;
+        let (p, payload, _) = page_with(&meta, r, |e| {
+            e.data_size = g.new;
+            e.capacity = g.capacity;
+            e.extent_count += 1;
+            e.span_start = e.span_start.min(at);
+            e.span_end = e.span_end.max(at + ext_len);
+            e.footprint_seq = meta_seq;
+        })?;
         self.commit_page(&mut meta, p, &payload, meta_seq)?;
-        // 4. Memory follows: the extent allocated, the usage, then the run
-        // and the new size published (the map before the frontier).
-        let container = meta.container_len;
+        // 4. Memory follows, in the same hold of the lock: the mark is the
+        // footprint, the usage counted.
+        holds.armed = false;
         if let Some(v2) = meta.v2.as_deref_mut() {
-            v2.allocated.push((at, ext_len));
-            v2.rebuild_free(container);
+            v2.settle(ext_len);
         }
-        self.count_growth(&mut meta, &old, new, ext_len);
-        drop(meta);
-        r.map.extend(at, ext_len);
-        r.map.publish_len(new);
-        if let Some(f) = &r.frontier {
-            f.raise_limit(new);
-        }
-        Ok(new)
+        self.count_growth(&mut meta, &g.old, g.new, ext_len);
+        Ok(())
     }
 
     /// Fills `pieces` (`(file offset, region offset, length)`) with the
@@ -312,8 +369,9 @@ where
     }
 
     /// Counts a committed growth of the region whose entry was `old`: its
-    /// usage in the table's list and the tags' counts, logical `new`,
-    /// physical `extra` more.
+    /// usage in the table's list (logical `new`, physical `extra` more) and
+    /// the tags' logical count (a growth beyond capacity charged its
+    /// extent's physical bytes when it marked it).
     fn count_growth(&self, meta: &mut Meta, old: &RawEntry, new: u64, extra: u64) {
         let physical = old.capacity.saturating_add(2 * self.inner.layout.block());
         if let Some(v2) = meta.v2.as_deref_mut() {
@@ -328,7 +386,7 @@ where
         }
         let mut acct = lock_acct(&self.inner.acct);
         acct.remove_usage(old.tag, old.data_size, 0);
-        acct.add_usage(old.tag, new, extra);
+        acct.add_usage(old.tag, new, 0);
     }
 }
 
@@ -390,4 +448,23 @@ fn growth_space(e: Error) -> Error {
         },
         e => e,
     }
+}
+
+/// A growth beyond capacity marked (phase 1), for
+/// [`Store::fill_and_commit_beyond2`].
+struct Beyond<'a> {
+    /// The new data size.
+    new: u64,
+    fill: FillPattern,
+    key: &'a [u8; 16],
+    /// The entry as it was.
+    old: RawEntry,
+    /// The new extent.
+    at: u64,
+    ext_len: u64,
+    /// The capacity after it.
+    capacity: u64,
+    /// The data size and capacity before it.
+    len: u64,
+    old_cap: u64,
 }

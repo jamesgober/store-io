@@ -1,9 +1,16 @@
-//! Provisioning a region in container format 2 (spec §10, §12): placed by
-//! first fit over the free space (else past everything allocated), filled,
-//! flushed and verified as in format 1, its header written in slot A, then
-//! committed by one table-page write carrying its entry, whose
-//! `footprint_seq` is that write's own `meta_seq`. Memory changes only after
-//! the commit is durable.
+//! Provisioning a region in container format 2 (spec §10, §12), in three
+//! phases (v0.5 E4 C13): under the metadata lock, its name and a table slot
+//! claimed, its space placed by first fit over the free space (else past
+//! everything allocated) and marked allocated, its tag charged (or the
+//! bytes taken from its reservation, which keeps counting them reserved
+//! until the commit); without the lock, filled, flushed and verified as in
+//! format 1 and its header written in slot A; under the lock again,
+//! committed by one table-page write carrying its entry (the page as it is
+//! then), whose `footprint_seq` is that write's own `meta_seq`, and the
+//! region made live in the same hold of the lock. Other provisionings,
+//! growths, releases, reservations and space reports run during the fill.
+//! A failure (or a panic) before the commit gives every hold back
+//! ([`Holds`]).
 //!
 //! A capped region (`RegionOptions::max_size`, v0.5 E4 C10) is one extent
 //! of its cap, flagged `FLAG_CAPPED`, charged whole: its data filled and
@@ -77,6 +84,11 @@ where
             return Err(too_large());
         }
         let extent = capacity.checked_add(2 * block).ok_or_else(too_large)?;
+        let flags = if capped.is_some() { FLAG_CAPPED } else { 0 };
+        let mut from = from;
+        // Phase 1, under the metadata lock (spec §12, "choose and mark"):
+        // the name and a table slot claimed, the space placed and marked,
+        // the tag charged or the reservation's bytes held.
         let mut meta = lock_meta(&inner.meta);
         self.name_taken2(&meta, &rname)?;
         let (p, seq) = {
@@ -87,19 +99,23 @@ where
                 .enumerate()
                 .find_map(|(p, page)| {
                     let h = page.header?;
+                    // Slots other provisionings hold count as taken; a seq
+                    // past every one claimed (a seq never committed may be
+                    // handed out again, as before: the next fill zeroes any
+                    // header a failed one left).
+                    let held = v2.claims.iter().filter(|c| c.page == p);
+                    let claimed = held.clone().count();
+                    let seq = held.map(|c| c.seq + 1).fold(h.next_seq, u32::max);
                     (page.standing == Standing::Confirmed
-                        && h.count < per_page
-                        && h.next_seq < u32::MAX)
-                        .then_some((p, h.next_seq))
+                        && usize::from(h.count) + claimed < usize::from(per_page)
+                        && seq < u32::MAX)
+                        .then_some((p, seq))
                 })
                 .ok_or(Error::NoSpace {
                     tag: ReserveTag::Table,
                     ctx: ErrorContext::default(),
                 })?
         };
-        // The commit's `meta_seq` (overflow refused here, before any I/O):
-        // the entry's `footprint_seq`.
-        let meta_seq = crate::v2::next_meta_seq_of(&meta)?;
         {
             let mut acct = lock_acct(&inner.acct);
             match &from {
@@ -142,7 +158,82 @@ where
                 Err(e) => return Err(e),
             }
         };
-        let id = ((p as u64) << 32) | u64::from(seq);
+        let extents: Vec<(u64, u64)> = if slot {
+            Vec::new()
+        } else {
+            vec![(offset + 2 * block, capacity)]
+        };
+        // As the open records a footprint: the header blocks, then the data
+        // extent (release removes exactly these).
+        let mut footprint = vec![(offset, block), (offset + block, block)];
+        footprint.extend(extents.iter().copied());
+        // The holds, all at once (nothing below fails until phase 2). A
+        // reservation's bytes stay counted reserved until the commit, so
+        // every placement meanwhile still sizes the container past them.
+        if let Some(r) = from.as_deref_mut() {
+            r.hold(extent)?;
+        }
+        let container = meta.container_len;
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            v2.claims.push(crate::v2::Claim {
+                page: p,
+                seq,
+                name: rname,
+            });
+            v2.mark(&footprint, container);
+        }
+        let charged = if from.is_none() {
+            lock_acct(&inner.acct).add_usage(tag, 0, extent);
+            extent
+        } else {
+            0
+        };
+        drop(meta);
+        let mut holds = Holds {
+            store: self,
+            ranges: footprint,
+            claim: Some((p, seq)),
+            tag,
+            charged,
+            from: from.map(|r| (r, extent)),
+            armed: true,
+        };
+        let placed = Placed {
+            kind,
+            name: rname,
+            tag,
+            flags,
+            id: ((p as u64) << 32) | u64::from(seq),
+            page: p,
+            seq,
+            offset,
+            data_size,
+            capacity,
+            extent,
+            extents: &extents,
+            fill_whole: capped.is_none() || self.writes_slack(),
+        };
+        // Any return before the commit drops `holds` armed: every hold
+        // given back.
+        self.fill_and_commit2(&placed, &mut holds)
+    }
+
+    /// Phases 2 and 3 of a format-2 provisioning placed and marked by
+    /// phase 1: filled, made durable and verified, its header written, all
+    /// without the metadata lock (other provisionings, growths, releases,
+    /// reservations and space reports run meanwhile); then, under it, the
+    /// commit: its page as it is now with the entry added, at the next
+    /// `meta_seq` (the entry's `footprint_seq`), and in the same hold of the
+    /// lock memory follows (the claim ends, the mark becomes the footprint,
+    /// the usage counted, `holds` disarmed) and the region becomes live, so
+    /// no other provisioning can take its name between the two.
+    fn fill_and_commit2(
+        &self,
+        pl: &Placed<'_>,
+        holds: &mut Holds<'_, P>,
+    ) -> Result<Arc<LiveRegion>, Error> {
+        let inner = &self.inner;
+        let block = inner.layout.block();
         let fill = if inner.opts.keyed_fill {
             FillPattern::KeyedV1
         } else {
@@ -156,48 +247,43 @@ where
         // 1-3. Fill, make durable, verify (as format 1); a capped region's
         // slack allocated, not written (but where the slack is written),
         // never verified.
-        let filled = match capped {
-            Some(_) if !self.writes_slack() => 2 * block + data_size,
-            _ => extent,
+        let filled = if pl.fill_whole {
+            pl.extent
+        } else {
+            2 * block + pl.data_size
         };
-        self.fill(offset, filled, block, fill, &fill_key)?;
-        if filled < extent {
+        self.fill(pl.offset, filled, block, fill, &fill_key)?;
+        if filled < pl.extent {
             inner
                 .platform
-                .allocate_range(&inner.file, offset + filled, extent - filled)
+                .allocate_range(&inner.file, pl.offset + filled, pl.extent - filled)
                 .map_err(|raw| {
-                    crate::store::space_err(store_io_core::error::Op::Allocate, raw, tag)
+                    crate::store::space_err(store_io_core::error::Op::Allocate, raw, pl.tag)
                 })?;
         }
         self.flush_all_accounted()?;
-        self.verify_ready(offset, filled)?;
+        self.verify_ready(pl.offset, filled)?;
         // 4. The header in slot A, generation 1, Ready.
-        let extents: Vec<(u64, u64)> = if slot {
-            Vec::new()
-        } else {
-            vec![(offset + 2 * block, capacity)]
-        };
-        let flags = if capped.is_some() { FLAG_CAPPED } else { 0 };
         let h = RegionHeader2 {
-            region_id: id,
-            kind,
+            region_id: pl.id,
+            kind: pl.kind,
             state: RegionState::Ready,
             fill,
-            flags,
+            flags: pl.flags,
             compat_flags: 0,
             log2_block: inner.layout.log2_block,
-            extent_count: extents.len() as u16,
+            extent_count: pl.extents.len() as u16,
             region_generation: 1,
             fill_key,
             object_len: 0,
         };
         let mut hbuf = vec![0u8; block as usize];
-        let hlen = encode_region_header(&mut hbuf, &h, &extents, &[]).map_err(|_| meta_err())?;
+        let hlen = encode_region_header(&mut hbuf, &h, pl.extents, &[]).map_err(|_| meta_err())?;
         let at = PairAt {
             volume: *inner.volume.as_bytes(),
-            object: inner.layout.region_object(id),
-            a: offset,
-            b: offset + block,
+            object: inner.layout.region_object(pl.id),
+            a: pl.offset,
+            b: pl.offset + block,
             log2: inner.layout.log2_block,
             format: FORMAT_2,
             numbered: false,
@@ -205,7 +291,7 @@ where
         let blank = PairRead::blank();
         let next = plan_next(&blank, &hbuf[..hlen], inner.owner_generation)?;
         let header = {
-            let mut q = inner.queues.get(id as usize);
+            let mut q = inner.queues.get(pl.id as usize);
             durable_slot::<P>(
                 &mut q,
                 &inner.file,
@@ -218,35 +304,47 @@ where
             )
             .inspect_err(|_| self.wake_frontiers())?
         };
-        // 5. The commit: page `p` with the entry added.
+        // 5. The commit: the page as it is now (other operations may have
+        // written it meanwhile) with the entry added, at the next
+        // `meta_seq`.
+        let mut meta = lock_meta(&inner.meta);
+        let meta_seq = crate::v2::next_meta_seq_of(&meta)?;
         let entry = Entry2 {
-            seq,
-            kind,
-            flags,
+            seq: pl.seq,
+            kind: pl.kind,
+            flags: pl.flags,
             compat_flags: 0,
-            name: rname,
-            tag,
-            extent_count: extents.len() as u16,
-            header_a: offset,
-            header_b: offset + block,
-            data_size,
-            capacity,
-            span_start: offset,
-            span_end: offset + extent,
+            name: pl.name,
+            tag: pl.tag,
+            extent_count: pl.extents.len() as u16,
+            header_a: pl.offset,
+            header_b: pl.offset + block,
+            data_size: pl.data_size,
+            capacity: pl.capacity,
+            span_start: pl.offset,
+            span_end: pl.offset + pl.extent,
             footprint_seq: meta_seq,
         };
         let payload = {
             let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
-            let page = &v2.pages[p];
+            let page = v2.pages.get(pl.page).ok_or_else(corrupt)?;
+            let ph = page.header.ok_or_else(corrupt)?;
+            if page.standing != Standing::Confirmed {
+                return Err(not_written(
+                    NotWrittenCause::Frozen,
+                    ErrorContext::default(),
+                ));
+            }
             let mut raws = page.entries.clone();
             raws.push(entry.to_raw());
-            let ph = PageHeader {
-                page_index: p as u32,
-                next_seq: seq + 1,
+            let next = PageHeader {
+                page_index: pl.page as u32,
+                // Past this seq and every one committed meanwhile.
+                next_seq: ph.next_seq.max(pl.seq + 1),
                 count: raws.len() as u16,
             };
             let mut buf = vec![0u8; PAGE_HEADER_LEN + 96 * raws.len()];
-            let n = encode_page(&mut buf, &ph, &raws).map_err(|_| meta_err())?;
+            let n = encode_page(&mut buf, &next, &raws).map_err(|_| meta_err())?;
             buf.truncate(n);
             buf
         };
@@ -261,50 +359,49 @@ where
                 &inner.policy,
                 &inner.domain,
                 &mut meta,
-                p,
+                pl.page,
                 &payload,
                 meta_seq,
                 inner.owner_generation,
             )
             .inspect_err(|_| self.wake_frontiers())?;
         }
-        // Durable: memory follows.
+        // Durable: memory follows, in the same hold of the lock.
+        holds.armed = false;
         if let Some(v2) = meta.v2.as_deref_mut() {
-            // As the open records a footprint: the header blocks, then the
-            // data extent (release removes exactly these).
-            v2.allocated.push((offset, block));
-            v2.allocated.push((offset + block, block));
-            v2.allocated.extend(extents.iter().copied());
-            v2.usage.push((tag, data_size, extent));
+            v2.settle(pl.extent);
+            v2.usage.push((pl.tag, pl.data_size, pl.extent));
         }
-        let len = meta.container_len;
-        if let Some(v2) = meta.v2.as_deref_mut() {
-            v2.rebuild_free(len);
+        {
+            let mut acct = lock_acct(&inner.acct);
+            if holds.from.is_some() {
+                // The reservation's bytes, counted reserved until now.
+                acct.unreserve(pl.tag, pl.extent);
+                acct.add_usage(pl.tag, pl.data_size, pl.extent);
+            } else {
+                acct.add_usage(pl.tag, pl.data_size, 0);
+            }
         }
-        if let Some(r) = from {
-            r.consume(extent)?;
-        }
-        lock_acct(&inner.acct).add_usage(tag, data_size, extent);
         let state = Arc::new(LiveRegion {
-            id: RegionId::from_raw(id),
-            name: rname,
-            kind,
+            id: RegionId::from_raw(pl.id),
+            name: pl.name,
+            kind: pl.kind,
             generation: Generation::FIRST,
-            map: match slot {
-                true => crate::regionmap::RegionMap::single(offset + 2 * block, 0),
-                false => crate::regionmap::RegionMap::from_extents(&extents, data_size),
+            map: match pl.kind == RegionKind::Slot {
+                true => crate::regionmap::RegionMap::single(pl.offset + 2 * block, 0),
+                false => crate::regionmap::RegionMap::from_extents(pl.extents, pl.data_size),
             }
             .with_room(store_io_format::meta2::max_extents(inner.layout.log2_block) - 1),
-            header_at: [offset, offset + block],
+            header_at: [pl.offset, pl.offset + block],
             header: Mutex::new(header),
-            frontier: (kind == RegionKind::Append).then(|| {
+            frontier: (pl.kind == RegionKind::Append).then(|| {
                 AppendFrontier::new(
                     0,
-                    data_size,
+                    pl.data_size,
                     u32::from(inner.layout.log2_block),
                     crate::frontier::ring_for(
                         inner.opts.append_window,
-                        crate::frontier::ring_reach(capacity, flags),
+                        crate::frontier::ring_reach(pl.capacity, pl.flags),
                         u32::from(inner.layout.log2_block),
                     ),
                 )
@@ -314,16 +411,25 @@ where
             read_only: false,
             gate: Gate::new(),
         });
+        // Live before its claim ends and the metadata lock is released:
+        // `name_taken2` (under that lock) finds the name one way or the
+        // other throughout.
         inner
             .regions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(Arc::clone(&state));
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            v2.claims
+                .retain(|c| !(c.page == pl.page && c.seq == pl.seq));
+        }
+        drop(meta);
         Ok(state)
     }
 
-    /// A name is taken by a live region, by an unavailable one, or by an
-    /// entry of a kind this version does not know (spec §9 step 5).
+    /// A name is taken by a live region, by an unavailable one, by an
+    /// entry of a kind this version does not know (spec §9 step 5), or by a
+    /// provisioning in flight.
     fn name_taken2(&self, meta: &Meta, name: &RegionName) -> Result<(), Error> {
         let taken = || Error::AlreadyExists {
             what: Named::Region,
@@ -342,13 +448,106 @@ where
                 .unavailable
                 .iter()
                 .any(|u| u.name == name.as_str())
-            || meta
-                .v2
-                .as_deref()
-                .is_some_and(|v| v.reserved_names.contains(name))
+            || meta.v2.as_deref().is_some_and(|v| {
+                v.reserved_names.contains(name) || v.claims.iter().any(|c| c.name == *name)
+            })
         {
             return Err(taken());
         }
         Ok(())
     }
+}
+
+/// What phase 1 of a format-2 provisioning or growth beyond capacity holds
+/// until its commit: its marked space, its claim on a name and a table slot,
+/// its tag's charge or its reservation's bytes. Dropped armed by a failure
+/// before the commit, it gives them all back; the commit disarms it. Once a
+/// write was submitted and failed (the store poisoned), or on a panic
+/// (which poisons the store), nothing is given back: that commit may have
+/// landed, so the space stays held until the store is reopened (a
+/// reservation's held bytes then stay counted reserved too). While a
+/// reservation-backed provisioning fills, `space()` counts its extent both
+/// in `regions` (marked) and in `reserved` (held): `released` is low by
+/// that much until the commit. Built after phase 1 releases the metadata
+/// lock (its drop takes that lock).
+pub(crate) struct Holds<'a, P: Platform>
+where
+    P::Queue: Send,
+{
+    pub(crate) store: &'a Store<P>,
+    /// The ranges marked allocated.
+    pub(crate) ranges: Vec<(u64, u64)>,
+    /// A provisioning's claimed table slot `(page, seq)` (its name with it).
+    pub(crate) claim: Option<(usize, u32)>,
+    pub(crate) tag: u32,
+    /// Physical bytes charged to the tag at the mark.
+    pub(crate) charged: u64,
+    /// The reservation the bytes were held from, and how many.
+    pub(crate) from: Option<(&'a mut Reservation<P>, u64)>,
+    pub(crate) armed: bool,
+}
+
+impl<P: Platform> Drop for Holds<'_, P>
+where
+    P::Queue: Send,
+{
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A panic may come after a write was submitted (the commit may have
+        // landed): fail-stop, keeping every hold, as a failure after
+        // submission does.
+        if std::thread::panicking() {
+            self.store
+                .inner
+                .domain
+                .poison(store_io_core::error::FirstCause {
+                    op: None,
+                    raw: None,
+                });
+            return;
+        }
+        if self.store.inner.domain.poisoned().is_some() {
+            return;
+        }
+        let inner = &self.store.inner;
+        let mut meta = lock_meta(&inner.meta);
+        let container = meta.container_len;
+        if let Some(v2) = meta.v2.as_deref_mut() {
+            if let Some((page, seq)) = self.claim {
+                v2.claims.retain(|c| !(c.page == page && c.seq == seq));
+            }
+            v2.unmark(&self.ranges, container);
+        }
+        drop(meta);
+        if self.charged > 0 {
+            lock_acct(&inner.acct).remove_usage(self.tag, 0, self.charged);
+        }
+        if let Some((r, bytes)) = self.from.take() {
+            r.unhold(bytes);
+        }
+    }
+}
+
+/// A format-2 provisioning placed, marked and claimed (phase 1), for
+/// [`Store::fill_and_commit2`].
+struct Placed<'a> {
+    kind: RegionKind,
+    name: RegionName,
+    tag: u32,
+    flags: u8,
+    id: u64,
+    /// Its claimed table slot.
+    page: usize,
+    seq: u32,
+    /// Its header blocks' offset; its data's size and capacity; its whole
+    /// footprint's length.
+    offset: u64,
+    data_size: u64,
+    capacity: u64,
+    extent: u64,
+    extents: &'a [(u64, u64)],
+    /// The whole footprint written (else the slack allocated).
+    fill_whole: bool,
 }

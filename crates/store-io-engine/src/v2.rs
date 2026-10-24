@@ -189,9 +189,55 @@ pub(crate) struct Meta2 {
     /// Every allocated range: free space is rebuilt from it (never by
     /// adding a range back).
     pub(crate) allocated: Vec<(u64, u64)>,
+    /// Provisionings between their placement and their commit: the name
+    /// and the table slot each holds (v0.5 E4 C13).
+    pub(crate) claims: Vec<Claim>,
+    /// Bytes marked allocated by provisionings and growths not yet
+    /// committed (in `allocated`, not yet in `usage`).
+    pub(crate) marked: u64,
+}
+
+/// A provisioning's hold, from its placement to its commit or its undo:
+/// no other provisioning takes its name or its table slot meanwhile.
+#[derive(Debug, Clone)]
+pub(crate) struct Claim {
+    pub(crate) page: usize,
+    pub(crate) seq: u32,
+    pub(crate) name: store_io_format::meta::RegionName,
 }
 
 impl Meta2 {
+    /// Marks `ranges` allocated for a provisioning or a growth that fills
+    /// them outside the metadata lock (spec §12: "choose and mark"): no
+    /// other placement takes them; free space is the complement again in a
+    /// container of `len` bytes.
+    pub(crate) fn mark(&mut self, ranges: &[(u64, u64)], len: u64) {
+        self.allocated.extend_from_slice(ranges);
+        self.marked += ranges.iter().map(|r| r.1).sum::<u64>();
+        self.rebuild_free(len);
+    }
+
+    /// Undoes [`Self::mark`] of exactly `ranges` (an operation that failed
+    /// before its commit).
+    pub(crate) fn unmark(&mut self, ranges: &[(u64, u64)], len: u64) {
+        for r in ranges {
+            if let Some(i) = self.allocated.iter().position(|a| a == r) {
+                let _gone = self.allocated.swap_remove(i);
+            }
+        }
+        let bytes = ranges.iter().map(|r| r.1).sum::<u64>();
+        debug_assert!(self.marked >= bytes, "unmarked more than was marked");
+        self.marked = self.marked.saturating_sub(bytes);
+        self.rebuild_free(len);
+    }
+
+    /// A marked operation committed: its `bytes` are now a footprint (they
+    /// stay in `allocated`).
+    pub(crate) fn settle(&mut self, bytes: u64) {
+        debug_assert!(self.marked >= bytes, "settled more than was marked");
+        self.marked = self.marked.saturating_sub(bytes);
+    }
+
     /// Free space again, as the complement of `allocated` in a container
     /// of `len` bytes.
     pub(crate) fn rebuild_free(&mut self, len: u64) {
@@ -415,6 +461,8 @@ pub(crate) fn create_metadata<P: Platform>(
             reserved_names: Vec::new(),
             cut_short: false,
             allocated: Vec::new(),
+            claims: Vec::new(),
+            marked: 0,
         })),
     })
 }
@@ -640,6 +688,8 @@ pub(crate) fn open_metadata<P: Platform>(
             reserved_names: Vec::new(),
             cut_short: false,
             allocated: Vec::new(),
+            claims: Vec::new(),
+            marked: 0,
         })),
     };
     // Steps 3-6, before anything is written.

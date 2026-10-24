@@ -13,6 +13,46 @@
 
 ### Added
 
+- Engine: **`copy_store(platform, from, to, CopyOptions)`** (v0.5 E5
+  C1): copies a store (format 1 or 2) into a new format-2 store in
+  another directory, returning a `CopyReport` (regions, bytes, the
+  source's format). The source is opened read-only and never written.
+  A source with unavailable regions or table entries that do not decode
+  (`NotWritten(NotReady)`, the first in the error's context), a stale
+  or lost table page (`NotWritten(Frozen)`) or a slot object larger
+  than a format-2 slot holds (`NotWritten(TooLarge)`), or a target
+  directory already holding a store (`AlreadyExists`), or one whose
+  contents cannot be looked at (`Io`), is refused before anything but
+  the target directory is created. A copy holds the lock on
+  `store.sio.copy-lock`
+  (`COPY_LOCK`, created in the target directory and kept) throughout:
+  a second copy into the same directory is `Locked`. Every region is
+  recreated with its name, kind, data size (zero too), cap, tag, region
+  generation (a format-1 slot's is 1), fill pattern and fill key, laid
+  out anew in one extent (an uncapped region's capacity past its data
+  size is not kept), and its whole data area copied (append regions
+  too: as after any reopen, the caller's `resume_at` from its own
+  records sets the append position); a target device that needs larger
+  blocks than the source's, or a region whose data size is not whole
+  target blocks, is refused (`NotWritten(Misaligned)`). The
+  target is built under `store.sio.copying` (`COPYING`; one left by a
+  crashed copy is removed by the next), made durable by one barrier,
+  closed, then renamed into place by a rename that never replaces (a
+  store created there meanwhile is kept and the copy is
+  `AlreadyExists`) and the directory flushed: after a crash the target
+  name holds nothing or the whole copy (`DurabilityUnknown` if the rename
+  or that flush failed: the copy may or may not be in place).
+- Platform (**breaking** for outside implementers of `Platform`, who must
+  add it): **`Platform::rename_noreplace`**, a rename that fails with the
+  platform's "already exists" error rather than replace. Linux:
+  `renameat2(RENAME_NOREPLACE)`, falling back where the kernel or file
+  system lacks the flag to `linkat`, a directory flush, then `unlinkat`
+  (a crash may leave both names, never neither). Windows:
+  `FileRenameInfoEx` without replace. A conformance check covers it on
+  every backend.
+- Simulator: `FaultPlan::fail_open` (every open of one named file in one
+  directory fails with a given code) and `World::set_evidence` (the
+  evidence `probe` returns from then on).
 - Engine: **`RegionOptions`** (`size`, `max_size`, `validate`) and
   `Store::provision_{append,page}_region_with`,
   `Reservation::provision_{append,page}_region_with` (v0.5 E4 C10; the

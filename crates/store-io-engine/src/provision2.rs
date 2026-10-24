@@ -51,10 +51,20 @@ where
         kind: RegionKind,
         opts: crate::RegionOptions,
         from: Option<&mut Reservation<P>>,
+        copied: Option<&crate::copy::CopyAttrs>,
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
         let data_size = opts.size_bytes();
-        let tag = from.as_ref().map_or(0, |r| r.tag());
+        // A region `copy_store` recreates keeps its tag, generation, fill
+        // pattern and key.
+        let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag);
+        let (fill, fill_key) = match copied {
+            Some(c) => (c.fill, c.fill_key),
+            None if inner.opts.keyed_fill => (FillPattern::KeyedV1, random_uuid()),
+            None => (FillPattern::Zeros, [0; 16]),
+        };
+        let generation =
+            Generation::from_raw(copied.map_or(1, |c| c.generation)).ok_or_else(corrupt)?;
         // Refusals before any I/O (spec §9 step 2, §10).
         if inner.report.metadata.frozen {
             return Err(not_written(
@@ -67,7 +77,7 @@ where
             .map_err(|_| not_written(NotWrittenCause::InvalidName, ErrorContext::default()))?;
         let block = inner.layout.block();
         let slot = kind == RegionKind::Slot;
-        let data_size = if slot {
+        let data_size = if slot || (data_size == 0 && copied.is_some()) {
             0
         } else {
             store_io_core::align::align_up(data_size.max(1), block).ok_or_else(too_large)?
@@ -78,7 +88,8 @@ where
             Some(cap) => store_io_core::align::align_up(cap, block)
                 .ok_or_else(too_large)?
                 .max(data_size),
-            None => data_size,
+            None if slot => 0,
+            None => data_size.max(block),
         };
         if capacity / block >= u64::from(u32::MAX) {
             return Err(too_large());
@@ -212,6 +223,9 @@ where
             extent,
             extents: &extents,
             fill_whole: capped.is_none() || self.writes_slack(),
+            fill,
+            fill_key,
+            generation,
         };
         // Any return before the commit drops `holds` armed: every hold
         // given back.
@@ -234,16 +248,7 @@ where
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
         let block = inner.layout.block();
-        let fill = if inner.opts.keyed_fill {
-            FillPattern::KeyedV1
-        } else {
-            FillPattern::Zeros
-        };
-        let fill_key = if fill == FillPattern::KeyedV1 {
-            random_uuid()
-        } else {
-            [0; 16]
-        };
+        let (fill, fill_key) = (pl.fill, pl.fill_key);
         // 1-3. Fill, make durable, verify (as format 1); a capped region's
         // slack allocated, not written (but where the slack is written),
         // never verified.
@@ -273,7 +278,7 @@ where
             compat_flags: 0,
             log2_block: inner.layout.log2_block,
             extent_count: pl.extents.len() as u16,
-            region_generation: 1,
+            region_generation: pl.generation.get(),
             fill_key,
             object_len: 0,
         };
@@ -386,7 +391,7 @@ where
             id: RegionId::from_raw(pl.id),
             name: pl.name,
             kind: pl.kind,
-            generation: Generation::FIRST,
+            generation: pl.generation,
             map: match pl.kind == RegionKind::Slot {
                 true => crate::regionmap::RegionMap::single(pl.offset + 2 * block, 0),
                 false => crate::regionmap::RegionMap::from_extents(pl.extents, pl.data_size),
@@ -550,4 +555,9 @@ struct Placed<'a> {
     extents: &'a [(u64, u64)],
     /// The whole footprint written (else the slack allocated).
     fill_whole: bool,
+    /// Its fill pattern and key, and its region generation (1, or the
+    /// source's for a region `copy_store` recreates).
+    fill: FillPattern,
+    fill_key: [u8; 16],
+    generation: Generation,
 }

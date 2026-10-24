@@ -59,7 +59,12 @@ pub(crate) fn crash_open(p: &SimPlatform, s: Store<SimPlatform>) {
 }
 
 pub(crate) fn media(p: &SimPlatform) -> Vec<u8> {
-    p.with_world(|w| w.media_of(&PathBuf::from(DIR), CONTAINER).unwrap().to_vec())
+    media_in(p, DIR)
+}
+
+/// The durable bytes of the store in `dir`.
+pub(crate) fn media_in(p: &SimPlatform, dir: &str) -> Vec<u8> {
+    p.with_world(|w| w.media_of(&PathBuf::from(dir), CONTAINER).unwrap().to_vec())
 }
 
 /// Writes `data` (whole 4 KiB blocks) at `at`, durably.

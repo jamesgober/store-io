@@ -361,6 +361,12 @@ impl World {
         &self.cfg.faults
     }
 
+    /// Sets (or clears, back to the device's own) the evidence `probe`
+    /// returns from now on (a store created after it sees a new device).
+    pub fn set_evidence(&mut self, ev: Option<Evidence>) {
+        self.cfg.evidence = ev;
+    }
+
     /// Mutable fault plan (to arm faults mid-run).
     pub fn faults_mut(&mut self) -> &mut FaultPlan {
         &mut self.cfg.faults
@@ -573,6 +579,25 @@ impl World {
         let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
         let id = d.entries.remove(from).ok_or(ENOENT)?;
         let _replaced = d.entries.insert(to.to_owned(), id);
+        Ok(())
+    }
+
+    /// [`Self::rename`], refusing an existing `to` (`EEXIST`).
+    pub(crate) fn rename_noreplace(
+        &mut self,
+        dir: &PathBuf,
+        from: &str,
+        to: &str,
+    ) -> Result<(), OsError> {
+        if self.cfg.faults.read_only_media {
+            return Err(EROFS);
+        }
+        let d = self.dirs.get_mut(dir).ok_or(ENOENT)?;
+        if d.entries.contains_key(to) {
+            return Err(EEXIST);
+        }
+        let id = d.entries.remove(from).ok_or(ENOENT)?;
+        let _none = d.entries.insert(to.to_owned(), id);
         Ok(())
     }
 

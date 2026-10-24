@@ -81,4 +81,8 @@ pub struct FaultPlan {
     /// The n-th `Platform::allocate_range` (1-based) fails with this raw
     /// code (for example 28, ENOSPC) and allocates nothing.
     pub fail_allocate_range: Option<(u64, i32)>,
+    /// Every `Platform::open_file` of the file of this name in the
+    /// directory of this path fails with this raw code (for example 13,
+    /// EACCES).
+    pub fail_open: Option<(std::path::PathBuf, String, i32)>,
 }

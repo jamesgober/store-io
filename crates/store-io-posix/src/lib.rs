@@ -431,6 +431,16 @@ mod platform {
             dir.rename(from, to)
         }
 
+        fn rename_noreplace(
+            &self,
+            dir: &PosixDir,
+            from: &FileName,
+            to: &FileName,
+            _file: &PosixFile,
+        ) -> RawResult<()> {
+            dir.rename_noreplace(from, to)
+        }
+
         fn unlink(&self, dir: &PosixDir, name: &FileName) -> RawResult<()> {
             dir.unlink(name)
         }

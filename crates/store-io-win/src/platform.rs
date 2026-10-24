@@ -82,6 +82,17 @@ impl Platform for WinPlatform {
         dir.rename_replace(to, file)
     }
 
+    /// As [`Self::rename_replace`], refusing an existing `to`.
+    fn rename_noreplace(
+        &self,
+        dir: &WinDir,
+        _from: &FileName,
+        to: &FileName,
+        file: &WinFile,
+    ) -> RawResult<()> {
+        dir.rename_noreplace(to, file)
+    }
+
     fn unlink(&self, dir: &WinDir, name: &FileName) -> RawResult<()> {
         dir.unlink(name)
     }

@@ -109,6 +109,23 @@ impl WinDir {
         }
     }
 
+    /// Renames the open `file` to `to` in this directory, refusing if `to`
+    /// exists (`ERROR_ALREADY_EXISTS`).
+    pub(crate) fn rename_noreplace(&self, to: &FileName, file: &WinFile) -> RawResult<()> {
+        let target = self.child(to);
+        let ex = rename_record(&target, FILE_RENAME_FLAG_POSIX_SEMANTICS);
+        match sys::set_file_info(file.handle(), FileRenameInfoEx, &ex) {
+            Ok(()) => Ok(()),
+            Err(e) if sys::is_unsupported(e) => {
+                self.legacy_rename.store(true, Ordering::Relaxed);
+                // ReplaceIfExists FALSE.
+                let legacy = rename_record(&target, 0);
+                sys::set_file_info(file.handle(), FileRenameInfo, &legacy)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Removes `name` with POSIX semantics (open handles keep working).
     pub(crate) fn unlink(&self, name: &FileName) -> RawResult<()> {
         let path = self.child(name);

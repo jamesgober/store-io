@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use store_io_core::error::{OsError, OsErrorSource};
 use store_io_core::evidence::{
     Bus, DeviceFacts, Evidence, FsFacts, FsKind, OsCacheMode, PlatformKind, Privilege, Tri,
 };
@@ -373,6 +374,14 @@ impl Platform for SimPlatform {
 
     fn open_file(&self, dir: &SimDir, name: &FileName, mode: FileMode) -> RawResult<SimFile> {
         let w = lock(&self.world);
+        if let Some((d, n, code)) = &w.faults().fail_open {
+            if *d == dir.path && n == name.as_str() {
+                return Err(OsError {
+                    code: *code,
+                    source: OsErrorSource::Sim,
+                });
+            }
+        }
         let id = w.lookup(&dir.path, name.as_str())?;
         if mode == FileMode::ReadWrite && w.faults().read_only_media {
             return Err(crate::world::EROFS);
@@ -392,6 +401,16 @@ impl Platform for SimPlatform {
         _file: &SimFile,
     ) -> RawResult<()> {
         lock(&self.world).rename(&dir.path, from.as_str(), to.as_str())
+    }
+
+    fn rename_noreplace(
+        &self,
+        dir: &SimDir,
+        from: &FileName,
+        to: &FileName,
+        _file: &SimFile,
+    ) -> RawResult<()> {
+        lock(&self.world).rename_noreplace(&dir.path, from.as_str(), to.as_str())
     }
 
     fn unlink(&self, dir: &SimDir, name: &FileName) -> RawResult<()> {

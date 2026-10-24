@@ -56,7 +56,7 @@ where
         // format 1 cannot record.
         opts.validate()?;
         if inner.layout.format == store_io_format::slot::FORMAT_2 {
-            return self.provision2(name, kind, opts, from);
+            return self.provision2(name, kind, opts, from, None);
         }
         if opts.max_size_bytes().is_some() {
             return Err(Error::Unsupported {

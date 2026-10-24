@@ -84,6 +84,9 @@ FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 REGIONMAP = ["-p", "store-io-engine", "--lib", "regionmap::"]
 FOOTPRINT_FMT = ["-p", "store-io-format", "--test", "footprint"]
 V2 = "crates/store-io-engine/src/v2.rs"
+# copy_store.
+COPY_SRC = "crates/store-io-engine/src/copy.rs"
+COPYT = ["-p", "store-io-engine", "--test", "copy"]
 CREATE = "crates/store-io-engine/src/create.rs"
 
 M = [
@@ -818,6 +821,35 @@ M = [
  ('crates/store-io-engine/src/directory.rs', "            | '\\u{180B}'..='\\u{180F}'", "            | '\\u{180B}'..='\\u{180E}'"),
  ('crates/store-io-engine/src/directory.rs', "            | '\\u{E0000}'..='\\u{E0FFF}'", "            | '\\u{E0001}'..='\\u{E0FFF}'"),
  ('crates/store-io-engine/src/directory.rs', "            '\\u{212A}' => 'k',", "            '\\u{212A}' => '\\u{212A}',"),
+ (COPY_SRC, "        } else {\n            r.generation.get()\n        };", "        } else {\n            r.generation.get() & 1\n        };", COPYT),
+ (COPY_SRC, "let generation = if !format_2 && r.kind == RegionKind::Slot {", "let generation = if !format_2 && r.kind == RegionKind::Slot && false {", COPYT),
+ (COPY_SRC, "                fill_key,\n                tag,", "                fill_key: [fill_key[0] ^ 1; 16],\n                tag,", COPYT),
+ (COPY_SRC, "(m.fill, m.fill_key, false)", "(m.fill, [0; 16], false)", COPYT),
+ (COPY_SRC, "                tag,\n            },", "                tag: tag & 0,\n            },", COPYT),
+ (COPY_SRC, "cap: capped.then(|| r.map.capacity()),", "cap: capped.then(|| r.map.capacity()).and(None),", COPYT),
+ (COPY_SRC, "        dst.flush_all_accounted()?;", "", COPYT),
+ (COPY_SRC, "    match platform.unlink(&dir, &temp) {", "    match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
+ (COPY_SRC, "    platform\n        .sync_dir(&dir)\n", "    Ok::<(), store_io_platform::OsError>(())\n", COPYT),
+ (COPY_SRC, "let src = Store::open_readonly(platform.clone(), from, opts.store.clone())?;", "let src = Store::open(platform.clone(), from, opts.store.clone())?;", COPYT),
+ (COPY_SRC, "if report.metadata.frozen {", "if report.metadata.frozen && false {", COPYT),
+ (COPY_SRC, "if let Some(u) = report.unavailable.first() {", "if let Some(u) = report.unavailable.first().filter(|_| false) {", COPYT),
+ (COPY_SRC, "o.len() > max_object(log2)", "o.len() > max_object(log2) + 100", COPYT),
+ (COPY_SRC, "        Ok(_) => Err(Error::AlreadyExists { what: Named::Store }),", "        Ok(_) => Ok(()),", COPYT),
+ (COPY_SRC, "if let Some(&(p, s)) = report.metadata.invalid_entries.first() {", "if let Some(&(p, s)) = report.metadata.invalid_entries.first().filter(|_| false) {", COPYT),
+ (COPY_SRC, "    let _lock = platform.lock_exclusive(&lock_file).map_err(|raw| {", "    let _lock = platform.lock_exclusive(&lock_file).map_or(Ok(()), |_| Ok(())).map_err(|raw: store_io_platform::OsError| {", COPYT),
+ (COPY_SRC, "    match platform.rename_noreplace(&dir, &temp, &final_name, &file) {", "    match platform.rename_replace(&dir, &temp, &final_name, &file) {", COPYT),
+ (COPY_SRC, "    holds_store()?;\n    match platform.unlink(&dir, &temp) {", "    drop(_lock);\n    holds_store()?;\n    match platform.unlink(&dir, &temp) {", COPYT),
+ (COPY_SRC, "        Err(raw) if is_not_found(raw) => Ok(()),\n        Err(raw) => Err(io(Op::Open, raw)),", "        Err(_) => Ok(()),", COPYT),
+ (COPY_SRC, "if dst.report().block_size != block {", "if dst.report().block_size != block && false {", COPYT),
+ (COPY_SRC, "if made.map.len() != f.data_size {", "if made.map.len() != f.data_size && false {", COPYT),
+ ('crates/store-io-engine/src/provision2.rs', 'let data_size = if slot || (data_size == 0 && copied.is_some()) {', 'let data_size = if slot || (data_size == 0 && copied.is_some() && false) {', COPYT),
+ ('crates/store-io-sim/src/world.rs', '        if d.entries.contains_key(to) {\n            return Err(EEXIST);', '        if d.entries.contains_key(to) && false {\n            return Err(EEXIST);', COPYT),
+ (COPY_SRC, "let _ticket = to.append(&buf[..got])?;", "let _ticket = to.append(&vec![0; got])?;", COPYT),
+ (COPY_SRC, "let _ticket = to.write(to.pos(at)?, &buf[..got])?;", "let _ticket = to.write(to.pos(at)?, &vec![0; got])?;", COPYT),
+ ('crates/store-io-engine/src/provision2.rs', '            region_generation: pl.generation.get(),', '            region_generation: 1,', COPYT),
+ ('crates/store-io-engine/src/provision2.rs', '            generation: pl.generation,', '            generation: Generation::FIRST,', COPYT),
+ ('crates/store-io-engine/src/provision2.rs', '            Some(c) => (c.fill, c.fill_key),', '            Some(c) => (c.fill, if c.fill_key == [0; 16] { random_uuid() } else { random_uuid() }),', COPYT),
+ ('crates/store-io-engine/src/provision2.rs', 'let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag);', 'let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag & 0);', COPYT),
 ]
 
 def kill_stuck_tests():

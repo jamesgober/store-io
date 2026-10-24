@@ -230,6 +230,10 @@ where
                 rename_unlink_sync,
             ),
             (
+                "a no-replace rename refuses an existing name and renames to a free one",
+                rename_noreplace,
+            ),
+            (
                 "the ownership lock admits one holder at a time",
                 ownership_lock,
             ),
@@ -645,6 +649,57 @@ fn rename_unlink_sync<P: Platform>(c: &Ctx<'_, P>) -> Check {
         Ok(_) => Err("an unlinked file still opens".into()),
         Err(e) => {
             check!(is_not_found(e), "unlinked: {e}");
+            Ok(())
+        }
+    }
+}
+
+fn rename_noreplace<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    let dir = c.dir()?;
+    let mut q = c.queue(4)?;
+    let a = c.file(&dir, "a", BLOCK as u64)?;
+    let b = c.file(&dir, "b", BLOCK as u64)?;
+    let _x = write_one(&mut q, &a, 0, c.buf(&pattern(8, BLOCK))?, false)?;
+    let _y = write_one(&mut q, &b, 0, c.buf(&pattern(9, BLOCK))?, false)?;
+    ok(c.p.flush_all(&a), "flush a")?;
+    ok(c.p.flush_all(&b), "flush b")?;
+    // Onto an existing name: refused, both files as they were.
+    match c.p.rename_noreplace(&dir, &name("a")?, &name("b")?, &a) {
+        Ok(()) => return Err("a no-replace rename replaced a file".into()),
+        Err(e) => check!(is_already_exists(e), "onto an existing name: {e}"),
+    }
+    drop(b);
+    let still_b = ok(
+        c.p.open_file(&dir, &name("b")?, FileMode::ReadOnly),
+        "open b",
+    )?;
+    let (r, back) = read_one(&mut q, &still_b, 0, c.buf(&[0; BLOCK])?)?;
+    check!(
+        r == Ok(BLOCK) && back.is_some_and(|x| x.as_slice() == pattern(9, BLOCK).as_slice()),
+        "the existing file changed"
+    );
+    drop(still_b);
+    // Onto a free name: renamed.
+    ok(
+        c.p.rename_noreplace(&dir, &name("a")?, &name("c")?, &a),
+        "rename_noreplace",
+    )?;
+    ok(c.p.sync_dir(&dir), "sync_dir")?;
+    drop(a);
+    let now_c = ok(
+        c.p.open_file(&dir, &name("c")?, FileMode::ReadOnly),
+        "open c",
+    )?;
+    let (r, back) = read_one(&mut q, &now_c, 0, c.buf(&[0; BLOCK])?)?;
+    check!(
+        r == Ok(BLOCK) && back.is_some_and(|x| x.as_slice() == pattern(8, BLOCK).as_slice()),
+        "the new name does not hold the renamed file's bytes"
+    );
+    drop(now_c);
+    match c.p.open_file(&dir, &name("a")?, FileMode::ReadOnly) {
+        Ok(_) => Err("the renamed name still exists".into()),
+        Err(e) => {
+            check!(is_not_found(e), "old name: {e}");
             Ok(())
         }
     }

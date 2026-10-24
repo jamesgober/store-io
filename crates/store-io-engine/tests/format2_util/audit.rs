@@ -12,7 +12,7 @@ use store_io_format::meta2::{
 use store_io_format::slot::{Expect, FORMAT_2, SlotIndex, SlotStatus, validate};
 use store_io_sim::SimPlatform;
 
-use super::{LOG2_TABLE, PAGES, block, media, page_at};
+use super::{DIR, LOG2_TABLE, PAGES, block, media_in, page_at};
 
 /// A region the audit found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,18 +69,23 @@ fn winner(
 /// Audits the container: panics, naming the broken rule, if any rule fails.
 /// Returns every region found, in table order.
 pub(crate) fn audit(pf: &SimPlatform) -> Vec<Found> {
-    audit_with(pf, false)
+    audit_with(pf, DIR, false)
+}
+
+/// [`audit`] of the store in `dir`.
+pub(crate) fn audit_in(pf: &SimPlatform, dir: &str) -> Vec<Found> {
+    audit_with(pf, dir, false)
 }
 
 /// [`audit`], also allowing a region header one extent ahead of its entry
 /// (a growth beyond capacity that stopped before its commit): that extent
 /// is not the region's (it may hold anything, and overlap anything).
 pub(crate) fn audit_allowing_extra(pf: &SimPlatform) -> Vec<Found> {
-    audit_with(pf, true)
+    audit_with(pf, DIR, true)
 }
 
-fn audit_with(pf: &SimPlatform, allow_extra: bool) -> Vec<Found> {
-    let m = media(pf);
+fn audit_with(pf: &SimPlatform, dir: &str, allow_extra: bool) -> Vec<Found> {
+    let m = media_in(pf, dir);
     let b = block(pf);
     let volume: [u8; 16] = m[32..48].try_into().unwrap();
     let (vbytes, _) = winner(&m, volume, 0, [0, b], 12, true).expect("no volume record");
@@ -204,7 +209,12 @@ pub(crate) struct Header {
 /// Region `id`'s header, read straight from the media at `at` (its two
 /// slots); `None` if neither copy is valid.
 pub(crate) fn header_of(pf: &SimPlatform, id: u64, at: [u64; 2]) -> Option<Header> {
-    let m = media(pf);
+    header_in(pf, DIR, id, at)
+}
+
+/// [`header_of`] in the store in `dir`.
+pub(crate) fn header_in(pf: &SimPlatform, dir: &str, id: u64, at: [u64; 2]) -> Option<Header> {
+    let m = media_in(pf, dir);
     let volume: [u8; 16] = m[32..48].try_into().unwrap();
     let mut best: Option<Header> = None;
     for (i, &off) in at.iter().enumerate() {

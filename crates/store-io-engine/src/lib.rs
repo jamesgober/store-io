@@ -22,6 +22,7 @@
 
 mod batch;
 pub mod completion;
+mod copy;
 mod create;
 mod directory;
 pub mod domain;
@@ -67,6 +68,7 @@ mod v2;
 
 pub use batch::{AppendBatch, PageBatch};
 pub use completion::{SubmitterConfig, WriteMode};
+pub use copy::{COPY_LOCK, COPYING, CopyOptions, CopyReport, copy_store};
 pub use directory::Directory;
 pub use domain::DomainStats;
 pub use flusher::SubmitterWaker;

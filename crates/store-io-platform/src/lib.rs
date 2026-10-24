@@ -453,6 +453,28 @@ pub trait Platform: Send + Sync + 'static {
         file: &Self::File,
     ) -> RawResult<()>;
 
+    /// Renames `from` to `to` in the same directory, refusing if `to`
+    /// exists (the platform's "already exists" error, nothing renamed): a
+    /// rename that can never replace a file another process created after
+    /// the caller looked. Atomic where the system has such a rename (Linux
+    /// `RENAME_NOREPLACE`, Windows); elsewhere a hard link named `to` made
+    /// to the file, the directory flushed, then `from` removed, so a crash
+    /// may leave both names on the file (never neither). The file handle is
+    /// the open `from` (Windows renames by handle).
+    ///
+    /// # Errors
+    ///
+    /// The raw error. After any other failure the file may be under `from`,
+    /// under `to`, or (the link fallback) under both; the engine treats it
+    /// as durability-unknown.
+    fn rename_noreplace(
+        &self,
+        dir: &Self::Dir,
+        from: &FileName,
+        to: &FileName,
+        file: &Self::File,
+    ) -> RawResult<()>;
+
     /// Removes a file.
     ///
     /// # Errors

@@ -33,10 +33,21 @@ where
     /// [`Error::Io`] / [`Error::DurabilityUnknown`] on platform failures
     /// (`Io(Lock)` on a file system that cannot lock).
     pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
+        Self::create_named(platform, path, opts, &container_name()?)
+    }
+
+    /// [`Self::create`] with the container under `name` (`copy_store`
+    /// builds its target under a temporary one).
+    pub(crate) fn create_named(
+        platform: P,
+        path: &Path,
+        opts: StoreOptions,
+        name: &store_io_platform::FileName,
+    ) -> Result<Self, Error> {
         let dir = platform
             .open_dir(path, true)
             .map_err(|e| io(Op::Create, e))?;
-        let name = container_name()?;
+        let name = name.clone();
         let (file, lock) = match platform.create_file(&dir, &name) {
             Ok(file) => {
                 let lock = platform.lock_exclusive(&file).map_err(|raw| {

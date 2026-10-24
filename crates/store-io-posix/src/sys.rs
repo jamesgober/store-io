@@ -268,6 +268,48 @@ pub(crate) fn renameat(dirfd: RawFd, from: &CStr, to: &CStr) -> RawResult<()> {
     check(unsafe { libc::renameat(dirfd, from.as_ptr(), dirfd, to.as_ptr()) })
 }
 
+/// `renameat2(2)` with `RENAME_NOREPLACE` within one directory: `EEXIST`
+/// if `to` exists. Where the file system or kernel lacks the flag
+/// (`EINVAL`, `ENOSYS`), `linkat(2)` (which never replaces either), the
+/// directory flushed, then `unlinkat(2)` of `from`: a crash between them
+/// leaves both names on the one file, never neither (a file system with
+/// neither the flag nor hard links fails the rename).
+pub(crate) fn renameat_noreplace(dirfd: RawFd, from: &CStr, to: &CStr) -> RawResult<()> {
+    // SAFETY: renameat2(2) through syscall(2) (glibc before 2.28 has no
+    // wrapper): both names are NUL-terminated and outlive the call; the
+    // flags are a plain integer.
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            dirfd,
+            from.as_ptr(),
+            dirfd,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if r == 0 {
+        return Ok(());
+    }
+    let e = last_errno();
+    if e.code != libc::EINVAL && e.code != libc::ENOSYS {
+        return Err(e);
+    }
+    rename_by_link(dirfd, from, to)
+}
+
+/// [`renameat_noreplace`]'s fallback: `linkat(2)` (`EEXIST` if `to`
+/// exists), the directory flushed, `unlinkat(2)` of `from`.
+fn rename_by_link(dirfd: RawFd, from: &CStr, to: &CStr) -> RawResult<()> {
+    // SAFETY: linkat(2): both names are NUL-terminated and outlive the
+    // call; no flags (a symlink is linked, not followed).
+    check(unsafe { libc::linkat(dirfd, from.as_ptr(), dirfd, to.as_ptr(), 0) })?;
+    // The link made durable before the unlink, which nothing else
+    // guarantees: a crash leaves both names, never neither.
+    fsync(dirfd)?;
+    unlinkat(dirfd, from)
+}
+
 /// `unlinkat(2)` of a file (no `AT_REMOVEDIR`).
 pub(crate) fn unlinkat(dirfd: RawFd, name: &CStr) -> RawResult<()> {
     // SAFETY: unlinkat(2): `name` is NUL-terminated and outlives the call.
@@ -708,7 +750,44 @@ pub(crate) fn nvme_admin(fd: RawFd, cmd: &mut NvmeAdminCmd, data: &mut [u8]) -> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
+
+    #[test]
+    fn test_the_link_fallback_never_replaces() {
+        use std::os::fd::AsRawFd;
+        let d = std::env::temp_dir().join(format!(".store-io-link-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a"), b"a").unwrap();
+        std::fs::write(d.join("b"), b"b").unwrap();
+        let path = std::ffi::CString::new(d.to_str().unwrap()).unwrap();
+        // SAFETY: open(2) of a NUL-terminated path; the descriptor is
+        // owned below.
+        let fd = owned(c_long::from(unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        }))
+        .unwrap();
+        let fd = fd.as_raw_fd();
+        assert_eq!(
+            rename_by_link(fd, c"a", c"b").map_err(|e| e.code),
+            Err(libc::EEXIST)
+        );
+        assert_eq!(std::fs::read(d.join("b")).unwrap(), b"b");
+        assert_eq!(rename_by_link(fd, c"a", c"c"), Ok(()));
+        assert_eq!(std::fs::read(d.join("c")).unwrap(), b"a");
+        assert!(!d.join("a").exists());
+        // The real call agrees on both.
+        assert_eq!(
+            renameat_noreplace(fd, c"c", c"b").map_err(|e| e.code),
+            Err(libc::EEXIST)
+        );
+        assert_eq!(renameat_noreplace(fd, c"c", c"a"), Ok(()));
+        let _cleanup = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn test_fiemap_buf_clamps_mapped_count() {

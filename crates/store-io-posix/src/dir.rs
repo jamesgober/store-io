@@ -44,6 +44,11 @@ impl PosixDir {
         sys::renameat(self.raw(), &name_cstring(from)?, &name_cstring(to)?)
     }
 
+    /// A rename that never replaces `to` (`EEXIST` if it exists).
+    pub(crate) fn rename_noreplace(&self, from: &FileName, to: &FileName) -> RawResult<()> {
+        sys::renameat_noreplace(self.raw(), &name_cstring(from)?, &name_cstring(to)?)
+    }
+
     /// `unlinkat` of `name`.
     pub(crate) fn unlink(&self, name: &FileName) -> RawResult<()> {
         sys::unlinkat(self.raw(), &name_cstring(name)?)

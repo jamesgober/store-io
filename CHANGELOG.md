@@ -22,8 +22,18 @@
 - Tests: crash enumeration over every format-2 change and inside the
   open (v0.5 E7 C1-C3; the simulator's `CrashMode::Exact`, step probe,
   power cut, settled metadata, `kill`), and the damage matrix
-  (`format2_damage.rs`: each slot damaged each way, alone and in pairs,
-  the spec's verdict and every way out).
+  (`format2_damage.rs`: 52 cases, each kind of damage the judgement
+  tells apart, eight pairs, three histories; the spec's verdict and
+  every way out). The audit (E7 C5) judges the
+  media itself with the format crate's judgement and holds every open to
+  it, checks free space as the complement of what is allocated and the
+  tags' charges against the regions, and checks the clean close. The
+  real-kernel crash replay (`tests/crash.rs`, ext4 and XFS, E7 C6) now
+  covers provisioning, growth within and beyond capacity, recycle,
+  release, and a repair after the container is cut short.
+- Docs: DURABILITY.md section 13 describes the crash enumeration and the
+  replay; PLATFORMS.md states that NTFS has no crash replay (no write log
+  on Windows) and what stands for it.
 - Harness: `examples/g1probe.rs` (Linux), the probe that found where a QD1
   durable write's time over the raw primitive went (G1): each side's
   write and flush halves, their thread CPU, and buffer variants of the raw
@@ -684,6 +694,14 @@
 
 ### Fixed
 
+- Engine: **a region cut short by a shorter container made the regions
+  inside its span read-only, and could not be repaired** (D-132, found by
+  the real-kernel crash replay). A region grown beyond its capacity can
+  span others; cut short, its header was not read and its whole span was
+  taken for what it may have written, so the regions inside it came out
+  possibly superseded and `repair_unavailable` refused it
+  (`NotWritten(Overlap)`). Its header is now judged alone (spec §9 step
+  4): only its own extents count, and the repair goes through.
 - Engine: a `Submitter` operation split at a run's end now checks, in
   release builds too, that every piece moves it on (a split that did not,
   only through a bug, re-issued writes for ever).

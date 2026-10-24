@@ -2,7 +2,7 @@
 
 > The on-disk format of a store's container file, `store.sio`, byte by byte: the layout, the A/B slot every piece of metadata is written with, the three metadata records, the keyed fill pattern, every validation rule, and why each multi-step change survives a crash. It is written so that an independent reader can be built from it. Every statement is taken from the code, and each section names its source.
 >
-> **Status: pre-1.0.** This is on-disk format 1 as store-io writes it today. The format may change incompatibly before the first stable release, and a container written by one 0.x release is not promised to open in another.
+> **Status: pre-1.0.** This is on-disk format 1, the format store-io 0.1 to 0.4 write. From 0.5 store-io creates format 2 (documented here once complete) and opens a format-1 container for reading only; `copy_store` (`store-io copy`) copies one into a new format-2 store. The format may change incompatibly before the first stable release, and a container written by one 0.x release is not promised to open in another.
 
 ---
 
@@ -434,7 +434,7 @@ Source: [`crates/store-io-engine/src/layout.rs`](../crates/store-io-engine/src/l
 
 | Mechanism | Where | Rule |
 |---|---|---|
-| `format_major` | Every slot, offset 14 | Only `1` is read or written. Any other value refuses the pair: the open fails with `Unsupported(FormatVersion)` for the volume record and the region table, and the region is not presented for a region header. |
+| `format_major` | Every slot, offset 14 | `1` in this document. 0.4 and earlier read and write only `1`: any other value refuses the pair (the open fails with `Unsupported(FormatVersion)` for the volume record and the region table, and the region is not presented for a region header). 0.5 writes `2`, refuses any value above `2` the same way, and opens a format-1 container for reading only (a writable open is `Unsupported(FormatVersion)`, before anything is written). |
 | `incompat_flags` | Every slot, offset 16 | No bit is defined. Any set bit refuses the pair, as above. |
 | `ro_compat_flags` | Every slot, offset 20 | No bit is defined. A slot with an unknown bit stays readable, and the pair must not be written by a version that does not know the bit. |
 | `compat_flags` | Every slot, offset 24 | No bit is defined. Unknown bits are ignored. |

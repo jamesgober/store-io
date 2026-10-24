@@ -369,6 +369,12 @@
   if its header says so (the volume record's or a page's first copy, at
   some block size), so an image of one in a damaged store's data never
   gets the store truncated.
+- Docs (v0.5 E5 C4): format 2 is the format and format-1 stores open
+  read-only, with the way to copy them: README, the crate docs,
+  `docs/API.md`, `docs/GUIDE.md` (new section 14, "Stores made before
+  0.5"), and `docs/FORMAT.md`'s status and versioning (it documents
+  format 1; format 2's byte-level spec follows once format 2 is
+  complete); the slot capacity and table-page figures are format 2's.
 
 - Engine: **format-2 provisioning and growth beyond capacity fill outside
   the metadata lock** (v0.5 E4 C13, spec §12's "choose and mark"): the

@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: 0.4 &mdash; io_uring and the engine layer.</strong> The simple and batch APIs on Windows and Linux, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>; power-cut certification follows in <code>1.x</code>. macOS arrives in 0.5. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: 0.4 &mdash; io_uring and the engine layer.</strong> The simple and batch APIs on Windows and Linux, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>; power-cut certification follows in <code>1.x</code>. macOS arrives in 0.5. In development for 0.5: container format 2 (a paged region table, 65,536 regions by default, and regions that can grow); a store made before 0.5 (format 1) opens read-only there and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -89,7 +89,7 @@ let (start, receipt) = batch.commit()?;
 | [`docs/API.md`](./docs/API.md) | Every public item, grouped by purpose. |
 | [`docs/DURABILITY.md`](./docs/DURABILITY.md) | The durability model: classes, evidence, trust, receipts, flush sharing, fail-stop. |
 | [`docs/PLATFORMS.md`](./docs/PLATFORMS.md) | What store-io does on Windows and Linux, and the known limits of each. |
-| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk format of a store. |
+| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk format 1 (stores made by 0.4 and earlier); format 2's follows. |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Every change. |
 
 ## Installation

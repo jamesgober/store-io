@@ -33,7 +33,7 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | Item | Description |
 |---|---|
 | `Store::create(path, StoreOptions) -> Result<Store>` | Creates a store in `path` (a directory of its own; created if needed). Probes the device and refuses unsafe or unverified devices unless the options' `trust` says otherwise. |
-| `Store::open(path) -> Result<Store>` | Opens an existing store for writing with default options. Takes the ownership lock, flushes whatever a dead owner left in the device cache, and verifies every region against its header. |
+| `Store::open(path) -> Result<Store>` | Opens an existing store for writing with default options. Takes the ownership lock, flushes whatever a dead owner left in the device cache, and verifies every region against its header. A store of container format 1 (made before 0.5) is refused (`Unsupported(FormatVersion)`) before anything is written: open it read-only, or copy it to format 2 with `copy_store`. |
 | `Store::open_with(path, StoreOptions) -> Result<Store>` | As `open`, with explicit options. |
 | `Store::open_readonly(path) -> Result<Store>` | Opens for reading and recovery with one handle that has no write rights, so it works on a read-only mount or a write-protected copy; nothing on disk changes. Takes the shared form of the ownership lock: other readers may open the store at the same time, and no writer runs meanwhile. |
 | `store.append_region(name)` / `page_region(name)` / `slot(name)` | Looks up an existing region or slot. Never creates one. A name the region table holds but open could not use returns `Corruption` naming the region (`Truncated`, `HeaderCrc` or `Metadata`), never `NotFound`. |
@@ -61,7 +61,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 |---|---|---|
 | `trust: Trust` | none | Certificate, attestation and override inputs to the class decision. |
 | `block_size: Option<u32>` | device's | Minimum block size; the device may require more. |
-| `log2_table_slot: u8` | 14 | Region-table slot size as a power of two (16 KiB holds 253 regions). |
+| `log2_table_slot: u8` | 14 | Region-table slot size as a power of two (a 16 KiB table page holds 169 regions; the table holds 65,536 by default). |
 | `max_io: usize` | 1 MiB | Largest single I/O of the blocking calls, and the batch buffer size. |
 | `max_write: usize` | 4 MiB | Largest single submitter operation: one buffer, one OS write or read (rounded up to a power of two, at most 1 GiB). |
 | `large_buffers: u32` | 8 | Pool buffers of `max_write` bytes (0: the submitter's largest operation is `max_io`; at most 16,777,215). |
@@ -148,7 +148,7 @@ A batch holds at most what the buffer pool can lend (`buffers_per_class × max_i
 |---|---|
 | `commit(&[u8]) -> Result<DurableReceipt>` | Commits a new version: one block write, one barrier. |
 | `read() -> Option<Vec<u8>>` | The current version, or `None` if never committed. |
-| `capacity() -> usize` | The largest payload: the block size less 176 bytes of headers. |
+| `capacity() -> usize` | The largest payload: the block size less 192 bytes of headers (3,904 bytes at 4 KiB; a format-1 slot, less 176). |
 
 ---
 
@@ -236,7 +236,7 @@ None of these can be constructed outside store-io.
 | `NoSpace { tag, ctx }` | A reservation or provisioning ran out of space or quota; nothing poisoned. |
 | `Corruption { kind, ctx }` | `MediaError`, `HeaderCrc`, `IdentityMismatch`, `Metadata`, `Fork`, `Truncated` (the container is shorter than its metadata says). |
 | `UnsafeDevice { reasons }`, `Unverified { missing, reasons }` | The device was refused. |
-| `Unsupported { what }` | A capability the platform lacks. |
+| `Unsupported { what }` | A capability the platform lacks; or (`FormatVersion`) a newer on-disk format, or a format-1 store opened for writing (copy it with `copy_store`). |
 | `Fenced { stale }`, `Locked` | Ownership: a newer owner exists; another holder has the lock (another handle, in this or another process, holds the store, or another handle or process is replacing in a directory). |
 | `NotFound { what }`, `AlreadyExists { what }` | Store, region or slot lookups. `NotFound` means no such name exists in the store at all. |
 | `Io { op, raw, ctx }` | A setup or metadata failure; durable data unaffected. |

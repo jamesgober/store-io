@@ -19,6 +19,7 @@
 11. [Recycling and releasing regions](#11-recycling-and-releasing-regions)
 12. [Tuning](#12-tuning)
 13. [Many operations from one thread: the Submitter](#13-many-operations-from-one-thread-the-submitter)
+14. [Stores made before 0.5](#14-stores-made-before-05)
 
 ---
 
@@ -252,7 +253,7 @@ Every error carries the operation, the region and byte range where known, and th
 | `UnsafeDevice`, `Unverified` | The device was refused at open. | Use another device, or attest or override (section 8). |
 | `Locked` | Another handle (in this or another process) holds the store, or another handle or process is replacing in the directory. | Wait for it and retry, or stop it. |
 | `NotFound`, `AlreadyExists` | A store, region or slot lookup. `NotFound` means the name does not exist in the store at all. | Create, or open. |
-| `Unsupported` | The platform cannot do this. | See the platform notes. |
+| `Unsupported` | The platform cannot do this; or (`FormatVersion`) the store is of a newer format, or of format 1 (made before 0.5) and opened for writing. | See the platform notes; for a format-1 store, section 14. |
 | `Io` | A setup or metadata call failed; durable data is unaffected. | Check the raw code. |
 
 A failed flush is never retried, and success is never reported after one. This is deliberate: on Linux a failed `fsync` can drop the dirty data and then let the next `fsync` "succeed" with nothing left to write.
@@ -305,7 +306,7 @@ These run only when you call them; store-io never reclaims space on its own.
 | `t3_pool_threads` | CPU count, at most 32 | Linux synchronous tier: worker threads that run a page batch's writes and a large read's pieces concurrently, started by the first such call; one pool per platform, sized by the first store on it (each simple-API store has its own). A single write or read never uses them. |
 | `append_window` | 16 MiB | Bytes an append may run ahead of the oldest incomplete one on its region. |
 | `keyed_fill` | off | Fill new regions with an incompressible pattern instead of zeros (thin, deduplicating or compressing storage). |
-| `log2_table_slot` | 14 | Region-table size: 16 KiB holds 253 regions. |
+| `log2_table_slot` | 14 | Region-table page size: 16 KiB holds 169 regions (the table holds 65,536 by default). |
 | `register_file` | on | Linux io_uring: register a read-only twin of the container with each submitter's ring as a direct descriptor, so its reads skip the kernel's per-operation file lookup (writes stay on the store's own descriptor, D-107). |
 | `linux_tier` | `Auto` | Linux only: `Auto` uses io_uring where the kernel accepts store-io's rings, else the synchronous tier; `Uring` requires io_uring; `Sync` never uses it. `store.report().io` names the interface chosen and why ([PLATFORMS](PLATFORMS.md#the-io-queue)). |
 
@@ -365,6 +366,34 @@ If an error returns early, dropping the submitter waits for the writes still in 
 - **Belonging to one thread.** A submitter is not `Send`. On Linux's io_uring tier its ring belongs to its thread and is never touched by another.
 - **Drop.** Dropping a submitter waits for everything in flight; nothing the device may still write is released early.
 - **Buffers.** Buffers are shared with the blocking calls. The largest is `sub.max_buf()` (`StoreOptions::max_write`, 4 MiB by default).
+
+---
+
+## 14. Stores made before 0.5
+
+From 0.5 store-io creates container format 2. A store made by 0.4 or earlier is format 1: it still opens read-only (`Store::open_readonly`, `store-io info`), and a writable open is refused with `Unsupported(FormatVersion)` before anything is written. Copy it into a new store:
+
+```text
+store-io copy data/orders data/orders-2
+```
+
+or from code:
+
+```rust
+use store_io::CopyOptions;
+
+let report = store_io::copy_store("data/orders", "data/orders-2", CopyOptions::default())?;
+println!("{} regions, {} bytes", report.regions, report.bytes);
+```
+
+- **The source is never written.** It is opened read-only; a writer cannot hold it meanwhile (`Locked`).
+- **Everything comes across.** Every region keeps its name, kind, data size, cap, tag, generation, fill pattern and key; the slots keep their objects. Each region is laid out anew in one extent.
+- **All or nothing.** The copy is built under a temporary name in the target directory (`store.sio.copying`, beside the copy's lock file) and renamed into place only when it is whole and durable: after a crash the target holds no store (copy again: the leftover is removed) or the whole copy.
+- **Refused up front.** A source with unavailable regions or table entries that do not decode, a stale or lost table page, a slot object too large for format 2 (format 1's slots hold 16 bytes more), or a target directory that already holds a store is refused before anything is created. A target device that needs larger blocks than the source's is refused (`NotWritten(Misaligned)`) before any data is copied.
+- **Append positions** are not stored on disk in either format: after the copy, as after any open, position each append region with `resume_at` from your own records.
+- **Trust.** The new store is created like any other: `CopyOptions::store` holds its options (`trust` among them; `store-io copy --override-refusal` for a device store-io refuses).
+
+Then open the new store, and keep the old one until you have checked it.
 
 
 ---

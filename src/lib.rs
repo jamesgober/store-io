@@ -57,6 +57,14 @@
 //! [`AppendRegion::scan`] and `resume_at`, the device report, errors and
 //! space.
 //!
+//! ## Container format
+//!
+//! Stores are created in container format 2. A store made before 0.5
+//! (format 1) opens read-only ([`Store::open_readonly`]); a writable open
+//! refuses it with `Unsupported(FormatVersion)` before writing anything.
+//! [`copy_store`] (or `store-io copy <old> <new>`) copies it into a new
+//! format-2 store, all or nothing, the source untouched.
+//!
 //! ## Layers
 //!
 //! - **Simple:** [`Store`], [`AppendRegion`], [`PageRegion`], [`Slot`] and

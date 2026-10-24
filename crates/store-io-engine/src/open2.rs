@@ -58,6 +58,21 @@ pub(crate) struct Regions2 {
 }
 
 /// A region whose entry passed the entry checks.
+/// The span a checked entry reserves: whole, or for one cut short, the part
+/// inside the file (`None` when nothing is), as `reserved_span` clamps an
+/// entry that fails its checks: a range past the file's end would move the
+/// free map's end, and with it where the next region is placed (past the
+/// end: growth, refused while the region exists).
+fn clamped(c: &Checked, container_len: u64) -> Option<Extent> {
+    let e = &c.entry;
+    let end = if c.short {
+        e.span_end.min(container_len)
+    } else {
+        e.span_end
+    };
+    (end > e.span_start).then(|| (e.span_start, end - e.span_start))
+}
+
 struct Checked {
     id: u64,
     page: usize,
@@ -81,6 +96,9 @@ struct Checked {
     small: bool,
     /// The footprint (step 3 passed), or why not.
     outcome: Result<Vec<Extent>, Unavailable>,
+    /// The entry reaches past the file's end (its only fault): unavailable
+    /// whatever its header says, its header read all the same.
+    short: bool,
 }
 
 /// Lists in the report stop at [`REPORT_LIMIT`]; the report says so.
@@ -155,8 +173,8 @@ pub(crate) fn check_regions<Q: Queue>(
     // Whether every region header on a stale page agrees with its entry.
     let mut agrees = vec![true; v2.pages.len()];
     // Entries that passed the entry checks, their header pairs to read:
-    // (id, page, entry, limits).
-    let mut pending: Vec<(u64, usize, Entry2, EntryLimits)> = Vec::new();
+    // (id, page, entry, limits, cut short).
+    let mut pending: Vec<(u64, usize, Entry2, EntryLimits, bool)> = Vec::new();
     for (p, page) in v2.pages.iter().enumerate() {
         if !matches!(page.standing, Standing::Confirmed | Standing::Unconfirmed) {
             // A Lost page's regions are unknown (allocation is frozen).
@@ -180,7 +198,23 @@ pub(crate) fn check_regions<Q: Queue>(
             // Past the file's end: growth must not make zeros of the tail.
             let short = raw.span_end > container_len;
             cut_short |= short;
-            let Ok(entry) = raw.check(&lim) else {
+            // Cut short and otherwise sound (the file's length its only
+            // fault): unavailable, but its header is read and judged alone
+            // (spec §9 step 4, D-132), so what it may have written, not its whole
+            // span, decides what it supersedes (its span may cover other
+            // regions' extents: a region grown beyond its capacity).
+            let checked_entry = match raw.check(&lim) {
+                Ok(entry) => Some((entry, false)),
+                Err(_) if short => raw
+                    .check(&EntryLimits {
+                        file_len: u64::MAX,
+                        ..lim
+                    })
+                    .ok()
+                    .map(|entry| (entry, true)),
+                Err(_) => None,
+            };
+            let Some((entry, entry_short)) = checked_entry else {
                 agrees[p] = false;
                 // A sequence the entry checks refuse may be newest: one that
                 // is 0, or past its page's write, supersedes as the highest.
@@ -242,12 +276,15 @@ pub(crate) fn check_regions<Q: Queue>(
                 continue;
             };
             // Bounded: the entry checks keep the capacity inside the span.
-            usage.push((
-                entry.tag,
-                entry.data_size,
-                entry.capacity.saturating_add(2 * block),
-            ));
-            pending.push((id, p, entry, lim));
+            // A region cut short is not counted (part of it is not there).
+            if !entry_short {
+                usage.push((
+                    entry.tag,
+                    entry.data_size,
+                    entry.capacity.saturating_add(2 * block),
+                ));
+            }
+            pending.push((id, p, entry, lim, entry_short));
         }
     }
     let mut own = if pending.len() >= OWN_QUEUE_FROM {
@@ -262,7 +299,7 @@ pub(crate) fn check_regions<Q: Queue>(
     for batch in pending.chunks(HEADER_BATCH) {
         let ats: Vec<PairAt> = batch
             .iter()
-            .map(|&(id, _, entry, _)| PairAt {
+            .map(|&(id, _, entry, _, _)| PairAt {
                 volume: *volume.as_bytes(),
                 object: layout.region_object(id),
                 a: entry.header_a,
@@ -273,7 +310,7 @@ pub(crate) fn check_regions<Q: Queue>(
             })
             .collect();
         let headers = read_all_retried(lane, file, pool, &ats, &mut report.retried_reads)?;
-        for (&(id, p, entry, lim), header) in batch.iter().zip(headers) {
+        for (&(id, p, entry, lim, short), header) in batch.iter().zip(headers) {
             let page = &v2.pages[p];
             let mut c = Checked {
                 id,
@@ -286,6 +323,7 @@ pub(crate) fn check_regions<Q: Queue>(
                 extra: None,
                 small: false,
                 outcome: Err(Unavailable::HeaderUnreadable),
+                short,
             };
             if let (Some(bytes), Some((won, info))) =
                 (c.header.payload.as_deref(), c.header.report.winner_info())
@@ -334,6 +372,12 @@ pub(crate) fn check_regions<Q: Queue>(
                         .map_err(reason_of);
                 }
             }
+            if short {
+                c.outcome = Err(Unavailable::ContainerShort {
+                    needed: entry.span_end,
+                    actual: container_len,
+                });
+            }
             // A header one extent ahead of its entry on a stale page is a
             // lost growth: it does not agree either.
             if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {
@@ -381,7 +425,12 @@ pub(crate) fn check_regions<Q: Queue>(
             }
             None => vec![span],
         };
-        gone.push((e.footprint_seq, Some(span), own, Some(e.name)));
+        gone.push((
+            e.footprint_seq,
+            clamped(c, container_len),
+            own,
+            Some(e.name),
+        ));
     }
     let settled = {
         let usable: Vec<Usable<'_>> = usable_at
@@ -460,10 +509,11 @@ pub(crate) fn check_regions<Q: Queue>(
             holds.push(crate::v2::Hold {
                 page: c.page,
                 seq: e.seq,
-                span: Some((e.span_start, e.span_end - e.span_start)),
-                usage: Some((e.tag, e.data_size, e.capacity.saturating_add(2 * block))),
+                span: clamped(&c, container_len),
+                usage: (!c.short)
+                    .then(|| (e.tag, e.data_size, e.capacity.saturating_add(2 * block))),
                 name: None,
-                short: false,
+                short: c.short,
                 footprint_seq: e.footprint_seq,
                 own,
                 demoted: c

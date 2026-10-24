@@ -663,7 +663,7 @@ M = [
  ('crates/store-io-engine/src/slots.rs', '        if at.a.checked_add(at.size() as u64) == Some(at.b) {', '        if at.a.checked_add(at.size() as u64) == Some(at.b) && at.log2 == 0 {', F2O),
  ('crates/store-io-engine/src/slots.rs', '        Ok(n) if n == len => Ok(got.ok_or(media)),', '        Ok(n) if n <= len => Ok(got.ok_or(media)),', F2O),
  ('crates/store-io-engine/src/slots.rs', '                            Some(OneSlot::unreadable(media)),\n                            Some(OneSlot::unreadable(media)),', '                            Some(judge_slot(at, SlotIndex::A, &vec![0u8; at.size()])),\n                            Some(OneSlot::unreadable(media)),', F2O),
- ('crates/store-io-engine/src/open2.rs', '        for (&(id, p, entry, lim), header) in batch.iter().zip(headers) {', '        for (&(id, p, entry, lim), header) in batch.iter().zip(headers.into_iter().rev()) {', F2O),
+ ('crates/store-io-engine/src/open2.rs', '        for (&(id, p, entry, lim, short), header) in batch.iter().zip(headers) {', '        for (&(id, p, entry, lim, short), header) in batch.iter().zip(headers.into_iter().rev()) {', F2O),
  # E2b/E3 C8 review: completions matched by tag (out of order too); the
  # open's own queue from 16 header pairs
  ('crates/store-io-engine/src/slots.rs', '            let (i, part) = reads[c.tag as usize];', '            let (i, part) = reads[(c.tag as usize).min(arrived - 1)];', F2O),
@@ -903,7 +903,7 @@ M = [
  (V2, "        if pair > 0 && (decode_lost || pages[pair - 1].ahead().next().is_some()) {", "        if pair > 0 && (decode_lost || pages[pair - 1].ahead().next().is_some() && false) {", F2REP),
  (V2, "        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)))", "        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)) && false)", F2REP),
  ('crates/store-io-engine/src/provision2.rs', "                        && page.ahead().next().is_none()", "                        && (page.ahead().next().is_none() || true)", F2REP),
- ('crates/store-io-engine/src/open2.rs', "                usage: Some((e.tag, e.data_size, e.capacity.saturating_add(2 * block))),", "                usage: None,", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                    .then(|| (e.tag, e.data_size, e.capacity.saturating_add(2 * block))),", "                    .then(|| (e.tag, e.data_size, 0)),", F2REP),
  # accept_page_rollback (v0.5 E6 C3).
  (REPAIR_SRC, "pages: &[u32]) -> Result<(), Error> {\n        self.ready()?;", "pages: &[u32]) -> Result<(), Error> {", F2REP),
  (REPAIR_SRC, "        let inner = &self.inner;\n        if inner.layout.format != store_io_format::slot::FORMAT_2 {", "        let inner = &self.inner;\n        if inner.layout.format != store_io_format::slot::FORMAT_2 && false {", F2REP),
@@ -1029,6 +1029,16 @@ M = [
  (V2_SRC, '            report.damaged_slots.push(DamagedSlot {\n                page,', '            let _ = std::convert::identity(DamagedSlot {\n                page,', DAMAGE),
  (V2_SRC, '        let page = i.checked_sub(1).map(|p| p as u32);', '        let page = i.checked_sub(1).map(|_| 0u32);', DAMAGE),
  (V2_SRC, '        for (slot_b, verdict) in [(false, v.a), (true, v.b)] {', '        for (slot_b, verdict) in [(true, v.a), (false, v.b)] {', DAMAGE),
+ # E7 C6: a region cut short has its header judged alone (spec §9 step 4):
+ # its own extents, not its span, supersede; its span clamped to the file
+ # (the free map's end: placement); its usage not counted; growth refused
+ # until it is repaired
+ ('crates/store-io-engine/src/open2.rs', '        e.span_end.min(container_len)\n    } else {', '        e.span_end.max(container_len & 0)\n    } else {', ['-p', 'store-io-engine', '--test', 'unavailable', '--test', 'format2_repair']),
+ ('crates/store-io-engine/src/open2.rs', '                Err(_) if short => raw\n                    .check(&EntryLimits {', '                Err(_) if false => raw\n                    .check(&EntryLimits {', ['-p', 'store-io-engine', '--test', 'format2_repair']),
+ ('crates/store-io-engine/src/open2.rs', '            if !entry_short {\n                usage.push((', '            if true {\n                usage.push((', ['-p', 'store-io-engine', '--test', 'format2_repair']),
+ ('crates/store-io-engine/src/open2.rs', '            if short {\n                c.outcome = Err(Unavailable::ContainerShort {', '            if false {\n                c.outcome = Err(Unavailable::ContainerShort {', ['-p', 'store-io-engine', '--test', 'format2_repair']),
+ ('crates/store-io-engine/src/open2.rs', '                usage: (!c.short)\n                    .then(', '                usage: true\n                    .then(', ['-p', 'store-io-engine', '--test', 'format2_repair']),
+ ('crates/store-io-engine/src/open2.rs', '                short: c.short,', '                short: false,', ['-p', 'store-io-engine', '--test', 'format2_repair']),
 ]
 
 def kill_stuck_tests():

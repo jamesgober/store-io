@@ -665,6 +665,11 @@ pub(crate) fn audit_space_in(pf: &SimPlatform, dir: &str, s: &store_io_engine::S
     }
     assert_eq!(space.regions, in_regions, "the bytes in regions");
     assert_eq!(
+        space.tags.iter().map(|t| t.physical).sum::<u64>(),
+        space.regions,
+        "the tags' charges are the bytes in regions"
+    );
+    assert_eq!(
         space.released + space.reserved,
         space.container - allocated,
         "free space is the complement of what is allocated"

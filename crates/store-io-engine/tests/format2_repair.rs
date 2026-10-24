@@ -1530,3 +1530,82 @@ fn test_a_stale_page_with_a_blank_newer_copy_never_gives_a_lost_id_again() {
     let b = s.provision_page_region("b", 4 * B).unwrap();
     assert_ne!(b.pos(0).unwrap().region(), old);
 }
+
+/// A region cut short whose span covers another region (its second extent,
+/// from a growth beyond capacity, lies past the other): its header still
+/// decodes, so what it may have written is its own extents, not the span
+/// (spec §9 step 4): the region between stays usable and writable, never
+/// possibly superseded, and the cut one is repaired away.
+#[test]
+fn test_a_region_cut_short_over_another_supersedes_nothing() {
+    let p = SimPlatform::new(SimConfig::volatile(1230));
+    drop(create(&p));
+    let base = 2 * B + 2 * u64::from(PAGES) * TABLE;
+    let cap = 16 * B;
+    let mid_at = base + 2 * B + cap;
+    let tail = mid_at + 2 * B + cap;
+    let mut low = region(0, RegionKind::Page, "low", base, cap);
+    low.extents.push((tail, cap));
+    low.entry.extent_count = 2;
+    low.header.extent_count = 2;
+    low.entry.capacity = 2 * cap;
+    low.entry.span_end = tail + cap;
+    let mut mid = region(1, RegionKind::Page, "mid", mid_at, cap);
+    // The region between is the older footprint (the cut one grew later).
+    mid.entry.footprint_seq = max_meta_seq(&p);
+    write_regions(&p, 0, &[low, mid]);
+    // The container cut into the tail extent.
+    {
+        let dir = p.open_dir(std::path::Path::new(DIR), false).unwrap();
+        let file = p
+            .open_file(
+                &dir,
+                &FileName::new(store_io_engine::CONTAINER).unwrap(),
+                FileMode::ReadWrite,
+            )
+            .unwrap();
+        p.set_len(&file, tail + cap / 2).unwrap();
+        p.flush_all(&file).unwrap();
+    }
+    let s = open(&p);
+    let r = s.report();
+    // Its span stays reserved and the overlap is reported (spec §9 step
+    // 4), but the region between is not possibly superseded.
+    assert!(r.metadata.superseded.is_empty(), "{:?}", r.metadata);
+    assert_eq!(
+        r.metadata.shares_reserved,
+        [RegionId::from_raw(1)],
+        "{:?}",
+        r.metadata
+    );
+    let unavailable = s.unavailable_regions();
+    assert!(
+        unavailable.len() == 1
+            && unavailable[0].name == "low"
+            && matches!(
+                unavailable[0].reason,
+                store_io_engine::Unavailable::ContainerShort { .. }
+            ),
+        "{unavailable:?}"
+    );
+    // Growth stays refused while an entry names space past the end.
+    let big = |s: &Store<SimPlatform>| s.provision_page_region("big", 1 << 20).map(drop);
+    assert!(
+        matches!(big(&s), Err(Error::Corruption { .. })),
+        "growth while cut short"
+    );
+    let m = s.page_region("mid").unwrap();
+    m.write_durable(m.pos(0).unwrap(), &[9; B as usize])
+        .unwrap();
+    format2_util::audit::audit_space(&p, &s);
+    s.repair_unavailable(id_of(&s, "low")).unwrap();
+    format2_util::audit::audit_space(&p, &s);
+    big(&s).unwrap();
+    format2_util::audit::audit_space(&p, &s);
+    drop((m, s));
+    format2_util::audit::audit_closed(&p);
+    // The span freed: nothing shares reserved bytes any more.
+    let s = open(&p);
+    assert!(s.report().metadata.shares_reserved.is_empty());
+    assert!(s.unavailable_regions().is_empty());
+}

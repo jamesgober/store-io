@@ -9,11 +9,17 @@
 //! power cut at that moment would keep.
 //!
 //! 1. `crash_phase_write` runs a store workload (durable appends, a batch,
-//!    durable page writes, slot commits, a submitter with durable and plain
-//!    writes and a store-wide barrier). After each acknowledgement it logs
-//!    what was acknowledged to `$STORE_IO_CRASH_ACKS` and inserts a mark
-//!    naming it into the log (`dmsetup message ... mark`); before each slot
-//!    commit it marks the attempt.
+//!    durable page writes, slot commits, the format-2 changes: a capped
+//!    region provisioned, grown within its capacity and released, another
+//!    provisioned, grown beyond its capacity and recycled; then a submitter
+//!    with durable and plain writes and a store-wide barrier; last, the
+//!    container cut short into the recycled region's grown extent, the
+//!    store opened writable, and that region, now unavailable, repaired
+//!    away). After each
+//!    acknowledgement it logs what was acknowledged to
+//!    `$STORE_IO_CRASH_ACKS` and inserts a mark naming it into the log
+//!    (`dmsetup message ... mark`); before each slot commit and each
+//!    format-2 change it marks the attempt.
 //! 2. `crash_phase_replay` reads the log (store-io's own reader of the
 //!    `dm-log-writes` format) and, from the mark that follows the store's
 //!    creation, rebuilds the device as it stood after every entry: every
@@ -22,7 +28,10 @@
 //!    the store read-only, and checks every acknowledgement whose mark
 //!    precedes the state: appended records and pages byte for byte, and
 //!    each slot holding its last acknowledged value or the value of a
-//!    commit already attempted after it, never anything else.
+//!    commit already attempted after it, and each region of a format-2
+//!    change as it was last acknowledged or as the change attempted after
+//!    it makes it (absent, unavailable, or its length and generation),
+//!    never anything else; no other region unavailable, nothing frozen.
 //!
 //! 3. `crash_phase_subsets` (SIM-05): a crash before a flush can keep any
 //!    subset of the writes the device still cached, in any order (a cache
@@ -51,7 +60,7 @@ use std::process::Command;
 
 use store_io::engine::completion::Done;
 use store_io::engine::{SubmitterConfig, WriteMode};
-use store_io::{Store, StoreOptions, Trust};
+use store_io::{Error, RegionOptions, Store, StoreOptions, Trust};
 
 // ----- the dm-log-writes log ---------------------------------------------------
 
@@ -246,6 +255,41 @@ fn workload(dir: &Path, acks_path: &Path, dm: Option<String>) {
         slot.commit(&round.to_le_bytes()).unwrap();
         acks.note(&format!("slot {round}"));
     }
+    // The format-2 changes (v0.5 E7 C6), each marked when attempted and
+    // when acknowledged with the region's state after it: its length and
+    // generation, or gone.
+    let state = |name: &str, len: u64, generation: u64| format!("{name} {len} {generation}");
+    let small = 256u64 << 10;
+    acks.note(&format!("region-try {}", state("capped", small, 1)));
+    let capped = store
+        .provision_page_region_with(
+            "capped",
+            RegionOptions::default().size(small).max_size(1 << 20),
+        )
+        .unwrap();
+    acks.note(&format!("region {}", state("capped", small, 1)));
+    assert_eq!(capped.capacity(), 1 << 20, "capped: room to grow within");
+    // Growth within its capacity: one table write.
+    acks.note(&format!("region-try {}", state("capped", 1 << 20, 1)));
+    capped.grow(1 << 20).unwrap();
+    acks.note(&format!("region {}", state("capped", 1 << 20, 1)));
+    acks.note(&format!("region-try {}", state("loose", small, 1)));
+    let loose = store.provision_page_region("loose", small).unwrap();
+    acks.note(&format!("region {}", state("loose", small, 1)));
+    assert_eq!(loose.capacity(), small, "loose: no room to grow within");
+    // Growth beyond its capacity: a new extent filled, the header, the
+    // table.
+    let grown = small + (2 << 20);
+    acks.note(&format!("region-try {}", state("loose", grown, 1)));
+    loose.grow(grown).unwrap();
+    assert!(loose.capacity() > small, "loose grew by a new extent");
+    acks.note(&format!("region {}", state("loose", grown, 1)));
+    acks.note(&format!("region-try {}", state("loose", grown, 2)));
+    loose.recycle().unwrap();
+    acks.note(&format!("region {}", state("loose", grown, 2)));
+    acks.note("region-try capped gone");
+    capped.release().unwrap();
+    acks.note("region capped gone");
     // A submitter: durable appends acknowledged one by one, then plain
     // appends made durable by a store-wide barrier.
     let mut sub = store.submitter(SubmitterConfig::default()).unwrap();
@@ -286,6 +330,32 @@ fn workload(dir: &Path, acks_path: &Path, dm: Option<String>) {
         acks.note(&format!("append {tag} {off}"));
     }
     drop(sub);
+    // A repair (v0.5 E7 C6): the container cut short into `loose`'s grown
+    // extent (the last space allocated: its tail), the store reopened
+    // writable, `loose` unavailable (its extent past the file's end), and
+    // repaired away: the entry released.
+    drop((wal, pages, slot, loose, store));
+    let container = dir.join(store_io::CONTAINER);
+    acks.note("region-try loose unavailable");
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&container)
+        .unwrap();
+    let len = file.metadata().unwrap().len();
+    file.set_len(len - (1 << 20)).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    acks.note("region loose unavailable");
+    let store = Store::open_with(dir, opts()).unwrap();
+    let unavailable = store.unavailable_regions();
+    assert!(
+        unavailable.len() == 1 && unavailable[0].name == "loose",
+        "the cut made loose unavailable: {unavailable:?}"
+    );
+    acks.note("region-try loose gone");
+    store.repair_unavailable(unavailable[0].id).unwrap();
+    acks.note("region loose gone");
+    drop(store);
     eprintln!("{} acknowledgements and attempts marked", acks.n);
 }
 
@@ -295,10 +365,29 @@ fn workload(dir: &Path, acks_path: &Path, dm: Option<String>) {
 #[derive(Debug, Clone)]
 enum Ack {
     Created,
-    Append { i: u64, offset: u64 },
-    Page { offset: u64, seed: u64 },
+    Append {
+        i: u64,
+        offset: u64,
+    },
+    Page {
+        offset: u64,
+        seed: u64,
+    },
     SlotTry(u64),
     Slot(u64),
+    /// A format-2 change attempted: the region's state it makes.
+    RegionTry(String, Held),
+    /// Acknowledged: the region's state.
+    Region(String, Held),
+}
+
+/// What a store holds of a changed region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Gone,
+    Unavailable,
+    /// Served: its length and generation.
+    Served(u64, u64),
 }
 
 fn parse_acks(text: &str) -> BTreeMap<String, Ack> {
@@ -318,6 +407,18 @@ fn parse_acks(text: &str) -> BTreeMap<String, Ack> {
             },
             "slot-try" => Ack::SlotTry(num(2)),
             "slot" => Ack::Slot(num(2)),
+            "region-try" | "region" => {
+                let state = match w[3] {
+                    "gone" => Held::Gone,
+                    "unavailable" => Held::Unavailable,
+                    _ => Held::Served(num(3), num(4)),
+                };
+                if w[1] == "region" {
+                    Ack::Region(w[2].to_owned(), state)
+                } else {
+                    Ack::RegionTry(w[2].to_owned(), state)
+                }
+            }
             other => panic!("unknown acknowledgement {other}"),
         };
         out.insert(w[0].to_owned(), ack);
@@ -364,6 +465,10 @@ fn check_state(mnt: &Path, passed: &[&Ack]) -> Result<(), String> {
         .map_err(|e| format!("pages: {e}"))?;
     let mut last_slot = None;
     let mut tried = None;
+    // Each changed region's acknowledged state, and the state a change
+    // attempted after it makes (before any acknowledgement: absent).
+    let mut acked: BTreeMap<&str, Held> = BTreeMap::new();
+    let mut pending: BTreeMap<&str, Held> = BTreeMap::new();
     for a in passed {
         match a {
             Ack::Created => {}
@@ -386,7 +491,42 @@ fn check_state(mnt: &Path, passed: &[&Ack]) -> Result<(), String> {
             }
             Ack::SlotTry(v) => tried = Some(*v),
             Ack::Slot(v) => last_slot = Some(*v),
+            Ack::RegionTry(name, state) => {
+                acked.entry(name.as_str()).or_insert(Held::Gone);
+                pending.insert(name.as_str(), *state);
+            }
+            Ack::Region(name, state) => {
+                acked.insert(name.as_str(), *state);
+                pending.remove(name.as_str());
+            }
         }
+    }
+    if store.frozen() {
+        return Err(format!("frozen: {:?}", store.report().metadata));
+    }
+    let unavailable = store.unavailable_regions();
+    for (name, was) in &acked {
+        let found = if unavailable.iter().any(|u| u.name == *name) {
+            Held::Unavailable
+        } else {
+            match store.page_region(name) {
+                Ok(r) => Held::Served(r.len(), r.generation().get()),
+                Err(Error::NotFound { .. }) => Held::Gone,
+                Err(e) => return Err(format!("region {name}: {e}")),
+            }
+        };
+        if found != *was && pending.get(name) != Some(&found) {
+            return Err(format!(
+                "region {name} is {found:?}: acknowledged {was:?}, attempted {:?}",
+                pending.get(name)
+            ));
+        }
+    }
+    if let Some(u) = unavailable
+        .iter()
+        .find(|u| !acked.contains_key(u.name.as_str()))
+    {
+        return Err(format!("region unavailable: {u:?}"));
     }
     let slot = store.slot("manifest").map_err(|e| format!("slot: {e}"))?;
     let value = slot

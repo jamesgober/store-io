@@ -275,6 +275,20 @@ pub enum CrashMode {
     Subset(u64),
     /// Each cached write is kept, dropped or torn at random from the seed.
     Random,
+    /// Each cached write's fate, oldest first (a crash enumeration's: every
+    /// combination, tears included); a write past the list is lost.
+    Exact(Vec<Fate>),
+}
+
+/// What a crash leaves of one cached write ([`CrashMode::Exact`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Fate {
+    /// None of it reaches media.
+    Lost,
+    /// All of it does.
+    Kept,
+    /// Its first `n` logical blocks do (a torn write; at most its length).
+    Torn(usize),
 }
 
 /// A test hook, run with the world unlocked: at the start of every
@@ -289,6 +303,21 @@ impl core::fmt::Debug for SubmitProbe {
             "SubmitProbe(set)"
         } else {
             "SubmitProbe(none)"
+        })
+    }
+}
+
+/// The hook run before each step ([`World::set_step_probe`]); `true` cuts
+/// the power there.
+#[derive(Clone, Default)]
+pub(crate) struct StepProbe(pub(crate) Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>);
+
+impl core::fmt::Debug for StepProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "StepProbe(set)"
+        } else {
+            "StepProbe(none)"
         })
     }
 }
@@ -318,6 +347,10 @@ pub struct World {
     pub(crate) submit_probe: SubmitProbe,
     /// Run first by every `Platform::release_range`, outside the world lock.
     pub(crate) release_probe: SubmitProbe,
+    pub(crate) step_probe: StepProbe,
+    /// The power is off ([`World::set_step_probe`]): every step and every
+    /// completion fails with EIO, changing nothing, until the next crash.
+    pub(crate) powered_off: bool,
     flushes_completed: u64,
     dir_syncs: u64,
     reopens: u64,
@@ -353,6 +386,8 @@ impl World {
             write_submits: 0,
             submit_probe: SubmitProbe::default(),
             release_probe: SubmitProbe::default(),
+            step_probe: StepProbe::default(),
+            powered_off: false,
             flushes_completed: 0,
             dir_syncs: 0,
             reopens: 0,
@@ -446,6 +481,31 @@ impl World {
         self.submit_probe = SubmitProbe(probe);
     }
 
+    /// Sets (or clears) the hook run before every step that can change what
+    /// a crash leaves: each operation a queue accepts (`Queue::submit` after
+    /// the submit probe, and `Queue::perform`; reads too, which change
+    /// nothing but order the rest) and each `Platform::create_file`,
+    /// rename, `unlink`, `sync_dir`, `allocate`, `set_len`,
+    /// `release_range`, `allocate_range` and `flush_all`; on the caller's
+    /// thread and outside the world lock (a crash enumeration's points),
+    /// and `open_dir` creating. A probe returning `true` cuts the power
+    /// there, as a crash enumeration does: that step and every later one
+    /// fail with EIO, and an operation in flight completes with EIO,
+    /// unapplied; nothing reaches the media until the next crash, which
+    /// turns the power back on.
+    pub fn set_step_probe(
+        &mut self,
+        probe: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) {
+        self.step_probe = StepProbe(probe);
+    }
+
+    /// The power is off ([`World::set_step_probe`]).
+    #[must_use]
+    pub fn powered_off(&self) -> bool {
+        self.powered_off
+    }
+
     /// Sets (or clears) the hook every `Platform::release_range` runs first,
     /// on the caller's thread and outside the world lock.
     pub fn set_release_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
@@ -537,6 +597,37 @@ impl World {
     #[must_use]
     pub fn cached_writes(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Each cached write, oldest first: its file, its offset, and its length
+    /// in logical blocks (the tears [`CrashMode::Exact`] can make of it).
+    #[must_use]
+    pub fn cached_extents(&self) -> Vec<(FileId, u64, usize)> {
+        let lb = self.cfg.logical_block.max(1) as usize;
+        self.cache
+            .iter()
+            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))
+            .collect()
+    }
+
+    /// Cuts the power ([`World::set_step_probe`]): every step and every
+    /// completion fails with EIO until the next crash.
+    pub fn cut_power(&mut self) {
+        self.powered_off = true;
+    }
+
+    /// A journaling file system's metadata commit: every directory's
+    /// entries and every file's length durable now, the data as it is (a
+    /// crash then keeps a name or a length the store never synced; within
+    /// the old durable length, bytes it never flushed read as they were,
+    /// and past it as zeros, unwritten).
+    pub fn settle_metadata(&mut self) {
+        for f in self.files.values_mut() {
+            f.durable_len = f.visible.len() as u64;
+        }
+        for d in self.dirs.values_mut() {
+            d.durable = d.entries.clone();
+        }
     }
 
     /// The event trace.
@@ -1096,6 +1187,14 @@ impl World {
         let cached: Vec<CachedWrite> = std::mem::take(&mut self.cache);
         self.cached_bytes = 0;
         let lb = self.cfg.logical_block.max(1) as usize;
+        // Each file's media before the crash, and what of the cache reaches
+        // it (file, start, end).
+        let before: BTreeMap<FileId, u64> = self
+            .files
+            .iter()
+            .map(|(&id, f)| (id, f.media.len() as u64))
+            .collect();
+        let mut reached: Vec<(FileId, u64, u64)> = Vec::new();
         for (i, w) in cached.iter().enumerate() {
             let keep = match mode {
                 CrashMode::LoseAll => 0,
@@ -1107,6 +1206,11 @@ impl World {
                         0
                     }
                 }
+                CrashMode::Exact(fates) => match fates.get(i) {
+                    Some(Fate::Kept) => w.data.len(),
+                    Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),
+                    Some(Fate::Lost) | None => 0,
+                },
                 CrashMode::Random => match self.rng.below(3) {
                     0 => 0,
                     1 => w.data.len(),
@@ -1118,19 +1222,32 @@ impl World {
             };
             if keep > 0 {
                 self.persist(w, keep);
+                reached.push((w.file, w.offset, w.offset + keep as u64));
             }
         }
-        for f in self.files.values_mut() {
+        for (id, f) in &mut self.files {
             let len = usize::try_from(f.durable_len).unwrap_or(usize::MAX);
             f.media.resize(len, 0);
             f.visible = f.media.clone();
             unmark(&mut f.holes, f.durable_len, u64::MAX);
+            // Past the media as it was, a durable length (settled metadata)
+            // holds data only where a kept write put it: elsewhere
+            // unwritten, as a file system's unwritten extents.
+            mark(
+                &mut f.holes,
+                before.get(id).copied().unwrap_or(0),
+                f.durable_len,
+            );
+            for &(_, s, e) in reached.iter().filter(|r| r.0 == *id) {
+                unmark(&mut f.holes, s, e.min(f.durable_len));
+            }
             f.valid_data = f.valid_data.min(f.durable_len);
         }
         for d in self.dirs.values_mut() {
             d.entries = d.durable.clone();
         }
         self.locks.clear();
+        self.powered_off = false;
         self.epoch += 1;
         self.trace.push(TraceEvent::Crash);
     }

@@ -15,6 +15,7 @@ use store_io_sim::{CrashMode, SimPlatform};
 
 pub(crate) mod audit;
 pub(crate) mod craft;
+pub(crate) mod enumerate;
 
 pub(crate) const DIR: &str = "/db";
 pub(crate) const CHUNK: usize = 4096;

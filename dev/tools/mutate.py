@@ -96,6 +96,10 @@ COPYS = ["-p", "store-io-engine", "--test", "copy_stale"]
 EXEC_SRC = "crates/store-io-engine/src/exec.rs"
 F2REP = ["-p", "store-io-engine", "--test", "format2_repair"]
 CREATE = "crates/store-io-engine/src/create.rs"
+# Crash enumeration (v0.5 E7).
+SIMW = "crates/store-io-sim/src/world.rs"
+SIMP = "crates/store-io-sim/src/platform.rs"
+MODEL = ["-p", "store-io-sim", "--test", "model"]
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -978,6 +982,37 @@ M = [
  ('crates/store-io-posix/src/queue.rs', "        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()", "        self.uring.is_none() && self.pooled.is_none()", POSIX),
  ('crates/store-io-posix/src/queue.rs', "        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()", "        false", POSIX),
  ('crates/store-io-posix/src/queue.rs', "        if !self.performs() {\n            return Ok(Err(op));\n        }\n        Ok(Ok(check(op, PosixFile::raw)?.perform()))", "        if false {\n            return Ok(Err(op));\n        }\n        Ok(Ok(check(op, PosixFile::raw)?.perform()))", POSIX),
+ # E7 C1: each cached write's exact fate (kept whole, torn at whole
+ # blocks and never past its end, lost, lost past the list); its length
+ # in blocks; the step probe before each step that can change a crash
+ (SIMW, '                    Some(Fate::Kept) => w.data.len(),', '                    Some(Fate::Kept) => 0,', MODEL),
+ (SIMW, '                    Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),', '                    Some(Fate::Torn(_)) => w.data.len(),', MODEL),
+ (SIMW, '                    Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),', '                    Some(Fate::Torn(n)) => (*n).min(w.data.len()),', MODEL),
+ (SIMW, '                    Some(Fate::Lost) | None => 0,', '                    Some(Fate::Lost) | None => w.data.len(),', MODEL),
+ (SIMW, '            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))', '            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb) & 1))', MODEL),
+ (SIMW, '            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))', '            .map(|w| (w.file, 0, w.data.len().div_ceil(lb)))', MODEL),
+ (SIMW, '        for f in self.files.values_mut() {\n            f.durable_len = f.visible.len() as u64;\n        }\n        for d in self.dirs.values_mut() {\n            d.durable = d.entries.clone();\n        }', '        for d in self.dirs.values_mut() {\n            d.durable = d.entries.clone();\n        }', MODEL),
+ (SIMW, '            f.durable_len = f.visible.len() as u64;\n        }\n        for d in self.dirs.values_mut() {\n            d.durable = d.entries.clone();\n        }', '            f.durable_len = f.visible.len() as u64;\n        }', MODEL),
+ (SIMP, '        if let Err(raw) = step(&self.world) {', '        if let Err(raw) = step(&self.world).and(Ok(())).or(Ok::<(), OsError>(())) {', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        let id = w.create_file(', '        let mut w = lock(&self.world);\n        let id = w.create_file(', MODEL),
+ (SIMP, '        if create {\n            step(&self.world)?;\n        }', '        if create && false {\n            step(&self.world)?;\n        }', MODEL),
+ (SIMP, '    if cut {\n        w.cut_power();\n    }', '    if cut && false {\n        w.cut_power();\n    }', MODEL),
+ (SIMW, '        self.powered_off = true;', '        self.powered_off = false;', MODEL),
+ (SIMP, '            } else if w.powered_off() {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', '            } else if w.powered_off() && false {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', MODEL),
+ (SIMP, '            } else if w.powered_off() {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', '            } else if w.powered_off() && false {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', MODEL),
+ (SIMW, '            mark(\n                &mut f.holes,\n                before.get(id).copied().unwrap_or(0),\n                f.durable_len,\n            );', '            let _ = before.get(id);', MODEL),
+ (SIMW, '                unmark(&mut f.holes, s, e.min(f.durable_len));', '                let _ = (s, e);', MODEL),
+ (SIMP, '            } else if w.powered_off() {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', '            } else if w.powered_off() && false {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', MODEL),
+ (SIMW, '        self.powered_off = false;\n        self.epoch += 1;', '        self.epoch += 1;', MODEL),
+ (SIMP, '        step(&self.world)?;\n        lock(&self.world).rename(&dir.path', '        lock(&self.world).rename(&dir.path', MODEL),
+ (SIMP, '        step(&self.world)?;\n        lock(&self.world).rename_noreplace(', '        lock(&self.world).rename_noreplace(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        lock(&self.world).unlink(', '        lock(&self.world).unlink(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        lock(&self.world).sync_dir(', '        lock(&self.world).sync_dir(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate(file.id, len)', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate(file.id, len)', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.set_len(', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.set_len(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        // A deallocation', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        // A deallocation', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate_range(', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate_range(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.flush_all(', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.flush_all(', MODEL),
 ]
 
 def kill_stuck_tests():

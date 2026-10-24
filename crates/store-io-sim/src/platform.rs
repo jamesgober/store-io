@@ -23,7 +23,7 @@ use store_io_platform::{
     RangeState, RawResult, Rejected, ReleaseHow, Wake,
 };
 
-use crate::world::{DeviceKind, EBADF, EINVAL, FileId, SimConfig, World};
+use crate::world::{DeviceKind, EBADF, EINVAL, EIO, FileId, SimConfig, World};
 
 /// Shared handle to a simulated world.
 #[derive(Clone, Debug)]
@@ -148,6 +148,16 @@ impl SimQueue {
         let probe = lock(&self.world).submit_probe.0.clone();
         if let Some(probe) = probe {
             probe();
+        }
+        if let Err(raw) = step(&self.world) {
+            let buf = match op {
+                IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),
+                IoOp::FlushData { .. } => None,
+            };
+            return Err(Rejected {
+                buf,
+                raw: Some(raw),
+            });
         }
         if self.in_flight.len() >= self.depth {
             let buf = match op {
@@ -331,6 +341,8 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
+            } else if w.powered_off() {
+                Err(EIO)
             } else if !aligned(w, offset, &buf) {
                 Err(EINVAL)
             } else {
@@ -350,6 +362,8 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
+            } else if w.powered_off() {
+                Err(EIO)
             } else if !aligned(w, offset, &buf) {
                 w.count_misaligned_read();
                 Err(EINVAL)
@@ -365,6 +379,8 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         Pending::Flush { file, epoch, cover } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
+            } else if w.powered_off() {
+                Err(EIO)
             } else {
                 w.complete_flush(file, cover)
             };
@@ -377,6 +393,21 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
     }
 }
 
+/// Runs the step probe ([`World::set_step_probe`]) outside the world lock;
+/// EIO once the power is off.
+fn step(world: &Mutex<World>) -> RawResult<()> {
+    let probe = lock(world).step_probe.0.clone();
+    let cut = probe.is_some_and(|p| p());
+    let mut w = lock(world);
+    if cut {
+        w.cut_power();
+    }
+    if w.powered_off() {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
 impl Platform for SimPlatform {
     type File = SimFile;
     type Dir = SimDir;
@@ -384,6 +415,9 @@ impl Platform for SimPlatform {
     type Queue = SimQueue;
 
     fn open_dir(&self, path: &Path, create: bool) -> RawResult<SimDir> {
+        if create {
+            step(&self.world)?;
+        }
         lock(&self.world).open_dir(path.to_path_buf(), create)?;
         Ok(SimDir {
             path: path.to_path_buf(),
@@ -391,6 +425,7 @@ impl Platform for SimPlatform {
     }
 
     fn create_file(&self, dir: &SimDir, name: &FileName) -> RawResult<SimFile> {
+        step(&self.world)?;
         let mut w = lock(&self.world);
         let id = w.create_file(&dir.path, name.as_str())?;
         Ok(SimFile {
@@ -428,6 +463,7 @@ impl Platform for SimPlatform {
         to: &FileName,
         _file: &SimFile,
     ) -> RawResult<()> {
+        step(&self.world)?;
         lock(&self.world).rename(&dir.path, from.as_str(), to.as_str())
     }
 
@@ -438,14 +474,17 @@ impl Platform for SimPlatform {
         to: &FileName,
         _file: &SimFile,
     ) -> RawResult<()> {
+        step(&self.world)?;
         lock(&self.world).rename_noreplace(&dir.path, from.as_str(), to.as_str())
     }
 
     fn unlink(&self, dir: &SimDir, name: &FileName) -> RawResult<()> {
+        step(&self.world)?;
         lock(&self.world).unlink(&dir.path, name.as_str())
     }
 
     fn sync_dir(&self, dir: &SimDir) -> RawResult<()> {
+        step(&self.world)?;
         lock(&self.world).sync_dir(&dir.path)
     }
 
@@ -498,12 +537,14 @@ impl Platform for SimPlatform {
     }
 
     fn allocate(&self, file: &SimFile, len: u64) -> RawResult<()> {
+        step(&self.world)?;
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         w.allocate(file.id, len)
     }
 
     fn set_len(&self, file: &SimFile, len: u64) -> RawResult<()> {
+        step(&self.world)?;
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         w.set_len(file.id, len)
@@ -526,6 +567,7 @@ impl Platform for SimPlatform {
         if let Some(probe) = probe {
             probe();
         }
+        step(&self.world)?;
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         // A deallocation punches a hole; a trim in place leaves the space
@@ -534,6 +576,7 @@ impl Platform for SimPlatform {
     }
 
     fn allocate_range(&self, file: &SimFile, offset: u64, len: u64) -> RawResult<()> {
+        step(&self.world)?;
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         w.allocate_range(file.id, offset, len)
@@ -560,6 +603,7 @@ impl Platform for SimPlatform {
     }
 
     fn flush_all(&self, file: &SimFile) -> RawResult<()> {
+        step(&self.world)?;
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         w.flush_all(file.id)

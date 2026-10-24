@@ -12,7 +12,7 @@ use store_io_format::meta2::{
 use store_io_format::slot::{Expect, FORMAT_2, SlotIndex, SlotStatus, validate};
 use store_io_sim::SimPlatform;
 
-use super::{DIR, LOG2_TABLE, PAGES, block, media_in, page_at};
+use super::{DIR, block, media_in};
 
 /// A region the audit found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,18 +91,29 @@ fn audit_with(pf: &SimPlatform, dir: &str, allow_extra: bool) -> Vec<Found> {
     let (vbytes, _) = winner(&m, volume, 0, [0, b], 12, true).expect("no volume record");
     let vm = VolumeMeta2::decode(&vbytes).expect("volume record");
     let table_end = vm.table_end();
-    assert_eq!(table_end, 2 * b + 2 * u64::from(PAGES) * (1 << LOG2_TABLE));
+    // The geometry as the volume record gives it (any table's).
+    let log2_table = vm.base.log2_table_slot_size;
+    let t = 1u64 << log2_table;
+    assert_eq!(table_end, 2 * b + 2 * u64::from(vm.table_pages) * t);
+    assert_eq!(
+        vm.entries_per_page,
+        entries_per_page(log2_table),
+        "entries per page"
+    );
     let file_len = m.len() as u64;
     let mut found = Vec::new();
     let mut ranges: Vec<(u64, u64, u64)> = Vec::new();
     let mut names = std::collections::HashSet::new();
     let mut scratch = vec![(0, 0); footprint_len(12)];
-    for p in 0..PAGES {
-        let at = [page_at(pf, p, 0), page_at(pf, p, 1)];
+    for p in 0..vm.table_pages {
+        let at = [
+            2 * b + 2 * u64::from(p) * t,
+            2 * b + (2 * u64::from(p) + 1) * t,
+        ];
         let (bytes, page_meta_seq) =
-            winner(&m, volume, (1 << 61) | u64::from(p), at, LOG2_TABLE, true)
+            winner(&m, volume, (1 << 61) | u64::from(p), at, log2_table, true)
                 .unwrap_or_else(|| panic!("page {p}: no valid copy"));
-        let page = decode_page(&bytes, p, entries_per_page(LOG2_TABLE))
+        let page = decode_page(&bytes, p, entries_per_page(log2_table))
             .unwrap_or_else(|e| panic!("page {p}: {e}"));
         let lim = EntryLimits {
             log2_block: 12,

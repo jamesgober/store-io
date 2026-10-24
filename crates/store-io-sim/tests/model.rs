@@ -507,3 +507,310 @@ fn test_a_crash_drops_holes_past_the_durable_length() {
         Tri::No
     );
 }
+
+#[test]
+fn test_an_exact_crash_gives_each_cached_write_its_fate() {
+    use store_io_sim::Fate;
+    let (p, _d, f, pool) = setup(SimConfig::volatile(8));
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    // Writes of 3, 1, 1 and 2 blocks, each its own byte, back to back.
+    let mut at = 0u64;
+    for (byte, blocks) in [(1u8, 3usize), (2, 1), (3, 1), (4, 2)] {
+        let mut b = pool.take(blocks * 4096).unwrap();
+        b.as_mut_slice().fill(byte);
+        q.submit(
+            IoOp::Write {
+                file: &f,
+                offset: at,
+                buf: b,
+                dsync: false,
+            },
+            at,
+        )
+        .unwrap();
+        at += blocks as u64 * 4096;
+    }
+    drain(&mut q);
+    let base = p.with_world(|w| w.clone());
+    let extents: Vec<(u64, usize)> = base
+        .cached_extents()
+        .iter()
+        .map(|&(_, at, blocks)| (at, blocks))
+        .collect();
+    assert_eq!(
+        extents,
+        [(0, 3), (3 * 4096, 1), (4 * 4096, 1), (5 * 4096, 2)]
+    );
+    let after = |fates: Vec<Fate>| {
+        let mut w = base.clone();
+        w.crash(&CrashMode::Exact(fates));
+        let m = w.media_of(&dir(), "f").unwrap().to_vec();
+        (0..7).map(|i| m[i * 4096]).collect::<Vec<u8>>()
+    };
+    // The first torn after two blocks, the second kept, the third lost,
+    // the fourth past the list (lost).
+    assert_eq!(
+        after(vec![Fate::Torn(2), Fate::Kept, Fate::Lost]),
+        [1, 1, 0, 2, 0, 0, 0]
+    );
+    // A tear longer than the write keeps it whole; a tear of none loses it.
+    assert_eq!(
+        after(vec![Fate::Torn(0), Fate::Lost, Fate::Kept, Fate::Torn(5)]),
+        [0, 0, 0, 0, 3, 4, 4]
+    );
+}
+
+#[test]
+fn test_the_step_probe_runs_before_each_step_that_can_change_a_crash() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use store_io_platform::ReleaseHow;
+    let (p, d, f, pool) = setup(SimConfig::volatile(9));
+    let steps = Arc::new(AtomicUsize::new(0));
+    let s = Arc::clone(&steps);
+    p.with_world(|w| {
+        w.set_step_probe(Some(Arc::new(move || {
+            s.fetch_add(1, Ordering::Relaxed);
+            false
+        })))
+    });
+    let mut last = 0;
+    let mut stepped = |what: &str, n: usize| {
+        let now = steps.load(Ordering::Relaxed);
+        assert_eq!(now - last, n, "{what}");
+        last = now;
+    };
+    let name = |s: &str| FileName::new(s).unwrap();
+    let _made = p.open_dir(Path::new("/t"), true).unwrap();
+    stepped("open_dir creating", 1);
+    let g = p.create_file(&d, &name("g")).unwrap();
+    stepped("create_file", 1);
+    p.rename_noreplace(&d, &name("g"), &name("h"), &g).unwrap();
+    stepped("rename_noreplace", 1);
+    p.rename_replace(&d, &name("h"), &name("g"), &g).unwrap();
+    stepped("rename_replace", 1);
+    p.unlink(&d, &name("g")).unwrap();
+    stepped("unlink", 1);
+    p.sync_dir(&d).unwrap();
+    stepped("sync_dir", 1);
+    p.allocate(&f, 2 << 20).unwrap();
+    stepped("allocate", 1);
+    p.set_len(&f, 2 << 20).unwrap();
+    stepped("set_len", 1);
+    p.release_range(&f, 0, 4096, ReleaseHow::Deallocate)
+        .unwrap();
+    stepped("release_range", 1);
+    p.allocate_range(&f, 0, 4096).unwrap();
+    stepped("allocate_range", 1);
+    p.flush_all(&f).unwrap();
+    stepped("flush_all", 1);
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &f, &pool, 0, 1, false);
+    q.submit(IoOp::FlushData { file: &f }, 1).unwrap();
+    drain(&mut q);
+    stepped("a write and a flush submitted", 2);
+    // Nothing else is a step.
+    let _f = p.open_file(&d, &name("f"), FileMode::ReadWrite).unwrap();
+    let _len = p.size(&f).unwrap();
+    let _dir = p.open_dir(&dir(), false).unwrap();
+    stepped("opens and a size", 0);
+}
+
+#[test]
+fn test_settled_metadata_keeps_names_and_lengths_not_data() {
+    let (p, d, _f, pool) = setup(SimConfig::volatile(10));
+    let name = FileName::new("g").unwrap();
+    let g = p.create_file(&d, &name).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &g, &pool, 4096, 7, false);
+    drain(&mut q);
+    let base = p.with_world(|w| w.clone());
+    // Unsettled: the name was never synced, so the file is gone.
+    let mut w = base.clone();
+    w.crash(&CrashMode::LoseAll);
+    assert!(w.media_of(&dir(), "g").is_none());
+    // Settled: the name and the length survive, the unflushed bytes read
+    // as zeros, or as written when the write is kept.
+    let mut w = base.clone();
+    w.settle_metadata();
+    w.crash(&CrashMode::LoseAll);
+    assert_eq!(w.media_of(&dir(), "g").unwrap(), &[0u8; 8192][..]);
+    let mut w = base;
+    w.settle_metadata();
+    w.crash(&CrashMode::KeepAll);
+    let m = w.media_of(&dir(), "g").unwrap();
+    assert_eq!((m.len(), m[0], m[4096]), (8192, 0, 7));
+}
+
+#[test]
+fn test_a_durable_length_past_the_media_is_unwritten_after_a_crash() {
+    use store_io_core::evidence::Tri;
+    let (p, d, _f, pool) = setup(SimConfig::volatile(12));
+    let name = FileName::new("g").unwrap();
+    let g = p.create_file(&d, &name).unwrap();
+    p.sync_dir(&d).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &g, &pool, 0, 1, false);
+    write(&mut q, &g, &pool, 4096, 2, false);
+    drain(&mut q);
+    p.with_world(|w| {
+        w.settle_metadata();
+        // The first write kept, the second lost: past the first, the file's
+        // durable length holds nothing.
+        w.crash(&CrashMode::Exact(vec![store_io_sim::Fate::Kept]));
+    });
+    let d = p.open_dir(&dir(), false).unwrap();
+    let g = p.open_file(&d, &name, FileMode::ReadWrite).unwrap();
+    assert_eq!(p.size(&g).unwrap(), 8192);
+    assert_eq!(p.range_state(&g, 0, 4096).unwrap().unwritten, Tri::No);
+    assert_eq!(p.range_state(&g, 4096, 4096).unwrap().unwritten, Tri::Yes);
+}
+
+#[test]
+fn test_a_step_probe_cuts_the_power() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (p, d, f, pool) = setup(SimConfig::volatile(11));
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &f, &pool, 0, 1, false);
+    drain(&mut q);
+    let steps = Arc::new(AtomicUsize::new(0));
+    let s = Arc::clone(&steps);
+    // The second step from here cuts the power.
+    p.with_world(|w| {
+        w.set_step_probe(Some(Arc::new(move || {
+            s.fetch_add(1, Ordering::Relaxed) + 1 == 2
+        })))
+    });
+    write(&mut q, &f, &pool, 4096, 2, false);
+    assert!(!p.with_world(|w| w.powered_off()));
+    // The cut: this step fails, so does every later one, and the write in
+    // flight completes with EIO, unapplied.
+    let eio = p.flush_all(&f).unwrap_err().code;
+    assert!(p.with_world(|w| w.powered_off()));
+    assert_eq!(p.sync_dir(&d).unwrap_err().code, eio);
+    let mut b = pool.take(4096).unwrap();
+    b.as_mut_slice().fill(3);
+    let refused = q
+        .submit(
+            IoOp::Write {
+                file: &f,
+                offset: 8192,
+                buf: b,
+                dsync: false,
+            },
+            8192,
+        )
+        .unwrap_err();
+    assert_eq!(refused.raw.map(|e| e.code), Some(eio));
+    // A read and a flush submitted before the cut (as steps 0 and 1 of a
+    // second probe would be: the probe counts from here) complete with EIO
+    // too, the flush persisting nothing.
+    let done = drain(&mut q);
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].1.as_ref().err().map(|e| e.code), Some(eio));
+    assert_eq!(
+        p.with_world(|w| w.cached_extents().len()),
+        1,
+        "only the first write"
+    );
+    // The crash keeps what was cached before the cut and turns the power on.
+    p.with_world(|w| {
+        w.set_step_probe(None);
+        w.crash(&CrashMode::KeepAll);
+    });
+    assert!(!p.with_world(|w| w.powered_off()));
+    let m = media(&p);
+    assert_eq!((m[0], m[4096], m[8192]), (1, 0, 0));
+    let d = p.open_dir(&dir(), false).unwrap();
+    let f = p
+        .open_file(&d, &FileName::new("f").unwrap(), FileMode::ReadWrite)
+        .unwrap();
+    p.flush_all(&f).unwrap();
+}
+
+#[test]
+fn test_a_flush_and_a_read_in_flight_at_the_cut_complete_unapplied() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (p, _d, f, pool) = setup(SimConfig::volatile(13));
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &f, &pool, 0, 1, false);
+    drain(&mut q);
+    let steps = Arc::new(AtomicUsize::new(0));
+    let s = Arc::clone(&steps);
+    // The third step from here cuts the power: a flush and a read go in
+    // first and are still in flight.
+    p.with_world(|w| {
+        w.set_step_probe(Some(Arc::new(move || {
+            s.fetch_add(1, Ordering::Relaxed) + 1 == 3
+        })))
+    });
+    q.submit(IoOp::FlushData { file: &f }, 1).unwrap();
+    let mut b = pool.take(4096).unwrap();
+    b.as_mut_slice().fill(9);
+    q.submit(
+        IoOp::Read {
+            file: &f,
+            offset: 0,
+            buf: b,
+        },
+        2,
+    )
+    .unwrap();
+    assert!(p.allocate(&f, 2 << 20).is_err(), "the cut");
+    let done = drain(&mut q);
+    assert_eq!(done.len(), 2);
+    assert!(done.iter().all(|(_, r)| r.is_err()), "{done:?}");
+    // The flush persisted nothing: the cached write is still cached, and a
+    // crash losing it leaves the media as before it.
+    assert_eq!(p.with_world(|w| w.cached_extents().len()), 1);
+    p.with_world(|w| {
+        w.set_step_probe(None);
+        w.crash(&CrashMode::LoseAll);
+    });
+    assert_eq!(media(&p)[0], 0);
+}
+
+#[test]
+fn test_a_lost_write_below_a_kept_one_is_unwritten_after_a_settled_crash() {
+    use store_io_core::evidence::Tri;
+    use store_io_sim::Fate::{Kept, Lost, Torn};
+    let (p, d, _f, pool) = setup(SimConfig::volatile(14));
+    let name = FileName::new("g").unwrap();
+    let g = p.create_file(&d, &name).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    // A two-block write at 0, one at 3 blocks.
+    let mut b = pool.take(8192).unwrap();
+    b.as_mut_slice().fill(1);
+    q.submit(
+        IoOp::Write {
+            file: &g,
+            offset: 0,
+            buf: b,
+            dsync: false,
+        },
+        0,
+    )
+    .unwrap();
+    write(&mut q, &g, &pool, 3 * 4096, 2, false);
+    drain(&mut q);
+    let base = p.with_world(|w| w.clone());
+    let unwritten = |fates: Vec<store_io_sim::Fate>| {
+        p.with_world(|w| {
+            *w = base.clone();
+            w.settle_metadata();
+            w.crash(&CrashMode::Exact(fates));
+        });
+        let d = p.open_dir(&dir(), false).unwrap();
+        let g = p.open_file(&d, &name, FileMode::ReadWrite).unwrap();
+        (0..4u64)
+            .map(|i| p.range_state(&g, i * 4096, 4096).unwrap().unwritten == Tri::Yes)
+            .collect::<Vec<bool>>()
+    };
+    // The first lost, the second kept: below the kept one, nothing written.
+    assert_eq!(unwritten(vec![Lost, Kept]), [true, true, true, false]);
+    // The first torn after a block: its lost block, and the gap, unwritten.
+    assert_eq!(unwritten(vec![Torn(1), Kept]), [false, true, true, false]);
+    assert_eq!(unwritten(vec![Kept, Kept]), [false, false, true, false]);
+}

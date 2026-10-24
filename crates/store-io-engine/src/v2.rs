@@ -25,6 +25,32 @@ use crate::store::*;
 /// clamped, and [`StoreReport::table_capacity`] says what was made.
 pub const MAX_REGION_CAPACITY: u32 = 1 << 22;
 
+/// What an open made of a damaged metadata slot
+/// ([`MetadataReport::damaged_slots`], spec §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SlotDamage {
+    /// The winner's predecessor, damaged: reported only (its pair stands).
+    Older,
+    /// The one write a crash left torn: a writable open heals it
+    /// ([`MetadataReport::healed`]; a read-only open leaves it).
+    InFlight,
+    /// Damage a crash cannot explain: its pair stale or lost.
+    Damage,
+}
+
+/// A metadata slot an open found damaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DamagedSlot {
+    /// The pair: `None` for the volume record, `Some(p)` for table page `p`.
+    pub page: Option<u32>,
+    /// Slot B (`true`) or slot A.
+    pub slot_b: bool,
+    /// What the judgement made of it.
+    pub damage: SlotDamage,
+}
+
 /// What a format-2 open found in its metadata pairs (the volume record and
 /// the table pages).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,6 +78,11 @@ pub struct MetadataReport {
     /// Metadata pairs read a second time because a slot read failed
     /// (each failed read is retried once).
     pub retried_reads: u32,
+    /// Every candidate and every damaged slot of the volume record and the
+    /// table pages (spec §9), in pair order, slot A first. A lost pair's
+    /// slots are all damage; a page whose winner fails the page checks
+    /// counts its winner as damage too.
+    pub damaged_slots: Vec<DamagedSlot>,
     /// Table entries whose kind or name do not decode, as `(page, seq)`:
     /// unavailable, their spans reserved (the regions with a readable name
     /// are in `StoreReport::unavailable`).
@@ -113,6 +144,18 @@ impl core::fmt::Display for MetadataReport {
         }
         if self.retried_reads > 0 {
             writeln!(f, "retried reads    {}", self.retried_reads)?;
+        }
+        for d in &self.damaged_slots {
+            let pair = d
+                .page
+                .map_or_else(|| "volume record".to_owned(), |p| format!("page {p}"));
+            let slot = if d.slot_b { 'B' } else { 'A' };
+            let what = match d.damage {
+                SlotDamage::Older => "an older copy, damaged",
+                SlotDamage::InFlight => "the write in flight",
+                SlotDamage::Damage => "damage",
+            };
+            writeln!(f, "damaged slot     {pair} {slot}: {what}")?;
         }
         if !self.invalid_entries.is_empty() {
             writeln!(f, "invalid entries  {:?}", self.invalid_entries)?;
@@ -776,7 +819,33 @@ pub(crate) fn open_metadata<P: Platform>(
             to_heal = None;
             if pages[pair - 1].standing == Standing::Confirmed {
                 pages[pair - 1].standing = Standing::Unconfirmed;
+                // The verdicts agree with the pages from here on.
+                verdicts[pair].standing = Standing::Unconfirmed;
             }
+        }
+    }
+    // Every candidate and damage, by slot (spec §9), from the final
+    // standings: a heal dropped above leaves damage, and a page failing the
+    // page checks its winner too.
+    for (i, v) in verdicts.iter().enumerate() {
+        let page = i.checked_sub(1).map(|p| p as u32);
+        let lost_late = page.is_some_and(|p| pages[p as usize].standing == Standing::Lost)
+            && v.standing != Standing::Lost;
+        for (slot_b, verdict) in [(false, v.a), (true, v.b)] {
+            let damage = match verdict {
+                SlotVerdict::OlderDamaged => SlotDamage::Older,
+                SlotVerdict::InFlight if to_heal.is_some_and(|(h, _)| h == i) => {
+                    SlotDamage::InFlight
+                }
+                SlotVerdict::InFlight | SlotVerdict::Damage => SlotDamage::Damage,
+                SlotVerdict::Winner if lost_late => SlotDamage::Damage,
+                SlotVerdict::Winner | SlotVerdict::Nothing => continue,
+            };
+            report.damaged_slots.push(DamagedSlot {
+                page,
+                slot_b,
+                damage,
+            });
         }
     }
     for (i, page) in pages.iter().enumerate() {

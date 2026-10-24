@@ -80,8 +80,8 @@ pub use scan::{ScanItem, ScanSummary};
 pub use space::{Reservation, SpaceReport, TagSpace};
 pub use stats::Outstanding;
 pub use store::{
-    CONTAINER, Healed, MetadataReport, Repair, Store, StoreOptions, StoreReport, Unavailable,
-    UnavailableRegion,
+    CONTAINER, DamagedSlot, Healed, MetadataReport, Repair, SlotDamage, Store, StoreOptions,
+    StoreReport, Unavailable, UnavailableRegion,
 };
 pub use store_io_format::meta::RegionKind;
 pub use submitter::{MAX_DEPTH, Submitter};

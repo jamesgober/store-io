@@ -100,6 +100,8 @@ CREATE = "crates/store-io-engine/src/create.rs"
 SIMW = "crates/store-io-sim/src/world.rs"
 SIMP = "crates/store-io-sim/src/platform.rs"
 MODEL = ["-p", "store-io-sim", "--test", "model"]
+DAMAGE = ["-p", "store-io-engine", "--test", "format2_damage"]
+V2_SRC = "crates/store-io-engine/src/v2.rs"
 CRASH_OPEN = ["-p", "store-io-engine", "--test", "format2_crash_open"]
 
 M = [
@@ -1020,6 +1022,13 @@ M = [
  (SIMW, '    pub fn restore_power(&mut self) {\n        self.powered_off = false;', '    pub fn restore_power(&mut self) {\n        self.powered_off = true;', MODEL),
  # E7 C3: the open drains a dead owner's cached writes before reading a slot
  ('crates/store-io-engine/src/open.rs', '            platform\n                .flush_all(&file)\n                .map_err(|e| Error::DurabilityUnknown {', '            Ok::<(), OsError>(())\n                .map_err(|e| Error::DurabilityUnknown {', CRASH_OPEN),
+ # E7 C4: every candidate and damage reported, by slot (spec §9)
+ (V2_SRC, '                SlotVerdict::OlderDamaged => SlotDamage::Older,', '                SlotVerdict::OlderDamaged => SlotDamage::Damage,', DAMAGE),
+ (V2_SRC, '                SlotVerdict::InFlight if to_heal.is_some_and(|(h, _)| h == i) => {', '                SlotVerdict::InFlight if true => {', DAMAGE),
+ (V2_SRC, '                SlotVerdict::Winner if lost_late => SlotDamage::Damage,', '                SlotVerdict::Winner if lost_late && false => SlotDamage::Damage,', DAMAGE),
+ (V2_SRC, '            report.damaged_slots.push(DamagedSlot {\n                page,', '            let _ = std::convert::identity(DamagedSlot {\n                page,', DAMAGE),
+ (V2_SRC, '        let page = i.checked_sub(1).map(|p| p as u32);', '        let page = i.checked_sub(1).map(|_| 0u32);', DAMAGE),
+ (V2_SRC, '        for (slot_b, verdict) in [(false, v.a), (true, v.b)] {', '        for (slot_b, verdict) in [(true, v.a), (false, v.b)] {', DAMAGE),
 ]
 
 def kill_stuck_tests():

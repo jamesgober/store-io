@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-pub use crate::v2::{Healed, MetadataReport};
+pub use crate::v2::{DamagedSlot, Healed, MetadataReport, SlotDamage};
 
 use store_io_buf::{BufPool, PoolConfig};
 use store_io_core::class::{DurabilityClass, ReceiptLabel};

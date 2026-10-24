@@ -13,6 +13,17 @@
 
 ### Added
 
+- Engine: **`MetadataReport::damaged_slots`** (v0.5 E7 C4, spec §9: the
+  report lists every candidate and damage): each damaged slot of the
+  volume record and the table pages, slot A or B, as `SlotDamage::Older`
+  (the winner's predecessor, reported only), `InFlight` (the torn write a
+  writable open heals) or `Damage` (its pair stale or lost); `Display`
+  prints them.
+- Tests: crash enumeration over every format-2 change and inside the
+  open (v0.5 E7 C1-C3; the simulator's `CrashMode::Exact`, step probe,
+  power cut, settled metadata, `kill`), and the damage matrix
+  (`format2_damage.rs`: each slot damaged each way, alone and in pairs,
+  the spec's verdict and every way out).
 - Harness: `examples/g1probe.rs` (Linux), the probe that found where a QD1
   durable write's time over the raw primitive went (G1): each side's
   write and flush halves, their thread CPU, and buffer variants of the raw

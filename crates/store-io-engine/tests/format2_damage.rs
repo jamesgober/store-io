@@ -24,7 +24,9 @@ mod format2_util;
 
 use std::path::Path;
 
-use format2_util::audit::{audit, audit_in};
+use format2_util::audit::{
+    assert_closed_in, audit_closed, audit_in, audit_space, audit_space_in, judged, report_agrees,
+};
 use format2_util::*;
 use store_io_core::error::{Capability, Error, NotWrittenCause};
 use store_io_engine::{CONTAINER, CopyOptions, CopyReport, Healed, SlotDamage, Store, copy_store};
@@ -356,8 +358,10 @@ fn check_copy(p: &SimPlatform, name: &str, spec: &Verdict, report: &CopyReport) 
         r.metadata
     );
     assert_eq!(served(&c, name), spec.regions, "{name}: the copy's regions");
+    audit_space_in(p, "/copy", &c);
     drop(c);
     audit_in(p, "/copy");
+    assert_closed_in(p, "/copy");
 }
 
 /// The store writable: nothing to heal or replace any more, `regions`
@@ -382,8 +386,9 @@ fn check_writable(p: &SimPlatform, name: &str, regions: &[&str]) {
     }
     s.provision_slot("new")
         .unwrap_or_else(|e| panic!("{name}: a provisioning: {e:?}"));
+    audit_space(p, &s);
     drop(s);
-    audit(p);
+    audit_closed(p);
 }
 
 /// Spec §9 2 (D-130): page `n` carries the trace a given-up commit may have
@@ -449,8 +454,13 @@ fn run(row: &Row, seed: u64) {
     want_damaged.sort_by_key(|d| (d.0, d.1));
 
     let p = damaged(row, seed);
+    let before = judged(&p);
     let opened = Store::open(p.clone(), Path::new(DIR), opts());
     if let Some(refused) = spec.fails {
+        assert!(
+            before.is_none(),
+            "{name}: the judgement opens it: {before:?}"
+        );
         let e = opened.map(|_| ()).unwrap_err();
         let unsupported = matches!(
             e,
@@ -483,6 +493,11 @@ fn run(row: &Row, seed: u64) {
         return;
     }
     let s = opened.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    report_agrees(
+        &before.unwrap_or_else(|| panic!("{name}: the judgement refuses it")),
+        s.report(),
+        name,
+    );
     let r = s.report();
     let m = &r.metadata;
     let found = (
@@ -1228,5 +1243,45 @@ fn test_each_damage_is_judged_as_the_spec_says_and_has_its_ways_out() {
         failures.len(),
         rows.len(),
         failures.join("\n")
+    );
+}
+
+/// The space audit over entries the open keeps without serving them: one
+/// of a kind this version does not know (an invalid entry, its name
+/// reserved) and one reaching past the file's end (unavailable, cut
+/// short): their spans allocated as the engine keeps them, the store still
+/// writable.
+#[test]
+fn test_space_keeps_what_unserved_entries_hold() {
+    use format2_util::craft::{region, write_regions};
+    use store_io_engine::RegionKind;
+    let p = SimPlatform::new(SimConfig::volatile(1990));
+    drop(create(&p));
+    let base = 2 * B + 2 * u64::from(PAGES) * TABLE;
+    let fine = region(0, RegionKind::Page, "fine", base, 4 * B);
+    let mut odd = region(1, RegionKind::Page, "odd", base + 6 * B, 4 * B);
+    odd.kind_raw = Some(9);
+    let mut short = region(2, RegionKind::Page, "short", base + 12 * B, 4 * B);
+    short.extend = false;
+    write_regions(&p, 0, &[fine, odd, short]);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.invalid_entries, [(0, 1)]);
+    let unavailable = s.unavailable_regions();
+    assert!(
+        unavailable.len() == 1
+            && unavailable[0].name == "short"
+            && matches!(
+                unavailable[0].reason,
+                store_io_engine::Unavailable::ContainerShort { .. }
+            ),
+        "{unavailable:?}"
+    );
+    assert!(!s.frozen() && !s.report().read_only);
+    audit_space(&p, &s);
+    // The invalid entry's name is reserved too.
+    let taken = s.provision_slot("odd").map(drop);
+    assert!(
+        matches!(taken, Err(Error::AlreadyExists { .. })),
+        "{taken:?}"
     );
 }

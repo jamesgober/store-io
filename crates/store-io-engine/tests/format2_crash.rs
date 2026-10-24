@@ -18,7 +18,9 @@ mod format2_util;
 use std::cell::RefCell;
 use std::path::Path;
 
-use format2_util::audit::{audit, audit_allowing_extra, audit_in};
+use format2_util::audit::{
+    assert_closed_in, audit_allowing_extra, audit_closed, audit_in, audit_space, audit_space_in,
+};
 use format2_util::craft::{region, tear_newer_copy_of, write_regions};
 use format2_util::enumerate::{
     Covered, Outcomes, agree, enumerate, enumerate_settled, enumerate_with, fates,
@@ -134,7 +136,7 @@ fn test_every_crash_of_a_create() {
                             .unwrap_or_else(|e| panic!("{case:?}: {e:?}")),
                     );
                 }
-                audit(p);
+                audit_closed(p);
             },
         );
         report(&format!("create {capacity}"), covered);
@@ -196,8 +198,9 @@ fn test_every_crash_of_each_kind_of_provisioning() {
                     }
                 }
                 assert!(s.unavailable_regions().is_empty(), "{name} {case:?}");
+                audit_space(p, &s);
                 drop(s);
-                audit(p);
+                audit_closed(p);
             },
         );
         report(&format!("provisioning {name}"), covered);
@@ -230,8 +233,10 @@ fn test_every_crash_of_a_growth_within_capacity() {
                 n => panic!("{case:?}: {n}"),
             }
             assert_eq!(r.capacity(), CAP, "{case:?}");
-            drop((r, s));
-            audit(p);
+            drop(r);
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
         },
     );
     report("growth within capacity", covered);
@@ -264,8 +269,11 @@ fn test_every_crash_of_a_growth_beyond_capacity() {
                 n if n == CAP + 2 * B => seen.saw(case, "new"),
                 n => panic!("{case:?}: {n}"),
             }
-            drop((r, s));
+            drop(r);
+            audit_space(p, &s);
+            drop(s);
             audit_allowing_extra(p);
+            assert_closed_in(p, DIR);
         },
     );
     report("growth beyond capacity", covered);
@@ -308,8 +316,9 @@ fn test_every_crash_of_a_release() {
                 }
             }
             assert!(s.unavailable_regions().is_empty(), "{case:?}");
+            audit_space(p, &s);
             drop(s);
-            audit(p);
+            audit_closed(p);
         },
     );
     report("release", covered);
@@ -342,8 +351,10 @@ fn test_every_crash_of_a_recycle() {
                 g => panic!("{case:?}: generation {g}"),
             }
             assert_eq!(r.len(), 8 * B, "{case:?}");
-            drop((r, s));
-            audit(p);
+            drop(r);
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
         },
     );
     report("recycle", covered);
@@ -374,8 +385,9 @@ fn test_every_crash_of_a_slot_commit() {
                 Some(b"the new object") => seen.saw(case, "new"),
                 got => panic!("{case:?}: {got:?}"),
             }
+            audit_space(p, &s);
             drop(s);
-            audit(p);
+            audit_closed(p);
         },
     );
     report("slot commit", covered);
@@ -408,11 +420,15 @@ fn test_every_crash_of_a_repair() {
             match s.unavailable_regions().len() {
                 0 => {
                     s.provision_page_region("broken", B).unwrap();
+                    audit_space(p, &s);
                     drop(s);
-                    audit(p);
+                    audit_closed(p);
                     seen.saw(case, "repaired");
                 }
-                1 => seen.saw(case, "unavailable"),
+                1 => {
+                    audit_space(p, &s);
+                    seen.saw(case, "unavailable");
+                }
                 n => panic!("{case:?}: {n} unavailable"),
             }
         },
@@ -450,8 +466,10 @@ fn test_every_crash_of_an_accept() {
             } else {
                 r.write_durable(r.pos(0).unwrap(), &[4; B as usize])
                     .unwrap();
-                drop((r, s));
-                audit(p);
+                drop(r);
+                audit_space(p, &s);
+                drop(s);
+                audit_closed(p);
                 seen.saw(case, "accepted");
             }
         },
@@ -491,8 +509,10 @@ fn test_every_crash_of_a_clean_close() {
             let mut back = vec![0u8; B as usize];
             r.read(r.pos(0).unwrap(), &mut back).unwrap();
             assert!(back == [6; B as usize], "{case:?}");
-            drop((r, s));
-            audit(p);
+            drop(r);
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
         },
     );
     report("clean close", covered);
@@ -544,8 +564,11 @@ fn test_every_crash_of_a_copy() {
                 let mut back = vec![0u8; B as usize];
                 r.read(r.pos(0).unwrap(), &mut back).unwrap();
                 assert!(back == [8; B as usize], "{case:?}");
-                drop((r, s));
+                drop(r);
+                audit_space_in(p, "/copy", &s);
+                drop(s);
                 audit_in(p, "/copy");
+                assert_closed_in(p, "/copy");
                 seen.saw(case, "copy");
             } else {
                 // What a crashed copy left (a temporary file, durable under
@@ -558,10 +581,32 @@ fn test_every_crash_of_a_copy() {
                 copy_store(p.clone(), Path::new(DIR), Path::new("/copy"), o)
                     .unwrap_or_else(|e| panic!("the next copy: {e:?} {case:?}"));
                 audit_in(p, "/copy");
+                assert_closed_in(p, "/copy");
                 seen.saw(case, "none");
             }
         },
     );
     report("copy", covered);
     seen.expect(&["copy", "none"], "copy");
+}
+
+/// The space audit while a reservation is held and a region provisioned
+/// from it: the reserved bytes are not free, and free plus reserved is the
+/// complement of what is allocated.
+#[test]
+fn test_space_is_the_complement_with_a_reservation_held() {
+    let (p, s) = created(1740);
+    s.provision_page_region("a", 4 * B).unwrap();
+    let mut res = s.reserve(16 * B, 7).unwrap();
+    audit_space(&p, &s);
+    res.provision_page_region("r", 8 * B).unwrap();
+    assert!(s.space().reserved > 0, "the reservation still holds bytes");
+    audit_space(&p, &s);
+    // Outside the reservation while it is held: never in its bytes.
+    s.provision_page_region("outside", 4 * B).unwrap();
+    audit_space(&p, &s);
+    drop(res);
+    audit_space(&p, &s);
+    drop(s);
+    audit_closed(&p);
 }

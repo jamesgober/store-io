@@ -178,7 +178,19 @@ const RUN_ON: usize = 100_000;
 /// media is left as it was found. Nothing to judge when it does not open.
 pub(crate) fn agree(p: &SimPlatform, dir: &str, case: &Case) {
     let crashed = p.with_world(|w| w.clone());
+    let placed = p.with_world(|w| {
+        w.media_of(&dir.into(), store_io_engine::CONTAINER)
+            .is_some()
+    });
+    let before = if placed {
+        super::audit::judged_in(p, dir)
+    } else {
+        None
+    };
     if let Ok(a) = Store::open(p.clone(), std::path::Path::new(dir), opts()) {
+        let before =
+            before.unwrap_or_else(|| panic!("opened what the judgement refuses: {case:?}"));
+        super::audit::report_agrees(&before, a.report(), &format!("{case:?}"));
         let first = summary(&a);
         p.with_world(|w| w.crash(&CrashMode::LoseAll));
         drop(a);
@@ -188,6 +200,11 @@ pub(crate) fn agree(p: &SimPlatform, dir: &str, case: &Case) {
             summary(&b),
             first,
             "the open after a crash during the first disagrees: {case:?}"
+        );
+    } else {
+        assert!(
+            before.is_none(),
+            "refused what the judgement opens: {before:?} {case:?}"
         );
     }
     p.with_world(|w| *w = crashed);

@@ -21,7 +21,7 @@ mod format2_util;
 use std::cell::RefCell;
 use std::path::Path;
 
-use format2_util::audit::audit;
+use format2_util::audit::{assert_closed_in, audit_closed, audit_space};
 use format2_util::craft::{lose_page, tear_newer_copy_of};
 use format2_util::enumerate::{Case, Outcomes, enumerate_with, summary};
 use format2_util::*;
@@ -158,7 +158,14 @@ fn every_crash_of_an_open(state: &State) {
                     "{name} {case:?}"
                 );
             }
-            let checked = !s.report().metadata.frozen && !s.report().read_only;
+            let r = s.report();
+            let writable = !r.read_only;
+            let unfrozen = !r.metadata.frozen;
+            // The strict audit decodes every page: not with one lost.
+            let audited = writable && r.metadata.lost_pages.is_empty();
+            if writable && unfrozen {
+                audit_space(p, &s);
+            }
             drop(s);
             if state.writes_nothing {
                 // Its writes, durable or still cached.
@@ -171,8 +178,12 @@ fn every_crash_of_an_open(state: &State) {
                 });
                 assert!(written == *found.borrow(), "{name}: the next open wrote");
             }
-            if checked {
-                audit(p);
+            // A writable store closes cleanly, frozen or not (the strict
+            // audit decodes every page: not with one lost).
+            if audited {
+                audit_closed(p);
+            } else if writable {
+                assert_closed_in(p, DIR);
             }
         },
     );
@@ -424,8 +435,10 @@ fn test_every_crash_of_an_open_after_a_dead_owner() {
                 assert!(back == [5; B as usize], "{case:?}");
                 seen.saw(case, "lost");
             }
-            drop((r, s));
-            audit(p);
+            drop(r);
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
         },
     );
     eprintln!("open dead owner: {covered:?}");
@@ -506,8 +519,9 @@ fn test_every_crash_of_an_open_after_an_owner_dead_before_its_flush() {
                 case,
                 judge(&s, &reference, "owner dead before its flush", case),
             );
+            audit_space(p, &s);
             drop(s);
-            audit(p);
+            audit_closed(p);
         },
     );
     eprintln!("open owner dead before its flush (step {k}): {covered:?}");
@@ -621,8 +635,9 @@ fn test_every_crash_of_an_open_after_an_owner_dead_inside_a_provisioning() {
                 "lost"
             };
             seen.saw(case, outcome);
+            audit_space(p, &s);
             drop(s);
-            audit(p);
+            audit_closed(p);
         },
     );
     eprintln!("open owner dead inside a provisioning (step {k}): {covered:?}");

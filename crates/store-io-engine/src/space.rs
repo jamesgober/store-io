@@ -51,6 +51,9 @@ pub struct SpaceReport {
     pub container: u64,
     /// Bytes held by ready regions, headers included, and by provisionings
     /// and growths filling now (format 2: marked before their commit).
+    /// Format 2 also counts an unavailable region whose entry passes the
+    /// entry checks, by its capacity and headers (its span stays allocated
+    /// either way).
     pub regions: u64,
     /// Format 1: bytes of released regions, reused by a later region of
     /// exactly the same size. Format 2: free bytes inside the container,

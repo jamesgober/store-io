@@ -157,6 +157,12 @@ pub enum Repair {
         /// Its sequence on the page.
         seq: u32,
     },
+    /// `accept_page_rollback`: a stale page's winner made the page's
+    /// content (whatever its lost commits held is given up).
+    PageAccepted {
+        /// The page.
+        page: u32,
+    },
 }
 
 /// A region the region table names that could not be opened (D-090).

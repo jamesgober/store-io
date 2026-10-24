@@ -183,6 +183,7 @@ where
             force_sync: Arc::clone(&r.force_sync),
             read_only: std::sync::atomic::AtomicBool::new(r.is_read_only()),
             superseded: r.superseded,
+            foreign: r.foreign,
         });
         let mut regions = self
             .inner

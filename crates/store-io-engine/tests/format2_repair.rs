@@ -13,7 +13,7 @@ mod format2_util;
 use format2_util::audit::audit;
 use format2_util::craft::{region, tear_newer_copy_of, write_regions};
 use format2_util::*;
-use store_io_core::error::{Capability, Error, NotWrittenCause};
+use store_io_core::error::{Capability, CorruptionKind, Error, NotWrittenCause};
 use store_io_core::id::RegionId;
 use store_io_engine::{Repair, Store, StoreOptions};
 use store_io_format::meta::RegionKind;
@@ -948,4 +948,585 @@ fn test_an_unrelated_repair_keeps_a_supersession_by_a_span() {
     let s = open(&p);
     assert_eq!(s.report().metadata.superseded, [RegionId::from_raw(0)]);
     s.repair_unavailable(id_of(&s, "x")).unwrap();
+}
+
+/// A store whose page 0 holds region "a" (16 KiB, a page written) and
+/// whose newer copy of page 0 is torn after a clean close: stale, frozen.
+fn torn_page_store(seed: u64) -> SimPlatform {
+    let p = SimPlatform::new(SimConfig::volatile(seed));
+    let s = create(&p);
+    let a = s.provision_page_region("a", 4 * B).unwrap();
+    a.write_durable(a.pos(0).unwrap(), &[3; B as usize])
+        .unwrap();
+    drop((a, s));
+    tear_newer_copy_of(&p, 0);
+    p
+}
+
+fn is_cause(e: &Error, want: NotWrittenCause) -> bool {
+    matches!(e, Error::NotWritten { cause, .. } if *cause == want)
+}
+
+/// A stale page accepted: its winner its content, the store no longer
+/// frozen, its region writable, provisioning allowed, the accept recorded;
+/// after a reopen the page is Confirmed and nothing is stale.
+#[test]
+fn test_a_stale_page_is_accepted() {
+    let p = torn_page_store(1240);
+    let s = open(&p);
+    assert!(s.frozen());
+    let a = s.page_region("a").unwrap();
+    let e = a
+        .write_durable(a.pos(0).unwrap(), &[4; B as usize])
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    let m = max_meta_seq(&p);
+    s.accept_page_rollback(&[0]).unwrap();
+    assert_eq!(max_meta_seq(&p), m + 1, "the next meta_seq");
+    assert!(!s.frozen());
+    assert_eq!(s.repairs(), [Repair::PageAccepted { page: 0 }]);
+    a.write_durable(a.pos(0).unwrap(), &[4; B as usize])
+        .unwrap();
+    s.provision_page_region("b", 4 * B).unwrap();
+    // Again: nothing to do.
+    s.accept_page_rollback(&[0]).unwrap();
+    assert_eq!(s.repairs().len(), 1);
+    drop((a, s));
+    let s = open(&p);
+    assert!(!s.frozen());
+    assert!(s.report().metadata.stale_pages.is_empty());
+    let a = s.page_region("a").unwrap();
+    let mut back = vec![0u8; B as usize];
+    a.read(a.pos(0).unwrap(), &mut back).unwrap();
+    assert!(back == [4; B as usize]);
+    a.write_durable(a.pos(B).unwrap(), &[5; B as usize])
+        .unwrap();
+    drop((a, s));
+    audit(&p);
+}
+
+/// The rewritten copy does not read back (both slots unreadable after the
+/// open): refused and the store poisoned, the page stale in memory; the
+/// next open (the slots reading again) finds the new copy: Confirmed.
+#[test]
+fn test_an_accept_that_does_not_read_back_leaves_the_page_stale() {
+    let p = torn_page_store(1241);
+    let file = p.with_world(|w| {
+        w.file_id(&std::path::PathBuf::from(DIR), store_io_engine::CONTAINER)
+            .unwrap()
+    });
+    let s = open(&p);
+    // The failed slot: whichever of page 0's two is not the winner. Both
+    // made unreadable for reads after the open; the accept writes one.
+    let (a0, b0) = (page_at(&p, 0, 0), page_at(&p, 0, 1));
+    p.with_world(|w| {
+        w.faults_mut().bad_ranges = vec![(file, a0, a0 + TABLE), (file, b0, b0 + TABLE)];
+    });
+    let e = s.accept_page_rollback(&[0]).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            Error::Corruption {
+                kind: CorruptionKind::MediaError,
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+    assert!(s.frozen());
+    assert!(s.repairs().is_empty());
+    assert!(s.poisoned().is_some());
+    drop(s);
+    p.with_world(|w| w.faults_mut().bad_ranges.clear());
+    let s = open(&p);
+    assert!(!s.frozen());
+    assert!(s.report().metadata.stale_pages.is_empty());
+    drop(s);
+    audit(&p);
+}
+
+/// One of page 0's slots unreadable after the open: the failed one (the
+/// new copy does not read back) or the winner's (the new copy reads, but
+/// the next open would find the page stale again: the two slots must read
+/// as twins). Either is refused, the store poisoned; the next open, both
+/// slots readable again, finds the page Confirmed.
+#[test]
+fn test_an_accept_is_verified_by_both_copies() {
+    for slot in 0..2 {
+        let p = torn_page_store(1250 + slot);
+        let file = p.with_world(|w| {
+            w.file_id(&std::path::PathBuf::from(DIR), store_io_engine::CONTAINER)
+                .unwrap()
+        });
+        let s = open(&p);
+        let at = page_at(&p, 0, slot);
+        p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, at, at + TABLE)]);
+        let e = s.accept_page_rollback(&[0]).unwrap_err();
+        assert!(
+            matches!(
+                e,
+                Error::Corruption {
+                    kind: CorruptionKind::MediaError,
+                    ..
+                }
+            ),
+            "{slot}: {e:?}"
+        );
+        assert!(s.frozen());
+        assert!(s.poisoned().is_some());
+        drop(s);
+        p.with_world(|w| w.faults_mut().bad_ranges.clear());
+        let s = open(&p);
+        assert!(!s.frozen(), "{slot}");
+        drop(s);
+        audit(&p);
+    }
+}
+
+/// Refused: a Lost page, a page the table does not have, a read-only
+/// store, a page holding an entry past its own write, format 1.
+#[test]
+fn test_accepts_are_refused_where_nothing_can_be_kept() {
+    // Lost.
+    let p = SimPlatform::new(SimConfig::volatile(1242));
+    let s = create(&p);
+    s.provision_page_region("a", 4 * B).unwrap();
+    drop(s);
+    format2_util::craft::lose_page(&p, 0);
+    tear_newer_copy_of(&p, 1);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.stale_pages, [1]);
+    let writes = p.with_world(|w| w.writes());
+    let e = s.accept_page_rollback(&[1, 0]).unwrap_err();
+    let named = (
+        page_at(&p, 0, 0).min(page_at(&p, 0, 1)),
+        page_at(&p, 0, 0).max(page_at(&p, 0, 1)) + TABLE,
+    );
+    assert!(
+        matches!(e, Error::NotWritten { cause: NotWrittenCause::NotReady, ctx } if ctx.range.map(|r| (r.start, r.end)) == Some(named)),
+        "{e:?}"
+    );
+    let e = s.accept_page_rollback(&[1, PAGES + 1]).unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::OutOfBounds), "{e:?}");
+    assert_eq!(p.with_world(|w| w.writes()), writes, "nothing accepted");
+    assert!(s.repairs().is_empty());
+    // Page 1 accepted alone (named twice: accepted once): page 0 Lost, the
+    // store stays frozen.
+    s.accept_page_rollback(&[1, 1]).unwrap();
+    assert_eq!(s.repairs(), [Repair::PageAccepted { page: 1 }]);
+    assert!(s.frozen());
+    drop(s);
+    // Read-only.
+    let p = torn_page_store(1243);
+    let s = Store::open_readonly(p.clone(), std::path::Path::new(DIR), opts()).unwrap();
+    let e = s.accept_page_rollback(&[0]).unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    drop(s);
+    // An entry past its page's write, on a stale page.
+    let p = fresh(1244);
+    let m0 = max_meta_seq(&p) + 1;
+    let mut x = region(0, RegionKind::Page, "x", BASE, CAP);
+    x.entry.footprint_seq = m0 + 1;
+    write_regions(&p, 1, &[x]);
+    tear_newer_copy_of(&p, 1);
+    let s = open(&p);
+    assert!(s.frozen());
+    let writes = p.with_world(|w| w.writes());
+    let e = s.accept_page_rollback(&[1]).unwrap_err();
+    assert!(
+        matches!(e, Error::NotWritten { cause: NotWrittenCause::Frozen, ctx } if ctx.region == Some(RegionId::from_raw(1 << 32))),
+        "{e:?}"
+    );
+    assert_eq!(p.with_world(|w| w.writes()), writes);
+    drop(s);
+    // Format 1.
+    let p = SimPlatform::new(SimConfig::volatile(1245));
+    let s = Store::create(
+        p,
+        std::path::Path::new(DIR),
+        StoreOptions {
+            container_format: store_io_format::slot::FORMAT_1,
+            ..opts()
+        },
+    )
+    .unwrap();
+    let e = s.accept_page_rollback(&[0]).unwrap_err();
+    assert!(
+        matches!(
+            e,
+            Error::Unsupported {
+                what: Capability::FormatVersion
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+/// A possibly superseded region, and one with a read-only-compatible
+/// feature this version does not know, stay read-only on an accepted page;
+/// a plain region beside them becomes writable.
+#[test]
+fn test_an_accept_never_makes_a_superseded_or_foreign_region_writable() {
+    let p = fresh(1246);
+    let mut old = region(0, RegionKind::Append, "old", BASE, CAP);
+    old.entry.footprint_seq = 1;
+    let next = BASE + 2 * B + CAP;
+    let mut gone = region(1, RegionKind::Append, "gone", next, CAP);
+    gone.entry.span_start = BASE + 2 * B;
+    gone.extents = vec![(BASE + 2 * B, CAP)];
+    gone.header.state = store_io_format::meta::RegionState::Released;
+    let f = BASE + 4 * B + 2 * CAP;
+    let mut foreign = region(2, RegionKind::Append, "foreign", f, CAP);
+    foreign.ro_compat = 1 << 31;
+    let plain = region(3, RegionKind::Append, "plain", f + 2 * B + CAP, CAP);
+    write_regions(&p, 0, &[old, gone, foreign, plain]);
+    tear_newer_copy_of(&p, 0);
+    let s = open(&p);
+    assert!(s.frozen());
+    s.accept_page_rollback(&[0]).unwrap();
+    assert!(!s.frozen());
+    for name in ["old", "foreign"] {
+        let r = s.append_region(name).unwrap();
+        let e = r.resume_at(0).unwrap_err();
+        assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{name}: {e:?}");
+    }
+    let plain = s.append_region("plain").unwrap();
+    assert_eq!(plain.resume_at(0).unwrap(), 0);
+    plain.append_durable(&[1u8; B as usize]).unwrap();
+}
+
+/// Two stale pages, a region on each: allocation frozen and both regions
+/// read-only (the accepted page's too: a lost commit of the other page may
+/// have been given its space) until both pages are accepted, also across a
+/// reopen in between.
+#[test]
+fn test_regions_stay_read_only_until_every_stale_page_is_accepted() {
+    let p = fresh(1247);
+    write_regions(&p, 0, &[region(0, RegionKind::Page, "a", BASE, CAP)]);
+    let at = BASE + 2 * B + CAP;
+    write_regions(&p, 1, &[region(0, RegionKind::Page, "b", at, CAP)]);
+    tear_newer_copy_of(&p, 0);
+    tear_newer_copy_of(&p, 1);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.stale_pages, [0, 1]);
+    s.accept_page_rollback(&[1]).unwrap();
+    assert!(s.frozen());
+    let (a, b) = (s.page_region("a").unwrap(), s.page_region("b").unwrap());
+    for r in [&a, &b] {
+        let e = r
+            .write_durable(r.pos(0).unwrap(), &[4; B as usize])
+            .unwrap_err();
+        assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    }
+    let e = s.provision_page_region("c", 4 * B).map(drop).unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::Frozen), "{e:?}");
+    // After a reopen too: page 1 (Confirmed, its slots twins) is possibly
+    // accepted while page 0 is stale.
+    drop((a, b, s));
+    let s = open(&p);
+    assert!(s.frozen());
+    let (a, b) = (s.page_region("a").unwrap(), s.page_region("b").unwrap());
+    for r in [&a, &b] {
+        let e = r
+            .write_durable(r.pos(0).unwrap(), &[4; B as usize])
+            .unwrap_err();
+        assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    }
+    s.accept_page_rollback(&[0]).unwrap();
+    assert!(!s.frozen());
+    for r in [&a, &b] {
+        r.write_durable(r.pos(0).unwrap(), &[4; B as usize])
+            .unwrap();
+    }
+    s.provision_page_region("c", 4 * B).unwrap();
+    drop((a, b, s));
+    let s = open(&p);
+    assert!(!s.frozen());
+    let b = s.page_region("b").unwrap();
+    b.write_durable(b.pos(0).unwrap(), &[5; B as usize])
+        .unwrap();
+    drop((b, s));
+    audit(&p);
+}
+
+/// The accept's write fails after submission (its barrier): the store is
+/// poisoned. Power failing then: the write lost leaves the page stale, kept
+/// leaves it Confirmed; torn (at random), either, the store sound: region
+/// "a" served, the audit clean once unfrozen, and a stale page accepted
+/// again.
+#[test]
+fn test_a_failed_accept_leaves_the_page_stale_or_accepted() {
+    let cases = [(1248, CrashMode::LoseAll), (1249, CrashMode::KeepAll)]
+        .into_iter()
+        .chain((1260..1268).map(|seed| (seed, CrashMode::Random)));
+    for (seed, crash) in cases {
+        let p = torn_page_store(seed);
+        let s = open(&p);
+        p.with_world(|w| w.faults_mut().fail_flush = Some(w.flushes() + 1));
+        let e = s.accept_page_rollback(&[0]).unwrap_err();
+        p.with_world(|w| w.faults_mut().fail_flush = None);
+        assert!(matches!(e, Error::DurabilityUnknown { .. }), "{e:?}");
+        assert!(s.poisoned().is_some());
+        std::mem::forget(s);
+        p.with_world(|w| w.crash(&crash));
+        let s = open(&p);
+        assert!(s.page_region("a").is_ok(), "{seed}");
+        match crash {
+            CrashMode::LoseAll => assert!(s.frozen(), "{seed}"),
+            CrashMode::KeepAll => assert!(!s.frozen(), "{seed}"),
+            _ => {}
+        }
+        if s.frozen() {
+            s.accept_page_rollback(&[0]).unwrap();
+            assert!(!s.frozen(), "{seed}");
+        }
+        drop(s);
+        audit(&p);
+    }
+}
+
+/// A page whose newer copy is unreadable at the open (a read error, no
+/// number known) is stale; the slot readable again, it is accepted: its
+/// winner (the older copy: "a" provisioned, "b" not) is the page, the
+/// region writable, reopen Confirmed, audit clean. Each of the two slots
+/// made unreadable in turn (either makes the page stale): the newer one's
+/// case gives "b" up, and the id "b" had is never given out again, by
+/// this handle or after a reopen (the page's `next_seq` raised).
+#[test]
+fn test_a_page_with_an_unreadable_copy_is_accepted() {
+    let mut given_up = 0;
+    for (slot, reopen) in [(0, false), (1, false), (0, true), (1, true)] {
+        let p = SimPlatform::new(SimConfig::volatile(1270 + slot + 2 * u64::from(reopen)));
+        let s = create(&p);
+        let a = s.provision_page_region("a", 4 * B).unwrap();
+        a.write_durable(a.pos(0).unwrap(), &[3; B as usize])
+            .unwrap();
+        let b = s.provision_page_region("b", 4 * B).unwrap();
+        let old = b.pos(0).unwrap().region();
+        drop((a, b, s));
+        let file = p.with_world(|w| {
+            w.file_id(&std::path::PathBuf::from(DIR), store_io_engine::CONTAINER)
+                .unwrap()
+        });
+        let at = page_at(&p, 0, slot);
+        p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, at, at + TABLE)]);
+        let mut s = open(&p);
+        p.with_world(|w| w.faults_mut().bad_ranges.clear());
+        assert!(s.frozen(), "{slot}: either copy unreadable makes it stale");
+        let lost_b = s.page_region("b").is_err();
+        s.accept_page_rollback(&[0]).unwrap();
+        assert!(!s.frozen());
+        let a = s.page_region("a").unwrap();
+        a.write_durable(a.pos(0).unwrap(), &[4; B as usize])
+            .unwrap();
+        drop(a);
+        if lost_b {
+            given_up += 1;
+            if reopen {
+                drop(s);
+                s = open(&p);
+            }
+            // Its name and space free again; its id not.
+            let b = s.provision_page_region("b", 4 * B).unwrap();
+            let id = b.pos(0).unwrap().region();
+            assert_ne!(id, old, "{reopen}");
+            assert_eq!(id.get() >> 32, old.get() >> 32, "the same page");
+        }
+        drop(s);
+        let s = open(&p);
+        assert!(!s.frozen());
+        assert!(s.report().metadata.stale_pages.is_empty());
+        assert!(s.page_region("b").is_ok(), "{slot}");
+        drop(s);
+        audit(&p);
+    }
+    assert_eq!(given_up, 2);
+}
+
+/// A store whose page 0's newer copy (provisioning "b") is unreadable at
+/// the open: the page stale, "b" given up by an accept. Returns the
+/// platform, the open store, the unreadable slot and the id "b" had.
+fn lost_b_store(seed: u64) -> (SimPlatform, Store<SimPlatform>, u64, RegionId) {
+    for slot in 0..2 {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let s = create(&p);
+        s.provision_page_region("a", 4 * B).unwrap();
+        let b = s.provision_page_region("b", 4 * B).unwrap();
+        let old = b.pos(0).unwrap().region();
+        drop((b, s));
+        let file = p.with_world(|w| {
+            w.file_id(&std::path::PathBuf::from(DIR), store_io_engine::CONTAINER)
+                .unwrap()
+        });
+        let at = page_at(&p, 0, slot);
+        p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, at, at + TABLE)]);
+        let s = open(&p);
+        p.with_world(|w| w.faults_mut().bad_ranges.clear());
+        if s.page_region("b").is_err() {
+            return (p, s, slot, old);
+        }
+    }
+    panic!("one of the two slots is the newer copy")
+}
+
+/// The accept's read-back cut short once (a short read): read again (spec
+/// §7), the twins found, the page accepted.
+#[test]
+fn test_an_accept_reads_back_again_after_a_short_read() {
+    let (p, s, _, _) = lost_b_store(1280);
+    p.with_world(|w| w.faults_mut().short_read = Some(w.reads() + 1));
+    s.accept_page_rollback(&[0]).unwrap();
+    assert!(!s.frozen());
+    assert!(s.poisoned().is_none());
+}
+
+/// The accept's own write torn (its flush failed, then power: the copy
+/// reached the media torn): the next open heals it with the winner, byte
+/// for byte, so the page is Confirmed and the rollback accepted after all;
+/// the id the lost commit gave "b" is not given out again.
+#[test]
+fn test_a_torn_accept_healed_never_gives_a_lost_id_again() {
+    let (p, s, slot, old) = lost_b_store(1282);
+    p.with_world(|w| w.faults_mut().fail_flush = Some(w.flushes() + 1));
+    let e = s.accept_page_rollback(&[0]).unwrap_err();
+    p.with_world(|w| w.faults_mut().fail_flush = None);
+    assert!(matches!(e, Error::DurabilityUnknown { .. }), "{e:?}");
+    std::mem::forget(s);
+    p.with_world(|w| w.crash(&CrashMode::KeepAll));
+    format2_util::tear(&p, page_at(&p, 0, slot));
+    let s = open(&p);
+    assert_eq!(
+        s.report().metadata.healed,
+        Some(store_io_engine::Healed::Page(0)),
+        "the torn accept healed"
+    );
+    assert!(!s.frozen());
+    let b = s.provision_page_region("b", 4 * B).unwrap();
+    assert_ne!(b.pos(0).unwrap().region(), old);
+    drop((b, s));
+    audit(&p);
+}
+
+/// A Confirmed page whose two slots hold different payloads (two commits:
+/// never accepted, never healed) keeps its regions writable while another
+/// page is stale; only a twin pair counts as possibly accepted.
+#[test]
+fn test_a_page_written_twice_is_not_taken_for_an_accepted_one() {
+    let p = SimPlatform::new(SimConfig::volatile(1284));
+    let s = create(&p);
+    s.provision_page_region("a", 4 * B).unwrap();
+    s.provision_page_region("b", 4 * B).unwrap();
+    drop(s);
+    tear_newer_copy_of(&p, 1);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.stale_pages, [1]);
+    let a = s.page_region("a").unwrap();
+    a.write_durable(a.pos(0).unwrap(), &[6; B as usize])
+        .unwrap();
+}
+
+/// Page `page`'s slot holding the older generation.
+fn older_slot(p: &SimPlatform, page: u32) -> u64 {
+    let m = media(p);
+    let (a, b) = (page_at(p, page, 0), page_at(p, page, 1));
+    if u64_at(&m, a as usize + 56) < u64_at(&m, b as usize + 56) {
+        a
+    } else {
+        b
+    }
+}
+
+/// An accepted page whose older copy decays afterwards is still judged
+/// Confirmed, its twin gone: while another page is stale its regions stay
+/// read-only (D-130), and the id its lost commit gave out is not given out
+/// again.
+#[test]
+fn test_an_accepted_page_whose_older_copy_decays_stays_possibly_accepted() {
+    // Two stale pages, page 1 accepted, its older copy then damaged.
+    let p = fresh(1286);
+    write_regions(&p, 0, &[region(0, RegionKind::Page, "a", BASE, CAP)]);
+    let at = BASE + 2 * B + CAP;
+    write_regions(&p, 1, &[region(0, RegionKind::Page, "b", at, CAP)]);
+    tear_newer_copy_of(&p, 0);
+    tear_newer_copy_of(&p, 1);
+    let s = open(&p);
+    s.accept_page_rollback(&[1]).unwrap();
+    drop(s);
+    format2_util::tear(&p, older_slot(&p, 1));
+    let s = open(&p);
+    assert_eq!(s.report().metadata.stale_pages, [0], "page 1 Confirmed");
+    let b = s.page_region("b").unwrap();
+    let e = b
+        .write_durable(b.pos(0).unwrap(), &[4; B as usize])
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    s.accept_page_rollback(&[0]).unwrap();
+    b.write_durable(b.pos(0).unwrap(), &[4; B as usize])
+        .unwrap();
+    drop((b, s));
+
+    // The lost commit's id: the page accepted, nothing written to it
+    // before the close, then its older copy damaged.
+    let (p, s, slot, old) = lost_b_store(1288);
+    s.accept_page_rollback(&[0]).unwrap();
+    drop(s);
+    format2_util::tear(&p, page_at(&p, 0, 1 - slot));
+    let s = open(&p);
+    assert!(!s.frozen());
+    let b = s.provision_page_region("b", 4 * B).unwrap();
+    assert_ne!(b.pos(0).unwrap().region(), old);
+}
+
+/// A Lost page keeps an accepted page's regions read-only across a reopen.
+#[test]
+fn test_a_lost_page_keeps_an_accepted_page_read_only_after_a_reopen() {
+    let p = fresh(1290);
+    let at = BASE + 2 * B + CAP;
+    write_regions(&p, 1, &[region(0, RegionKind::Page, "b", at, CAP)]);
+    format2_util::craft::lose_page(&p, 0);
+    tear_newer_copy_of(&p, 1);
+    let s = open(&p);
+    s.accept_page_rollback(&[1]).unwrap();
+    assert!(s.frozen());
+    drop(s);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.lost_pages, [0]);
+    let b = s.page_region("b").unwrap();
+    let e = b
+        .write_durable(b.pos(0).unwrap(), &[4; B as usize])
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+}
+
+/// A stale page whose newer copy reads Blank (zeros where a lost write
+/// was): stale, its regions read-only; accepted, the id its lost commit
+/// gave "b" is not given out again.
+#[test]
+fn test_a_stale_page_with_a_blank_newer_copy_never_gives_a_lost_id_again() {
+    let p = SimPlatform::new(SimConfig::volatile(1292));
+    let s = create(&p);
+    let a = s.provision_page_region("a", 4 * B).unwrap();
+    a.write_durable(a.pos(0).unwrap(), &[3; B as usize])
+        .unwrap();
+    let b = s.provision_page_region("b", 4 * B).unwrap();
+    let old = b.pos(0).unwrap().region();
+    drop((a, b, s));
+    let older = older_slot(&p, 0);
+    let newer = if older == page_at(&p, 0, 0) {
+        page_at(&p, 0, 1)
+    } else {
+        page_at(&p, 0, 0)
+    };
+    format2_util::put(&p, newer, &vec![0u8; TABLE as usize]);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.stale_pages, [0]);
+    assert!(s.page_region("b").is_err(), "the newer copy's region gone");
+    let a = s.page_region("a").unwrap();
+    let e = a
+        .write_durable(a.pos(0).unwrap(), &[4; B as usize])
+        .unwrap_err();
+    assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    s.accept_page_rollback(&[0]).unwrap();
+    let b = s.provision_page_region("b", 4 * B).unwrap();
+    assert_ne!(b.pos(0).unwrap().region(), old);
 }

@@ -2,7 +2,10 @@
 //! `repair_unavailable` releases an unavailable region's table entry (the
 //! page written without it, the commit; then free space is the complement
 //! again: the entry's span is never added back, other regions' bytes inside
-//! it stay allocated), its bytes untouched.
+//! it stay allocated), its bytes untouched; `accept_page_rollback` makes a
+//! stale page's winner its content (whatever its lost commits held is
+//! given up), its regions writable and, once no page is stale, allocation
+//! free again.
 
 use store_io_core::error::{Capability, Error, ErrorContext, Named, NotWrittenCause};
 use store_io_core::id::RegionId;
@@ -254,6 +257,158 @@ where
             },
         };
         meta.repairs.push(record);
+        Ok(())
+    }
+
+    /// Accepts the rollback of stale table pages (spec §12): for each page
+    /// of `pages` that is Unconfirmed (`report().metadata.stale_pages`),
+    /// its winner is rewritten byte for byte into its failed slot (even an
+    /// unreadable one: writing usually remaps the sector) at the next
+    /// `meta_seq`, durably, and read back; once the new copy reads back as
+    /// the winner the page counts as Confirmed: whatever its lost commits
+    /// held is given up (space they used may be handed out again) and the
+    /// extra extents counted allocated for it are free. Every page is
+    /// checked before any is written (an error from a check accepts
+    /// none). Each accepted page is recorded ([`Self::repairs`]); a
+    /// Confirmed page is left as it is.
+    ///
+    /// Once no page is stale or lost, allocation is no longer frozen
+    /// ([`Self::frozen`]) and the regions become writable (not one possibly
+    /// superseded, or with a header feature this version may not write).
+    /// Not before: a region of an accepted page may be one a lost commit
+    /// released, its space then given to a region of another stale page's
+    /// lost commit, whose bytes it would overwrite. The same holds across
+    /// a reopen: an accepted page's two slots then hold the same payload
+    /// (as after a heal), and while any page is stale or lost the open
+    /// keeps such a page's regions read-only (also once its older copy is
+    /// damaged: any Confirmed page with a damaged older copy counts). A store with a Lost page
+    /// stays frozen, the regions of the pages accepted read-only: it is
+    /// copied (`copy_store`). An accepted page's `next_seq` counts higher
+    /// (raised by the open that found it stale and by each open while its
+    /// trace lasts, written by its next commit): the region ids its lost
+    /// commit gave out are not given out
+    /// again (unless more than 4,096 provisionings failed on that page
+    /// between its last two commits). Container format 2.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(NotReady)` for a Lost page, its slots named (no winner
+    /// to keep); `NotWritten(OutOfBounds)` for a page the table does not
+    /// have; `NotWritten(Frozen)` for a page holding an entry whose
+    /// `footprint_seq` is past the page's own write, the entry named (the
+    /// rewrite would change how the next open counts it, and no repair
+    /// runs while allocation is frozen: such a store is copied).
+    /// `Corruption(MediaError)` if the page does not read back with both
+    /// slots Valid and the same, and `Io` if it does not read: the write was
+    /// durable, so the store is poisoned (what the next open finds is the
+    /// page's state: Confirmed if the new copy reads, else stale, to be
+    /// accepted again). `NotWritten(ReadOnly)`; `Unsupported(FormatVersion)`
+    /// for format 1; `Poisoned`; `DurabilityUnknown` if the write failed
+    /// after submission (the store poisoned; at the next open the page is
+    /// still stale, or Confirmed if the new copy reached the media).
+    pub fn accept_page_rollback(&self, pages: &[u32]) -> Result<(), Error> {
+        self.ready()?;
+        let inner = &self.inner;
+        if inner.layout.format != store_io_format::slot::FORMAT_2 {
+            return Err(Error::Unsupported {
+                what: Capability::FormatVersion,
+            });
+        }
+        let mut meta = lock_meta(&inner.meta);
+        let mut todo: Vec<(u32, usize)> = Vec::new();
+        {
+            let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
+            for &page in pages {
+                let p = usize::try_from(page).map_err(|_| corrupt())?;
+                let Some(pg) = v2.pages.get(p) else {
+                    return Err(not_written(
+                        NotWrittenCause::OutOfBounds,
+                        ErrorContext::default(),
+                    ));
+                };
+                match pg.standing {
+                    Standing::Confirmed => continue,
+                    Standing::Unconfirmed => {}
+                    Standing::Lost | Standing::Refused => {
+                        return Err(not_written(
+                            NotWrittenCause::NotReady,
+                            ErrorContext {
+                                range: Some(crate::v2::page_range(&inner.layout, page)),
+                                ..ErrorContext::default()
+                            },
+                        ));
+                    }
+                }
+                if let Some((seq, _)) = pg.ahead().next() {
+                    return Err(not_written(
+                        NotWrittenCause::Frozen,
+                        ErrorContext {
+                            region: Some(RegionId::from_raw(
+                                (u64::from(page) << 32) | u64::from(seq),
+                            )),
+                            ..ErrorContext::default()
+                        },
+                    ));
+                }
+                if !todo.iter().any(|&(_, at)| at == p) {
+                    todo.push((page, p));
+                }
+            }
+        }
+        for (page, p) in todo {
+            {
+                let mut q = inner.queues.get(0);
+                crate::v2::accept_page::<P>(
+                    &mut q,
+                    &inner.file,
+                    &inner.pool,
+                    &inner.layout,
+                    inner.volume,
+                    &inner.policy,
+                    &inner.domain,
+                    &mut meta,
+                    p,
+                    inner.owner_generation,
+                )?;
+            }
+            // Confirmed: the extra extents counted for it are free (a
+            // growth beyond capacity that never committed), free space is
+            // the complement again.
+            let len = meta.container_len;
+            let v2 = meta.v2.as_deref_mut().ok_or_else(corrupt)?;
+            let freed: Vec<(u64, u64)> = v2
+                .stale_extra
+                .iter()
+                .filter(|(at, _)| *at == p)
+                .map(|&(_, r)| r)
+                .collect();
+            v2.stale_extra.retain(|(at, _)| *at != p);
+            for range in &freed {
+                if let Some(i) = v2.allocated.iter().position(|a| a == range) {
+                    let _gone = v2.allocated.swap_remove(i);
+                }
+            }
+            v2.rebuild_free(len);
+            meta.repairs.push(Repair::PageAccepted { page });
+        }
+        // No page stale or lost: every region the open served read-only for
+        // its page is writable, and allocation unfrozen.
+        let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
+        if v2.pages.iter().all(|pg| pg.standing == Standing::Confirmed) {
+            for r in inner
+                .regions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|r| !r.superseded && !r.foreign)
+            {
+                r.read_only
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+            inner
+                .frozen
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         Ok(())
     }
 }

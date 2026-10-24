@@ -484,7 +484,7 @@ M = [
  # meta_seq is the one chosen first (a torn one heals); free bytes leave
  # reservations out
  ('crates/store-io-engine/src/provision2.rs', '            footprint_seq: meta_seq,', '            footprint_seq: 1,', F2P),
- ('crates/store-io-engine/src/v2.rs', '    next.meta_seq = meta_seq;', '    next.meta_seq = meta_seq + 1;', F2P),
+ ('crates/store-io-engine/src/v2.rs', '    let mut next = plan_next(&page.pair, payload, owner_generation)?;\n    next.meta_seq = meta_seq;', '    let mut next = plan_next(&page.pair, payload, owner_generation)?;\n    next.meta_seq = meta_seq + 1;', F2P),
  ('crates/store-io-engine/src/space.rs', '                released: v2.free.free_bytes().saturating_sub(acct.reserved()),', '                released: v2.free.free_bytes(),', F2P),
  # E4 C8: growth within capacity: the fill flushed and verified before the
  # commit; the capacity bound; published after the commit (the map, then
@@ -703,9 +703,9 @@ M = [
  # foreign-header regions are read-only; overlap and name demote; extra
  # extents are reported; several extents and 512 B blocks are refused
  # or read-only; every reserved overlap and stale page's agreement is said
- ('crates/store-io-engine/src/open2.rs', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),', '            read_only: std::sync::atomic::AtomicBool::new(s.superseded || !writable),', F2R),
- ('crates/store-io-engine/src/open2.rs', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || !writable),', F2R),
- ('crates/store-io-engine/src/open2.rs', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || (!writable && false)),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '                unconfirmed\n                    || (!settled', '                false\n                    || (!settled', F2R + ['--test', 'format2_repair']),
+ ('crates/store-io-engine/src/open2.rs', '                    || s.superseded\n                    || !writable,', '                    || !writable,', F2R),
+ ('crates/store-io-engine/src/open2.rs', '                    || s.superseded\n                    || !writable,', '                    || s.superseded\n                    || (!writable && false),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.overlapped => Some(Unavailable::Overlaps),', '            (Ok(_), Some(s)) if s.overlapped && false => Some(Unavailable::Overlaps),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.renamed => Some(Unavailable::NameTaken),', '            (Ok(_), Some(s)) if s.renamed && false => Some(Unavailable::NameTaken),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.extra.is_some() && page.standing == Standing::Unconfirmed {', F2R),
@@ -863,8 +863,8 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            generation: pl.generation,', '            generation: Generation::FIRST,', COPYT),
  ('crates/store-io-engine/src/provision2.rs', '            Some(c) => (c.fill, c.fill_key),', '            Some(c) => (c.fill, if c.fill_key == [0; 16] { random_uuid() } else { random_uuid() }),', COPYT),
  ('crates/store-io-engine/src/provision2.rs', 'let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag);', 'let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag & 0);', COPYT),
- (REPAIR_SRC, "        self.ready()?;\n        let inner = &self.inner;", "        let inner = &self.inner;", F2REP),
- (REPAIR_SRC, "        if inner.layout.format != store_io_format::slot::FORMAT_2 {", "        if inner.layout.format != store_io_format::slot::FORMAT_2 && false {", F2REP),
+ (REPAIR_SRC, "id: RegionId) -> Result<(), Error> {\n        self.ready()?;", "id: RegionId) -> Result<(), Error> {", F2REP),
+ (REPAIR_SRC, "        };\n        if inner.layout.format != store_io_format::slot::FORMAT_2 {", "        };\n        if inner.layout.format != store_io_format::slot::FORMAT_2 && false {", F2REP),
  (REPAIR_SRC, "        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {", "        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) && false {", F2REP),
  (REPAIR_SRC, "        if let Some(span) = hold.span {", "        if let Some(span) = hold.span.filter(|_| false) {", F2REP),
  (REPAIR_SRC, "        if let Some(usage) = hold.usage {", "        if let Some(usage) = hold.usage.filter(|_| false) {", F2REP),
@@ -872,7 +872,7 @@ M = [
  (REPAIR_SRC, "        v2.cut_short = v2.holds.iter().any(|h| h.short);", "        v2.cut_short = v2.cut_short || v2.holds.iter().any(|h| h.short);", F2REP),
  (REPAIR_SRC, "                region: meta.unavailable.remove(i),", "                region: meta.unavailable[i].clone(),", F2REP),
  (REPAIR_SRC, "        meta.repairs.push(record);", "        let _ = record;", F2REP),
- (REPAIR_SRC, "        v2.rebuild_free(len);", "        let _ = len;", F2REP),
+ (REPAIR_SRC, "\n        v2.rebuild_free(len);", "\n        let _ = len;", F2REP),
  (REPAIR_SRC, "        v2.cut_short = v2.holds.iter().any(|h| h.short);", "        v2.cut_short = v2.holds.iter().any(|h| h.short && false);", F2REP),
  (REPAIR_SRC, "            if let Some(region) = crate::repair::would_lift(self, v2, id.get()) {", "            if let Some(region) = crate::repair::would_lift(self, v2, id.get()).filter(|_| false) {", F2REP),
  ('crates/store-io-engine/src/lifecycle2.rs', "            .and_then(|v2| crate::repair::would_lift(self, v2, id))", "            .and_then(|v2| crate::repair::would_lift(self, v2, id).filter(|_| false))", F2REP),
@@ -894,6 +894,44 @@ M = [
  (V2, "        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)))", "        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)) && false)", F2REP),
  ('crates/store-io-engine/src/provision2.rs', "                        && page.ahead().next().is_none()", "                        && (page.ahead().next().is_none() || true)", F2REP),
  ('crates/store-io-engine/src/open2.rs', "                usage: Some((e.tag, e.data_size, e.capacity.saturating_add(2 * block))),", "                usage: None,", F2REP),
+ # accept_page_rollback (v0.5 E6 C3).
+ (REPAIR_SRC, "pages: &[u32]) -> Result<(), Error> {\n        self.ready()?;", "pages: &[u32]) -> Result<(), Error> {", F2REP),
+ (REPAIR_SRC, "        let inner = &self.inner;\n        if inner.layout.format != store_io_format::slot::FORMAT_2 {", "        let inner = &self.inner;\n        if inner.layout.format != store_io_format::slot::FORMAT_2 && false {", F2REP),
+ (REPAIR_SRC, "                        NotWrittenCause::OutOfBounds,", "                        NotWrittenCause::NotReady,", F2REP),
+ (REPAIR_SRC, "                    Standing::Confirmed => continue,", "                    Standing::Confirmed => {}", F2REP),
+ (REPAIR_SRC, "                    Standing::Unconfirmed => {}\n                    Standing::Lost | Standing::Refused => {", "                    Standing::Unconfirmed | Standing::Lost => {}\n                    Standing::Refused => {", F2REP),
+ (REPAIR_SRC, "                if let Some((seq, _)) = pg.ahead().next() {", "                if let Some((seq, _)) = pg.ahead().next().filter(|_| false) {", F2REP),
+ (REPAIR_SRC, "                                (u64::from(page) << 32) | u64::from(seq),", "                                u64::from(seq),", F2REP),
+ (REPAIR_SRC, "                if let Some(i) = v2.allocated.iter().position(|a| a == range) {", "                if let Some(i) = v2.allocated.iter().position(|a| a == range).filter(|_| false) {", F2B),
+ (REPAIR_SRC, "                .filter(|(at, _)| *at == p)", "                .filter(|(at, _)| *at == p || true)", F2B),
+ (REPAIR_SRC, "            v2.rebuild_free(len);", "            let _ = len;", F2B),
+ (REPAIR_SRC, "                .filter(|r| !r.superseded && !r.foreign)", "                .filter(|r| !r.foreign)", F2REP),
+ (REPAIR_SRC, "                .filter(|r| !r.superseded && !r.foreign)", "                .filter(|r| !r.superseded)", F2REP),
+ (REPAIR_SRC, "                r.read_only\n                    .store(false, std::sync::atomic::Ordering::Release);\n            }\n            inner", "                r.read_only\n                    .store(true, std::sync::atomic::Ordering::Release);\n            }\n            inner", F2REP),
+ (REPAIR_SRC, "        if v2.pages.iter().all(|pg| pg.standing == Standing::Confirmed) {\n            for r in inner", "        if v2.pages.iter().all(|pg| pg.standing == Standing::Confirmed) || true {\n            for r in inner", F2REP),
+ (REPAIR_SRC, "        if v2.pages.iter().all(|pg| pg.standing == Standing::Confirmed) {\n            for r in inner", "        if v2.pages.iter().all(|pg| pg.standing == Standing::Confirmed) && false {\n            for r in inner", F2REP),
+ (REPAIR_SRC, "                if !todo.iter().any(|&(_, at)| at == p) {", "                if true {", F2REP),
+ (REPAIR_SRC, "                                range: Some(crate::v2::page_range(&inner.layout, page)),", "                                range: None,", F2REP),
+ (V2, "            domain.poison(store_io_core::error::FirstCause {\n                op: Some(store_io_core::error::Op::Read),", "            let _ = core::convert::identity(store_io_core::error::FirstCause {\n                op: Some(store_io_core::error::Op::Read),", F2REP),
+ (V2, "        end: a.max(b) + (1u64 << layout.log2_table),", "        end: a.max(b),", F2REP),
+ (REPAIR_SRC, "            meta.repairs.push(Repair::PageAccepted { page });", "            let _ = page;", F2REP),
+ (V2, "    let mut next = plan_next(&page.pair, &payload, og)?;\n    next.meta_seq = meta_seq;", "    let mut next = plan_next(&page.pair, &payload, og)?;\n    next.meta_seq = meta_seq - 1;", F2REP),
+ (V2, "            page.pair = back;\n            page.standing = Standing::Confirmed;", "            page.pair = back;", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "            foreign: !writable,", "            foreign: false,", F2REP),
+ # The twin trace (D-130).
+ (V2, "        if back.twin {", "        if true {", F2REP),
+ (V2, "                    if standing == Standing::Unconfirmed || page.pair.possibly_accepted() {", "                    if page.pair.possibly_accepted() {", F2REP),
+ (V2, "                    if standing == Standing::Unconfirmed || page.pair.possibly_accepted() {", "                    if standing == Standing::Unconfirmed {", F2REP),
+ (V2, "            h.next_seq = h.next_seq.saturating_add(SEQ_MARGIN);", "            h.next_seq = h.next_seq.saturating_add(SEQ_MARGIN * 0);", F2REP),
+ ('crates/store-io-engine/src/slots.rs', "    let twin = same(a.payload.as_deref(), b.payload.as_deref());", "    let twin = false;", F2REP),
+ ('crates/store-io-engine/src/slots.rs', "    let twin = same(a.payload.as_deref(), b.payload.as_deref());", "    let twin = a.payload.is_some() && b.payload.is_some();", F2REP),
+ ('crates/store-io-engine/src/slots.rs', "    let twin = both\n", "    let twin = false && both\n", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                    || (!settled && v2.pages[c.page].pair.possibly_accepted())", "                    || (!settled && v2.pages[c.page].pair.possibly_accepted() && false)", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                    || (!settled && v2.pages[c.page].pair.possibly_accepted())", "                    || ((!settled || true) && v2.pages[c.page].pair.possibly_accepted())", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "    let settled = v2.pages.iter().all(|p| p.standing == Standing::Confirmed);", "    let settled = v2.pages.iter().all(|p| p.standing != Standing::Unconfirmed);", F2REP),
+ ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        self.twin || (!matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank) && false)", F2REP),
+ ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                    stale_extra.push((c.page, range));", "                    stale_extra.clear();\n                    let _ = range;", F2B),
 ]
 
 def kill_stuck_tests():

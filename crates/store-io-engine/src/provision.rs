@@ -252,6 +252,7 @@ where
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             read_only: std::sync::atomic::AtomicBool::new(false),
             superseded: false,
+            foreign: false,
             gate: Gate::new(),
         });
         inner

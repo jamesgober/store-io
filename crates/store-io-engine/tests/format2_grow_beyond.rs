@@ -368,7 +368,8 @@ fn ahead(seed: u64) -> (SimPlatform, Store<SimPlatform>) {
 
 /// The extent a header one extent ahead lists is free while the region's
 /// page is Confirmed, and counted allocated while it is stale (it may be
-/// the newest growth); the region is then read-only.
+/// the newest growth); the region is then read-only. Accepting the page
+/// (not another) frees it.
 #[test]
 fn test_an_extra_extent_on_a_stale_page_stays_allocated() {
     let (p, s) = ahead(785);
@@ -381,6 +382,7 @@ fn test_an_extra_extent_on_a_stale_page_stays_allocated() {
     let free = s.space().released;
     drop(s);
     format2_util::craft::tear_newer_copy_of(&p, 0);
+    format2_util::craft::tear_newer_copy_of(&p, 1);
     let s = store(&p);
     assert!(s.report().metadata.frozen);
     assert_eq!(s.report().metadata.extra_extents[0].1, extra);
@@ -388,6 +390,15 @@ fn test_an_extra_extent_on_a_stale_page_stays_allocated() {
     let pages = s.page_region("p").unwrap();
     let e = pages.grow(NEW).unwrap_err();
     assert!(is_cause(&e, NotWrittenCause::ReadOnly), "{e:?}");
+    // Another page accepted: the extent stays allocated. Its own page
+    // accepted: the extent is free again, the region grows.
+    s.accept_page_rollback(&[1]).unwrap();
+    assert_eq!(s.space().released, free - extra.1, "still allocated");
+    s.accept_page_rollback(&[0]).unwrap();
+    assert_eq!(s.space().released, free, "the extent freed");
+    pages.grow(NEW).unwrap();
+    drop((pages, s));
+    audit(&p);
 }
 
 /// A growth whose commit was refused leaves the header one extent ahead,

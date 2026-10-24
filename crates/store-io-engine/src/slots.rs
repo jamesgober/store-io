@@ -68,6 +68,17 @@ pub(crate) struct PairRead {
     /// What each slot's header shows (A, B): the format-2 tear judgement
     /// reads them; `None` for a slot that could not be read.
     pub(crate) facts: [Option<HeaderFacts>; 2],
+    /// Both slots read Valid with the same payload: the trace a heal or an
+    /// accepted rollback leaves (the winner rewritten byte for byte) until
+    /// the next write of the pair. Only a read of both slots sets it (a
+    /// pair after a write, [`Self::after`], says false).
+    pub(crate) twin: bool,
+}
+
+/// Whether two slots' payloads (`None` for a slot that is not Valid) are
+/// both present and the same.
+fn same(a: Option<&[u8]>, b: Option<&[u8]>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x == y)
 }
 
 impl PairRead {
@@ -95,7 +106,24 @@ impl PairRead {
             payload,
             media_error: false,
             facts,
+            // Only a read of both slots finds a twin (the open's, an
+            // accept's read-back).
+            twin: false,
         }
+    }
+
+    /// Whether the pair may carry an accepted rollback (spec §9 step 2,
+    /// D-130): a twin, or a winner whose other slot is damaged (neither
+    /// Valid nor Blank: an accepted page whose older copy decayed afterwards
+    /// is still judged Confirmed, the twin gone). Conservative: a heal, or
+    /// any decay of an older copy, counts too.
+    pub(crate) fn possibly_accepted(&self) -> bool {
+        let other = match self.report.winner_info() {
+            Some((SlotIndex::A, _)) => self.report.b,
+            Some((SlotIndex::B, _)) => self.report.a,
+            None => return false,
+        };
+        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)
     }
 
     /// A pair never written (both slots blank).
@@ -105,6 +133,7 @@ impl PairRead {
             payload: None,
             media_error: false,
             facts: [None, None],
+            twin: false,
         }
     }
 }
@@ -260,6 +289,7 @@ fn finish_one(
 /// The pair decision over two slots as read.
 fn assemble(a: OneSlot, b: OneSlot) -> PairRead {
     let report = decide(a.status, b.status);
+    let twin = same(a.payload.as_deref(), b.payload.as_deref());
     let payload = match report.winner_info() {
         Some((SlotIndex::A, _)) => a.payload,
         Some((SlotIndex::B, _)) => b.payload,
@@ -270,6 +300,7 @@ fn assemble(a: OneSlot, b: OneSlot) -> PairRead {
         payload,
         media_error: a.media || b.media,
         facts: [a.facts, b.facts],
+        twin,
     }
 }
 
@@ -438,6 +469,15 @@ pub(crate) fn reread_failed<Q: Queue>(
         }
     }
     let report = decide(status[0], status[1]);
+    let both = status.iter().all(|s| matches!(s, SlotStatus::Valid(_)));
+    let reread = payloads.iter().find_map(|p| p.as_deref());
+    let twin = both
+        && match (first.report.a, first.report.b) {
+            (SlotStatus::ReadError, SlotStatus::ReadError) => {
+                same(payloads[0].as_deref(), payloads[1].as_deref())
+            }
+            _ => same(first.payload.as_deref(), reread),
+        };
     // The first read's payload is its winner's, a slot that read.
     let payload = match report.winner_info() {
         Some((slot, _)) => {
@@ -456,6 +496,7 @@ pub(crate) fn reread_failed<Q: Queue>(
             payload,
             media_error: media,
             facts,
+            twin,
         },
         true,
     ))

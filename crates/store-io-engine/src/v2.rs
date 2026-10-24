@@ -200,9 +200,30 @@ pub(crate) struct Meta2 {
     /// not know) holds: exactly what the open added for it, so
     /// `repair_unavailable` takes away no more and no less (v0.5 E6).
     pub(crate) holds: Vec<Hold>,
+    /// The extra extents counted allocated because their page is stale
+    /// (spec §9 step 3): `(page, range)`, freed when the page is accepted.
+    pub(crate) stale_extra: Vec<(usize, (u64, u64))>,
 }
 
+/// How far the open raises a page's `next_seq`, in memory, on every stale
+/// page and every page whose pair may carry an accepted rollback
+/// ([`PairRead::possibly_accepted`]): an
+/// accepted page's lost commit may have handed out seqs past its winner's
+/// `next_seq` (a provisioning's claim takes one past every claim held), and
+/// the region ids it gave out are never handed out again unless more than
+/// this many provisionings failed on that page between its last two
+/// commits. The page's next commit writes the raised value.
+pub(crate) const SEQ_MARGIN: u32 = 1 << 12;
+
 impl Page2 {
+    /// Raises the page's `next_seq` past what a lost commit may have given
+    /// out (see [`SEQ_MARGIN`]).
+    pub(crate) fn raise_next_seq(&mut self) {
+        if let Some(h) = self.header.as_mut() {
+            h.next_seq = h.next_seq.saturating_add(SEQ_MARGIN);
+        }
+    }
+
     /// The `meta_seq` of the page's winning copy (0 when none).
     pub(crate) fn meta_seq(&self) -> u64 {
         self.pair
@@ -546,6 +567,7 @@ pub(crate) fn create_metadata<P: Platform>(
             claims: Vec::new(),
             marked: 0,
             holds: Vec::new(),
+            stale_extra: Vec::new(),
         })),
         unavailable: Vec::new(),
         repairs: Vec::new(),
@@ -724,6 +746,13 @@ pub(crate) fn open_metadata<P: Platform>(
                 Some(Ok((h, entries))) => {
                     page.header = Some(h);
                     page.entries = entries;
+                    // A stale page (it may be accepted: its newer copy may
+                    // even read Blank), or one possibly accepted already:
+                    // ids its lost commit gave out stay given (see
+                    // `SEQ_MARGIN`).
+                    if standing == Standing::Unconfirmed || page.pair.possibly_accepted() {
+                        page.raise_next_seq();
+                    }
                 }
                 _ => {
                     standing = Standing::Lost;
@@ -779,6 +808,7 @@ pub(crate) fn open_metadata<P: Platform>(
             claims: Vec::new(),
             marked: 0,
             holds: Vec::new(),
+            stale_extra: Vec::new(),
         })),
         unavailable: Vec::new(),
         repairs: Vec::new(),
@@ -806,6 +836,7 @@ pub(crate) fn open_metadata<P: Platform>(
         v2.cut_short = regions.cut_short;
         v2.allocated = regions.allocated;
         v2.holds = regions.holds;
+        v2.stale_extra = regions.stale_extra;
     }
     let read_only = read_only || {
         report.read_only_reason = if !j.writable {
@@ -900,6 +931,76 @@ fn heal<P: Platform>(
         v2.pages[pair - 1].standing = Standing::Confirmed;
     }
     Ok(())
+}
+
+/// The bytes of page `p`'s two slots (an error naming the page).
+pub(crate) fn page_range(layout: &Layout, p: u32) -> store_io_core::error::ByteRange {
+    let (a, b) = layout.page_slots(p);
+    store_io_core::error::ByteRange {
+        start: a.min(b),
+        end: a.max(b) + (1u64 << layout.log2_table),
+    }
+}
+
+/// Accepts stale page `p` (spec §12 `accept_page_rollback`): its winner
+/// rewritten byte for byte into its failed slot at the next `meta_seq`,
+/// durably, then the pair read back (retried once, §7): both slots must be
+/// Valid with the same payload (the twin the next open will see, which
+/// then counts the page Confirmed). On success the page is Confirmed (its
+/// `next_seq` was raised by the open that found it stale, see
+/// [`SEQ_MARGIN`]). Any failure after the write
+/// poisons the store: the new copy is on the media, at a `meta_seq` this
+/// state cannot count (its slot may read at the next open), so only the
+/// next open knows the page.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn accept_page<P: Platform>(
+    q: &mut Lane<P::Queue>,
+    file: &P::File,
+    pool: &store_io_buf::BufPool,
+    layout: &Layout,
+    volume: VolumeId,
+    policy: &Policy,
+    domain: &Domain,
+    meta: &mut Meta,
+    p: usize,
+    og: u64,
+) -> Result<(), Error> {
+    let meta_seq = next_meta_seq_of(meta)?;
+    let v2 = meta.v2.as_mut().ok_or_else(corrupt)?;
+    let page = v2.pages.get_mut(p).ok_or_else(corrupt)?;
+    let at = pair_page(volume, layout, u32::try_from(p).map_err(|_| corrupt())?);
+    let payload = page.pair.payload.clone().ok_or_else(corrupt)?;
+    let mut next = plan_next(&page.pair, &payload, og)?;
+    next.meta_seq = meta_seq;
+    let _written = durable_slot::<P>(q, file, pool, &at, &page.pair, &next, policy, domain)?;
+    let mut retried = 0;
+    let back = read_retried(q, file, pool, &at, &mut retried).and_then(|back| {
+        if back.twin {
+            Ok(back)
+        } else {
+            Err(Error::Corruption {
+                kind: store_io_core::error::CorruptionKind::MediaError,
+                ctx: ErrorContext {
+                    range: Some(page_range(layout, u32::try_from(p).map_err(|_| corrupt())?)),
+                    ..ErrorContext::default()
+                },
+            })
+        }
+    });
+    match back {
+        Ok(back) => {
+            page.pair = back;
+            page.standing = Standing::Confirmed;
+            Ok(())
+        }
+        Err(e) => {
+            domain.poison(store_io_core::error::FirstCause {
+                op: Some(store_io_core::error::Op::Read),
+                raw: None,
+            });
+            Err(e)
+        }
+    }
 }
 
 /// Writes the volume record's next version: `owner_generation` and

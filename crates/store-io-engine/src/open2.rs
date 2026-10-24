@@ -52,6 +52,9 @@ pub(crate) struct Regions2 {
     pub(crate) allocated: Vec<Extent>,
     /// What each unavailable or unknown-kind entry holds.
     pub(crate) holds: Vec<crate::v2::Hold>,
+    /// The extra extents counted allocated on stale pages: `(page,
+    /// range)`, as they are in `allocated`.
+    pub(crate) stale_extra: Vec<(usize, Extent)>,
 }
 
 /// A region whose entry passed the entry checks.
@@ -147,6 +150,7 @@ pub(crate) fn check_regions<Q: Queue>(
     let mut reserved_names = Vec::new();
     let mut cut_short = false;
     let mut holds = Vec::new();
+    let mut stale_extra = Vec::new();
     let mut truncated = false;
     // Whether every region header on a stale page agrees with its entry.
     let mut agrees = vec![true; v2.pages.len()];
@@ -411,6 +415,7 @@ pub(crate) fn check_regions<Q: Queue>(
     // Each live region's footprint, for the reserved-overlap report.
     let mut footprints: Vec<(u64, String, u64, Vec<Extent>)> = Vec::new();
     let mut live = Vec::new();
+    let settled = v2.pages.iter().all(|p| p.standing == Standing::Confirmed);
     for (c, verdict) in checked.into_iter().zip(verdicts) {
         let e = c.entry;
         let unconfirmed = v2.pages[c.page].standing == Standing::Unconfirmed;
@@ -420,7 +425,9 @@ pub(crate) fn check_regions<Q: Queue>(
             // there (a header is decoded without the file's length).
             if let Some((off, len)) = c.extra {
                 if off < container_len {
-                    allocated.push((off, len.min(container_len - off)));
+                    let range = (off, len.min(container_len - off));
+                    allocated.push(range);
+                    stale_extra.push((c.page, range));
                 }
             }
         }
@@ -521,10 +528,20 @@ pub(crate) fn check_regions<Q: Queue>(
             frontier,
             positioned: std::sync::atomic::AtomicBool::new(false),
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            // On a stale page, possibly superseded, or with a header whose
-            // winner carries a feature this version may not write.
-            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),
+            // On a stale page; on a page possibly accepted (a twin, or its
+            // older copy damaged) while
+            // another is stale or lost (D-130: its lost commit's release
+            // may have given another stale page's lost commit its space);
+            // possibly superseded; or with a header whose winner carries a
+            // feature this version may not write.
+            read_only: std::sync::atomic::AtomicBool::new(
+                unconfirmed
+                    || (!settled && v2.pages[c.page].pair.possibly_accepted())
+                    || s.superseded
+                    || !writable,
+            ),
             superseded: s.superseded,
+            foreign: !writable,
             gate: Gate::new(),
         }));
     }
@@ -566,5 +583,6 @@ pub(crate) fn check_regions<Q: Queue>(
         cut_short,
         allocated,
         holds,
+        stale_extra,
     })
 }

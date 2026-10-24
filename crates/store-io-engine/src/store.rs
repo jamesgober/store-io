@@ -269,12 +269,17 @@ pub(crate) struct LiveRegion {
     /// holds after a recycle.
     pub(crate) force_sync: Arc<std::sync::atomic::AtomicBool>,
     /// Writes refused, the store being writable: format 2's regions on a
-    /// page that is not confirmed, or possibly superseded (always false in
-    /// format 1). Never lifted for a superseded region.
+    /// page that is not confirmed, possibly superseded, or with a header
+    /// feature this version may not write (always false in format 1).
+    /// Lifted by `accept_page_rollback` once every page is confirmed, never
+    /// for a superseded or foreign one.
     pub(crate) read_only: std::sync::atomic::AtomicBool,
     /// Possibly superseded (spec §9 step 4): another region's newer
     /// footprint may cover its bytes; it stays read-only for good.
     pub(crate) superseded: bool,
+    /// Its header's winner carries a read-only-compatible feature this
+    /// version does not know (spec §14): read-only for good too.
+    pub(crate) foreign: bool,
 }
 
 impl LiveRegion {

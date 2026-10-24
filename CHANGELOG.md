@@ -34,6 +34,36 @@
   frozen now. `Store::report()` stays what the open found;
   `unavailable_regions()` and every check use the live state (v0.5 E6
   C1).
+- Engine: **`Store::accept_page_rollback(pages)`** (v0.5 E6 C3, spec
+  §12): each named stale page (`metadata.stale_pages`) has its winner
+  rewritten byte for byte into its failed slot at the next `meta_seq`,
+  durably, and read back (retried once); once the new copy reads back as
+  the winner the page is Confirmed: whatever its lost commits held is
+  given up and the extra extents counted allocated for it are free.
+  Once no page is stale or lost, allocation is no longer frozen and the
+  regions are writable (never one possibly superseded, or one whose
+  header carries a read-only-compatible feature this version does not
+  know); not before, since a region of an accepted page may be one a
+  lost commit released whose space another stale page's lost commit
+  handed out (D-130); across a reopen too, by the trace the accept
+  leaves (its page's two slots hold the same payload, as after a heal:
+  while any page is stale or lost, the open keeps such a page's regions
+  read-only). An accepted page's `next_seq` is raised (by 4,096, written
+  by its next commit), so the region ids its lost commit gave out are not
+  given out again (unless more than 4,096 provisionings failed on that
+  page between its last two commits). A Confirmed page whose older copy is
+  damaged counts as possibly accepted too (the twin may have decayed).
+  Every named page is checked before any is written.
+  Recorded as `Repair::PageAccepted`; a Confirmed page is left as it is.
+  Refused for a Lost page (`NotWritten(NotReady)`, its slots named: such
+  a store is copied), a page the table does not have
+  (`NotWritten(OutOfBounds)`), a page holding an entry past its own write
+  (`NotWritten(Frozen)`, the entry named: copied too), on a read-only
+  store and on format 1. A rewrite that does not read back with both
+  slots Valid and the same (`Corruption(MediaError)`, or `Io`) poisons
+  the store: the copy is
+  durable at a `meta_seq` memory cannot count, so the next open decides
+  the page.
 - Engine, format 2: **the open's step 4 is stable** (v0.5 E6 C2, D-129).
   Before a release or a repair removes an entry, step 4 (overlaps,
   names, possibly superseded) is judged again over what would remain,

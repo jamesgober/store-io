@@ -269,8 +269,16 @@ impl Table {
         }
     }
 
+    /// Publishes the busy mark of an operation performed at once, with no
+    /// row (`Lane::perform`): outstanding until [`Self::publish`].
+    pub(crate) fn busy(&mut self) {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.mark.set(2 * seq + 1);
+    }
+
     /// Publishes the busy mark (only the owner writes it).
-    fn publish(&self) {
+    pub(crate) fn publish(&self) {
         self.mark.set(match self.order.front() {
             Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,
             _ => 2 * self.next_seq,

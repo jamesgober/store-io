@@ -52,6 +52,12 @@ jobs:
         run: cargo test --workspace
       - name: Test (all features)
         run: cargo test --workspace --all-features
+      # The simulator's queues perform at once (the fast path Linux's
+      # synchronous tier takes, G1 P1): the simulator's suites once more.
+      - name: Test (simulator inline)
+        run: cargo test -p store-io-engine -p store-io-sim -p store-io
+        env:
+          STORE_IO_SIM_INLINE: "1"
       - name: Doc (all features)
         run: cargo doc --workspace --no-deps --all-features
         env:

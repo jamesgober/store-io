@@ -110,6 +110,22 @@ pub struct SimConfig {
     /// than 1 GiB of unflushed writes in a volatile cache (a fixed bound). A
     /// benchmark that writes more raises it.
     pub runaway_writes: u64,
+    /// Queues perform an operation at once when nothing is in flight
+    /// (`Queue::perform`), as an inline synchronous queue does: the engine's
+    /// fast path (no wait fault applies to an operation performed at once;
+    /// one submitted, with something in flight, waits as before). The
+    /// constructors' default is false (every operation submitted and waited
+    /// for), or true when the environment variable `STORE_IO_SIM_INLINE` is
+    /// `1`: the whole suite then runs on the fast path, as Linux's
+    /// synchronous tier does.
+    pub inline: bool,
+}
+
+/// [`SimConfig::inline`]'s default: `STORE_IO_SIM_INLINE` is `1` (read
+/// once).
+fn inline_default() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STORE_IO_SIM_INLINE").is_some_and(|v| v == "1"))
 }
 
 impl SimConfig {
@@ -125,6 +141,7 @@ impl SimConfig {
             evidence: None,
             valid_data_model: false,
             runaway_writes: 500_000,
+            inline: inline_default(),
         }
     }
 

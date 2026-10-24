@@ -99,6 +99,33 @@ impl<Q: Queue> Lane<Q> {
             .inspect_err(|_| self.core.table.abort(index))
     }
 
+    /// Performs `op` at once when the lane holds nothing and its queue
+    /// performs operations inside `submit` (`Queue::performs`: the inline
+    /// synchronous queue): no row, no completion. Its busy mark is
+    /// published for the duration, so a hung device stays visible to
+    /// `Store::oldest_outstanding` (A1 C6). Otherwise the operation comes
+    /// back for [`Self::submit`].
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn perform<'a>(
+        &mut self,
+        op: IoOp<'a, Q::File>,
+    ) -> Result<Result<(Option<IoBuf>, RawResult<usize>), IoOp<'a, Q::File>>, Rejected> {
+        if self.core.table.live > 0 || !self.done.is_empty() || !self.core.queue.performs() {
+            return Ok(Err(op));
+        }
+        /// Publishes the mark again when dropped: also if the call panics,
+        /// so no performed operation is left looking outstanding.
+        struct Idle<'t>(&'t crate::optable::Table);
+        impl Drop for Idle<'_> {
+            fn drop(&mut self) {
+                self.0.publish();
+            }
+        }
+        self.core.table.busy();
+        let _idle = Idle(&self.core.table);
+        self.core.queue.perform(op)
+    }
+
     /// Waits until at least `min` of the queue's operations complete, then
     /// moves every completion that arrived into `done` under its caller's
     /// tag (also when the wait then failed). Returns how many arrived.
@@ -505,6 +532,19 @@ pub(crate) fn run<Q: Queue>(
         drop(op);
         return Ok(Ran::Abandoned(raw));
     }
+    // Nothing in flight: a queue that runs operations inside `submit`
+    // performs it here, without a row or a completion.
+    let op = match slot.perform(op) {
+        Ok(Ok((buf, result))) => {
+            debug_assert!(
+                !is_read || buf.is_some() || result.is_err(),
+                "a read succeeded without its buffer (platform contract 1)"
+            );
+            return Ok(Ran::Done { buf, result });
+        }
+        Ok(Err(op)) => op,
+        Err(r) => return Err((r.buf, r.raw)),
+    };
     slot.submit(op, TAG).map_err(|r| (r.buf, r.raw))?;
     loop {
         for c in slot.done.drain() {
@@ -566,7 +606,10 @@ pub(crate) enum Pumped {
 }
 
 /// Submits every write `src` produces on one queue, keeping as many in
-/// flight as the queue accepts, and waits for all of them.
+/// flight as the queue accepts, and waits for all of them. On a queue that
+/// performs operations at once (`Lane::perform`: the inline synchronous
+/// queue) each write is performed in turn, nothing in flight between them,
+/// and the first failure stops the call.
 ///
 /// After the first failure nothing new is submitted, but every write already
 /// in flight is still waited for: its buffer belongs to the kernel until its
@@ -600,15 +643,39 @@ pub(crate) fn pump<Q: Queue>(
                 },
             };
             let bytes = buf.len() as u64;
-            match lane.submit(
-                IoOp::Write {
-                    file,
-                    offset,
-                    buf,
-                    dsync,
-                },
-                TAG,
-            ) {
+            let op = IoOp::Write {
+                file,
+                offset,
+                buf,
+                dsync,
+            };
+            // Nothing in flight: a queue that runs operations inside
+            // `submit` performs it here, settled as its completion would be.
+            let op = if in_flight == 0 {
+                match lane.perform(op) {
+                    Ok(Ok((buf, result))) => {
+                        submitted += 1;
+                        obs.add(Counter::Writes, 1);
+                        obs.add(Counter::WriteBytes, bytes);
+                        match (result, buf) {
+                            (Ok(n), Some(buf)) if n == buf.len() => src.recycle(buf),
+                            (result, _) => failure = Some(result.err()),
+                        }
+                        continue;
+                    }
+                    Ok(Err(op)) => op,
+                    Err(r) => {
+                        if submitted == 0 {
+                            return Pumped::Refused(r.raw);
+                        }
+                        failure = Some(r.raw);
+                        break;
+                    }
+                }
+            } else {
+                op
+            };
+            match lane.submit(op, TAG) {
                 Ok(()) => {
                     in_flight += 1;
                     submitted += 1;

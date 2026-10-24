@@ -140,11 +140,11 @@ impl Wake for SimWaker {
     }
 }
 
-impl Queue for SimQueue {
-    type File = SimFile;
-    type Waker = SimWaker;
-
-    fn submit(&mut self, op: IoOp<'_, SimFile>, tag: u64) -> Result<(), Rejected> {
+impl SimQueue {
+    /// The checks `submit` makes (the submit probe first, then room, the
+    /// injected submission fault, the file): the operation as it will
+    /// complete, or its refusal.
+    fn accept(&mut self, op: IoOp<'_, SimFile>) -> Result<Pending, Rejected> {
         let probe = lock(&self.world).submit_probe.0.clone();
         if let Some(probe) = probe {
             probe();
@@ -213,9 +213,37 @@ impl Queue for SimQueue {
                 }
             }
         };
-        drop(w);
+        Ok(pending)
+    }
+}
+
+impl Queue for SimQueue {
+    type File = SimFile;
+    type Waker = SimWaker;
+
+    fn submit(&mut self, op: IoOp<'_, SimFile>, tag: u64) -> Result<(), Rejected> {
+        let pending = self.accept(op)?;
         self.in_flight.push((tag, pending));
         Ok(())
+    }
+
+    /// With [`crate::SimConfig::inline`] and nothing in flight: the checks
+    /// `submit` makes, then the completion at once (its faults as any
+    /// completion's), as an inline queue performs inside `submit`.
+    fn performs(&self) -> bool {
+        self.in_flight.is_empty() && lock(&self.world).config().inline
+    }
+
+    fn perform<'a>(
+        &mut self,
+        op: IoOp<'a, SimFile>,
+    ) -> Result<Result<(Option<IoBuf>, RawResult<usize>), IoOp<'a, SimFile>>, Rejected> {
+        if !self.performs() {
+            return Ok(Err(op));
+        }
+        let pending = self.accept(op)?;
+        let c = complete(&mut lock(&self.world), 0, pending);
+        Ok(Ok((c.buf, c.result)))
     }
 
     fn reap(&mut self, out: &mut CompletionBuf) -> usize {

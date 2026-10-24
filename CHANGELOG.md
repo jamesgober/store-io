@@ -421,6 +421,19 @@
 
 ### Changed
 
+- Performance: **an operation on an idle inline queue is performed at
+  once** (G1 P1). On Linux's synchronous tier, the queue makes each system
+  call inside `submit`; the engine now calls it directly
+  (`Queue::performs`, `Queue::perform`, defaults: never) when the lane
+  holds nothing, with no op-table row, ready ring or completion buffer:
+  the same system call, checks, faults and outcome, the lane's busy mark
+  published for the duration (a hung device stays visible to
+  `Store::oldest_outstanding`). One QD1 4 KiB durable write: 5,805 → 4,418
+  user-space instructions (callgrind); 0.7-1.1 µs less CPU per write on an
+  AMD EPYC 7763, 0.3-0.5 µs on newer CPUs. A write of several pieces on
+  such a queue stops at its first failure. Simulator:
+  `SimConfig::inline` (default false; `STORE_IO_SIM_INLINE` set makes it
+  true for the whole suite, which CI and the pre-push check run once more).
 - **Breaking: container format 2 is the format** (v0.5 E5 C3, D-112,
   D-116). `Store::create` writes format 2 by default; a writable open of
   a format-1 store (every store made before 0.5) is refused with

@@ -38,8 +38,11 @@ fn fresh(seed: u64) -> SimPlatform {
 /// A fresh store whose queues complete in a seeded random order when
 /// `reorder`, else in submission order.
 fn fresh_ordered(seed: u64, reorder: bool) -> SimPlatform {
+    // Completions reordered and waits failed (also with
+    // `STORE_IO_SIM_INLINE`): every read submitted and waited for.
     let p = SimPlatform::new(SimConfig {
         reorder,
+        inline: false,
         ..SimConfig::volatile(seed)
     });
     drop(create(&p));

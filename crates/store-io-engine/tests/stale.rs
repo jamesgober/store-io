@@ -30,6 +30,9 @@ const EIO: i32 = 5;
 fn platform(seed: u64) -> SimPlatform {
     let mut cfg = SimConfig::volatile(seed);
     cfg.reorder = true;
+    // Failed waits (also with `STORE_IO_SIM_INLINE`): every operation
+    // submitted and waited for.
+    cfg.inline = false;
     SimPlatform::new(cfg)
 }
 

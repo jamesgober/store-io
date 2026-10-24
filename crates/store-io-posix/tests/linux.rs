@@ -739,3 +739,76 @@ fn test_allocate_range_allocates_holes_inside_the_file() {
         libc::EBADF
     );
 }
+
+/// The inline queue performs an operation at once when it holds nothing
+/// (`Queue::perform`, G1 P1): the result a submit and a wait would give,
+/// the same refusals (a read-only handle: EBADF, the buffer back); with a
+/// completion waiting it performs nothing and the operation comes back.
+#[test]
+fn test_an_inline_queue_performs_at_once_only_when_it_holds_nothing() {
+    let (_t, p, dir, file, pool, mut q) = setup();
+    p.allocate(&file, 8192).unwrap();
+    assert!(q.performs());
+    let mut b = pool.take(4096).unwrap();
+    b.as_mut_slice().fill(0x22);
+    let op = IoOp::Write {
+        file: &file,
+        offset: 0,
+        buf: b,
+        dsync: false,
+    };
+    let Ok(Ok((buf, r))) = q.perform(op) else {
+        panic!("the write was not performed");
+    };
+    assert_eq!(r, Ok(4096));
+    assert!(buf.is_some(), "the buffer comes back");
+    assert_eq!(q.in_flight(), 0, "no completion left behind");
+    let Ok(Ok((buf, r))) = q.perform(IoOp::FlushData { file: &file }) else {
+        panic!("the flush was not performed");
+    };
+    assert_eq!(r, Ok(0));
+    assert!(buf.is_none());
+    let op = IoOp::Read {
+        file: &file,
+        offset: 0,
+        buf: pool.take(4096).unwrap(),
+    };
+    let Ok(Ok((Some(back), r))) = q.perform(op) else {
+        panic!("the read was not performed");
+    };
+    assert_eq!(r, Ok(4096));
+    assert!(back.as_slice().iter().all(|&x| x == 0x22));
+    // Refused as `submit` refuses.
+    let ro = p
+        .open_file(&dir, &name("data"), FileMode::ReadOnly)
+        .unwrap();
+    let op = IoOp::Write {
+        file: &ro,
+        offset: 0,
+        buf: pool.take(4096).unwrap(),
+        dsync: false,
+    };
+    let Err(rej) = q.perform(op) else {
+        panic!("a write through a read-only handle was not refused");
+    };
+    assert_eq!(rej.raw.map(|e| e.code), Some(libc::EBADF));
+    assert!(rej.buf.is_some());
+    // A completion waiting: nothing performed.
+    q.submit(
+        IoOp::Write {
+            file: &file,
+            offset: 4096,
+            buf: pool.take(4096).unwrap(),
+            dsync: false,
+        },
+        9,
+    )
+    .map_err(|_| ())
+    .unwrap();
+    assert!(!q.performs());
+    let Ok(Err(IoOp::FlushData { .. })) = q.perform(IoOp::FlushData { file: &file }) else {
+        panic!("performed with a completion waiting");
+    };
+    assert_eq!(drain(&mut q).len(), 1);
+    assert!(q.performs());
+}

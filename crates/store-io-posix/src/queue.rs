@@ -25,6 +25,8 @@ use crate::uring::ring::Flavour;
 /// `preadv2` or `fdatasync`) and stores the completion in a ring allocated
 /// once, sized by [`QueueConfig::depth`]; `reap` drains the ring, and `wait`
 /// does the same, since nothing ever completes later. Zero thread hops.
+/// Holding no completion, it also performs an operation directly
+/// (`Queue::perform`): the same system call and checks, no completion.
 ///
 /// **Pooled** ([`QueueConfig::parallel`]): `submit` makes the same checks,
 /// then queues the operation on the platform's submit pool and returns; the
@@ -438,6 +440,21 @@ impl Queue for PosixQueue {
                 Ok(n)
             }
         }
+    }
+
+    /// The inline synchronous queue, holding no completion.
+    fn performs(&self) -> bool {
+        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()
+    }
+
+    fn perform<'a>(
+        &mut self,
+        op: IoOp<'a, PosixFile>,
+    ) -> Result<Result<(Option<IoBuf>, RawResult<usize>), IoOp<'a, PosixFile>>, Rejected> {
+        if !self.performs() {
+            return Ok(Err(op));
+        }
+        Ok(Ok(check(op, PosixFile::raw)?.perform()))
     }
 
     fn in_flight(&self) -> usize {

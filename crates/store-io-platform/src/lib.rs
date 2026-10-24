@@ -393,6 +393,30 @@ pub trait Queue {
     /// Operations submitted and not yet reaped.
     fn in_flight(&self) -> usize;
 
+    /// Whether [`Self::perform`] would perform an operation now: this queue
+    /// runs every operation inside [`Self::submit`] and holds nothing. The
+    /// default: never.
+    fn performs(&self) -> bool {
+        false
+    }
+
+    /// Performs `op` now, on the calling thread, when [`Self::performs`]:
+    /// its buffer and result, exactly as its completion would carry them
+    /// (the same checks first, the same faults), with no completion left
+    /// behind. Otherwise the operation comes back (`Ok(Err(op))`) for
+    /// [`Self::submit`]. The default never performs.
+    ///
+    /// # Errors
+    ///
+    /// [`Rejected`] as [`Self::submit`]: refused before any I/O.
+    #[allow(clippy::type_complexity)]
+    fn perform<'a>(
+        &mut self,
+        op: IoOp<'a, Self::File>,
+    ) -> Result<Result<(Option<IoBuf>, RawResult<usize>), IoOp<'a, Self::File>>, Rejected> {
+        Ok(Err(op))
+    }
+
     /// A handle another thread uses to end this queue's wait (D-083).
     fn waker(&self) -> Self::Waker;
 

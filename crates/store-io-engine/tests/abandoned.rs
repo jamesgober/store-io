@@ -32,8 +32,17 @@ fn fail_next_wait(p: &SimPlatform) {
     });
 }
 
+/// Every operation submitted and waited for (also with
+/// `STORE_IO_SIM_INLINE`): these are the waits' failures.
+fn waited(seed: u64) -> SimConfig {
+    SimConfig {
+        inline: false,
+        ..SimConfig::volatile(seed)
+    }
+}
+
 fn store(seed: u64) -> (SimPlatform, Store<SimPlatform>) {
-    let p = SimPlatform::new(SimConfig::volatile(seed));
+    let p = SimPlatform::new(waited(seed));
     let s = Store::create(p.clone(), Path::new("/db"), opts()).unwrap();
     (p, s)
 }
@@ -118,7 +127,7 @@ fn test_a_failed_clear_fails_the_batch_before_any_write() {
 const DIR: &str = "/conf";
 
 fn directory(seed: u64) -> (SimPlatform, Directory<SimPlatform>) {
-    let p = SimPlatform::new(SimConfig::volatile(seed));
+    let p = SimPlatform::new(waited(seed));
     drop(Directory::open(p.clone(), Path::new(DIR), true, Trust::default()).unwrap());
     let d = Directory::open(p.clone(), Path::new(DIR), false, Trust::default()).unwrap();
     (p, d)
@@ -154,7 +163,7 @@ fn test_an_abandoned_directory_read_is_io_not_media() {
 /// whichever of create's waits fails.
 #[test]
 fn test_create_never_reclaims_a_container_after_a_failed_wait() {
-    let p = SimPlatform::new(SimConfig::volatile(606));
+    let p = SimPlatform::new(waited(606));
     drop(Store::create(p.clone(), Path::new("/a"), opts()).unwrap());
     let name = FileName::new(CONTAINER).unwrap();
     // The first 4 KiB of a real container, in a small file at /b: what a
@@ -306,7 +315,7 @@ fn test_a_read_only_open_with_a_failed_wait_fails_io() {
         (610, store_io_format::slot::FORMAT_1),
         (611, store_io_format::slot::FORMAT_2),
     ] {
-        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let p = SimPlatform::new(waited(seed));
         // A small table (format 2's default reads 388 pages: a wait failing
         // at each of them is the same case 388 times).
         let opts = || StoreOptions {

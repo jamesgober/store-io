@@ -91,6 +91,8 @@ COPYT = ["-p", "store-io-engine", "--test", "copy"]
 F1T = ["-p", "store-io-engine", "--test", "format1"]
 # Repairs (v0.5 E6).
 REPAIR_SRC = "crates/store-io-engine/src/repair.rs"
+INLINE = ["-p", "store-io-engine", "--test", "inline"]
+EXEC_SRC = "crates/store-io-engine/src/exec.rs"
 F2REP = ["-p", "store-io-engine", "--test", "format2_repair"]
 CREATE = "crates/store-io-engine/src/create.rs"
 
@@ -104,7 +106,7 @@ M = [
  ("crates/store-io-engine/src/receipt.rs", "        self.epoch == t.epoch\n            &&", "        "),
  ("crates/store-io-engine/src/io.rs", "            need: self.inner.domain.ticket(),", "            need: 0,"),
  ("crates/store-io-engine/src/batch.rs", "            .any(|w| w[0].0 + w[0].1.len() as u64 > w[1].0);", "            .any(|w| w[0].0 + w[0].1.len() as u64 > w[1].0 + 4096);"),
- ("crates/store-io-engine/src/exec.rs", "                (Ok(n), Some(buf)) if n == buf.len() => src.recycle(buf),", "                (Ok(_), Some(buf)) => src.recycle(buf),"),
+ ("crates/store-io-engine/src/exec.rs", "                (Ok(n), Some(buf)) if n == buf.len() => src.recycle(buf),\n                (result, _) => {", "                (Ok(_), Some(buf)) => src.recycle(buf),\n                (result, _) => {"),
  ("crates/store-io-engine/src/io.rs", "        if self.r.take().is_some() {\n            self.store.inner.domain.poison(", "        if self.r.take().is_some() && false {\n            self.store.inner.domain.poison("),
  ("crates/store-io-engine/src/batch.rs", "                    self.truncate(at);\n", "                    if false { self.truncate(at); }\n"),
  ("crates/store-io-engine/src/scan.rs", "                if len <= sector {", "                if len <= sector || true {"),
@@ -932,6 +934,21 @@ M = [
  ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        self.twin || (!matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank) && false)", F2REP),
  ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", F2REP),
  ('crates/store-io-engine/src/open2.rs', "                    stale_extra.push((c.page, range));", "                    stale_extra.clear();\n                    let _ = range;", F2B),
+ # The inline fast path (G1 P1).
+ (EXEC_SRC, "        self.core.table.busy();\n        let _idle", "        if false {\n            self.core.table.busy();\n        }\n        let _idle", INLINE),
+ (EXEC_SRC, "                self.0.publish();", "                let _ = &self.0;", INLINE),
+ (EXEC_SRC, "        let _idle = Idle(&self.core.table);", "        let _ = Idle(&self.core.table);", INLINE),
+ (EXEC_SRC, "|| !self.done.is_empty() || !self.core.queue.performs() {", "|| !self.done.is_empty() || true {", INLINE),
+ (EXEC_SRC, "            return Ok(Ran::Done { buf, result });", "            return Ok(Ran::Done { buf, result: result.or(Ok(0)) });", INLINE),
+ (EXEC_SRC, "                            (Ok(n), Some(buf)) if n == buf.len() => src.recycle(buf),\n                            (result, _) => failure = Some(result.err()),", "                            (Ok(_), Some(buf)) => src.recycle(buf),\n                            (result, _) => failure = Some(result.err()),", INLINE),
+ (EXEC_SRC, "                            (result, _) => failure = Some(result.err()),", "                            (_, _) => {}", INLINE),
+ (EXEC_SRC, "            let op = if in_flight == 0 {\n                match lane.perform(op) {", "            let op = if false {\n                match lane.perform(op) {", INLINE),
+ (EXEC_SRC, "                        if submitted == 0 {\n                            return Pumped::Refused(r.raw);\n                        }\n                        failure = Some(r.raw);\n                        break;", "                        if false {\n                            return Pumped::Refused(r.raw);\n                        }\n                        failure = Some(r.raw);\n                        break;", INLINE),
+ (EXEC_SRC, "                        submitted += 1;\n                        obs.add(Counter::Writes, 1);\n                        obs.add(Counter::WriteBytes, bytes);\n                        match (result, buf) {", "                        obs.add(Counter::Writes, 1);\n                        obs.add(Counter::WriteBytes, bytes);\n                        match (result, buf) {", INLINE),
+ ('crates/store-io-engine/src/optable.rs', "        self.mark.set(2 * seq + 1);", "        self.mark.set(2 * seq);", INLINE),
+ ('crates/store-io-posix/src/queue.rs', "        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()", "        self.uring.is_none() && self.pooled.is_none()", POSIX),
+ ('crates/store-io-posix/src/queue.rs', "        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()", "        false", POSIX),
+ ('crates/store-io-posix/src/queue.rs', "        if !self.performs() {\n            return Ok(Err(op));\n        }\n        Ok(Ok(check(op, PosixFile::raw)?.perform()))", "        if false {\n            return Ok(Err(op));\n        }\n        Ok(Ok(check(op, PosixFile::raw)?.perform()))", POSIX),
 ]
 
 def kill_stuck_tests():

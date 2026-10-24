@@ -30,7 +30,7 @@ where
     pub(crate) fn release_region2(&self, r: &Arc<LiveRegion>) -> Result<(), Error> {
         let inner = &self.inner;
         let c = ctx(r);
-        if inner.report.metadata.frozen {
+        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {
             return Err(not_written(NotWrittenCause::Frozen, c));
         }
         // Drained before any lock (a `Submitter` operation holds its pass
@@ -47,12 +47,29 @@ where
             e
         };
         let p = usize::try_from(id >> 32).map_err(|_| refused(corrupt()))?;
+        // A region an overlap or a name demoted rests on this one: released,
+        // the next open would serve it (spec §9 step 4).
+        if let Some(d) = meta
+            .v2
+            .as_deref()
+            .and_then(|v2| crate::repair::would_lift(self, v2, id))
+        {
+            return Err(refused(not_written(
+                NotWrittenCause::Overlap,
+                store_io_core::error::ErrorContext {
+                    region: Some(d),
+                    ..store_io_core::error::ErrorContext::default()
+                },
+            )));
+        }
         // 1. The commit: the page without the entry.
         let (payload, removed) = {
             let v2 = meta.v2.as_deref().ok_or_else(|| refused(corrupt()))?;
             let page = v2.pages.get(p).ok_or_else(|| refused(corrupt()))?;
             let ph = page.header.ok_or_else(|| refused(corrupt()))?;
-            if page.standing != Standing::Confirmed {
+            // A page holding an entry past its own write is written only to
+            // remove that entry (`Page2::ahead`).
+            if page.standing != Standing::Confirmed || page.ahead().next().is_some() {
                 return Err(refused(not_written(NotWrittenCause::Frozen, c)));
             }
             let Some(at) = page.entries.iter().position(|e| e.seq == seq) else {

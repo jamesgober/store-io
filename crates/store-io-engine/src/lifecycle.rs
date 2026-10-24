@@ -181,7 +181,8 @@ where
             // A runtime setting of the region, shared with its next
             // generation.
             force_sync: Arc::clone(&r.force_sync),
-            read_only: r.read_only,
+            read_only: std::sync::atomic::AtomicBool::new(r.is_read_only()),
+            superseded: r.superseded,
         });
         let mut regions = self
             .inner

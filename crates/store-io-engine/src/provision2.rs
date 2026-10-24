@@ -66,7 +66,7 @@ where
         let generation =
             Generation::from_raw(copied.map_or(1, |c| c.generation)).ok_or_else(corrupt)?;
         // Refusals before any I/O (spec §9 step 2, §10).
-        if inner.report.metadata.frozen {
+        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {
             return Err(not_written(
                 NotWrittenCause::Frozen,
                 ErrorContext::default(),
@@ -117,10 +117,13 @@ where
                     let held = v2.claims.iter().filter(|c| c.page == p);
                     let claimed = held.clone().count();
                     let seq = held.map(|c| c.seq + 1).fold(h.next_seq, u32::max);
+                    // Not a page holding an entry past its own write (see
+                    // `Page2::ahead`): it is written only to remove it.
                     (page.standing == Standing::Confirmed
                         && usize::from(h.count) + claimed < usize::from(per_page)
-                        && seq < u32::MAX)
-                        .then_some((p, seq))
+                        && seq < u32::MAX
+                        && page.ahead().next().is_none())
+                    .then_some((p, seq))
                 })
                 .ok_or(Error::NoSpace {
                     tag: ReserveTag::Table,
@@ -413,7 +416,8 @@ where
             }),
             positioned: std::sync::atomic::AtomicBool::new(true),
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            read_only: false,
+            read_only: std::sync::atomic::AtomicBool::new(false),
+            superseded: false,
             gate: Gate::new(),
         });
         // Live before its claim ends and the metadata lock is released:
@@ -447,12 +451,7 @@ where
             .iter()
             .any(|r| r.name == *name);
         if live
-            || self
-                .inner
-                .report
-                .unavailable
-                .iter()
-                .any(|u| u.name == name.as_str())
+            || meta.unavailable.iter().any(|u| u.name == name.as_str())
             || meta.v2.as_deref().is_some_and(|v| {
                 v.reserved_names.contains(name) || v.claims.iter().any(|c| c.name == *name)
             })

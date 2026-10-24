@@ -137,6 +137,28 @@ impl core::fmt::Display for Unavailable {
     }
 }
 
+/// What one repair of a store did (v0.5 E6), as [`Store::repairs`](crate::Store::repairs)
+/// returns it: for the caller's own log (the library prints nothing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Repair {
+    /// `repair_unavailable`: an unavailable region's table entry released
+    /// (its bytes untouched; its space free again where no other region's
+    /// footprint lies).
+    EntryReleased {
+        /// The region, as `unavailable_regions` listed it.
+        region: UnavailableRegion,
+    },
+    /// `repair_unavailable`: a table entry of a kind this version does not
+    /// know (`metadata.invalid_entries`) released.
+    InvalidEntryReleased {
+        /// Its table page.
+        page: u32,
+        /// Its sequence on the page.
+        seq: u32,
+    },
+}
+
 /// A region the region table names that could not be opened (D-090).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnavailableRegion {

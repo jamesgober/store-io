@@ -398,7 +398,7 @@ where
     pub fn reserve(&self, bytes: u64, tag: u32) -> Result<Reservation<P>, Error> {
         self.ready()?;
         let inner = &self.inner;
-        if inner.report.metadata.frozen {
+        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {
             // Allocation is frozen (spec §9 step 2).
             return Err(not_written(
                 NotWrittenCause::Frozen,

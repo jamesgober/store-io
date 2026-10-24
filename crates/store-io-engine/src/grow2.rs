@@ -71,9 +71,11 @@ where
         // a `meta_seq` from what the open could read; a Lost page may have
         // used a higher one, and a torn commit would then be judged
         // against a sequence that is not the newest.
-        if inner.report.metadata.frozen {
+        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {
             return Err(not_written(NotWrittenCause::Frozen, c));
         }
+        // The commit's page refusals, before any fill.
+        let _entry = entry_of(&lock_meta(&inner.meta), r)?;
         let block = inner.layout.block();
         let too_large = || not_written(NotWrittenCause::TooLarge, c);
         let new = align_up(new_size, block).ok_or_else(too_large)?;
@@ -398,7 +400,9 @@ fn entry_of(meta: &Meta, r: &LiveRegion) -> Result<(usize, RawEntry), Error> {
     let p = usize::try_from(id >> 32).map_err(|_| corrupt())?;
     let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
     let page = v2.pages.get(p).ok_or_else(corrupt)?;
-    if page.standing != Standing::Confirmed {
+    // A page holding an entry past its own write is written only to remove
+    // that entry (`Page2::ahead`): no growth commits there.
+    if page.standing != Standing::Confirmed || page.ahead().next().is_some() {
         return Err(not_written(NotWrittenCause::Frozen, ctx(r)));
     }
     let e = page

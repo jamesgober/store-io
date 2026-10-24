@@ -89,6 +89,9 @@ COPY_SRC = "crates/store-io-engine/src/copy.rs"
 COPYT = ["-p", "store-io-engine", "--test", "copy"]
 # Format 1 read-only.
 F1T = ["-p", "store-io-engine", "--test", "format1"]
+# Repairs (v0.5 E6).
+REPAIR_SRC = "crates/store-io-engine/src/repair.rs"
+F2REP = ["-p", "store-io-engine", "--test", "format2_repair"]
 CREATE = "crates/store-io-engine/src/create.rs"
 
 M = [
@@ -136,7 +139,7 @@ M = [
  ("crates/store-io-engine/src/store.rs", "    Ok(prev.after(written))", "    let _ = written;\n    Ok(prev.clone())"),
  ("crates/store-io-engine/src/io.rs", "                Some(mut lane) => flush_data(&mut lane, file),", "                Some(_lane) => flush_data(&mut self.inner.queues.get(0), file),"),
  ("crates/store-io-engine/src/provision.rs", "                    inner.domain.poison(FirstCause {\n                        op: Some(Op::Write),\n                        raw,\n                    });\n                    self.wake_frontiers();", "                    self.wake_frontiers();"),
- ("crates/store-io-engine/src/region.rs", "        if self.store.inner.read_only || self.state.read_only {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,", "        if self.state.read_only {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,"),
+ ("crates/store-io-engine/src/region.rs", "        if self.store.inner.read_only || self.state.is_read_only() {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,", "        if self.state.is_read_only() {\n            return Err(Error::NotWritten {\n                cause: NotWrittenCause::ReadOnly,"),
  # D-090: unavailable regions are reported and never NotFound
  ("crates/store-io-engine/src/store.rs", ".find(|u| u.name == name.as_str() && u.kind == kind)", ".find(|u| u.name == name.as_str() && u.kind == kind && false)"),
  ("crates/store-io-engine/src/open.rs", "            io: platform.io_path(),\n            unavailable,\n            format:", "            io: platform.io_path(),\n            unavailable: {\n                drop(unavailable);\n                Vec::new()\n            },\n            format:"),
@@ -443,7 +446,7 @@ M = [
  ('crates/store-io-engine/src/open.rs', '            if !header_verifies(b.as_slice()) {', '            if !header_verifies(b.as_slice()) && false {', F2),
  ('crates/store-io-engine/src/slots.rs', '    if !failed(first.report.a) && !failed(first.report.b) {', '    if true {', F2),
  (V2, '    if reread {', '    if reread && false {', F2),
- (V2, '        if pair > 0 && decode_lost {', '        if pair > 0 && decode_lost && false {', F2),
+ (V2, '        if pair > 0 && (decode_lost || pages[pair - 1].ahead().next().is_some()) {', '        if pair > 0 && (decode_lost && false || pages[pair - 1].ahead().next().is_some()) {', F2),
  (V2, '        .any(|p| p.report.winner_info().is_some_and(|(_, i)| !i.writable()));', '        .any(|p| p.report.winner_info().is_some_and(|(_, i)| !i.writable() && false));', F2),
  (V2, '        clean_close: j.clean,', '        clean_close: vm.clean_close,', F2),
  (V2, '        None => next_meta_seq(&meta.volume_pair, &v2.pages, Some((pair, slot)))?,', '        None => next_meta_seq(&meta.volume_pair, &v2.pages, Some((pair, slot)))? + 1,', F2),
@@ -497,7 +500,7 @@ M = [
  ('crates/store-io-engine/src/grow2.rs', '        acct.add_usage(old.tag, new, 0);', '        acct.add_usage(old.tag, old.data_size, 0);', F2G),
  ('crates/store-io-engine/src/grow2.rs', 'the map\'s length is the entry\'s");\n            e.data_size = new;', 'the map\'s length is the entry\'s");\n            e.data_size = len;', F2G),
  # C8 review: refused while frozen (stricter than the spec)
- ('crates/store-io-engine/src/grow2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2G),
+ ('crates/store-io-engine/src/grow2.rs', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) && false {', F2G),
  # E4 C13: provisioning and growth beyond capacity fill outside the
  # metadata lock: the space marked (and charged, a reservation consumed)
  # before, given back on a failure before the commit, settled after; a
@@ -572,7 +575,7 @@ M = [
  ('crates/store-io-engine/src/grow2.rs', '        if listed > committed {', '        if listed > committed && false {', F2B),
  ('crates/store-io-engine/src/grow2.rs', '        r.map.extend(at, ext_len);', '        r.map.extend(at, 0);', F2B),
  ('crates/store-io-engine/src/grow2.rs', '        if let Some(f) = &r.frontier {\n            f.raise_limit(new);\n        }\n        Ok(new)', '        if let Some(f) = r.frontier.as_ref().filter(|_| false) {\n            f.raise_limit(new);\n        }\n        Ok(new)', F2B),
- ('crates/store-io-engine/src/open2.rs', '            allocated.extend(c.extra);', '            let _ = &c.extra;', F2B),
+ ('crates/store-io-engine/src/open2.rs', '            if let Some((off, len)) = c.extra {', '            if let Some((off, len)) = c.extra.filter(|_| false) {', F2B),
  ('crates/store-io-engine/src/lifecycle2.rs', '        extents.extend(append);', '        extents.extend(append.filter(|_| false));', F2B),
  ('crates/store-io-engine/src/footprint.rs', '            .is_some_and(|end| self.free.iter().any(|&(s, e)| s <= at && end <= e))', '            .is_some_and(|end| self.free.iter().any(|&(s, e)| s <= at && end < e))', FOOTPRINT),
  ('crates/store-io-engine/src/regionmap.rs', '        if at.checked_add(cap - start) != Some(file) {', '        if at.checked_add(cap - start) != Some(file) || true {', REGIONMAP),
@@ -674,7 +677,7 @@ M = [
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
  # header says Released; format 2 never takes format 1's path
- ('crates/store-io-engine/src/lifecycle2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) && false {', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '                next_seq: ph.next_seq,', '                next_seq: ph.next_seq - 1,', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '                    let _gone = v2.allocated.swap_remove(i);', '                    let _gone = i;', F2X),
  ('crates/store-io-engine/src/lifecycle2.rs', '                let _gone = v2.usage.swap_remove(i);', '                let _gone = i;', F2X),
@@ -687,9 +690,9 @@ M = [
  # tail; large data aligned; free space rebuilt after the commit; growth
  # refused past a truncated entry; a reservation grows past what is
  # allocated
- ('crates/store-io-engine/src/provision2.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2P),
- ('crates/store-io-engine/src/space.rs', '        if inner.report.metadata.frozen {', '        if inner.report.metadata.frozen && false {', F2P),
- ('crates/store-io-engine/src/provision2.rs', '                .any(|u| u.name == name.as_str())', '                .any(|u| u.name == name.as_str() && false)', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) && false {', F2P),
+ ('crates/store-io-engine/src/space.rs', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {', '        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) && false {', F2P),
+ ('crates/store-io-engine/src/provision2.rs', '            || meta.unavailable.iter().any(|u| u.name == name.as_str())', '            || meta.unavailable.iter().any(|u| u.name == name.as_str() && false)', F2P),
  ('crates/store-io-engine/src/provision2.rs', '                v.reserved_names.contains(name) || v.claims.iter().any(|c| c.name == *name)', '                (v.reserved_names.contains(name) && false) || v.claims.iter().any(|c| c.name == *name)', F2P),
  ('crates/store-io-engine/src/provision2.rs', '                        && usize::from(h.count) + claimed < usize::from(per_page)', '                        && usize::from(h.count) + claimed <= usize::from(per_page)', F2P),
  ('crates/store-io-engine/src/provision2.rs', '            let offset = match v2.free.first_fit(extent, align, 2 * block) {', '            let offset = match v2.free.first_fit(extent, align, 2 * block).filter(|_| false) {', ['-p', 'store-io-engine', '--test', 'format2_provision', '--test', 'format2']),
@@ -700,9 +703,9 @@ M = [
  # foreign-header regions are read-only; overlap and name demote; extra
  # extents are reported; several extents and 512 B blocks are refused
  # or read-only; every reserved overlap and stale page's agreement is said
- ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: s.superseded || !writable,', F2R),
- ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: unconfirmed || !writable,', F2R),
- ('crates/store-io-engine/src/open2.rs', '            read_only: unconfirmed || s.superseded || !writable,', '            read_only: unconfirmed || s.superseded || (!writable && false),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),', '            read_only: std::sync::atomic::AtomicBool::new(s.superseded || !writable),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || !writable),', F2R),
+ ('crates/store-io-engine/src/open2.rs', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),', '            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || (!writable && false)),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.overlapped => Some(Unavailable::Overlaps),', '            (Ok(_), Some(s)) if s.overlapped && false => Some(Unavailable::Overlaps),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            (Ok(_), Some(s)) if s.renamed => Some(Unavailable::NameTaken),', '            (Ok(_), Some(s)) if s.renamed && false => Some(Unavailable::NameTaken),', F2R),
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.extra.is_some() && page.standing == Standing::Unconfirmed {', F2R),
@@ -834,8 +837,8 @@ M = [
  (COPY_SRC, "    match platform.unlink(&dir, &temp) {", "    match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
  (COPY_SRC, "    platform\n        .sync_dir(&dir)\n", "    Ok::<(), store_io_platform::OsError>(())\n", COPYT),
  (COPY_SRC, "let src = Store::open_readonly(platform.clone(), from, opts.store.clone())?;", "let src = Store::open(platform.clone(), from, opts.store.clone())?;", COPYT),
- (COPY_SRC, "if report.metadata.frozen {", "if report.metadata.frozen && false {", COPYT),
- (COPY_SRC, "if let Some(u) = report.unavailable.first() {", "if let Some(u) = report.unavailable.first().filter(|_| false) {", COPYT),
+ (COPY_SRC, "if src.frozen() {", "if src.frozen() && false {", COPYT),
+ (COPY_SRC, "if let Some(u) = src.unavailable_regions().first() {", "if let Some(u) = src.unavailable_regions().first().filter(|_| false) {", COPYT),
  (COPY_SRC, "o.len() > max_object(log2)", "o.len() > max_object(log2) + 100", COPYT),
  (COPY_SRC, "        Ok(_) => Err(Error::AlreadyExists { what: Named::Store }),", "        Ok(_) => Ok(()),", COPYT),
  (COPY_SRC, "if let Some(&(p, s)) = report.metadata.invalid_entries.first() {", "if let Some(&(p, s)) = report.metadata.invalid_entries.first().filter(|_| false) {", COPYT),
@@ -860,6 +863,37 @@ M = [
  ('crates/store-io-engine/src/provision2.rs', '            generation: pl.generation,', '            generation: Generation::FIRST,', COPYT),
  ('crates/store-io-engine/src/provision2.rs', '            Some(c) => (c.fill, c.fill_key),', '            Some(c) => (c.fill, if c.fill_key == [0; 16] { random_uuid() } else { random_uuid() }),', COPYT),
  ('crates/store-io-engine/src/provision2.rs', 'let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag);', 'let tag = copied.map_or_else(|| from.as_ref().map_or(0, |r| r.tag()), |c| c.tag & 0);', COPYT),
+ (REPAIR_SRC, "        self.ready()?;\n        let inner = &self.inner;", "        let inner = &self.inner;", F2REP),
+ (REPAIR_SRC, "        if inner.layout.format != store_io_format::slot::FORMAT_2 {", "        if inner.layout.format != store_io_format::slot::FORMAT_2 && false {", F2REP),
+ (REPAIR_SRC, "        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {", "        if inner.frozen.load(std::sync::atomic::Ordering::Acquire) && false {", F2REP),
+ (REPAIR_SRC, "        if let Some(span) = hold.span {", "        if let Some(span) = hold.span.filter(|_| false) {", F2REP),
+ (REPAIR_SRC, "        if let Some(usage) = hold.usage {", "        if let Some(usage) = hold.usage.filter(|_| false) {", F2REP),
+ (REPAIR_SRC, "        if let Some(name) = &hold.name {", "        if let Some(name) = hold.name.as_ref().filter(|_| false) {", F2REP),
+ (REPAIR_SRC, "        v2.cut_short = v2.holds.iter().any(|h| h.short);", "        v2.cut_short = v2.cut_short || v2.holds.iter().any(|h| h.short);", F2REP),
+ (REPAIR_SRC, "                region: meta.unavailable.remove(i),", "                region: meta.unavailable[i].clone(),", F2REP),
+ (REPAIR_SRC, "        meta.repairs.push(record);", "        let _ = record;", F2REP),
+ (REPAIR_SRC, "        v2.rebuild_free(len);", "        let _ = len;", F2REP),
+ (REPAIR_SRC, "        v2.cut_short = v2.holds.iter().any(|h| h.short);", "        v2.cut_short = v2.holds.iter().any(|h| h.short && false);", F2REP),
+ (REPAIR_SRC, "            if let Some(region) = crate::repair::would_lift(self, v2, id.get()) {", "            if let Some(region) = crate::repair::would_lift(self, v2, id.get()).filter(|_| false) {", F2REP),
+ ('crates/store-io-engine/src/lifecycle2.rs', "            .and_then(|v2| crate::repair::would_lift(self, v2, id))", "            .and_then(|v2| crate::repair::would_lift(self, v2, id).filter(|_| false))", F2REP),
+ (REPAIR_SRC, "    if !demoted && !superseded {", "    if !demoted || !superseded {", F2REP),
+ (REPAIR_SRC, "            (*demoted && !(s.overlapped || s.renamed)) || (*superseded && !s.superseded)", "            (*demoted && !(s.overlapped || s.renamed)) || (*superseded && !s.superseded && false)", F2REP),
+ (REPAIR_SRC, "            (*demoted && !(s.overlapped || s.renamed)) || (*superseded && !s.superseded)", "            (*demoted && !(s.overlapped || s.renamed) && false) || (*superseded && !s.superseded)", F2REP),
+ (REPAIR_SRC, "            (*demoted && !(s.overlapped || s.renamed)) || (*superseded && !s.superseded)", "            (*demoted && !s.overlapped) || (*superseded && !s.superseded)", F2REP),
+ (REPAIR_SRC, "        .filter(|h| h.id() != removing && h.demoted.is_none())", "        .filter(|h| h.demoted.is_none())", F2REP),
+ (REPAIR_SRC, "    for r in live.iter().filter(|r| r.id.get() != removing) {", "    for r in live.iter() {", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                bad_entries.push((seq, span, entry_name));", "                bad_entries.push((seq, span, entry_name.filter(|_| false)));", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                    demoted: None,\n                    entry_name,\n", "                    demoted: None,\n                    entry_name: entry_name.filter(|_| false),\n", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                entry_name: Some(e.name),", "                entry_name: Some(e.name).filter(|_| false),", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                (Err(_), None) => vec![(e.span_start, e.span_end - e.span_start)],", "                (Err(_), None) => Vec::new(),", F2REP),
+ ('crates/store-io-engine/src/footprint.rs', "            .filter_map(|x| x.name.map(|n| (n, x.seq))),", "            .filter_map(|x| x.name.map(|n| (n, x.seq)).filter(|_| false)),", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                    if usize::from(view.header.extent_count) >= committed {", "                    if usize::from(view.header.extent_count) >= committed || true {", F2REP),
+ (REPAIR_SRC, "        let mut f = vec![(r.header_at[0], block), (r.header_at[1], block)];", "        let mut f = vec![(r.header_at[0], 0 * block), (r.header_at[1], 0)];", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                if let Ok(view) = decode_region_header(bytes, layout.log2_block, u64::MAX) {", "                if let Ok(view) = decode_region_header(bytes, layout.log2_block, container_len) {", F2REP),
+ (V2, "        if pair > 0 && (decode_lost || pages[pair - 1].ahead().next().is_some()) {", "        if pair > 0 && (decode_lost || pages[pair - 1].ahead().next().is_some() && false) {", F2REP),
+ (V2, "        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)))", "        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)) && false)", F2REP),
+ ('crates/store-io-engine/src/provision2.rs', "                        && page.ahead().next().is_none()", "                        && (page.ahead().next().is_none() || true)", F2REP),
+ ('crates/store-io-engine/src/open2.rs', "                usage: Some((e.tag, e.data_size, e.capacity.saturating_add(2 * block))),", "                usage: None,", F2REP),
 ]
 
 def kill_stuck_tests():

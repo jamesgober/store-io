@@ -476,7 +476,7 @@ where
     ///
     /// `NotWritten(ReadOnly | TooManyInFlight | OutOfBounds)`, `Poisoned`.
     pub fn resume_at(&self, offset: u64) -> Result<u64, Error> {
-        if self.store.inner.read_only || self.state.read_only {
+        if self.store.inner.read_only || self.state.is_read_only() {
             return Err(Error::NotWritten {
                 cause: NotWrittenCause::ReadOnly,
                 ctx: ctx(&self.state),

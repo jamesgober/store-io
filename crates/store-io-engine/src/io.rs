@@ -207,7 +207,7 @@ where
     /// region (naming it).
     pub(crate) fn ready_for(&self, r: &LiveRegion) -> Result<(), Error> {
         self.ready()?;
-        if r.read_only {
+        if r.is_read_only() {
             return Err(not_written(NotWrittenCause::ReadOnly, ctx(r)));
         }
         Ok(())

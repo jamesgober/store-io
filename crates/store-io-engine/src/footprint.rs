@@ -43,6 +43,11 @@ pub(crate) struct Unavailable<'a> {
     /// span: what it may have written over. (What it reserves, its span, is
     /// the caller's: see [`shares_reserved`].)
     pub own: &'a [Extent],
+    /// Its name, when its entry's decodes: it counts for names as a usable
+    /// region does (a usable region of the same name and a lower or equal
+    /// `footprint_seq` loses it), so that an entry failing step 3 never
+    /// lets an older one of its name be served.
+    pub name: Option<&'a str>,
 }
 
 /// What settling decided for one usable region.
@@ -182,12 +187,18 @@ pub(crate) fn settle(usable: &[Usable<'_>], unavailable: &[Unavailable<'_>]) -> 
             out[iv.owner].overlapped = true;
         }
     }
-    // Names: the highest `footprint_seq` keeps a name, unless two share it.
+    // Names: the highest `footprint_seq` keeps a name, unless two share it;
+    // an unavailable entry's name counts too (it keeps nothing itself).
     let mut names: HashMap<&str, (u64, u32)> = HashMap::with_capacity(usable.len());
-    for u in usable {
-        let e = names.entry(u.name).or_insert((u.seq, 0));
-        match u.seq.cmp(&e.0) {
-            core::cmp::Ordering::Greater => *e = (u.seq, 1),
+    let named = usable.iter().map(|u| (u.name, u.seq)).chain(
+        unavailable
+            .iter()
+            .filter_map(|x| x.name.map(|n| (n, x.seq))),
+    );
+    for (name, seq) in named {
+        let e = names.entry(name).or_insert((seq, 0));
+        match seq.cmp(&e.0) {
+            core::cmp::Ordering::Greater => *e = (seq, 1),
             core::cmp::Ordering::Equal => e.1 += 1,
             core::cmp::Ordering::Less => {}
         }
@@ -379,6 +390,7 @@ mod tests {
         let newest = Unavailable {
             seq: u64::MAX,
             own: &r,
+            name: None,
         };
         assert!(settle(&[u("a", 5, &r)], &[newest])[0].superseded);
         let s = settle(&[u("a", u64::MAX, &r)], &[newest]);
@@ -447,6 +459,7 @@ mod tests {
         let newer = Unavailable {
             seq: 9,
             own: &[(5, 1)],
+            name: None,
         };
         let s = settle(&[u("a", 1, &a)], &[newer]);
         assert!(s[0].usable() && s[0].superseded);
@@ -537,6 +550,7 @@ mod tests {
                 .map(|own| Unavailable {
                     seq: rng.below(8),
                     own,
+                    name: None,
                 })
                 .collect();
             assert_eq!(

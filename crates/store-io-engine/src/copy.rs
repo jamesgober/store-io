@@ -126,7 +126,8 @@ where
             ..ErrorContext::default()
         },
     };
-    if let Some(u) = report.unavailable.first() {
+    // The source's state now (a read-only open: what its open found).
+    if let Some(u) = src.unavailable_regions().first() {
         return Err(refused(NotWrittenCause::NotReady, Some(u.id)));
     }
     // An entry whose kind or name does not decode (a newer release's) is
@@ -135,7 +136,7 @@ where
         let id = RegionId::from_raw((u64::from(p) << 32) | u64::from(s));
         return Err(refused(NotWrittenCause::NotReady, Some(id)));
     }
-    if report.metadata.frozen {
+    if src.frozen() {
         return Err(refused(NotWrittenCause::Frozen, None));
     }
     let block = report.block_size;

@@ -13,6 +13,50 @@
 
 ### Added
 
+- Engine: **`Store::repair_unavailable(id)`** (v0.5 E6 C2, Q6, D-112):
+  releases an unavailable region's table entry (one
+  `unavailable_regions()` lists, or, named by its id, an entry of a kind
+  this version does not know): its page is written without the entry,
+  durably; the bytes are not touched; its space becomes free where no
+  other region's footprint lies (exactly what the open reserved for it is
+  taken away, never more: a span covering another region's bytes keeps
+  them allocated); its usage leaves its tag; its name is free; growth is
+  allowed again once no entry names space past the container's end.
+  Refused while allocation is frozen (`NotWritten(Frozen)`), on a
+  read-only store, for a usable region or an unknown id (`NotFound`), on
+  format 1, and for an entry another verdict of the open rests on
+  (`NotWritten(Overlap)`, naming the region: one it supersedes, which is
+  read-only and may read another's bytes, so the entry stays until the
+  store is copied; or one it demoted by an overlap or a name, repaired
+  first). **`Store::repairs()`** returns what this handle's
+  repairs did (`Repair`: `EntryReleased`, `InvalidEntryReleased`), for
+  the caller's own log; **`Store::frozen()`** says whether allocation is
+  frozen now. `Store::report()` stays what the open found;
+  `unavailable_regions()` and every check use the live state (v0.5 E6
+  C1).
+- Engine, format 2: **the open's step 4 is stable** (v0.5 E6 C2, D-129).
+  Before a release or a repair removes an entry, step 4 (overlaps,
+  names, possibly superseded) is judged again over what would remain,
+  and the removal is refused (`NotWritten(Overlap)`, naming the region)
+  if a region it demoted would be served at the next open, or one
+  possibly superseded would be writable again (judged only when some
+  region is demoted or superseded: a healthy store pays a scan of the
+  unavailable entries and the live regions). What a
+  failed region header may have written is judged by the header alone,
+  never by the file's length (a later growth changed it), and by its
+  whole span when it lists fewer extents than its entry (a header rolled
+  back); step 3 decodes headers without the file's length too (each
+  committed extent is checked against the span). An unavailable entry
+  whose name decodes counts for names: a usable region of its name with
+  a lower or equal `footprint_seq` loses it (spec §9 step 4 amended:
+  before, an entry failing step 3 let an older one of its name be served,
+  an acknowledged write possibly hidden by a region that came back after
+  growth). A table page holding an entry whose `footprint_seq` is past
+  the page's own write (only damage writes one; the open counts it newest
+  of all) is never rewritten with it: writes that keep it are
+  `NotWritten(Frozen)` naming it, provisioning places nothing on that
+  page, growth and release refuse before any I/O, and a torn write of it
+  is not healed (the page is left stale).
 - Engine: **`copy_store(platform, from, to, CopyOptions)`** (v0.5 E5
   C1): copies a store (format 1 or 2) into a new format-2 store in
   another directory, returning a `CopyReport` (regions, bytes, the

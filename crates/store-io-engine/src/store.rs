@@ -187,7 +187,7 @@ pub(crate) struct Policy {
     pub(crate) flush: bool,
 }
 
-pub use crate::report::{Unavailable, UnavailableRegion};
+pub use crate::report::{Repair, Unavailable, UnavailableRegion};
 
 /// What the store learned about its device, and what it decided.
 #[derive(Debug, Clone)]
@@ -212,7 +212,8 @@ pub struct StoreReport {
     /// on first use) are counted live in [`Store::io_path`].
     pub io: IoPath,
     /// Regions the region table names that could not be opened, with the
-    /// reason (D-090). Empty for a healthy store.
+    /// reason (D-090), as the open found them (repairs since:
+    /// `Store::unavailable_regions`). Empty for a healthy store.
     pub unavailable: Vec<UnavailableRegion>,
     /// The container format (1 or 2).
     pub format: u16,
@@ -235,6 +236,12 @@ pub(crate) struct Meta {
     pub(crate) container_len: u64,
     /// Format 2's metadata (the format-1 fields above are then unused).
     pub(crate) v2: Option<Box<crate::v2::Meta2>>,
+    /// The regions the table names that cannot be used, as they stand now
+    /// (the open's list, less those repaired since): lookups, the names
+    /// taken and growth read this, never the open-time report.
+    pub(crate) unavailable: Vec<UnavailableRegion>,
+    /// What the store's repairs did, in order ([`Store::repairs`]).
+    pub(crate) repairs: Vec<crate::report::Repair>,
 }
 
 /// One live region.
@@ -263,14 +270,22 @@ pub(crate) struct LiveRegion {
     pub(crate) force_sync: Arc<std::sync::atomic::AtomicBool>,
     /// Writes refused, the store being writable: format 2's regions on a
     /// page that is not confirmed, or possibly superseded (always false in
-    /// format 1).
-    pub(crate) read_only: bool,
+    /// format 1). Never lifted for a superseded region.
+    pub(crate) read_only: std::sync::atomic::AtomicBool,
+    /// Possibly superseded (spec §9 step 4): another region's newer
+    /// footprint may cover its bytes; it stays read-only for good.
+    pub(crate) superseded: bool,
 }
 
 impl LiveRegion {
     /// Whether barriers on this region always flush (D-102).
     pub(crate) fn forced(&self) -> bool {
         self.force_sync.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether writes to the region are refused (see `read_only`).
+    pub(crate) fn is_read_only(&self) -> bool {
+        self.read_only.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -300,7 +315,14 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) pool: BufPool,
     pub(crate) meta: Mutex<Meta>,
     pub(crate) regions: Mutex<Vec<Arc<LiveRegion>>>,
+    /// What the open found (never changed after: see `Meta::unavailable`
+    /// and `frozen` for what stands now).
     pub(crate) report: StoreReport,
+    /// Allocation is frozen (format 2: a page is Unconfirmed or Lost), as
+    /// it stands now: set at open, only ever cleared afterwards (once no
+    /// page is stale), so a check made without the metadata lock can only
+    /// refuse what it might have allowed, never the reverse.
+    pub(crate) frozen: std::sync::atomic::AtomicBool,
     pub(crate) read_only: bool,
     pub(crate) owner_generation: u64,
     pub(crate) opts: StoreOptions,
@@ -397,7 +419,10 @@ where
         self.inner.observer.snapshot()
     }
 
-    /// What the store learned about its device and what it decided.
+    /// What the store learned about its device and what it decided, as
+    /// the open found it (never changed after: what repairs change since
+    /// is in [`Self::unavailable_regions`], [`Self::frozen`] and
+    /// [`Self::repairs`]).
     #[must_use]
     pub fn report(&self) -> &StoreReport {
         &self.inner.report
@@ -487,12 +512,11 @@ where
         }
         // A region the table names but open could not use is corrupt, not
         // missing: a caller must never mistake it for a fresh start (D-090).
-        match self
-            .inner
-            .report
+        match lock_meta(&self.inner.meta)
             .unavailable
             .iter()
             .find(|u| u.name == name.as_str() && u.kind == kind)
+            .cloned()
         {
             Some(u) => Err(Error::Corruption {
                 kind: u.reason.corruption_kind(),
@@ -506,10 +530,28 @@ where
     }
 
     /// Regions the region table names that open could not use, with the
-    /// reason (D-090). Empty for a healthy store. Their names stay reserved.
+    /// reason (D-090), less any repaired since. Empty for a healthy store.
+    /// Their names stay reserved.
     #[must_use]
     pub fn unavailable_regions(&self) -> Vec<UnavailableRegion> {
-        self.inner.report.unavailable.clone()
+        lock_meta(&self.inner.meta).unavailable.clone()
+    }
+
+    /// Whether allocation is frozen now (format 2: a table page is stale
+    /// or lost; spec §9 step 2): no provisioning, no growth beyond
+    /// capacity, no release, no repair. `report().metadata.frozen` is what
+    /// the open found.
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.inner.frozen.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// What this handle's repairs did, in order
+    /// ([`Self::repair_unavailable`]): the store's log of them, for the
+    /// caller to record. The library prints nothing.
+    #[must_use]
+    pub fn repairs(&self) -> Vec<crate::report::Repair> {
+        lock_meta(&self.inner.meta).repairs.clone()
     }
 }
 

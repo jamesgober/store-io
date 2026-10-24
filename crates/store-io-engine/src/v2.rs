@@ -44,7 +44,8 @@ pub struct MetadataReport {
     pub volume_stale: bool,
     /// The one metadata write a crash left torn, which this open rewrote.
     pub healed: Option<Healed>,
-    /// Allocation is frozen: some page is stale or lost.
+    /// Allocation is frozen: some page is stale or lost (as the open found
+    /// it; now: `Store::frozen`).
     pub frozen: bool,
     /// Why a writable open was made read-only, if it was.
     pub read_only_reason: Option<&'static str>,
@@ -195,6 +196,68 @@ pub(crate) struct Meta2 {
     /// Bytes marked allocated by provisionings and growths not yet
     /// committed (in `allocated`, not yet in `usage`).
     pub(crate) marked: u64,
+    /// What each unavailable entry (and each of a kind this version does
+    /// not know) holds: exactly what the open added for it, so
+    /// `repair_unavailable` takes away no more and no less (v0.5 E6).
+    pub(crate) holds: Vec<Hold>,
+}
+
+impl Page2 {
+    /// The `meta_seq` of the page's winning copy (0 when none).
+    pub(crate) fn meta_seq(&self) -> u64 {
+        self.pair
+            .report
+            .winner_info()
+            .and_then(|(i, _)| self.pair.facts[usize::from(i.as_u8())])
+            .and_then(|f| f.numbered)
+            .map_or(0, |n| n.meta_seq)
+    }
+
+    /// Entries whose `footprint_seq` is past the page's own write (only
+    /// damage writes one): the open counts them newest of all (spec §9
+    /// step 4). A rewrite of the page at a later `meta_seq` would count
+    /// them otherwise, changing the verdicts that rest on them, so a page
+    /// holding one is written only to remove it.
+    pub(crate) fn ahead(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
+        let ms = self.meta_seq();
+        self.entries
+            .iter()
+            .filter(move |e| e.footprint_seq > ms)
+            .map(|e| (e.seq, e.footprint_seq))
+    }
+}
+
+/// What an unavailable table entry holds (see [`Meta2::holds`]).
+#[derive(Debug, Clone)]
+pub(crate) struct Hold {
+    pub(crate) page: usize,
+    pub(crate) seq: u32,
+    /// Its range in `allocated` (its reserved span, as the open found it),
+    /// if it has one.
+    pub(crate) span: Option<(u64, u64)>,
+    /// Its usage in `usage` (an entry that passed the entry checks).
+    pub(crate) usage: Option<(u32, u64, u64)>,
+    /// Its name in `reserved_names` (an entry of an unknown kind).
+    pub(crate) name: Option<store_io_format::meta::RegionName>,
+    /// It names space past the file's end (`cut_short`).
+    pub(crate) short: bool,
+    /// Its `footprint_seq` as settled (spec §9 step 4) and what its writes
+    /// may have touched (its header blocks and extents when its header
+    /// decoded, else its span; none for a region demoted by an overlap).
+    pub(crate) footprint_seq: u64,
+    pub(crate) own: Vec<(u64, u64)>,
+    /// A region that passed step 3 and was demoted in step 4 (by an
+    /// overlap or a name): its name and footprint, for judging it again.
+    pub(crate) demoted: Option<(store_io_format::meta::RegionName, Vec<(u64, u64)>)>,
+    /// Its entry's name, when that decodes (it counts for names in step 4).
+    pub(crate) entry_name: Option<store_io_format::meta::RegionName>,
+}
+
+impl Hold {
+    /// The region id of the entry (`page << 32 | seq`).
+    pub(crate) fn id(&self) -> u64 {
+        ((self.page as u64) << 32) | u64::from(self.seq)
+    }
 }
 
 /// A provisioning's hold, from its placement to its commit or its undo:
@@ -283,6 +346,25 @@ pub(crate) fn write_page<P: Platform>(
     let decoded = decode_page(payload, pi, entries_per_page(layout.log2_table))
         .map(|d| (d.header, d.entries().collect::<Vec<_>>()))
         .map_err(|_| corrupt())?;
+    // An entry past the page's write, kept as it is, would read as an older
+    // one after this write (see `Page2::ahead`): refused before any I/O.
+    let ahead: Vec<(u32, u64)> = page.ahead().collect();
+    if let Some(kept) = decoded
+        .1
+        .iter()
+        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)))
+    {
+        // Named: the entry to repair first.
+        return Err(Error::NotWritten {
+            cause: store_io_core::error::NotWrittenCause::Frozen,
+            ctx: ErrorContext {
+                region: Some(store_io_core::id::RegionId::from_raw(
+                    (u64::from(pi) << 32) | u64::from(kept.seq),
+                )),
+                ..ErrorContext::default()
+            },
+        });
+    }
     let mut next = plan_next(&page.pair, payload, owner_generation)?;
     next.meta_seq = meta_seq;
     let at = pair_page(volume, layout, pi);
@@ -463,7 +545,10 @@ pub(crate) fn create_metadata<P: Platform>(
             allocated: Vec::new(),
             claims: Vec::new(),
             marked: 0,
+            holds: Vec::new(),
         })),
+        unavailable: Vec::new(),
+        repairs: Vec::new(),
     })
 }
 
@@ -651,9 +736,12 @@ pub(crate) fn open_metadata<P: Platform>(
     // A page that fails the page checks is Lost, which the judgement could
     // not see: a page's torn write is healed only when nothing else is
     // lost (spec §7), so the heal is dropped and the torn copy is damage.
+    // Likewise for a page holding an entry past its own write: the heal's
+    // later `meta_seq` would change how the next open counts that entry
+    // (see `Page2::ahead`), so the page is left stale, never written.
     let mut to_heal = j.heal;
     if let Some((pair, _)) = to_heal {
-        if pair > 0 && decode_lost {
+        if pair > 0 && (decode_lost || pages[pair - 1].ahead().next().is_some()) {
             to_heal = None;
             if pages[pair - 1].standing == Standing::Confirmed {
                 pages[pair - 1].standing = Standing::Unconfirmed;
@@ -690,7 +778,10 @@ pub(crate) fn open_metadata<P: Platform>(
             allocated: Vec::new(),
             claims: Vec::new(),
             marked: 0,
+            holds: Vec::new(),
         })),
+        unavailable: Vec::new(),
+        repairs: Vec::new(),
     };
     // Steps 3-6, before anything is written.
     let regions = {
@@ -714,6 +805,7 @@ pub(crate) fn open_metadata<P: Platform>(
         v2.reserved_names = regions.reserved_names;
         v2.cut_short = regions.cut_short;
         v2.allocated = regions.allocated;
+        v2.holds = regions.holds;
     }
     let read_only = read_only || {
         report.read_only_reason = if !j.writable {

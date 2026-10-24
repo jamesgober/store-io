@@ -50,6 +50,8 @@ pub(crate) struct Regions2 {
     pub(crate) cut_short: bool,
     /// Every allocated range `free` is the complement of.
     pub(crate) allocated: Vec<Extent>,
+    /// What each unavailable or unknown-kind entry holds.
+    pub(crate) holds: Vec<crate::v2::Hold>,
 }
 
 /// A region whose entry passed the entry checks.
@@ -64,6 +66,12 @@ struct Checked {
     decoded: Option<(u64, bool)>,
     /// The header's committed extents, when it decoded (data order).
     extents: Vec<Extent>,
+    /// Every extent the header lists, decoded without the file's length
+    /// (`None` if it does not decode even so, or lists fewer than its
+    /// entry): what its writes may
+    /// have touched, judged by the header alone, so that a later growth of
+    /// the file never changes the answer step 4 gives (spec §9 step 4).
+    written: Option<Vec<Extent>>,
     /// An extent the header lists past the entry's count.
     extra: Option<Extent>,
     /// The header's data blocks are 512 B (spec §13, not built).
@@ -128,12 +136,17 @@ pub(crate) fn check_regions<Q: Queue>(
     let mut checked: Vec<Checked> = Vec::new();
     // Entries that failed the entry checks: their `footprint_seq` as stored
     // and what they reserve.
-    let mut bad_entries: Vec<(u64, Extent)> = Vec::new();
+    let mut bad_entries: Vec<(
+        u64,
+        Option<Extent>,
+        Option<store_io_format::meta::RegionName>,
+    )> = Vec::new();
     let mut usage: Vec<(u32, u64, u64)> = Vec::new();
     let mut unavailable = Vec::new();
     let mut read_only_reason = None;
     let mut reserved_names = Vec::new();
     let mut cut_short = false;
+    let mut holds = Vec::new();
     let mut truncated = false;
     // Whether every region header on a stale page agrees with its entry.
     let mut agrees = vec![true; v2.pages.len()];
@@ -172,9 +185,27 @@ pub(crate) fn check_regions<Q: Queue>(
                 } else {
                     raw.footprint_seq
                 };
-                if let Some((start, end)) = raw.reserved_span(&lim) {
-                    bad_entries.push((seq, (start, end - start)));
-                }
+                let span = raw
+                    .reserved_span(&lim)
+                    .map(|(start, end)| (start, end - start));
+                let entry_name = raw.name_and_kind().map(|(n, _)| n).or_else(|| raw.name());
+                bad_entries.push((seq, span, entry_name));
+                holds.push(crate::v2::Hold {
+                    page: p,
+                    seq: raw.seq,
+                    span,
+                    usage: None,
+                    name: if raw.name_and_kind().is_none() {
+                        raw.name()
+                    } else {
+                        None
+                    },
+                    short,
+                    footprint_seq: seq,
+                    own: span.into_iter().collect(),
+                    demoted: None,
+                    entry_name,
+                });
                 // Every unavailable region is listed, never cut: the list
                 // keeps their names reserved.
                 match raw.name_and_kind() {
@@ -247,6 +278,7 @@ pub(crate) fn check_regions<Q: Queue>(
                 header,
                 decoded: None,
                 extents: Vec::new(),
+                written: None,
                 extra: None,
                 small: false,
                 outcome: Err(Unavailable::HeaderUnreadable),
@@ -270,8 +302,23 @@ pub(crate) fn check_regions<Q: Queue>(
                     );
                 }
                 c.outcome = Err(Unavailable::HeaderInvalid);
-                if let Ok(view) = decode_region_header(bytes, layout.log2_block, container_len) {
+                // Decoded by the header alone: the file's length is never an
+                // input (a later growth of the file would change the
+                // verdict). The entry checks keep the span inside the file
+                // and `check_region` each committed extent inside the span;
+                // only the one extent a header may list past its entry's (a
+                // lost growth, ignored or counted allocated) may lie past
+                // the file's end.
+                if let Ok(view) = decode_region_header(bytes, layout.log2_block, u64::MAX) {
                     let committed = usize::from(entry.extent_count);
+                    // What its writes may have touched: the extents its
+                    // header lists, unless it lists fewer than the entry (a
+                    // header rolled back: the span then).
+                    if usize::from(view.header.extent_count) >= committed {
+                        // Every extent it lists: one past its entry's (a
+                        // lost growth) was filled before the header named it.
+                        c.written = Some(view.extents().collect());
+                    }
                     c.extents = view.extents().take(committed).collect();
                     if usize::from(view.header.extent_count) == committed + 1 {
                         c.extra = view.extents().nth(committed);
@@ -305,23 +352,32 @@ pub(crate) fn check_regions<Q: Queue>(
     let usable_at: Vec<usize> = (0..checked.len())
         .filter(|&i| checked[i].outcome.is_ok())
         .collect();
-    let mut gone: Vec<(u64, Extent, Vec<Extent>)> = bad_entries
+    // (footprint_seq, span reserved, what it may have written, name).
+    #[allow(clippy::type_complexity)]
+    let mut gone: Vec<(
+        u64,
+        Option<Extent>,
+        Vec<Extent>,
+        Option<store_io_format::meta::RegionName>,
+    )> = bad_entries
         .iter()
-        .map(|&(seq, span)| (seq, span, vec![span]))
+        .map(|&(seq, span, name)| (seq, span, span.into_iter().collect(), name))
         .collect();
     for c in checked.iter().filter(|c| c.outcome.is_err()) {
         let e = &c.entry;
         let span = (e.span_start, e.span_end - e.span_start);
-        // What its writes may have touched: its header blocks and its
-        // extents when the header decoded, else the whole span.
-        let own = if c.decoded.is_some() {
-            let mut own = vec![(e.header_a, block), (e.header_b, block)];
-            own.extend_from_slice(&c.extents);
-            own
-        } else {
-            vec![span]
+        // What its writes may have touched: its header blocks and the
+        // extents its header lists, when the header decodes (by the header
+        // alone: see `written`), else the whole span.
+        let own = match &c.written {
+            Some(written) => {
+                let mut own = vec![(e.header_a, block), (e.header_b, block)];
+                own.extend_from_slice(written);
+                own
+            }
+            None => vec![span],
         };
-        gone.push((e.footprint_seq, span, own));
+        gone.push((e.footprint_seq, Some(span), own, Some(e.name)));
     }
     let settled = {
         let usable: Vec<Usable<'_>> = usable_at
@@ -334,7 +390,11 @@ pub(crate) fn check_regions<Q: Queue>(
             .collect();
         let others: Vec<Gone<'_>> = gone
             .iter()
-            .map(|(seq, _, own)| Gone { seq: *seq, own })
+            .map(|(seq, _, own, name)| Gone {
+                seq: *seq,
+                own,
+                name: name.as_ref().map(store_io_format::meta::RegionName::as_str),
+            })
             .collect();
         settle(&usable, &others)
     };
@@ -345,7 +405,7 @@ pub(crate) fn check_regions<Q: Queue>(
 
     // Step 6: free space is the complement of every usable footprint, every
     // unavailable span, and every extra extent on a stale page.
-    let mut allocated: Vec<Extent> = gone.iter().map(|g| g.1).collect();
+    let mut allocated: Vec<Extent> = gone.iter().filter_map(|g| g.1).collect();
     // Every unavailable region's span: those above, then the demoted.
     let mut reserved: Vec<Extent> = allocated.clone();
     // Each live region's footprint, for the reserved-overlap report.
@@ -355,8 +415,14 @@ pub(crate) fn check_regions<Q: Queue>(
         let e = c.entry;
         let unconfirmed = v2.pages[c.page].standing == Standing::Unconfirmed;
         if unconfirmed {
-            // It may be the newest growth (spec §9 step 3).
-            allocated.extend(c.extra);
+            // It may be the newest growth (spec §9 step 3). Bytes past the
+            // file's end hold nothing: clamped, so free space never ends
+            // there (a header is decoded without the file's length).
+            if let Some((off, len)) = c.extra {
+                if off < container_len {
+                    allocated.push((off, len.min(container_len - off)));
+                }
+            }
         }
         let reason = match (&c.outcome, verdict) {
             (Err(r), _) => Some(*r),
@@ -370,6 +436,34 @@ pub(crate) fn check_regions<Q: Queue>(
                 allocated.push((e.span_start, e.span_end - e.span_start));
                 reserved.push((e.span_start, e.span_end - e.span_start));
             }
+            // Its span is in `allocated` (above, or with the failed ones)
+            // and its usage was counted. What it may have written, as step
+            // 4 judged it (a demoted region supersedes nothing).
+            let own = match (&c.outcome, &c.written) {
+                (Err(_), Some(written)) => {
+                    let mut own = vec![(e.header_a, block), (e.header_b, block)];
+                    own.extend_from_slice(written);
+                    own
+                }
+                (Err(_), None) => vec![(e.span_start, e.span_end - e.span_start)],
+                (Ok(_), _) => Vec::new(),
+            };
+            holds.push(crate::v2::Hold {
+                page: c.page,
+                seq: e.seq,
+                span: Some((e.span_start, e.span_end - e.span_start)),
+                usage: Some((e.tag, e.data_size, e.capacity.saturating_add(2 * block))),
+                name: None,
+                short: false,
+                footprint_seq: e.footprint_seq,
+                own,
+                demoted: c
+                    .outcome
+                    .as_ref()
+                    .ok()
+                    .map(|ranges| (e.name, ranges.clone())),
+                entry_name: Some(e.name),
+            });
             unavailable.push(UnavailableRegion {
                 name: e.name.as_str().to_owned(),
                 id: RegionId::from_raw(c.id),
@@ -388,7 +482,6 @@ pub(crate) fn check_regions<Q: Queue>(
         }
         let ranges = c.outcome.unwrap_or_default();
         allocated.extend_from_slice(&ranges);
-        footprints.push((c.id, e.name.as_str().to_owned(), e.footprint_seq, ranges));
         if s.superseded {
             pushed(
                 &mut report.superseded,
@@ -396,6 +489,7 @@ pub(crate) fn check_regions<Q: Queue>(
                 &mut truncated,
             );
         }
+        footprints.push((c.id, e.name.as_str().to_owned(), e.footprint_seq, ranges));
         // A usable region's header decoded, and a decoded header's
         // generation is never 0.
         let (raw_generation, writable) = c.decoded.ok_or_else(corrupt)?;
@@ -429,7 +523,8 @@ pub(crate) fn check_regions<Q: Queue>(
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // On a stale page, possibly superseded, or with a header whose
             // winner carries a feature this version may not write.
-            read_only: unconfirmed || s.superseded || !writable,
+            read_only: std::sync::atomic::AtomicBool::new(unconfirmed || s.superseded || !writable),
+            superseded: s.superseded,
             gate: Gate::new(),
         }));
     }
@@ -470,5 +565,6 @@ pub(crate) fn check_regions<Q: Queue>(
         reserved_names,
         cut_short,
         allocated,
+        holds,
     })
 }

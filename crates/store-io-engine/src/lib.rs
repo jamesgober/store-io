@@ -54,6 +54,7 @@ pub(crate) mod queue_core;
 pub mod receipt;
 mod region;
 mod regionmap;
+mod repair;
 mod report;
 mod scan;
 mod settle;
@@ -79,7 +80,7 @@ pub use scan::{ScanItem, ScanSummary};
 pub use space::{Reservation, SpaceReport, TagSpace};
 pub use stats::Outstanding;
 pub use store::{
-    CONTAINER, Healed, MetadataReport, Store, StoreOptions, StoreReport, Unavailable,
+    CONTAINER, Healed, MetadataReport, Repair, Store, StoreOptions, StoreReport, Unavailable,
     UnavailableRegion,
 };
 pub use store_io_format::meta::RegionKind;

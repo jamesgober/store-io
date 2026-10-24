@@ -112,7 +112,7 @@ pub use store_io_core::id::{Generation, RegionId, VolumeId};
 pub use store_io_core::observe;
 pub use store_io_engine::{
     CONTAINER, COPY_LOCK, COPYING, CopyOptions, CopyReport, DomainStats, DurableReceipt,
-    Outstanding, RegionKind, RegionOptions, RegionPos, ScanItem, ScanSummary, SpaceReport,
+    Outstanding, RegionKind, RegionOptions, RegionPos, Repair, ScanItem, ScanSummary, SpaceReport,
     StoreOptions, StoreReport, TagSpace, Unavailable, UnavailableRegion, WriteTicket,
 };
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};

@@ -250,7 +250,8 @@ where
             }),
             positioned: std::sync::atomic::AtomicBool::new(true),
             force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            read_only: false,
+            read_only: std::sync::atomic::AtomicBool::new(false),
+            superseded: false,
             gate: Gate::new(),
         });
         inner

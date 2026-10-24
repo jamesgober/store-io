@@ -316,6 +316,8 @@ where
             entries: Vec::new(),
             container_len: header_len,
             v2: None,
+            unavailable: Vec::new(),
+            repairs: Vec::new(),
         };
         Ok((meta, report, layout, policy, pool, queues))
     }

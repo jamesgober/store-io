@@ -275,7 +275,8 @@ where
                 frontier,
                 positioned: std::sync::atomic::AtomicBool::new(false),
                 force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                read_only: false,
+                read_only: std::sync::atomic::AtomicBool::new(false),
+                superseded: false,
                 gate: Gate::new(),
             }));
         }
@@ -288,6 +289,8 @@ where
             entries,
             container_len,
             v2: None,
+            unavailable: Vec::new(),
+            repairs: Vec::new(),
         };
         // Format 1 opens for reading only (a writable open was refused
         // above): no owner generation is taken, nothing is written.
@@ -362,6 +365,9 @@ where
         queues.keep_flush_lanes(1 + flush_files.len());
         let mut report = report;
         report.flushes_in_flight = 1 + flush_files.len() as u8;
+        let mut meta = meta;
+        meta.unavailable = report.unavailable.clone();
+        let frozen = std::sync::atomic::AtomicBool::new(report.metadata.frozen);
         Self {
             inner: Arc::new(Inner {
                 domain: Domain::with_slots(1 + flush_files.len()),
@@ -378,6 +384,7 @@ where
                 meta: Mutex::new(meta),
                 regions: Mutex::new(regions),
                 report,
+                frozen,
                 read_only,
                 owner_generation,
                 opts,

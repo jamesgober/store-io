@@ -35,6 +35,7 @@ impl core::fmt::Display for StoreReport {
         writeln!(f, "table capacity   {} regions", self.table_capacity)?;
         writeln!(f, "filesystem       {:?}", self.evidence.fs.kind)?;
         writeln!(f, "bus              {:?}", self.evidence.device.bus)?;
+        writeln!(f, "internal         {:?}", self.evidence.device.internal)?;
         if let Some(m) = &self.evidence.device.model {
             writeln!(f, "model            {m}")?;
         }

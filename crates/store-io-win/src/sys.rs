@@ -20,9 +20,10 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, TRUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, DeleteFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_INFO_BY_HANDLE_CLASS,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FlushFileBuffers,
-    GetDriveTypeW, GetFileInformationByHandleEx, GetFileSizeEx, GetVolumeInformationByHandleW,
+    CreateDirectoryW, CreateFileW, DeleteFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO,
+    FILE_INFO_BY_HANDLE_CLASS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FileAttributeTagInfo, FileIdInfo, FlushFileBuffers, GetDriveTypeW,
+    GetFileInformationByHandleEx, GetFileSizeEx, GetVolumeInformationByHandleW,
     GetVolumeNameForVolumeMountPointW, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
     LockFileEx, OPEN_EXISTING, ReOpenFile, ReadFile, SetFileCompletionNotificationModes,
     SetFileInformationByHandle, UnlockFileEx, WriteFile,
@@ -219,6 +220,31 @@ pub fn attribute_tag(h: &Handle) -> RawResult<(u32, u32)> {
     };
     if ok != FALSE {
         Ok((info.FileAttributes, info.ReparseTag))
+    } else {
+        Err(last_error())
+    }
+}
+
+/// The volume serial number and 128-bit file id of an open handle
+/// (`FileIdInfo`): the same pair is the same file.
+///
+/// # Errors
+///
+/// The Win32 error.
+pub fn file_id(h: &Handle) -> RawResult<(u64, [u8; 16])> {
+    let mut info = FILE_ID_INFO::default();
+    // SAFETY: `info` is a correctly sized, writable FILE_ID_INFO matching
+    // the FileIdInfo class; it holds only integers and bytes.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            h.raw(),
+            FileIdInfo,
+            ptr::addr_of_mut!(info).cast::<c_void>(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if ok != FALSE {
+        Ok((info.VolumeSerialNumber, info.FileId.Identifier))
     } else {
         Err(last_error())
     }

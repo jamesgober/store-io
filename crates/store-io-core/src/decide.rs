@@ -266,6 +266,12 @@ fn unverified_reasons(ev: &Evidence) -> ReasonSet {
     if ev.platform == PlatformKind::MacOs && fs.full_flush == Tri::Unknown {
         r.insert(Reason::FullFlushUnsupported);
     }
+    // macOS qualifies only a built-in device: an external drive's bridge
+    // may complete `F_FULLFSYNC` early, and a disk image's backing file is
+    // another file system's data.
+    if ev.platform == PlatformKind::MacOs && d.internal != Tri::Yes {
+        r.insert(Reason::DeviceNotInternal);
+    }
     if d.os_cache_mode == OsCacheMode::WriteThrough && d.cache_present == Tri::Unknown {
         r.insert(Reason::CacheStateUnknown);
     }
@@ -528,7 +534,15 @@ mod tests {
         ev.platform = PlatformKind::MacOs;
         ev.fs.kind = FsKind::Apfs;
         ev.fs.full_flush = Tri::Yes;
+        ev.device.internal = Tri::Yes;
         assert_eq!(class(&ev).0, DurabilityClass::FlushRequired);
+        for not_internal in [Tri::No, Tri::Unknown] {
+            ev.device.internal = not_internal;
+            let d = decide(&ev, &Trust::default());
+            assert_eq!(d.class, DurabilityClass::Unverified);
+            assert!(d.reasons.contains(Reason::DeviceNotInternal));
+        }
+        ev.device.internal = Tri::Yes;
         ev.fs.full_flush = Tri::No;
         assert_eq!(class(&ev).0, DurabilityClass::Unsafe);
     }

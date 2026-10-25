@@ -56,9 +56,18 @@
 
 #[cfg(target_os = "linux")]
 mod alloc;
+#[cfg(target_os = "macos")]
+#[path = "mac/alloc.rs"]
+mod alloc;
 #[cfg(target_os = "linux")]
 mod dir;
+#[cfg(target_os = "macos")]
+#[path = "mac/dir.rs"]
+mod dir;
 #[cfg(target_os = "linux")]
+mod file;
+#[cfg(target_os = "macos")]
+#[path = "mac/file.rs"]
 mod file;
 /// Fuzz entry point for the probe's parsers (cargo-fuzz builds only).
 #[cfg(all(target_os = "linux", fuzzing))]
@@ -66,29 +75,45 @@ mod file;
 pub mod fuzzing;
 #[cfg(target_os = "linux")]
 mod lock;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+#[path = "mac/lock.rs"]
+mod lock;
+#[cfg(target_os = "macos")]
+#[path = "mac/platform.rs"]
+mod mac_platform;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pool;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod posix;
 #[cfg(target_os = "linux")]
 mod probe;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+#[path = "mac/probe.rs"]
+mod probe;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod queue;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod sync;
 #[cfg(target_os = "linux")]
+mod sys;
+#[cfg(target_os = "macos")]
+#[path = "mac/sys.rs"]
 mod sys;
 #[cfg(target_os = "linux")]
 mod uring;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use dir::PosixDir;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use file::PosixFile;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use lock::PosixLock;
+#[cfg(target_os = "macos")]
+pub use mac_platform::PosixPlatform;
 #[cfg(target_os = "linux")]
-pub use queue::{PosixQueue, PosixWaker, Registration};
+pub use queue::Registration;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use queue::{PosixQueue, PosixWaker};
 
 #[cfg(target_os = "linux")]
 pub use store_io_platform::LinuxTier;

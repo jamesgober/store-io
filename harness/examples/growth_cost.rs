@@ -22,7 +22,7 @@
     clippy::cast_precision_loss
 )]
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod cost {
     use std::path::Path;
     use std::sync::Arc;
@@ -218,11 +218,11 @@ mod cost {
     }
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn main() {
     cost::main();
 }
 
 /// No backend here.
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn main() {}

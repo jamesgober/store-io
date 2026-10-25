@@ -95,6 +95,14 @@ impl PosixFile {
         self.block_device
     }
 
+    /// What the queue's executor needs to know of the file.
+    #[inline]
+    pub(crate) fn traits(&self) -> sys::FileTraits {
+        sys::FileTraits {
+            bdev: self.block_device,
+        }
+    }
+
     /// The raw descriptor, valid while `self` is alive.
     #[inline]
     pub(crate) fn raw(&self) -> RawFd {

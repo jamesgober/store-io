@@ -52,14 +52,14 @@ Source: [`crates/store-io-core/src/class.rs`](../crates/store-io-core/src/class.
 The decision is a pure function of the evidence and the caller's trust inputs (section 6), with no I/O, so the same report always gives the same class. The rules apply in this order:
 
 1. **Unsafe**, if any unsafe reason applies (section 4): an unsafe file system (tmpfs, ramfs, FUSE, a network file system, overlayfs, FAT or exFAT, a pass-through file system such as 9p, drvfs or virtiofs, bcachefs), a RAM disk, direct I/O that is not honoured, data journaling, no write barriers, disabled syncs, compressed or software-encrypted files, flushes the OS reports unsupported or suppresses, Windows "turn off write-cache buffer flushing", parity RAID with a write hole, or a missing full-flush primitive on macOS. The unverified reasons that also apply are reported alongside.
-2. **Unverified**, if any unverified reason applies: an unqualified file system, a weak error mode, write-through reported over a cache whose presence is unknown, a USB device, a write-behind mirror member, a filter driver, a loop device, or a hypervisor. An attestation lifts this to `FlushRequired`.
+2. **Unverified**, if any unverified reason applies: an unqualified file system, a weak error mode, write-through reported over a cache whose presence is unknown, a USB device, a write-behind mirror member, a filter driver, a loop device, or a hypervisor; on macOS, a device not known to be internal, or a full-flush primitive not checked. An attestation lifts this to `FlushRequired`.
 3. Otherwise the stack is clean, and two facts can still block power-safe without making the stack unsafe: a layer that may allocate on overwrite (thin provisioning, deduplication, a virtual-disk file, a copy-on-write file system or a sparse file) and a write-back cache layer. Each adds its reason to the report; macOS also blocks power-safe.
 4. **PowerSafe (certified)**, if the caller supplies a certificate, nothing blocks power-safe, and the device has not reported a failed backup.
 5. If the device reports **no volatile write cache** and nothing blocks power-safe:
    - health readable and the backup working: **PowerSafe**;
    - health reports a failed backup: **FlushRequired** (reason `BackupFailed`);
    - health unreadable: **FlushRequired**, flagged in the report as a *power-safe candidate*.
-6. **FlushRequired**, if the operating system is known to pass flushes to the device: on Windows, the class driver reports flush support; on Linux, the block queue's cache mode is `write back`; on macOS, the full-flush primitive is supported.
+6. **FlushRequired**, if the operating system is known to pass flushes to the device: on Windows, the class driver reports flush support; on Linux, the block queue's cache mode is `write back`; on macOS, the full-flush primitive is supported (on an internal device: step 2).
 7. Otherwise **Unverified**, with reason `CacheStateUnknown`.
 
 Missing evidence never raises the class: a fact that cannot be read stays unknown, and every rule needs a known fact to promote. A device that reports a volatile cache, under an OS that passes flushes, is therefore `FlushRequired` however much else is missing, and a device whose cache state cannot be read at all is `Unverified`.
@@ -90,13 +90,14 @@ A reason says why a device is below power-safe, or why it was refused. The repor
 | `AllocatingLayer` | a thin, copy-on-write or virtual-disk layer may allocate on overwrite | Blocks power-safe; Unverified for a loop device | An LVM thin pool or snapshot, VDO deduplication, a copy-on-write file system, or a sparse file (Windows); a loop device makes it Unverified. A virtual-disk-file layer is defined, but no backend detects one yet. |
 | `Hypervisor` | running under a hypervisor without a certificate for this volume type | Unverified | A hypervisor is detected, or the disk is a virtual device. |
 | `FilterDriver` | a filter driver or software encryption layer sits in the stack | Unverified | A filter layer in the stack. Defined, but no backend detects one yet. |
-| `UntrustedBus` | device bus (USB, unknown) commonly drops or reorders flushes | Unverified | The device is attached over USB. (An unknown bus does not raise it.) |
+| `UntrustedBus` | device bus (USB) commonly drops or reorders flushes | Unverified | The device is attached over USB. (An unknown bus does not raise it.) |
 | `BackupFailed` | SMART reports the volatile-memory backup has failed | Demotes power-safe to flush-required | NVMe SMART critical warning bit 4 is set on a device that reports no volatile cache. |
 | `CacheStateUnknown` | volatile write cache state could not be read | Unverified | Write-through reported over a cache of unknown presence, or no rule could show that flushes reach the device. |
-| `FullFlushUnsupported` | the full-flush primitive is not supported (macOS F_FULLFSYNC) | Unsafe if known unsupported, Unverified if unknown | macOS only. |
+| `FullFlushUnsupported` | the full-flush primitive (macOS F_FULLFSYNC) is not supported, or was not checked | Unsafe if known unsupported, Unverified if unknown | macOS only: `F_FULLFSYNC` refused on the store's file or directory; unknown on a read-only open, which makes no flush check. |
 | `KnownBug` | known kernel or driver bug affecting this configuration | &mdash; | Reserved: no rule raises it yet. |
+| `DeviceNotInternal` | device not known to be internal (an external drive, a disk image, or not identified) | Unverified | macOS only: the device is not known to be built in. Until the macOS device probe lands, no device is identified, so every macOS store is Unverified. |
 
-Source: [`crates/store-io-core/src/class.rs`](../crates/store-io-core/src/class.rs) (`Reason`), [`crates/store-io-core/src/decide.rs`](../crates/store-io-core/src/decide.rs), [`crates/store-io-posix/src/probe/`](../crates/store-io-posix/src/probe/), [`crates/store-io-win/src/probe/`](../crates/store-io-win/src/probe/)
+Source: [`crates/store-io-core/src/class.rs`](../crates/store-io-core/src/class.rs) (`Reason`), [`crates/store-io-core/src/decide.rs`](../crates/store-io-core/src/decide.rs), [`crates/store-io-posix/src/probe/`](../crates/store-io-posix/src/probe/), [`crates/store-io-posix/src/mac/probe.rs`](../crates/store-io-posix/src/mac/probe.rs), [`crates/store-io-win/src/probe/`](../crates/store-io-win/src/probe/)
 
 ---
 

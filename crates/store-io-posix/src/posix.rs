@@ -59,6 +59,12 @@ pub(crate) fn mkdir(path: &CStr, mode: u32) -> RawResult<()> {
     check(unsafe { libc::mkdir(path.as_ptr(), mode as libc::mode_t) })
 }
 
+/// Removes an empty directory with `rmdir(2)`.
+pub(crate) fn rmdir(path: &CStr) -> RawResult<()> {
+    // SAFETY: rmdir(2): `path` is NUL-terminated and outlives the call.
+    check(unsafe { libc::rmdir(path.as_ptr()) })
+}
+
 /// Duplicates a descriptor onto the same open file description with
 /// `F_DUPFD_CLOEXEC` (fcntl(2)).
 pub(crate) fn dup_cloexec(fd: RawFd) -> RawResult<OwnedFd> {
@@ -77,6 +83,26 @@ pub(crate) fn fstat(fd: RawFd) -> RawResult<libc::stat> {
     let r = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
     check(r)?;
     // SAFETY: fstat returned 0, so every field was written by the kernel.
+    Ok(unsafe { st.assume_init() })
+}
+
+/// `lstat(2)` (`fstatat` with `AT_SYMLINK_NOFOLLOW`) of a path.
+pub(crate) fn lstat(path: &CStr) -> RawResult<libc::stat> {
+    let mut st = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstatat(2): `path` is NUL-terminated and outlives the call; a
+    // complete `struct stat` is written through the pointer on success and
+    // nothing on failure; the buffer is assumed initialised only after a 0
+    // return.
+    let r = unsafe {
+        libc::fstatat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            st.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    check(r)?;
+    // SAFETY: fstatat returned 0, so every field was written by the kernel.
     Ok(unsafe { st.assume_init() })
 }
 

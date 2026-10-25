@@ -43,6 +43,10 @@ where
     /// a format-1 store (read-only in 0.5: open it with
     /// [`Store::open_readonly`], or copy it to format 2 with
     /// [`copy_store`](crate::copy_store)) before anything is written,
+    /// [`Error::DurabilityUnknown`] when a dead owner's writes may not be
+    /// durable: the drain's flush failed, or the probe did (on macOS its
+    /// flush check is a flush; elsewhere it reads, and fails only on an I/O
+    /// error),
     /// [`Error::Io`] (`Io(Lock)` on a file system that cannot lock).
     pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
         Self::open_inner(platform, path, opts, false)
@@ -93,7 +97,20 @@ where
                 io(Op::Lock, raw)
             }
         })?;
-        let evidence = platform.probe(&dir, &file).map_err(|e| io(Op::Probe, e))?;
+        // A writable open's probe may flush (the macOS flush check): its
+        // failure leaves a dead owner's writes unknown, as the drain's below
+        // does. A reader's probe never flushes.
+        let evidence = platform.probe(&dir, &file).map_err(|e| {
+            if read_only {
+                io(Op::Probe, e)
+            } else {
+                Error::DurabilityUnknown {
+                    op: Op::Probe,
+                    raw: Some(e),
+                    ctx: ErrorContext::default(),
+                }
+            }
+        })?;
         let decision = decide(&evidence, &opts.trust);
         if !read_only {
             refuse(&decision)?;

@@ -94,10 +94,12 @@ flag_enum! {
         BackupFailed = 17,
         /// volatile write cache state could not be read
         CacheStateUnknown = 18,
-        /// the full-flush primitive is not supported (macOS F_FULLFSYNC)
+        /// the full-flush primitive (macOS F_FULLFSYNC) is not supported, or was not checked
         FullFlushUnsupported = 19,
         /// known kernel or driver bug affecting this configuration
         KnownBug = 20,
+        /// device not known to be internal (an external drive, a disk image, or not identified)
+        DeviceNotInternal = 21,
     }
 }
 

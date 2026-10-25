@@ -167,6 +167,36 @@ fn read(
     (result, buf.unwrap())
 }
 
+/// A create under a parent this caller may write and search but not read:
+/// its `..` cannot be opened, so the directory itself is synced instead
+/// (`fsync`, committing the transaction that holds its entry, then
+/// `syncfs`), and both a new directory and an existing one open. (Skipped
+/// as root, which can open anything.)
+#[test]
+fn test_an_unreadable_parent_is_synced_through_its_file_system() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TempDir::new();
+    let parent = t.path().join("parent");
+    std::fs::create_dir(&parent).unwrap();
+    let set = |mode| {
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    std::fs::create_dir(parent.join("old")).unwrap();
+    // Write and search, no read: mkdir works, opening the parent fails.
+    set(0o300);
+    let root = std::fs::read_dir(&parent).is_ok();
+    let p = PosixPlatform::new();
+    let made = p.open_dir(&parent.join("new"), true).map(drop);
+    let old = p.open_dir(&parent.join("old"), true).map(drop);
+    set(0o700);
+    if root {
+        return;
+    }
+    assert_eq!(made, Ok(()));
+    assert!(parent.join("new").is_dir());
+    assert_eq!(old, Ok(()));
+}
+
 #[test]
 fn test_create_allocate_write_read_roundtrip_with_probe_alignment() {
     let (_t, p, dir, file, pool, mut q) = setup();

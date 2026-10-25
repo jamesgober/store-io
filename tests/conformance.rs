@@ -7,7 +7,7 @@
 //! is refused (a virtual disk, a `nobarrier` mount), the store scenarios use
 //! the labelled override and say so.
 
-#![cfg(any(windows, target_os = "linux"))]
+#![cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::print_stderr)]
 
 use std::path::PathBuf;

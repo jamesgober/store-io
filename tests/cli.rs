@@ -2,7 +2,10 @@
 //! `store-io copy` (v0.5 E5 C2) copies a store, refuses a target holding
 //! one, and `store-io info` reads the copy.
 
-#![cfg(all(feature = "cli", any(windows, target_os = "linux")))]
+#![cfg(all(
+    feature = "cli",
+    any(windows, target_os = "linux", target_os = "macos")
+))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

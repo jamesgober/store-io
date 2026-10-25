@@ -32,7 +32,7 @@ use store_io_buf::{BufPool, IoBuf, PoolConfig};
 use store_io_core::class::Missing;
 use store_io_core::decide::Trust;
 use store_io_core::errno::{is_already_exists, is_not_found};
-use store_io_core::error::Error;
+use store_io_core::error::{Error, OsError, OsErrorSource};
 use store_io_core::evidence::Tri;
 use store_io_engine::{CONTAINER, Directory, ScanItem, Store, StoreOptions};
 use store_io_platform::{
@@ -824,10 +824,13 @@ fn allocate_range_keeps_size<P: Platform>(c: &Ctx<'_, P>) -> Check {
     let mut q = c.queue(4)?;
     let _w = write_one(&mut q, &f, 0, c.buf(&pattern(5, 32 * BLOCK))?, false)?;
     ok(c.p.flush_all(&f), "flush_all")?;
-    ok(
-        c.p.allocate_range(&f, 8 * BLOCK as u64, 8 * BLOCK as u64),
-        "allocate_range",
-    )?;
+    // macOS cannot allocate inside a file and says so; the rest of the
+    // contract still holds there. Elsewhere the file systems the suite runs
+    // on can.
+    match c.p.allocate_range(&f, 8 * BLOCK as u64, 8 * BLOCK as u64) {
+        Err(e) if cannot_allocate_inside(e) => {}
+        r => ok(r, "allocate_range")?,
+    }
     check!(
         ok(c.p.size(&f), "size")? == len,
         "allocate_range changed the file size"
@@ -860,6 +863,12 @@ fn allocate_range_keeps_size<P: Platform>(c: &Ctx<'_, P>) -> Check {
         "allocate_range on a read-only handle succeeded"
     );
     Ok(())
+}
+
+/// Whether `raw` is macOS's `ENOTSUP` (45) for an allocation inside a file,
+/// which it never makes. Nowhere else is a refusal accepted.
+fn cannot_allocate_inside(raw: OsError) -> bool {
+    cfg!(target_vendor = "apple") && raw.source == OsErrorSource::Errno && raw.code == 45
 }
 
 fn probe_is_honest<P: Platform>(c: &Ctx<'_, P>) -> Check {

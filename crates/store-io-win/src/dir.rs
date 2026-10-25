@@ -5,14 +5,17 @@ use core::mem::offset_of;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use store_io_core::errno::is_unsupported;
 use store_io_platform::{FileMode, FileName, RawResult};
-use windows_sys::Win32::Foundation::{ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY};
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY, ERROR_WRITE_PROTECT,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FileDispositionInfo, FileDispositionInfoEx,
-    FileRenameInfo, FileRenameInfoEx, OPEN_EXISTING,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FileRenameInfoEx, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
@@ -32,19 +35,40 @@ pub struct WinDir {
 }
 
 impl WinDir {
-    /// Opens `path`, creating it (and flushing its parent) when `create`.
+    /// Opens `path`; with `create`, creates it if missing, then flushes its
+    /// parent so the entry is durable. Also when the directory exists: an
+    /// earlier attempt that died, or one racing this, may have made it
+    /// without the flush. The parent of an existing directory is left as it
+    /// is where it cannot be opened for the flush (`ERROR_ACCESS_DENIED`:
+    /// Windows has no volume-wide flush an unprivileged caller may make, so
+    /// a directory made under such a parent by an attempt that died, or
+    /// raced this one, keeps an entry that may not be durable), where it is
+    /// write-protected (`ERROR_WRITE_PROTECT`), or where it cannot be
+    /// flushed (unsupported: SMB and WSL shares; `sync_dir` and the probe
+    /// class such a volume). A directory made here whose flush fails is
+    /// removed again (if it is still the one made), so a retry never meets
+    /// it as existing.
     pub(crate) fn open(path: &Path, create: bool) -> RawResult<Self> {
         let path = std::path::absolute(path)
             .map_err(|e| sys::win32(e.raw_os_error().unwrap_or(0) as u32))?;
-        let mut created = false;
-        if create {
-            created = sys::create_directory(&path)?;
-        }
+        let created = create && sys::create_directory(&path)?;
         let handle = open_dir_handle(&path)?;
-        if created {
+        if create {
             if let Some(parent) = path.parent() {
-                let p = open_dir_handle(parent)?;
-                sys::flush_file_buffers(&p)?;
+                match flush_parent(parent) {
+                    Ok(()) => {}
+                    Err(e)
+                        if !created
+                            && (e.code == ERROR_ACCESS_DENIED as i32
+                                || e.code == ERROR_WRITE_PROTECT as i32
+                                || is_unsupported(e)) => {}
+                    Err(e) => {
+                        if created {
+                            let _removed = remove_made(&path, &handle);
+                        }
+                        return Err(e);
+                    }
+                }
             }
         }
         Ok(Self {
@@ -163,6 +187,47 @@ impl WinDir {
     }
 }
 
+/// Removes the directory `path` names if it is the one `h` is open on (the
+/// same volume and file id): a second handle to it, with delete access,
+/// marked for deletion with POSIX semantics (its name goes at once, so a
+/// retry can make it again while another opener holds it; else the legacy
+/// disposition, when its last handle closes); one that is not empty stays.
+/// (`ReOpenFile` refuses a directory handle.) The handle is opened by path
+/// after the create, so a directory swapped in between the two would be
+/// the one checked against: an empty directory at worst.
+fn remove_made(path: &Path, h: &Handle) -> RawResult<()> {
+    let d = sys::create_file(
+        path,
+        DELETE | FILE_READ_ATTRIBUTES,
+        sys::SHARE_ALL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )?;
+    if sys::file_id(&d)? != sys::file_id(h)? {
+        return Err(sys::win32(ERROR_CANT_ACCESS_FILE));
+    }
+    let flags: u32 = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+    match sys::set_file_info(&d, FileDispositionInfoEx, &flags.to_le_bytes()) {
+        Err(e) if sys::is_unsupported(e) => sys::set_file_info(&d, FileDispositionInfo, &[1u8]),
+        r => r,
+    }
+}
+
+/// Flushes the directory `parent`, opened with only the right a directory
+/// needs to have been made in it (`FILE_ADD_SUBDIRECTORY`, which is
+/// `FILE_APPEND_DATA`, enough for `FlushFileBuffers`), following reparse
+/// points: the directory `path` names, which holds the entry.
+fn flush_parent(parent: &Path) -> RawResult<()> {
+    let h = sys::create_file(
+        parent,
+        FILE_ADD_SUBDIRECTORY,
+        sys::SHARE_ALL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+    )?;
+    sys::flush_file_buffers(&h)
+}
+
 /// Opens a directory handle with add-file access, refusing reparse points.
 fn open_dir_handle(path: &Path) -> RawResult<Handle> {
     let h = sys::create_file(
@@ -221,5 +286,25 @@ mod tests {
         assert_eq!(rec.len(), name_off + 12 + 2);
         assert_eq!(&rec[name_off..name_off + 2], &(b'C' as u16).to_le_bytes());
         assert_eq!(&rec[rec.len() - 2..], &[0, 0]);
+    }
+
+    /// A made directory is removed through a handle checked to be on it; a
+    /// different directory at the path is never removed.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn test_a_made_directory_is_removed_only_through_its_own_handle() {
+        let base = std::env::temp_dir().join(format!("sio-win-remove-{}", std::process::id()));
+        let _gone = std::fs::remove_dir_all(&base);
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let ha = open_dir_handle(&a).unwrap();
+        assert!(remove_made(&b, &ha).is_err());
+        assert!(b.is_dir());
+        remove_made(&a, &ha).unwrap();
+        // POSIX semantics: the name is gone while the handle is still open.
+        assert!(!a.exists());
+        drop(ha);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

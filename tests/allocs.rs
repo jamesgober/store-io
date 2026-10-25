@@ -4,7 +4,7 @@
 //! allocation in the process, on any thread, while 100 durable page writes
 //! run after 200 warm-up writes.
 
-#![cfg(any(windows, target_os = "linux"))]
+#![cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #![allow(clippy::unwrap_used, unused_results, unused_must_use)]
 
 use std::alloc::{GlobalAlloc, Layout, System};

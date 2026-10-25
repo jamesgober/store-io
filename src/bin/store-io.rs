@@ -95,7 +95,7 @@ fn is_flag(a: &str) -> bool {
     a.starts_with("--")
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn probe(dir: &str) -> Result<(), store_io::Error> {
     let p = store_io::probe(dir)?;
     let d = &p.decision;
@@ -113,7 +113,7 @@ fn probe(dir: &str) -> Result<(), store_io::Error> {
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn info(path: &str) -> Result<(), store_io::Error> {
     let store = store_io::Store::open_readonly(path)?;
     out!("{}", store.report());
@@ -176,7 +176,7 @@ fn copy_args<'a>(args: &[&'a str]) -> Option<(&'a str, &'a str, CopyFlags)> {
 
 /// Copies; `Ok(true)` when the report lists anything left out or not
 /// verified.
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 fn copy(from: &str, to: &str, flags: CopyFlags) -> Result<bool, store_io::Error> {
     let mut opts = store_io::CopyOptions::default();
     opts.store.trust.override_refusal = flags.override_refusal;
@@ -221,19 +221,19 @@ fn copy(from: &str, to: &str, flags: CopyFlags) -> Result<bool, store_io::Error>
         && r.superseded.is_empty()))
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn copy(_from: &str, _to: &str, _flags: CopyFlags) -> Result<bool, store_io::Error> {
     probe("").map(|()| false)
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn probe(_dir: &str) -> Result<(), store_io::Error> {
     Err(store_io::Error::Unsupported {
         what: store_io::Capability::Platform,
     })
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn info(_path: &str) -> Result<(), store_io::Error> {
     probe("")
 }

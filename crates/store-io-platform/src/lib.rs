@@ -440,7 +440,14 @@ pub trait Platform: Send + Sync + 'static {
     /// Per-thread queue.
     type Queue: Queue<File = Self::File>;
 
-    /// Opens a directory, creating it (and syncing its parent) if `create`.
+    /// Opens a directory; with `create`, creates it if missing and syncs its
+    /// parent (the directory holding its entry), also when it already exists
+    /// (an earlier attempt may have died before the sync). For an existing
+    /// directory, a parent that cannot be synced on that volume (no
+    /// directory flush: unsupported; read-only on macOS; on Windows not
+    /// openable for it or write-protected) is not an error. A directory this
+    /// call made is removed again if its sync fails (POSIX: also its open),
+    /// when it is still the one made.
     ///
     /// # Errors
     ///
@@ -623,7 +630,8 @@ pub trait Platform: Send + Sync + 'static {
     /// `ERROR_INVALID_PARAMETER`); a read-only handle (`EBADF`,
     /// `ERROR_ACCESS_DENIED`); a file system that cannot allocate inside a
     /// file (Linux `EOPNOTSUPP`: ext4 without extents, NFS before 4.2, many
-    /// FUSE file systems) or a file whose space a write may still need to
+    /// FUSE file systems; macOS `ENOTSUP`, always: `F_PREALLOCATE` only
+    /// extends a file) or a file whose space a write may still need to
     /// allocate (Windows: sparse, compressed or integrity-stream files,
     /// `ERROR_NOT_SUPPORTED`) as unsupported.
     fn allocate_range(&self, file: &Self::File, offset: u64, len: u64) -> RawResult<()>;

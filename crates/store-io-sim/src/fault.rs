@@ -85,4 +85,7 @@ pub struct FaultPlan {
     /// directory of this path fails with this raw code (for example 13,
     /// EACCES).
     pub fail_open: Option<(std::path::PathBuf, String, i32)>,
+    /// Every `Platform::probe` fails with this raw code (for example 5,
+    /// EIO, as the macOS flush check's `F_FULLFSYNC` failing).
+    pub fail_probe: Option<i32>,
 }

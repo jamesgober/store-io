@@ -20,10 +20,18 @@ use std::os::fd::{OwnedFd, RawFd};
 use store_io_platform::RawResult;
 
 pub(crate) use crate::posix::{
-    SignalsBlocked, dup_cloexec, errno, flock, fstat, fsync, ftruncate, last_errno, mkdir, openat,
-    renameat, unblock_fault_signals, unlinkat,
+    SignalsBlocked, dup_cloexec, errno, flock, fstat, fsync, ftruncate, last_errno, lstat, mkdir,
+    openat, renameat, rmdir, unblock_fault_signals, unlinkat,
 };
 use crate::posix::{check, owned};
+
+/// `syncfs(2)`: commits the whole file system holding `fd`. Writeback
+/// errors are reported from Linux 5.8, the file system's own commit error
+/// only from 5.17; before, it may return 0 after a failure.
+pub(crate) fn syncfs(fd: RawFd) -> RawResult<()> {
+    // SAFETY: syncfs(2) takes only a descriptor.
+    check(unsafe { libc::syncfs(fd) })
+}
 
 // ----- opening --------------------------------------------------------------
 
@@ -311,6 +319,13 @@ pub(crate) fn monotonic_coarse_ms() -> u64 {
 
 // ----- data -----------------------------------------------------------------
 
+/// What the queue's executor needs to know of a file: whether it is a raw
+/// block device.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FileTraits {
+    pub(crate) bdev: bool,
+}
+
 /// A data write of one buffer at `offset` (the queue's executor): durable
 /// at completion when `dsync` (`pwritev2(RWF_DSYNC)`), except on a raw
 /// block device, where the synchronous `RWF_DSYNC` path issues both a FUA
@@ -323,8 +338,9 @@ pub(crate) fn write_data(
     len: usize,
     offset: libc::off_t,
     dsync: bool,
-    bdev: bool,
+    traits: FileTraits,
 ) -> RawResult<usize> {
+    let bdev = traits.bdev;
     let flags: c_int = if dsync && !bdev { libc::RWF_DSYNC } else { 0 };
     let mut result = pwritev2(fd, ptr, len, offset, flags);
     if dsync && bdev && result == Ok(len) {
@@ -348,7 +364,7 @@ pub(crate) fn read_data(
 /// A data flush (`fdatasync`): the data, the metadata needed to read it,
 /// and a device cache flush.
 #[inline]
-pub(crate) fn flush_data(fd: RawFd) -> RawResult<()> {
+pub(crate) fn flush_data(fd: RawFd, _traits: FileTraits) -> RawResult<()> {
     fdatasync(fd)
 }
 

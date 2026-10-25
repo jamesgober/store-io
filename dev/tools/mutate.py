@@ -982,8 +982,9 @@ M = [
  (EXEC_SRC, "                        if submitted == 0 {\n                            return Pumped::Refused(r.raw);\n                        }\n                        failure = Some(r.raw);\n                        break;", "                        if false {\n                            return Pumped::Refused(r.raw);\n                        }\n                        failure = Some(r.raw);\n                        break;", INLINE),
  (EXEC_SRC, "                        submitted += 1;\n                        obs.add(Counter::Writes, 1);\n                        obs.add(Counter::WriteBytes, bytes);\n                        match (result, buf) {", "                        obs.add(Counter::Writes, 1);\n                        obs.add(Counter::WriteBytes, bytes);\n                        match (result, buf) {", INLINE),
  ('crates/store-io-engine/src/optable.rs', "        self.mark.set(2 * seq + 1);", "        self.mark.set(2 * seq);", INLINE),
- ('crates/store-io-posix/src/queue.rs', "        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()", "        self.uring.is_none() && self.pooled.is_none()", POSIX),
- ('crates/store-io-posix/src/queue.rs', "        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()", "        false", POSIX),
+ ('crates/store-io-posix/src/queue.rs', "        self.pooled.is_none() && self.ready.is_empty()\n    }", "        self.pooled.is_none()\n    }", POSIX),
+ ('crates/store-io-posix/src/queue.rs', "        self.pooled.is_none() && self.ready.is_empty()\n    }", "        false\n    }", POSIX),
+ ('crates/store-io-posix/src/queue.rs', "        if self.uring.is_some() {\n            return false;\n        }\n        self.pooled", "        if false {\n            return false;\n        }\n        self.pooled", POSIX),
  ('crates/store-io-posix/src/queue.rs', "        if !self.performs() {\n            return Ok(Err(op));\n        }\n        Ok(Ok(check(op, PosixFile::raw)?.perform()))", "        if false {\n            return Ok(Err(op));\n        }\n        Ok(Ok(check(op, PosixFile::raw)?.perform()))", POSIX),
  # E7 C1: each cached write's exact fate (kept whole, torn at whole
  # blocks and never past its end, lost, lost past the list); its length
@@ -1039,6 +1040,15 @@ M = [
  ('crates/store-io-engine/src/open2.rs', '            if short {\n                c.outcome = Err(Unavailable::ContainerShort {', '            if false {\n                c.outcome = Err(Unavailable::ContainerShort {', ['-p', 'store-io-engine', '--test', 'format2_repair']),
  ('crates/store-io-engine/src/open2.rs', '                usage: (!c.short)\n                    .then(', '                usage: true\n                    .then(', ['-p', 'store-io-engine', '--test', 'format2_repair']),
  ('crates/store-io-engine/src/open2.rs', '                short: c.short,', '                short: false,', ['-p', 'store-io-engine', '--test', 'format2_repair']),
+ # macOS M2: only a built-in device is qualified on macOS (an unknown one
+ # is not); a writable open's probe failing (the flush check) is
+ # DurabilityUnknown, a reader's plain Io
+ ('crates/store-io-core/src/decide.rs', '    if ev.platform == PlatformKind::MacOs && d.internal != Tri::Yes {', '    if ev.platform == PlatformKind::MacOs && d.internal == Tri::No {', ['-p', 'store-io-core', '--lib', 'decide::']),
+ ('crates/store-io-engine/src/open.rs', '            if read_only {\n                io(Op::Probe, e)', '            if true {\n                io(Op::Probe, e)', ['-p', 'store-io-engine', '--test', 'refused']),
+ ('crates/store-io-engine/src/open.rs', '            if read_only {\n                io(Op::Probe, e)', '            if false {\n                io(Op::Probe, e)', ['-p', 'store-io-engine', '--test', 'refused']),
+ # A create under a parent this caller may not read syncs the parent's file
+ # system instead (its entry is there too)
+ ('crates/store-io-posix/src/dir.rs', '        Err(e) if matches!(e.code, libc::EACCES | libc::EPERM) => {\n            sys::fsync(dirfd)', '        Err(e) if e.code < 0 => {\n            sys::fsync(dirfd)', POSIX + ['--test', 'linux']),
 ]
 
 def kill_stuck_tests():

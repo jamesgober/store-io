@@ -1,22 +1,30 @@
-//! The Linux queue. On the synchronous tier (T3), inline, each operation is
-//! one system call made inside `submit`, and its completion is pushed into a
-//! fixed ready ring; pooled (`QueueConfig::parallel`, D-096), `submit` hands
-//! the operation to the platform's submit pool and its completion arrives in
-//! the queue's inbox. On the io_uring tier the queue is a ring
-//! (`crate::uring::queue`).
+//! The POSIX queue. Inline (Linux's synchronous tier, T3, and every lone
+//! operation on macOS), each operation is one system call made inside
+//! `submit`, and its completion is pushed into a fixed ready ring; pooled
+//! (`QueueConfig::parallel`, D-096), `submit` hands the operation to the
+//! platform's submit pool and its completion arrives in the queue's inbox.
+//! On Linux's io_uring tier the queue is a ring (`crate::uring::queue`).
+//! The system calls themselves are the OS's (`sys::write_data`,
+//! `read_data`, `flush_data`).
 
 use core::ffi::c_int;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use store_io_platform::OsError;
 use store_io_platform::{
-    Completion, CompletionBuf, IoBuf, IoOp, OsError, Queue, QueueConfig, RawResult, Rejected, Wake,
+    Completion, CompletionBuf, IoBuf, IoOp, Queue, QueueConfig, RawResult, Rejected, Wake,
 };
 
 use crate::file::PosixFile;
 use crate::pool::{Inbox, Job, SubmitPool};
 use crate::sys;
+#[cfg(target_os = "linux")]
 use crate::uring::queue::UringQueue;
+#[cfg(target_os = "linux")]
 use crate::uring::ring::Flavour;
 
 /// A per-thread synchronous queue.
@@ -41,7 +49,7 @@ use crate::uring::ring::Flavour;
 /// In both modes at most `depth` operations are submitted and not yet
 /// reaped; beyond that `submit` refuses the operation and returns its buffer.
 ///
-/// **io_uring** (a platform on [`crate::LinuxTier::Uring`]), for a queue
+/// **io_uring** (Linux, a platform on `LinuxTier::Uring`), for a queue
 /// that keeps several operations in flight (`parallel`, or
 /// [`store_io_platform::Owner::Thread`]): each read and write is submitted
 /// to a ring without blocking and completes asynchronously. A queue for one
@@ -51,11 +59,14 @@ use crate::uring::ring::Flavour;
 /// tier too (D-104). Dropping it waits for every operation in
 /// flight. What the kernel cannot do without blocking, or transfers short,
 /// is finished by one blocking call in `reap` or `wait` (counted:
-/// [`PosixQueue::fallbacks`]). A durable write uses `RWF_DSYNC` on every
+/// `PosixQueue::fallbacks`). A durable write uses `RWF_DSYNC` on every
 /// file, raw block devices included (there the asynchronous path makes it a
 /// FUA write).
 ///
-/// On the synchronous tier, a write asked for durability at completion uses
+/// On macOS, a write asked for durability at completion is a `pwrite`, then
+/// a flush of the file (`F_FULLFSYNC`, or `fsync` on a volume that refused
+/// it). On Linux's synchronous tier, a write asked for durability at
+/// completion uses
 /// `RWF_DSYNC`, except on a raw block device, where the synchronous
 /// `RWF_DSYNC` path issues both a FUA write and a cache flush: there the
 /// write is plain and one `fdatasync` follows it. Short transfers are
@@ -94,11 +105,13 @@ pub struct PosixQueue {
     ready: Vec<Completion>,
     depth: usize,
     pooled: Option<Pooled>,
+    #[cfg(target_os = "linux")]
     uring: Option<UringQueue>,
 }
 
 /// What an io_uring queue registered (D-078), from
 /// [`PosixQueue::registered`].
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Registration {
     /// The file is the ring's direct descriptor.
@@ -138,12 +151,14 @@ impl PosixQueue {
             ready: Vec::with_capacity(depth),
             depth,
             pooled: None,
+            #[cfg(target_os = "linux")]
             uring: None,
         }
     }
 
     /// A queue on an io_uring ring, thread-owned if `owned`, registering
     /// `reg` on an owned ring (D-078, best effort).
+    #[cfg(target_os = "linux")]
     pub(crate) fn uring(
         cfg: QueueConfig,
         owned: bool,
@@ -165,6 +180,7 @@ impl PosixQueue {
 
     /// What this queue's ring registered (D-078), and how many operations
     /// used it; `None` off a ring.
+    #[cfg(target_os = "linux")]
     #[must_use]
     pub fn registered(&self) -> Option<Registration> {
         self.uring.as_ref().map(|u| {
@@ -179,6 +195,7 @@ impl PosixQueue {
 
     /// Operations the io_uring tier finished with a blocking call because
     /// the kernel would have blocked (0 on the synchronous tier).
+    #[cfg(target_os = "linux")]
     #[must_use]
     pub fn fallbacks(&self) -> u64 {
         self.uring.as_ref().map_or(0, UringQueue::fallbacks)
@@ -196,6 +213,7 @@ impl PosixQueue {
                 inbox: Arc::new(Inbox::new(depth)),
                 in_flight: 0,
             }),
+            #[cfg(target_os = "linux")]
             uring: None,
         }
     }
@@ -228,7 +246,7 @@ fn depth_of(cfg: QueueConfig) -> usize {
 pub(crate) enum Work<F> {
     Write {
         fd: F,
-        bdev: bool,
+        traits: sys::FileTraits,
         offset: libc::off_t,
         buf: IoBuf,
         dsync: bool,
@@ -240,24 +258,32 @@ pub(crate) enum Work<F> {
     },
     Flush {
         fd: F,
+        traits: sys::FileTraits,
     },
 }
 
 impl<F: AsRawFd> Work<F> {
     /// Performs the operation: one system call, or two for a durable write
-    /// to a raw block device. Returns the buffer and the raw outcome; the
+    /// that needs a flush after it (a raw block device on Linux; every
+    /// durable write on macOS). Returns the buffer and the raw outcome; the
     /// descriptor is dropped before this returns.
     pub(crate) fn perform(self) -> (Option<IoBuf>, RawResult<usize>) {
         match self {
             Self::Write {
                 fd,
-                bdev,
+                traits,
                 offset,
                 buf,
                 dsync,
             } => {
-                let result =
-                    sys::write_data(fd.as_raw_fd(), buf.as_ptr(), buf.len(), offset, dsync, bdev);
+                let result = sys::write_data(
+                    fd.as_raw_fd(),
+                    buf.as_ptr(),
+                    buf.len(),
+                    offset,
+                    dsync,
+                    traits,
+                );
                 drop(fd);
                 (Some(buf), result)
             }
@@ -271,8 +297,8 @@ impl<F: AsRawFd> Work<F> {
                 drop(fd);
                 (Some(buf), result)
             }
-            Self::Flush { fd } => {
-                let result = sys::flush_data(fd.as_raw_fd()).map(|()| 0);
+            Self::Flush { fd, traits } => {
+                let result = sys::flush_data(fd.as_raw_fd(), traits).map(|()| 0);
                 drop(fd);
                 (None, result)
             }
@@ -306,7 +332,7 @@ fn check<F>(op: IoOp<'_, PosixFile>, fd: impl Fn(&PosixFile) -> F) -> Result<Wor
             };
             Ok(Work::Write {
                 fd: fd(file),
-                bdev: file.is_block_device(),
+                traits: file.traits(),
                 offset,
                 buf,
                 dsync,
@@ -326,7 +352,10 @@ fn check<F>(op: IoOp<'_, PosixFile>, fd: impl Fn(&PosixFile) -> F) -> Result<Wor
             if !file.is_writable() {
                 return Err(refuse(None, libc::EBADF));
             }
-            Ok(Work::Flush { fd: fd(file) })
+            Ok(Work::Flush {
+                fd: fd(file),
+                traits: file.traits(),
+            })
         }
     }
 }
@@ -341,6 +370,7 @@ enum Wakes {
     Inline,
     Pooled(Arc<Inbox>),
     /// The eventfd an io_uring queue's wait watches.
+    #[cfg(target_os = "linux")]
     Ring(Arc<OwnedFd>),
 }
 
@@ -349,6 +379,7 @@ impl core::fmt::Debug for PosixWaker {
         let kind = match self.0 {
             Wakes::Inline => "inline",
             Wakes::Pooled(_) => "pooled",
+            #[cfg(target_os = "linux")]
             Wakes::Ring(_) => "ring",
         };
         f.debug_tuple("PosixWaker").field(&kind).finish()
@@ -360,6 +391,7 @@ impl Wake for PosixWaker {
         match &self.0 {
             Wakes::Inline => {}
             Wakes::Pooled(inbox) => inbox.wake(),
+            #[cfg(target_os = "linux")]
             Wakes::Ring(fd) => crate::uring::sys::eventfd_signal(fd),
         }
     }
@@ -370,6 +402,7 @@ impl Queue for PosixQueue {
     type Waker = PosixWaker;
 
     fn submit(&mut self, op: IoOp<'_, PosixFile>, tag: u64) -> Result<(), Rejected> {
+        #[cfg(target_os = "linux")]
         if let Some(u) = &mut self.uring {
             return u.submit(op, tag);
         }
@@ -401,6 +434,7 @@ impl Queue for PosixQueue {
     }
 
     fn reap(&mut self, out: &mut CompletionBuf) -> usize {
+        #[cfg(target_os = "linux")]
         if let Some(u) = &mut self.uring {
             return u.reap(out);
         }
@@ -415,6 +449,7 @@ impl Queue for PosixQueue {
     }
 
     fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
+        #[cfg(target_os = "linux")]
         if let Some(u) = &mut self.uring {
             return u.wait(min, out);
         }
@@ -440,7 +475,11 @@ impl Queue for PosixQueue {
 
     /// The inline synchronous queue, holding no completion.
     fn performs(&self) -> bool {
-        self.uring.is_none() && self.pooled.is_none() && self.ready.is_empty()
+        #[cfg(target_os = "linux")]
+        if self.uring.is_some() {
+            return false;
+        }
+        self.pooled.is_none() && self.ready.is_empty()
     }
 
     fn perform<'a>(
@@ -454,16 +493,21 @@ impl Queue for PosixQueue {
     }
 
     fn in_flight(&self) -> usize {
-        self.ready.len()
-            + self.pooled.as_ref().map_or(0, |p| p.in_flight)
-            + self.uring.as_ref().map_or(0, UringQueue::in_flight)
+        #[cfg(target_os = "linux")]
+        let ring = self.uring.as_ref().map_or(0, UringQueue::in_flight);
+        #[cfg(not(target_os = "linux"))]
+        let ring = 0;
+        self.ready.len() + self.pooled.as_ref().map_or(0, |p| p.in_flight) + ring
     }
 
     fn waker(&self) -> PosixWaker {
-        PosixWaker(match (&self.uring, &self.pooled) {
-            (Some(u), _) => Wakes::Ring(u.waker()),
-            (None, Some(p)) => Wakes::Pooled(Arc::clone(&p.inbox)),
-            (None, None) => Wakes::Inline,
+        #[cfg(target_os = "linux")]
+        if let Some(u) = &self.uring {
+            return PosixWaker(Wakes::Ring(u.waker()));
+        }
+        PosixWaker(match &self.pooled {
+            Some(p) => Wakes::Pooled(Arc::clone(&p.inbox)),
+            None => Wakes::Inline,
         })
     }
 

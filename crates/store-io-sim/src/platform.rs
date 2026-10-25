@@ -612,6 +612,12 @@ impl Platform for SimPlatform {
     fn probe(&self, _dir: &SimDir, file: &SimFile) -> RawResult<Evidence> {
         let w = lock(&self.world);
         file.check(&w, false)?;
+        if let Some(code) = w.faults().fail_probe {
+            return Err(OsError {
+                code,
+                source: OsErrorSource::Sim,
+            });
+        }
         if let Some(ev) = &w.config().evidence {
             return Ok(ev.clone());
         }

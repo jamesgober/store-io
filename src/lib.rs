@@ -25,8 +25,14 @@
 //!
 //! ## Quick start
 //!
-#![cfg_attr(any(windows, target_os = "linux"), doc = "```no_run")]
-#![cfg_attr(not(any(windows, target_os = "linux")), doc = "```ignore")]
+#![cfg_attr(
+    any(windows, target_os = "linux", target_os = "macos"),
+    doc = "```no_run"
+)]
+#![cfg_attr(
+    not(any(windows, target_os = "linux", target_os = "macos")),
+    doc = "```ignore"
+)]
 //! use store_io::{Store, StoreOptions};
 //!
 //! // First run: create. Every later run: `Store::open`.
@@ -80,16 +86,17 @@
 //!
 //! ## Platforms
 //!
-//! Windows (unbuffered overlapped I/O on IOCP) and Linux (direct I/O,
-//! `pwritev2`) have native backends ([`NativePlatform`]). On other targets the
-//! types compile but there is no native backend yet; macOS arrives in 0.5.
+//! Windows (unbuffered overlapped I/O on IOCP), Linux (direct I/O, io_uring
+//! or `pwritev2`) and macOS (`pwrite` and `F_FULLFSYNC`, uncached where the
+//! kernel can) have native backends ([`NativePlatform`]). On other targets the
+//! types compile but there is no native backend.
 
 #![deny(warnings)]
 #![forbid(unsafe_code)]
 // Without a native backend the simple-API types do not exist, so the links
 // above have no target there.
 #![cfg_attr(
-    not(any(windows, target_os = "linux")),
+    not(any(windows, target_os = "linux", target_os = "macos")),
     allow(rustdoc::broken_intra_doc_links)
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -126,7 +133,7 @@ pub mod submit {
 
     /// The waker of a [`Submitter`](crate::Submitter) on the native backend
     /// (`Submitter::waker`).
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     pub type Waker = store_io_engine::SubmitterWaker<
         <<crate::NativePlatform as store_io_platform::Platform>::Queue as store_io_platform::Queue>::Waker,
     >;
@@ -137,7 +144,7 @@ pub mod submit {
 pub type NativePlatform = store_io_win::WinPlatform;
 
 /// The operating system's native backend.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub type NativePlatform = store_io_posix::PosixPlatform;
 
 /// Operations, process-wide, that the io_uring tier finished with a
@@ -146,10 +153,10 @@ pub type NativePlatform = store_io_posix::PosixPlatform;
 #[cfg(target_os = "linux")]
 pub use store_io_posix::io_uring_fallbacks;
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 mod native;
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use native::{
     AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, Reservation, Slot, Store,
     Submitter, copy_store, probe,

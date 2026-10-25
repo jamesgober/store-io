@@ -32,6 +32,41 @@ fn store(seed: u64) -> (SimPlatform, Store<SimPlatform>) {
     (p, s)
 }
 
+/// A writable open's probe that fails (the macOS flush check's
+/// `F_FULLFSYNC` failing, by any code) leaves a dead owner's writes
+/// unknown: `DurabilityUnknown`, as the drain after it would be. A reader
+/// never flushes, so its probe failing is a plain `Io`.
+#[test]
+fn test_a_writable_opens_failed_probe_is_durability_unknown() {
+    use store_io_core::error::Op;
+    let (p, s) = store(31);
+    drop(s);
+    let opts = StoreOptions::default();
+    p.with_world(|w| w.faults_mut().fail_probe = Some(EIO));
+    let r = Store::open(p.clone(), Path::new("/db"), opts.clone());
+    assert!(
+        matches!(&r, Err(Error::DurabilityUnknown { op: Op::Probe, raw: Some(e), .. }) if e.code == EIO),
+        "{:?}",
+        r.err()
+    );
+    let r = Store::open_readonly(p.clone(), Path::new("/db"), opts.clone());
+    assert!(
+        matches!(&r, Err(Error::Io { op: Op::Probe, .. })),
+        "{:?}",
+        r.err()
+    );
+    // ENXIO (the drive gone): not a media error, as unknown.
+    p.with_world(|w| w.faults_mut().fail_probe = Some(6));
+    let r = Store::open(p.clone(), Path::new("/db"), opts.clone());
+    assert!(
+        matches!(&r, Err(Error::DurabilityUnknown { op: Op::Probe, raw: Some(e), .. }) if e.code == 6),
+        "{:?}",
+        r.err()
+    );
+    p.with_world(|w| w.faults_mut().fail_probe = None);
+    Store::open(p, Path::new("/db"), opts).unwrap();
+}
+
 /// Refuses the next write submission with EIO.
 fn refuse_next_write(p: &SimPlatform) {
     p.with_world(|w| {

@@ -6,7 +6,7 @@
 //! with the documented labelled override, and the test asserts that every
 //! receipt says so. Nothing here weakens the class decision.
 
-#![cfg(any(windows, target_os = "linux"))]
+#![cfg(any(windows, target_os = "linux", target_os = "macos"))]
 // Test setup unwraps (a failure is the test failing) and ignores values a
 // given test does not inspect.
 #![allow(
@@ -595,6 +595,11 @@ fn test_the_io_tier_is_chosen_and_reported() {
     drop((wal, store));
     if cfg!(windows) {
         assert_eq!(io.interface, IoInterface::Iocp);
+        return;
+    }
+    // macOS has one path, whatever the tier asks.
+    if cfg!(target_os = "macos") {
+        assert_eq!(io.interface, IoInterface::Synchronous);
         return;
     }
     assert_eq!(

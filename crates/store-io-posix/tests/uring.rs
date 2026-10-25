@@ -575,3 +575,17 @@ fn test_a_registered_ring_finishes_a_read_past_the_end_by_the_fallback() {
             .all(|&b| b == 0x5E)
     );
 }
+
+/// A ring queue never performs inline, not even while nothing is in flight
+/// or waiting: every operation goes through its ring.
+#[test]
+fn test_a_ring_queue_never_performs_inline() {
+    for owner in [Owner::Shared, Owner::Thread] {
+        let Some(f) = fixture(4) else { return };
+        let mut q = queue(&f.p, owner, 8);
+        assert!(!q.performs(), "{owner:?}");
+        let Ok(Err(IoOp::FlushData { .. })) = q.perform(IoOp::FlushData { file: &f.file }) else {
+            panic!("{owner:?}: a ring queue performed inline");
+        };
+    }
+}

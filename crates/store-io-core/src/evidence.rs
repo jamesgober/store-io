@@ -75,9 +75,9 @@ pub struct DeviceFacts {
     /// Interconnect.
     pub bus: Bus,
     /// The device is built into the machine: not an external or removable
-    /// drive and not a disk image. Only an internal device is qualified on
-    /// macOS; `Unknown` until the macOS backend's device probe reads it,
-    /// and elsewhere.
+    /// drive and not a disk image. Read on macOS (DiskArbitration and
+    /// IOKit), where only an internal device is qualified; `Unknown`
+    /// elsewhere.
     pub internal: Tri,
     /// The device reports a volatile write cache (NVMe Identify VWC bit 0,
     /// SCSI caching mode page, ATA identify).

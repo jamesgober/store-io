@@ -340,9 +340,10 @@ mod tests {
     }
 
     /// A reader's probe makes no flush check; a writer's store is Unverified
-    /// until the device is known to be internal.
+    /// (`DeviceNotInternal`) exactly when its device is not known to be
+    /// internal.
     #[test]
-    fn test_a_reader_makes_no_flush_check_and_no_device_is_internal_yet() {
+    fn test_a_reader_makes_no_flush_check_and_the_device_decides_internal() {
         use store_io_core::class::Reason;
         use store_io_core::decide::{Trust, decide};
         let path = scratch("reader");
@@ -361,7 +362,12 @@ mod tests {
         let ev = p.probe(&dir, &w).unwrap();
         assert_eq!(ev.fs.full_flush, Tri::Yes);
         let d = decide(&ev, &Trust::default());
-        assert!(d.reasons.contains(Reason::DeviceNotInternal), "{d:?}");
+        assert_eq!(
+            d.reasons.contains(Reason::DeviceNotInternal),
+            ev.device.internal != Tri::Yes,
+            "{:?} {d:?}",
+            ev.device
+        );
         drop((r, w, dir));
         std::fs::remove_dir_all(&path).unwrap();
     }

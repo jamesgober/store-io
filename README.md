@@ -89,7 +89,7 @@ let (start, receipt) = batch.commit()?;
 | [`docs/API.md`](./docs/API.md) | Every public item, grouped by purpose. |
 | [`docs/DURABILITY.md`](./docs/DURABILITY.md) | The durability model: classes, evidence, trust, receipts, flush sharing, fail-stop. |
 | [`docs/PLATFORMS.md`](./docs/PLATFORMS.md) | What store-io does on Windows, Linux and macOS, and the known limits of each. |
-| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk format 1 (stores made by 0.4 and earlier); format 2's follows. |
+| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk formats: format 2 (made by 0.5), and format 1 (made by 0.4 and earlier, read-only from 0.5). |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Every change. |
 
 ## Installation

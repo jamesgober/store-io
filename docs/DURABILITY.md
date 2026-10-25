@@ -274,7 +274,7 @@ Source: [`crates/store-io-engine/src/receipt.rs`](../crates/store-io-engine/src/
 | Windows | The smaller of the file system's reported atomicity and the device's raw unit; nothing if either is unknown. |
 | macOS, SATA, SAS, anything else | Nothing. |
 
-No write path claims an untorn unit yet, so every receipt reports `untorn() == false`. Slots and the region table do not depend on untorn writes: their A/B layout tolerates any tear ([Format](./FORMAT.md), section 13).
+No write path claims an untorn unit yet, so every receipt reports `untorn() == false`. Slots and the region table do not depend on untorn writes: their A/B layout tolerates any tear ([Format](./FORMAT.md), section 19; format 1: F13).
 
 Source: [`crates/store-io-core/src/untorn.rs`](../crates/store-io-core/src/untorn.rs), [`crates/store-io-engine/src/io.rs`](../crates/store-io-engine/src/io.rs) (`receipt`)
 

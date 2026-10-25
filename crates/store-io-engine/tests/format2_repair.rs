@@ -913,6 +913,31 @@ fn test_a_cut_off_newer_entry_keeps_its_name_from_an_older_region() {
     assert!(is_overlap(&e, 1), "{e:?}");
 }
 
+/// A newer entry of a name failing the entry checks for a fault of its own
+/// (its data size past its capacity; not the file's length, which is
+/// judged as a cut-short entry) takes the name from an older region too,
+/// at the open and in the judgement before a removal: an unrelated repair is
+/// allowed (the older one stays demoted by that name).
+#[test]
+fn test_an_invalid_newer_entry_keeps_its_name_from_an_older_region() {
+    let p = fresh(1238);
+    // X first, unrelated, its header never written.
+    let mut x = region(0, RegionKind::Page, "x", BASE, CAP);
+    x.write_header = false;
+    let old_at = BASE + 2 * B + CAP;
+    let mut old = region(1, RegionKind::Page, "n", old_at, CAP);
+    old.entry.footprint_seq = 1;
+    let mut new = region(2, RegionKind::Page, "n", old_at + 2 * B + CAP, CAP);
+    new.entry.data_size = CAP + B;
+    write_regions(&p, 0, &[x, old, new]);
+    let s = open(&p);
+    assert_eq!(s.unavailable_regions().len(), 3);
+    assert!(matches!(s.page_region("n"), Err(Error::Corruption { .. })));
+    s.repair_unavailable(id_of(&s, "x")).unwrap();
+    let e = s.repair_unavailable(RegionId::from_raw(2)).unwrap_err();
+    assert!(is_overlap(&e, 1), "{e:?}");
+}
+
 /// The judgement before a removal counts names of entries failing step 3:
 /// an older region demoted by a newer one of its name with no header stays
 /// demoted, so an unrelated repair is allowed.

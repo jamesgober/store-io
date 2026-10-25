@@ -247,7 +247,7 @@ Every error carries the operation, the region and byte range where known, and th
 | Error | What happened | What to do |
 |---|---|---|
 | `NotWritten { cause }` | Refused before reaching the device; the media is untouched. | Fix the cause (alignment, bounds, size, name, read-only, `NotPositioned`) and retry. |
-| `DurabilityUnknown` | A write or flush failed after submission; the bytes may or may not be durable. The device's barrier domain is now poisoned. | Stop writing. Drop the store, reopen, and recover with a scan. |
+| `DurabilityUnknown` | A write or flush failed after submission; the bytes may or may not be durable. The device's barrier domain is now poisoned. From `Store::open` (`op` `FlushAll` or `Probe`): a dead owner's writes could not be made durable, and no store was opened. | Stop writing. Drop the store, reopen, and recover with a scan. After a failed open: fix the device and open again; the store's own state is checked at the next open. |
 | `Poisoned` | An earlier failure poisoned the domain; nothing will be written. Reads still work. | Same as above. |
 | `NoSpace { tag }` | A reservation or provisioning ran out of space or quota. Nothing was written or poisoned. | Free space, raise the cap, or release regions. |
 | `Corruption` | store-io's own metadata or the media is damaged. A region lookup returns it, naming the region, when the region exists but open could not use it (`store.unavailable_regions()` says why). | Recover from a replica or backup; scan what remains. Never treat it as "no data yet". |

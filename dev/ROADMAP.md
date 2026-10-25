@@ -143,7 +143,7 @@ Exit criteria (dispositions recorded 2026-10-19, at the v0.4.0 release):
 macOS backend (`F_FULLFSYNC` for every flush; never classed power-safe); container format 2 (a paged region table, 65,536 regions by default; regions that grow in place, fixed size by default, or reserved and capped with `max_size`; any freed space reused; a damaged region made unavailable without closing the store); format-1 stores read-only, with a copy tool; one portable format on every system; unprivileged mode as a tested guarantee.
 
 Exit criteria:
-- [ ] Conformance on APFS (CI runner), NTFS and ext4.
+- [x] Conformance on APFS (CI runner), NTFS and ext4. (APFS: the macOS backend, M2-M4; every CI run on macOS stable and 1.85.)
 - [ ] Containers made by the same operations on Linux, Windows and macOS identical in structure and data (field by field and byte for byte, except the fields that differ between any two creates: ids, times, fill keys), and each opens on every system.
 - [ ] Zero idle wakeups.
 - [ ] Every new integrity guard has a mutation entry; the simulator enumerates every crash point of every format-2 change.

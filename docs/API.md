@@ -252,7 +252,7 @@ None of these can be constructed outside store-io.
 ## 12. The engine and platforms
 
 - `store_io::engine` is the generic engine (`engine::Store<P>` and friends) over any `Platform`, including the deterministic simulator used by store-io's own tests.
-- `NativePlatform` is `store_io_win::WinPlatform` on Windows and `store_io_posix::PosixPlatform` on Linux. macOS is planned for 0.5; on other targets only the shared types compile.
+- `NativePlatform` is `store_io_win::WinPlatform` on Windows and `store_io_posix::PosixPlatform` on Linux and macOS. On macOS the store's class needs an internal device (DiskArbitration and IOKit; `DeviceNotInternal` otherwise), every flush is `F_FULLFSYNC`, and nothing is power-safe ([Platforms](./PLATFORMS.md), section 5). On other targets only the shared types compile.
 - The engine layer: `Store::submitter(SubmitterConfig)` returns a `Submitter`, which keeps many operations in flight from one thread with owned buffers and completion tags ([GUIDE section 13](GUIDE.md#13-many-operations-from-one-thread-the-submitter)). Its types are in `store_io::submit`:
   - `SubmitterConfig`, `MAX_DEPTH`;
   - `WriteMode` (`Plain`, `Durable`);

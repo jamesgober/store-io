@@ -1,6 +1,6 @@
 # store-io &mdash; Platforms
 
-> What store-io does on each operating system, and why: the system calls behind every durability primitive, how files are opened, locked, allocated and released, where the device evidence comes from, and what each backend cannot do yet. Windows and Linux have native backends; macOS is planned for 0.5; the deterministic simulator runs everywhere. Each section names the source it describes.
+> What store-io does on each operating system, and why: the system calls behind every durability primitive, how files are opened, locked, allocated and released, where the device evidence comes from, and what each backend cannot do yet. Windows, Linux and macOS have native backends; the deterministic simulator runs everywhere. Each section names the source it describes.
 
 ---
 
@@ -19,13 +19,13 @@
 
 | | Windows | Linux | macOS | Simulator |
 |---|---|---|---|---|
-| Crate | `store-io-win` | `store-io-posix` | &mdash; | `store-io-sim` |
-| Status | Native backend | Native backend (synchronous) | Planned for 0.5 | Tests and conformance |
-| Data I/O | Unbuffered overlapped `WriteFile` / `ReadFile`, reaped from a per-queue I/O completion port | `O_DIRECT` `pwritev2` / `preadv2`, one system call per operation in the caller's thread | &mdash; | In-memory model of one device |
-| Barrier | `NtFlushBuffersFileEx` data-sync on NTFS, `FlushFileBuffers` elsewhere | `fdatasync` | &mdash; | Flush of the writes completed before it |
-| Ownership lock | `LockFileEx` on a sentinel byte | Open-file-description lock | &mdash; | Per-file flag |
+| Crate | `store-io-win` | `store-io-posix` | `store-io-posix` (its `mac/` modules) | `store-io-sim` |
+| Status | Native backend | Native backend (synchronous and io_uring tiers) | Native backend (synchronous) | Tests and conformance |
+| Data I/O | Unbuffered overlapped `WriteFile` / `ReadFile`, reaped from a per-queue I/O completion port | `O_DIRECT` `pwritev2` / `preadv2`, or io_uring | `pwrite` / `pread` (`F_NOCACHE` as a hint), one system call per operation | In-memory model of one device |
+| Barrier | `NtFlushBuffersFileEx` data-sync on NTFS, `FlushFileBuffers` elsewhere | `fdatasync` | `F_FULLFSYNC` | Flush of the writes completed before it |
+| Ownership lock | `LockFileEx` on a sentinel byte | Open-file-description lock | Open-file-description lock (macOS 14 and later), `flock` before | Per-file flag |
 
-The `store-io` crate's `NativePlatform` is the Windows backend on Windows and the Linux backend on Linux. On other targets the engine and the simulator build, but there is no native backend. Both native crates compile to empty shells on the other operating systems.
+The `store-io` crate's `NativePlatform` is the Windows backend on Windows and `store-io-posix`'s `PosixPlatform` on Linux and macOS. On other targets the engine and the simulator build, but there is no native backend. Both native crates compile to empty shells on the operating systems they do not serve.
 
 The engine above every backend is the same: it issues only block-aligned transfers from aligned pooled buffers, decides the durability class from the evidence a backend reports ([Durability](./DURABILITY.md)), and never retries a failed write or flush.
 
@@ -35,22 +35,22 @@ Source: [`src/lib.rs`](../src/lib.rs), [`crates/store-io-platform/src/lib.rs`](.
 
 ## 2. Durability primitives per platform
 
-The engine asks a backend for six things. The table lists what each backend does for each, and what it guarantees.
+The engine asks a backend for eight things. The table lists what each backend does for each, and what it guarantees.
 
-| Primitive | Used for | Windows | Linux | Guarantee |
-|---|---|---|---|---|
-| **Data flush** (`FlushData`) | Every barrier on a flush-required, unverified or unsafe store; metadata commits on those stores | NTFS: `NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)`. Other file systems: `FlushFileBuffers`. Chosen once when the file is opened. | `fdatasync` | The file's written data, the metadata needed to read it back, and a device cache flush. Covers the writes that completed before it was submitted. |
-| **Durable write** (`dsync`) | Every write on a power-safe store | The write, then the same data flush on the same handle, before the completion is reported. Never `FILE_FLAG_WRITE_THROUGH`. | Files: `pwritev2(RWF_DSYNC)`. Block devices: a plain `pwritev2`, then `fdatasync`. | The write is durable when it completes. |
-| **Full flush** (`flush_all`) | Creating a store, the start of every writable open, provisioning, directory-mode files | `FlushFileBuffers` | `fsync` | All data and metadata of the file, including its length, and a device cache flush. |
-| **Directory flush** (`sync_dir`) | Creating a store, directory-mode replace | `FlushFileBuffers` on a directory handle opened with add-file access | `fsync` on the directory descriptor | The directory's entries (create, rename, delete) are durable. An unsupported directory flush is an error, never success. |
-| **Atomic replace** (`rename_replace`) | Directory-mode replace | `SetFileInformationByHandle(FileRenameInfoEx, REPLACE_IF_EXISTS \| POSIX_SEMANTICS)` on the open temporary file | `renameat` within the directory descriptor | The target names the old or the new file, never neither. Durable only after the directory flush. |
-| **Ownership lock** (`lock_exclusive`) | Every writable open of a store | `LockFileEx(EXCLUSIVE \| FAIL_IMMEDIATELY)` on one byte at offset 2^63 &minus; 2 | `fcntl(F_OFD_SETLK, F_WRLCK)` over the whole file, on the I/O descriptor's open file description (`flock(LOCK_EX \| LOCK_NB)` before Linux 3.15) | One owner at a time; released when the owner's handle (or process) goes away. |
-| **Reader lock** (`lock_shared`) | Every read-only open of a store | `LockFileEx(FAIL_IMMEDIATELY)` (shared) on the same byte | `fcntl(F_OFD_SETLK, F_RDLCK)` over the whole file (`flock(LOCK_SH \| LOCK_NB)` before Linux 3.15) | Any number of readers, on read-only handles; readers and the owner exclude each other. |
-| **Coarse clock** (`monotonic_ms`) | `oldest_outstanding` queries only, never the I/O path | `GetTickCount64` (10-16 ms resolution) | `clock_gettime(CLOCK_MONOTONIC_COARSE)` (one kernel tick, 1-10 ms) | Monotonic milliseconds, read from memory the kernel shares (on Linux through the vDSO where the architecture has one). |
+| Primitive | Used for | Windows | Linux | macOS | Guarantee |
+|---|---|---|---|---|---|
+| **Data flush** (`FlushData`) | Every barrier on a flush-required, unverified or unsafe store; metadata commits on those stores | NTFS: `NtFlushBuffersFileEx(FLUSH_FLAGS_FILE_DATA_SYNC_ONLY)`. Other file systems: `FlushFileBuffers`. Chosen once when the file is opened. | `fdatasync` | `F_FULLFSYNC` (`fsync` on a volume that refused it: an overridden Unsafe store) | The file's written data, the metadata needed to read it back, and a device cache flush. Covers the writes that completed before it was submitted. |
+| **Durable write** (`dsync`) | Every write on a power-safe store | The write, then the same data flush on the same handle, before the completion is reported. Never `FILE_FLAG_WRITE_THROUGH`. | Files: `pwritev2(RWF_DSYNC)`. Block devices: a plain `pwritev2`, then `fdatasync`. | `pwrite`, then `F_FULLFSYNC` (no class is power-safe on macOS, so the engine does not ask for it in practice) | The write is durable when it completes. |
+| **Full flush** (`flush_all`) | Creating a store, the start of every writable open, provisioning, directory-mode files | `FlushFileBuffers` | `fsync` | `F_FULLFSYNC` | All data and metadata of the file, including its length, and a device cache flush. |
+| **Directory flush** (`sync_dir`) | Creating a store, directory-mode replace | `FlushFileBuffers` on a directory handle opened with add-file access | `fsync` on the directory descriptor | `F_FULLFSYNC` on the directory descriptor | The directory's entries (create, rename, delete) are durable. An unsupported directory flush is an error, never success. |
+| **Atomic replace** (`rename_replace`) | Directory-mode replace | `SetFileInformationByHandle(FileRenameInfoEx, REPLACE_IF_EXISTS \| POSIX_SEMANTICS)` on the open temporary file | `renameat` within the directory descriptor | `renameat` within the directory descriptor (no replace: `renameatx_np(RENAME_EXCL)`) | The target names the old or the new file, never neither. Durable only after the directory flush. |
+| **Ownership lock** (`lock_exclusive`) | Every writable open of a store | `LockFileEx(EXCLUSIVE \| FAIL_IMMEDIATELY)` on one byte at offset 2^63 &minus; 2 | `fcntl(F_OFD_SETLK, F_WRLCK)` over the whole file, on the I/O descriptor's open file description (`flock(LOCK_EX \| LOCK_NB)` before Linux 3.15) | `fcntl(F_OFD_SETLK, F_WRLCK)` over the whole file (macOS 14 and later); `flock(LOCK_EX \| LOCK_NB)` before | One owner at a time; released when the owner's handle (or process) goes away. |
+| **Reader lock** (`lock_shared`) | Every read-only open of a store | `LockFileEx(FAIL_IMMEDIATELY)` (shared) on the same byte | `fcntl(F_OFD_SETLK, F_RDLCK)` over the whole file (`flock(LOCK_SH \| LOCK_NB)` before Linux 3.15) | `fcntl(F_OFD_SETLK, F_RDLCK)` over the whole file (macOS 14 and later); `flock(LOCK_SH \| LOCK_NB)` before | Any number of readers, on read-only handles; readers and the owner exclude each other. |
+| **Coarse clock** (`monotonic_ms`) | `oldest_outstanding` queries only, never the I/O path | `GetTickCount64` (10-16 ms resolution) | `clock_gettime(CLOCK_MONOTONIC_COARSE)` (one kernel tick, 1-10 ms) | `clock_gettime(CLOCK_UPTIME_RAW_APPROX)` (a value cached at context switch; stops in sleep) | Monotonic milliseconds, read from memory the kernel shares (on Linux through the vDSO where the architecture has one). |
 
-How the engine combines them: on a power-safe store every write is a durable write and a barrier issues nothing; on every other class writes are plain and a barrier is one data flush shared between concurrent writers ([Durability](./DURABILITY.md), sections 7&ndash;8). Neither backend asks for FUA (forced unit access) writes directly: the Linux kernel may use FUA inside `RWF_DSYNC` as it chooses, and the Windows backend never relies on write-through, whose FUA path is not certified.
+How the engine combines them: on a power-safe store every write is a durable write and a barrier issues nothing; on every other class writes are plain and a barrier is one data flush shared between concurrent writers ([Durability](./DURABILITY.md), sections 7&ndash;8). No backend asks for FUA (forced unit access) writes directly: the Linux kernel may use FUA inside `RWF_DSYNC` as it chooses, the Windows backend never relies on write-through, whose FUA path is not certified, and macOS has no write-through primitive that flushes the drive.
 
-Source: [`crates/store-io-win/src/queue.rs`](../crates/store-io-win/src/queue.rs), [`crates/store-io-win/src/file.rs`](../crates/store-io-win/src/file.rs), [`crates/store-io-win/src/dir.rs`](../crates/store-io-win/src/dir.rs), [`crates/store-io-win/src/lock.rs`](../crates/store-io-win/src/lock.rs), [`crates/store-io-posix/src/queue.rs`](../crates/store-io-posix/src/queue.rs), [`crates/store-io-posix/src/lock.rs`](../crates/store-io-posix/src/lock.rs), [`crates/store-io-posix/src/lib.rs`](../crates/store-io-posix/src/lib.rs)
+Source: [`crates/store-io-win/src/queue.rs`](../crates/store-io-win/src/queue.rs), [`crates/store-io-win/src/file.rs`](../crates/store-io-win/src/file.rs), [`crates/store-io-win/src/dir.rs`](../crates/store-io-win/src/dir.rs), [`crates/store-io-win/src/lock.rs`](../crates/store-io-win/src/lock.rs), [`crates/store-io-posix/src/queue.rs`](../crates/store-io-posix/src/queue.rs), [`crates/store-io-posix/src/lock.rs`](../crates/store-io-posix/src/lock.rs), [`crates/store-io-posix/src/lib.rs`](../crates/store-io-posix/src/lib.rs), [`crates/store-io-posix/src/mac/`](../crates/store-io-posix/src/mac/)
 
 ---
 
@@ -220,13 +220,77 @@ Source: [`crates/store-io-posix/src/`](../crates/store-io-posix/src/) (`lib.rs`,
 
 ## 5. macOS
 
-There is no macOS backend yet. The engine and the simulator build and run there, and the CI matrix compiles and tests the workspace on macOS, but `NativePlatform` does not exist on macOS and a store cannot be opened on a real file.
+The macOS backend is `store-io-posix`'s `mac/` modules (D-133, D-134): the POSIX calls it shares with the Linux backend (`posix.rs`, the queue's executor, the submit pool), and its own files, directories, locks, space, flush state and probe. Nothing needs privilege.
 
-The rules for macOS are already part of the class decision: a store on macOS is never classed power-safe; a missing full-flush primitive (`F_FULLFSYNC`) is `Unsafe`, and an unknown one `Unverified`; flushes are taken to reach the device only when the full-flush primitive is supported.
+### Files and directories
 
-Planned for 0.5 ([roadmap](../dev/ROADMAP.md)): an `F_FULLFSYNC` backend, conformance on APFS, a container byte-identical across operating systems, and zero idle wakeups. macOS flush costs and directory-flush support will be measured on real hardware first ([later list](../dev/TODO.md)).
+- **Data files** are opened `O_RDWR | O_CLOEXEC | O_NOFOLLOW` (read-only: `O_RDONLY | O_CLOEXEC | O_NOFOLLOW`) with `openat` relative to the store directory's descriptor; the name is a single validated path component. Anything but a regular file is refused. `F_NOCACHE` and `F_RDAHEAD 0` are set on each: a hint only (requests aligned to the kernel page, 16 KiB on Apple silicon, bypass the cache), never part of a durability argument. macOS has no direct I/O.
+- **New files** are created `O_CREAT | O_EXCL`, mode 0600; **directories** mode 0700, then the parent (the directory's `..`) is flushed on its own volume, also when the directory already exists (an earlier attempt may have died before the flush). Where the caller may not open the parent, the directory itself is flushed, which commits the volume's transaction (APFS) or journal (HFS+) holding its entry. A directory the call made is removed again if its open or flush fails, when it is still the one made (same device and inode). For an existing directory, a read-only volume or one that cannot flush a directory (and has not accepted `F_FULLFSYNC`) is not an error.
+- **Rename** is `renameat`; a rename that must not replace is `renameatx_np(RENAME_EXCL)`.
 
-Source: [`src/lib.rs`](../src/lib.rs), [`crates/store-io-core/src/decide.rs`](../crates/store-io-core/src/decide.rs), [`dev/ROADMAP.md`](../dev/ROADMAP.md)
+### The I/O queue
+
+One tier, synchronous: every data operation is one system call (`pwrite`, `pread`, or the flush). A queue for one operation at a time performs it inline in `submit`; a parallel queue (a `Submitter`'s, the blocking API's parallel lanes) runs on the submit pool's worker threads, started on first use and parked while idle. POSIX AIO is not used (small limits, and its `aio_fsync` never reaches the drive). One call transfers at most `INT_MAX` bytes; a longer buffer transfers short. `StoreReport::io` names the path.
+
+### Flushes and the flush check
+
+Every flush is `F_FULLFSYNC`: macOS has no data-only drive flush, and `fsync` never reaches the drive's cache. A `PosixPlatform` (with its clones) keeps one flush state for each volume (by device number and mount source), shared by every directory and file opened through it. The simple API makes a new platform for each create or open, so each one starts from "not asked". The state has three values:
+
+- **Not asked.** Every writable create or open checks, unless the volume has refused: one `F_FULLFSYNC` of the container, then one of its directory (a few milliseconds). The first answer is recorded.
+- **Accepted.** Every flush is `F_FULLFSYNC`. A later refusal (another vnode, a race, a later open's check) is a failed flush, never a downgrade, because the store's class rests on the acceptance.
+- **Refused** (`ENOTSUP`, `EOPNOTSUPP`, `ENOSYS`, `ENOTTY`, `EINVAL`), recorded only from "not asked". The store is `Unsafe` (`FullFlushUnsupported`) and refused unless overridden; an overridden store's flushes are all `fsync` from then on, directory flushes included, so it never meets the refusal again. Every receipt is labelled with the override.
+
+A read-only open makes no flush check. Its report shows its platform's state for the volume: Yes, No, or Unknown when no writer on the same platform has asked. Through the simple API it is Unknown (`FullFlushUnsupported`, so Unverified); a read-only open is never refused for its class.
+
+### Ownership lock
+
+`fcntl(F_OFD_SETLK)` over the whole file on a `dup` of the I/O descriptor (macOS 14 and later); before macOS 14, where OFD locks are private API, `flock(LOCK_NB)`, which has the same ownership. The kind is chosen by OS release (`kern.osproductversion`; an unreadable release takes OFD), never by probing the call, and the two are never mixed on one file. Writers take the exclusive form, read-only opens the shared one. The kernel releases a killed owner's lock (tested).
+
+### Space
+
+- **Allocation** is `F_PREALLOCATE` (`F_ALLOCATEALL`, contiguous first, then not) of the growth past the blocks the file holds, then `ftruncate` to the new size: real blocks, read as zeros. It never truncates.
+- **Allocating inside a file** is not available (`F_PREALLOCATE` only extends): `ENOTSUP`. The engine writes a capped region's slack, and the rest of a growth's extent, instead. An empty range is a no-op and a range past the end `EINVAL`, as the contract asks.
+- **Release** is `F_PUNCHHOLE`; the range must be aligned to the file system's block. Trim in place is unsupported (`EOPNOTSUPP`).
+- **Range state** reads nothing: unwritten and shared are `Unknown` (no unprivileged extent map), and page-cache residency is not reported (writes not aligned to the kernel page, 16 KiB on Apple silicon, stay cached by design, so it would decide nothing).
+
+### The probe
+
+| Fact | Source |
+|---|---|
+| File system, local, removable mount | `fstatfs`: `f_fstypename`, `MNT_LOCAL`, `MNT_REMOVABLE`; `f_mntfromname` names the disk |
+| Release; hypervisor | `kern.osproductversion`; `kern.hv_vmm_present` |
+| Machine architecture | `hw.optional.arm64` (decides the allowlist below, whatever the build: Rosetta) |
+| Device: internal, protocol, model, removable and ejectable media, registry path | DiskArbitration's description of the BSD disk (a `/dev/disk…` mount source only) |
+| Thunderbolt tunnel; RAID or multi-store container | IOKit from the volume's own media entry: `IOPCITunnelled` searched over every ancestor; every entry up to the root must have one parent. The media's `BSD Name` must read back first, so a refused read never passes for an absent property |
+| Full and directory flush | The flush check (above) |
+
+**Classes.** Never power-safe on macOS (no power-loss-protection claim from Apple; `F_FULLFSYNC` is best effort; APFS is copy-on-write). **FlushRequired** for APFS on an internal device whose `F_FULLFSYNC` was accepted, and nothing else. **Unverified** for HFS+ and any other local file system (unqualified), any device not known to be internal (`DeviceNotInternal`), under a hypervisor, and a read-only open whose flush state is unknown. **Unsafe** where `F_FULLFSYNC` is refused, and on FAT, exFAT, FUSE and network volumes.
+
+**Internal** is an allowlist. Every one of these must hold:
+
+- DiskArbitration calls the device internal.
+- Its media is known to be neither removable nor ejectable, and the mount is not removable.
+- Its protocol is `Apple Fabric`. On an Intel Mac, `PCI-Express` and `SATA` count as well.
+- It is neither a disk image (a virtual-disk layer is reported) nor a virtual machine's disk.
+- IOKit shows its media on a single line of parents, with nothing on that line tunnelled over Thunderbolt.
+- Its registry path names no Thunderbolt or USB controller.
+
+A device that fails a rule is `No`; one where a fact cannot be read is `Unknown`. Both are Unverified.
+
+### Known limitations
+
+- **Not yet seen on Apple's own storage stack.** CI's macOS runners are virtual machines. Their APFS volume's description has no protocol, so the runner is Unverified (and under a hypervisor anyway). Whether a real internal APFS volume reads as internal (Apple silicon, Intel T2) is checked on real hardware next. If not, the cost is availability: the store is Unverified, and an attestation opens it.
+- **Apple silicon's Thunderbolt tunnels** are not known to carry `IOPCITunnelled`, so on Apple silicon only `Apple Fabric` counts as internal. A Mac Pro's PCIe card is Unverified there.
+- **A multi-store APFS container** built by hand with an internal main store and an external secondary store is caught only if APFS shows the container under every store. If APFS shows it under the main store alone, the store reads as internal and is classed flush-required: the unsafe direction, in a deliberate and unusual setup. AppleRAID and CoreStorage sets are caught.
+- **Intel edge cases IOKit cannot tell apart**, classed flush-required if they occur: hot-plug SATA or PCIe that is not Thunderbolt (ExpressCard eSATA, a Mac Pro's eSATA card) whose driver reports it internal and fixed, and a Thunderbolt enclosure reporting itself internal behind a sandbox that filters IOKit property reads by name.
+- **Internal is not a correct flush.** A replaced or third-party internal SSD passes the allowlist; its `F_FULLFSYNC` behaviour is its own.
+- **No direct I/O, no in-file allocation, no extent map, no trim in place.** See above.
+- **Cost.** A writable create or open makes two `F_FULLFSYNC`s for the flush check, and creating a directory one more for its parent.
+- An open interrupted by `EINTR` is retried up to 64 times and counted.
+
+Mutation testing of the macOS backend runs on CI's macOS runners (`mutate.py --only-platform`); the Linux shards skip it.
+
+Source: [`crates/store-io-posix/src/mac/`](../crates/store-io-posix/src/mac/) (`platform.rs`, `file.rs`, `dir.rs`, `lock.rs`, `alloc.rs`, `probe.rs`, `sys.rs`), [`crates/store-io-posix/src/posix.rs`](../crates/store-io-posix/src/posix.rs), [`crates/store-io-core/src/decide.rs`](../crates/store-io-core/src/decide.rs)
 
 ---
 

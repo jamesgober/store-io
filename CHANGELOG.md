@@ -13,6 +13,40 @@
 
 ### Added
 
+- Platforms: **the macOS backend** (v0.5 macOS M1-M4, D-133, D-134):
+  `store-io-posix` builds on macOS, and `NativePlatform` is its
+  `PosixPlatform` there.
+  - **I/O and flushes.** `pwrite` and `pread`, one system call per
+    operation, inline or on the submit pool. Every flush is
+    `F_FULLFSYNC`.
+  - **The flush check.** At every writable create or open, unless the
+    volume has refused, one `F_FULLFSYNC` of the container and one of its
+    directory. A platform keeps each volume's answer, shared by every
+    handle opened through it: not asked, accepted (never weakened
+    afterwards), or refused (the store is Unsafe, and an overridden store
+    runs on `fsync`).
+  - **Locks.** Open-file-description locks on macOS 14 and later,
+    `flock` before.
+  - **Space.** `F_PREALLOCATE` growth and `F_PUNCHHOLE` release. No
+    allocation inside a file (the engine writes a capped region's slack).
+  - **The probe.** `fstatfs`, DiskArbitration and IOKit. A store on APFS
+    on the Mac's own drive is meant to be flush-required (not yet
+    confirmed on real hardware). External, USB and Thunderbolt
+    devices, disk images, removable media, SD cards, RAID sets and
+    anything not identified are Unverified (`Reason::DeviceNotInternal`,
+    `DeviceFacts::internal`). FAT, exFAT, FUSE and network volumes are
+    Unsafe. Nothing is power-safe.
+  - See PLATFORMS.md section 5.
+- Tests: the macOS backend's own tests on CI's macOS runners:
+  - the flush state;
+  - the lock across descriptions, and a killed owner's lock released;
+  - allocation and release by block counts;
+  - a RAM disk image;
+  - the runner's own device.
+
+  Mutation entries for the macOS and Windows backends are run by a
+  Mutation job on each system (`dev/tools/mutate.py --only-platform`;
+  entries are tagged by file).
 - Engine: **`MetadataReport::damaged_slots`** (v0.5 E7 C4, spec §9: the
   report lists every candidate and damage): each damaged slot of the
   volume record and the table pages, slot A or B, as `SlotDamage::Older`
@@ -472,6 +506,28 @@
 
 ### Changed
 
+- Engine: **a `Store::open` whose probe fails reports `DurabilityUnknown {
+  op: Probe }`** (create and directory mode keep `Io`). On macOS the probe's flush check is the first flush after
+  a dead owner, like the drain after it. A read-only open's stays `Io`.
+- Platforms: **creating a directory flushes its parent also when the
+  directory already exists**, on every backend. An earlier attempt may
+  have died before the flush, and its retry used to skip it.
+  - The parent flushed is the one that holds the entry: `..` of the
+    opened directory on Linux and macOS. On Windows it is the absolute
+    path's parent, following reparse points, opened with
+    `FILE_ADD_SUBDIRECTORY` only.
+  - Linux syncs the file system where the caller may not read the
+    parent; macOS flushes the directory itself.
+  - A directory the call made is removed again if its flush fails.
+  - An existing directory on a volume that cannot flush a directory (SMB,
+    WSL shares; on macOS, one that has not accepted `F_FULLFSYNC`, or a
+    read-only volume) still opens.
+  - On Windows an existing directory whose parent cannot be opened for
+    the flush, or is write-protected, still opens: a directory left there
+    by an attempt that died may have an entry that is not durable.
+- Reasons: `FullFlushUnsupported` now reads "the full-flush primitive
+  (macOS F_FULLFSYNC) is not supported, or was not checked"; the report
+  prints `internal`.
 - Performance: **an operation on an idle inline queue is performed at
   once** (G1 P1). On Linux's synchronous tier, the queue makes each system
   call inside `submit`; the engine now calls it directly
@@ -694,6 +750,10 @@
 
 ### Fixed
 
+- Tests: **mutants 558 and 559 had lost their only killing test** when
+  D-132 rerouted cut-short entries. A new test makes an entry fail the
+  entry checks for a fault of its own; both are killed again.
+- Tools: a mutant whose build times out is now invalid, not caught.
 - Engine: **a region cut short by a shorter container made the regions
   inside its span read-only, and could not be repaired** (D-132, found by
   the real-kernel crash replay). A region grown beyond its capacity can

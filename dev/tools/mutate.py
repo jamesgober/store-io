@@ -8,12 +8,15 @@ exactly once), the tests of `packages` run (default: the engine and the
 simulator) with `env` added to the environment, and the source is restored.
 A mutation the tests do not kill is a
 survivor, and one that does not compile is invalid; either fails the run.
-Entries whose packages are Linux-only are skipped on other systems, and
-reported as skipped.
+Entries that can only run on one system are skipped elsewhere and reported
+as skipped: the macOS backend's (`crates/store-io-posix/src/mac/`), the
+Windows backend's (`crates/store-io-win/`), and the Linux backend's (its
+packages Linux-only).
 
 Usage: python3 dev/tools/mutate.py [index ...]
        python3 dev/tools/mutate.py --shard K/N   (entries whose index is K mod N)
        python3 dev/tools/mutate.py --check   (every pattern occurs exactly once; nothing built)
+       python3 dev/tools/mutate.py --only-platform   (only the entries that run only on this system)
 """
 import os
 import subprocess
@@ -26,6 +29,8 @@ TIMEOUT = int(os.environ.get("MUTATE_TIMEOUT", "600"))
 ENGINE = ["-p", "store-io-engine", "-p", "store-io-sim"]
 # The Linux backend's own tests (its submit pool included); Linux only.
 POSIX = ["-p", "store-io-posix"]
+# (It holds the macOS backend too: `platform_of` tags that by its files
+# first.)
 LINUX_ONLY = {"store-io-posix"}
 # The observer's own tests (feature `observe`).
 OBSERVE = ["-p", "store-io-core", "--features", "store-io-core/observe"]
@@ -103,6 +108,15 @@ MODEL = ["-p", "store-io-sim", "--test", "model"]
 DAMAGE = ["-p", "store-io-engine", "--test", "format2_damage"]
 V2_SRC = "crates/store-io-engine/src/v2.rs"
 CRASH_OPEN = ["-p", "store-io-engine", "--test", "format2_crash_open"]
+
+# The macOS backend's files and its own tests (run on macOS only).
+MAC_LOCK = "crates/store-io-posix/src/mac/lock.rs"
+MAC_ALLOC = "crates/store-io-posix/src/mac/alloc.rs"
+MAC_DIR = "crates/store-io-posix/src/mac/dir.rs"
+MAC_PROBE = "crates/store-io-posix/src/mac/probe.rs"
+MAC_LIB = ["-p", "store-io-posix", "--lib"]
+# The Windows backend's own tests (run on Windows only).
+WIN_LIB = ["-p", "store-io-win", "--lib"]
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -1049,6 +1063,30 @@ M = [
  # A create under a parent this caller may not read syncs the parent's file
  # system instead (its entry is there too)
  ('crates/store-io-posix/src/dir.rs', '        Err(e) if matches!(e.code, libc::EACCES | libc::EPERM) => {\n            sys::fsync(dirfd)', '        Err(e) if e.code < 0 => {\n            sys::fsync(dirfd)', POSIX + ['--test', 'linux']),
+ # macOS (M4): the ownership lock, space, the flush state, the probe's
+ # rules. Run by the macOS mutation job (`--only-platform`).
+ (MAC_LOCK, '                let t = if shared { libc::F_RDLCK } else { libc::F_WRLCK };', '                let t = if shared { libc::F_RDLCK } else { libc::F_RDLCK };', MAC_LIB),
+ (MAC_LOCK, '            Kind::Ofd => sys::ofd_setlk(raw, libc::F_UNLCK),', '            Kind::Ofd => Ok(()),', MAC_LIB),
+ (MAC_ALLOC, '    if len > held {', '    if false && len > held {', MAC_LIB),
+ (MAC_ALLOC, '            sys::punch_hole(file.raw(), off, l)', '            sys::punch_hole(file.raw(), off, l & 0)', MAC_LIB),
+ (MAC_ALLOC, '    if len == 0 {\n        return Ok(());', '    if len == 0 && false {\n        return Ok(());', ['-p', 'store-io', '--test', 'conformance']),
+ (MAC_DIR, '            Err(was) => was == REFUSED,', '            Err(_) => true,', MAC_LIB),
+ (MAC_DIR, '            ACCEPTED => Tri::Yes,', '            ACCEPTED => Tri::Unknown,', MAC_LIB),
+ (MAC_DIR, '        Err(e) if matches!(e.code, libc::EACCES | libc::EPERM) => None,', '        Err(e) if e.code < 0 => None,', MAC_LIB),
+ (MAC_PROBE, '    if file.is_writable() && state.full() {', '    if state.full() {', MAC_LIB),
+ (MAC_PROBE, '    if removable_mount {', '    if false && removable_mount {', MAC_LIB),
+ (MAC_PROBE, '        || d.tunnelled == Some(true)', '        || false', MAC_LIB),
+ (MAC_PROBE, '        || d.single == Some(false)', '        || false', MAC_LIB),
+ (MAC_PROBE, '        || is_disk_image(d)', '        || (is_disk_image(d) && false)', MAC_LIB),
+ (MAC_PROBE, '        || is_vm_disk(d)', '        || (is_vm_disk(d) && false)', MAC_LIB),
+ (MAC_PROBE, '    let fixed = d.removable == Some(false) && d.ejectable == Some(false);', '    let fixed = d.removable != Some(true) && d.ejectable != Some(true);', MAC_LIB),
+ (MAC_PROBE, '        (false, Some(true)) if fixed && lineage => Tri::Yes,', '        (false, Some(true)) if fixed && (lineage || true) => Tri::Yes,', MAC_LIB),
+ (MAC_PROBE, '    ok.then(|| CString::new(name).ok()).flatten()', '    (ok || true).then(|| CString::new(name).ok()).flatten()', MAC_LIB),
+ # Windows (M4): a made directory is removed only through a handle checked
+ # to be on it, with POSIX semantics (the name goes at once). Run by the
+ # Windows mutation job.
+ ('crates/store-io-win/src/dir.rs', '    if sys::file_id(&d)? != sys::file_id(h)? {', '    if sys::file_id(&d)? != sys::file_id(h)? && false {', WIN_LIB),
+ ('crates/store-io-win/src/dir.rs', '    match sys::set_file_info(&d, FileDispositionInfoEx, &flags.to_le_bytes()) {', '    match sys::set_file_info(&d, FileDispositionInfo, &[u8::from(flags != 0)]) {', WIN_LIB),
 ]
 
 def kill_stuck_tests():
@@ -1079,6 +1117,22 @@ def check_names():
     for name in twice:
         print(f"{name} is assigned twice", flush=True)
     return twice
+
+
+def platform_of(f, pkgs):
+    """The system an entry's mutation can only run on (a `sys.platform`
+    prefix), or None for any."""
+    if f.startswith("crates/store-io-posix/src/mac/"):
+        return "darwin"
+    if f.startswith("crates/store-io-win/"):
+        return "win32"
+    if any(k in LINUX_ONLY for k in pkgs):
+        return "linux"
+    return None
+
+
+def pkgs_of(entry):
+    return list(entry[3]) if len(entry) > 3 else ENGINE
 
 
 def check_patterns():
@@ -1112,13 +1166,20 @@ def main():
         if not only:
             print(f"--shard {k}/{n}: no entries", flush=True)
             sys.exit(0)
+    elif sys.argv[1:] == ["--only-platform"]:
+        # The entries no other system's run can do: this system's backend.
+        only = [i for i, e in enumerate(M)
+                if (need := platform_of(e[0], pkgs_of(e))) and sys.platform.startswith(need)]
+        if not only:
+            print(f"--only-platform: no entries for {sys.platform}", flush=True)
+            sys.exit(0)
     else:
         only = [int(a) for a in sys.argv[1:]]
     survived, missing, invalid = [], [], []
     skipped = []
     for i, entry in enumerate(M):
         f, a, b = entry[:3]
-        pkgs = list(entry[3]) if len(entry) > 3 else ENGINE
+        pkgs = pkgs_of(entry)
         env = {**os.environ, **entry[4]} if len(entry) > 4 else None
         if only and i not in only:
             continue
@@ -1130,12 +1191,14 @@ def main():
             missing.append(i)
             continue
         # After the pattern check, so a stale entry is reported everywhere.
-        if not sys.platform.startswith("linux") and any(k in LINUX_ONLY for k in pkgs):
-            print(f"[{i}] {f}: skipped (Linux only)", flush=True)
+        need = platform_of(f, pkgs)
+        if need and not sys.platform.startswith(need):
+            print(f"[{i}] {f}: skipped ({need} only)", flush=True)
             skipped.append(i)
             continue
         with open(p, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(src.replace(a, b))
+        phase = "build"
         try:
             try:
                 # Build first, test second, so a build failure can never be
@@ -1156,14 +1219,20 @@ def main():
                     why = f"compile error ({first[:120]})"
                     killed = False
                 else:
+                    phase = "test"
                     r = subprocess.run(["cargo", "test", "-q"] + pkgs, cwd=ROOT,
                                        env=env, capture_output=True, text=True, timeout=TIMEOUT)
                     killed = r.returncode != 0
                     why = "tests failed" if killed else "SURVIVED"
             except subprocess.TimeoutExpired:
-                # A hang is a caught mutation; clear the stuck test binaries.
                 kill_stuck_tests()
-                killed, why = True, "tests hung (caught)"
+                if phase == "build":
+                    # A build that never finished tested nothing: invalid,
+                    # never a caught mutation (a cold build can take long).
+                    killed, why = False, "compile error (the build timed out)"
+                else:
+                    # A hang is a caught mutation; clear the stuck test binaries.
+                    killed, why = True, "tests hung (caught)"
             print(f"[{i}] {f}: {why}", flush=True)
             if why.startswith("compile error"):
                 # A mutation that does not compile tests nothing.

@@ -302,8 +302,9 @@ mod tests {
         assert!(remove_made(&b, &ha).is_err());
         assert!(b.is_dir());
         remove_made(&a, &ha).unwrap();
-        // POSIX semantics: the name is gone while the handle is still open.
-        assert!(!a.exists());
+        // POSIX semantics: the name is gone while the handle is still open,
+        // so a retry can make the directory again at once.
+        std::fs::create_dir(&a).unwrap();
         drop(ha);
         std::fs::remove_dir_all(&base).unwrap();
     }

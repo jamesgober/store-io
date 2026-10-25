@@ -1,7 +1,8 @@
 # Mutation check (Directives section 4.7, D-086): every listed mutation of a
 # flush, barrier, poison, directory-sync, accounting or buffer-ownership site
 # must be killed by the engine and simulator tests (the Linux backend's own
-# tests for its entries). Runs when that code or the list changes,
+# tests for its entries; the macOS and Windows backends' own tests for theirs,
+# on those systems). Runs when that code or the list changes,
 # and on demand.
 name: Mutation
 
@@ -15,6 +16,9 @@ on:
       - "crates/store-io-core/**"
       - "crates/store-io-platform/**"
       - "crates/store-io-posix/**"
+      - "crates/store-io-win/**"
+      - "crates/store-io-conformance/**"
+      - "tests/conformance.rs"
       - "crates/store-io-buf/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
@@ -27,6 +31,9 @@ on:
       - "crates/store-io-core/**"
       - "crates/store-io-platform/**"
       - "crates/store-io-posix/**"
+      - "crates/store-io-win/**"
+      - "crates/store-io-conformance/**"
+      - "tests/conformance.rs"
       - "crates/store-io-buf/**"
       - "dev/tools/mutate.py"
       - ".github/workflows/mutation.yml"
@@ -65,3 +72,26 @@ jobs:
         run: cargo test -q -p store-io-engine -p store-io-sim -p store-io-posix --no-run
       - name: Every mutation is killed
         run: python3 dev/tools/mutate.py --shard ${{ matrix.shard }}/${{ matrix.total }}
+
+  mutation-platform:
+    # The entries only one system can run: the macOS and Windows backends'
+    # (the Linux shards skip them; `--only-platform` runs just these).
+    name: Mutation check (${{ matrix.os }} backend)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Built once before the first mutant, so no mutant starts from a cold
+      # build (a build that times out is an invalid mutant).
+      - name: Build the tests once
+        run: >-
+          cargo test -q --no-run
+          ${{ runner.os == 'Windows' && '-p store-io-win' || '-p store-io-posix -p store-io' }}
+      - name: Every mutation is killed
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} dev/tools/mutate.py --only-platform

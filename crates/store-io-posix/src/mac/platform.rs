@@ -371,4 +371,115 @@ mod tests {
         drop((r, w, dir));
         std::fs::remove_dir_all(&path).unwrap();
     }
+
+    /// The ownership lock is the open file description's: a second
+    /// description of the file can take neither the exclusive nor the
+    /// shared lock while the first holds the exclusive one; readers share;
+    /// dropping the lock releases it even while its file stays open.
+    #[test]
+    fn test_the_lock_excludes_another_description_and_drops_cleanly() {
+        use store_io_core::errno::is_lock_held;
+        let path = scratch("lock");
+        let p = PosixPlatform::new();
+        let dir = p.open_dir(&path, true).unwrap();
+        let a = p.create_file(&dir, &name("f")).unwrap();
+        let b = p.open_file(&dir, &name("f"), FileMode::ReadWrite).unwrap();
+        let held = p.lock_exclusive(&a).unwrap();
+        assert!(is_lock_held(p.lock_exclusive(&b).unwrap_err()));
+        assert!(is_lock_held(p.lock_shared(&b).unwrap_err()));
+        drop(held);
+        let held = p.lock_exclusive(&b).unwrap();
+        drop(held);
+        let r1 = p.open_file(&dir, &name("f"), FileMode::ReadOnly).unwrap();
+        let r2 = p.open_file(&dir, &name("f"), FileMode::ReadOnly).unwrap();
+        let (s1, s2) = (p.lock_shared(&r1).unwrap(), p.lock_shared(&r2).unwrap());
+        assert!(is_lock_held(p.lock_exclusive(&a).unwrap_err()));
+        drop((s1, s2, r1, r2, a, b, dir));
+        std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    /// The lock of an owner that is killed (no drop runs) is released by
+    /// the kernel: a child process of this test takes it, is killed, and the
+    /// lock is free.
+    #[test]
+    fn test_a_killed_owners_lock_is_released() {
+        use std::io::{BufRead, BufReader, Write};
+
+        use store_io_core::errno::is_lock_held;
+        const CHILD: &str = "STORE_IO_LOCK_CHILD";
+        const LOCKED: &str = "store-io lock child: locked";
+        if let Some(path) = std::env::var_os(CHILD) {
+            // The child: take the lock, say so, wait to be killed.
+            let p = PosixPlatform::new();
+            let dir = p.open_dir(std::path::Path::new(&path), false).unwrap();
+            let f = p.open_file(&dir, &name("f"), FileMode::ReadWrite).unwrap();
+            let _held = p.lock_exclusive(&f).unwrap();
+            // On its own line: the harness may have printed the test's name
+            // without one.
+            let _said = writeln!(std::io::stdout(), "\n{LOCKED}");
+            let _flushed = std::io::stdout().flush();
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            return;
+        }
+        let path = scratch("killed");
+        let p = PosixPlatform::new();
+        let dir = p.open_dir(&path, true).unwrap();
+        let f = p.create_file(&dir, &name("f")).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "mac_platform::tests::test_a_killed_owners_lock_is_released",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = BufReader::new(child.stdout.take().unwrap());
+        let locked = out
+            .lines()
+            .map_while(Result::ok)
+            .any(|l| l.contains(LOCKED));
+        assert!(locked, "the child never took the lock");
+        let refused = p.lock_exclusive(&f).map(drop);
+        child.kill().unwrap();
+        let _status = child.wait().unwrap();
+        assert!(refused.is_err_and(is_lock_held), "{refused:?}");
+        drop(p.lock_exclusive(&f).unwrap());
+        drop((f, dir));
+        std::fs::remove_dir_all(&path).unwrap();
+    }
+
+    /// `allocate` reserves the blocks (`F_PREALLOCATE`), not just the size;
+    /// `release_range` frees a written range's blocks (`F_PUNCHHOLE`) and
+    /// keeps the size.
+    #[test]
+    fn test_allocate_reserves_blocks_and_release_frees_them() {
+        const MIB: u64 = 1 << 20;
+        let path = scratch("space");
+        let p = PosixPlatform::new();
+        let dir = p.open_dir(&path, true).unwrap();
+        let f = p.create_file(&dir, &name("grown")).unwrap();
+        p.allocate(&f, 8 * MIB).unwrap();
+        let held = |f: &PosixFile| {
+            let st = sys::fstat(f.raw()).unwrap();
+            u64::try_from(st.st_blocks).unwrap() * 512
+        };
+        assert_eq!(p.size(&f).unwrap(), 8 * MIB);
+        assert!(held(&f) >= 8 * MIB, "{} bytes held", held(&f));
+        std::fs::write(path.join("written"), vec![7u8; (8 * MIB) as usize]).unwrap();
+        let w = p
+            .open_file(&dir, &name("written"), FileMode::ReadWrite)
+            .unwrap();
+        // The data on the media, so its blocks are counted.
+        p.flush_all(&w).unwrap();
+        let before = held(&w);
+        p.release_range(&w, 2 * MIB, 4 * MIB, ReleaseHow::Deallocate)
+            .unwrap();
+        assert_eq!(p.size(&w).unwrap(), 8 * MIB);
+        assert!(held(&w) + 3 * MIB <= before, "{before} then {}", held(&w));
+        drop((f, w, dir));
+        std::fs::remove_dir_all(&path).unwrap();
+    }
 }

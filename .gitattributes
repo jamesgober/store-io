@@ -4,6 +4,9 @@
 # `rustfmt.toml` pins `newline_style = "Unix"`.
 * text=auto eol=lf
 
+# Test fixtures are binary containers: never converted.
+tests/data/** binary
+
 # Keep development-only paths out of `git archive` source tarballs.
 /.dev             export-ignore
 /.github          export-ignore

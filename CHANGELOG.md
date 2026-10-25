@@ -37,6 +37,16 @@
     `DeviceFacts::internal`). FAT, exFAT, FUSE and network volumes are
     Unsafe. Nothing is power-safe.
   - See PLATFORMS.md section 5.
+- Tests: **one portable format, checked** (`tests/portable.rs`): a fixed
+  scenario makes the same container on Linux, Windows and macOS, byte for
+  byte except what any two creates differ in (the volume id, the creation
+  time, a keyed region's fill key and fill, the CRCs over them) and the
+  bytes the format leaves undefined (free space, a released region's
+  included), with zero fill and with keyed fill. What the mask hides is
+  checked consistent first (one volume id, every payload CRC, one creation
+  time, every pair's chain). A container made on Linux
+  (`tests/data/portable/`) opens, reads back and takes writes on every
+  system.
 - Tests: the macOS backend's own tests on CI's macOS runners:
   - the flush state;
   - the lock across descriptions, and a killed owner's lock released;

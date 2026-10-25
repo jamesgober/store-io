@@ -172,6 +172,7 @@ dependencies = [
  "store-io-conformance",
  "store-io-core",
  "store-io-engine",
+ "store-io-format",
  "store-io-platform",
  "store-io-posix",
  "store-io-win",

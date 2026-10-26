@@ -164,7 +164,7 @@ where
         if inner.frozen.load(std::sync::atomic::Ordering::Acquire) {
             return Err(not_written(NotWrittenCause::Frozen, ctx));
         }
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let (p, payload, at) = {
             let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
             let Some(at) = v2.holds.iter().position(|h| h.id() == id.get()) else {
@@ -314,7 +314,7 @@ where
                 what: Capability::FormatVersion,
             });
         }
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let mut todo: Vec<(u32, usize)> = Vec::new();
         {
             let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;

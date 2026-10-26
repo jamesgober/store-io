@@ -37,6 +37,17 @@
     `DeviceFacts::internal`). FAT, exFAT, FUSE and network volumes are
     Unsafe. Nothing is power-safe.
   - See PLATFORMS.md section 5.
+- Tests: **an idle store is silent on every system** (`tests/idle.rs`, CI
+  job "Idle store is silent" on macOS and Windows beside the Linux runs):
+  after the store is exercised and every thread it started is asleep, none
+  of them may run for 60 s. macOS reads each thread's CPU ticks
+  (`PROC_PIDTHREADCOUNTS`) and the process's storage bytes; Windows reads
+  each thread's context switches and cycles. A control thread's single
+  wakeup must be seen, or the test fails as blind. Threads the system
+  starts in the process (Windows' own thread pool, unnamed, beginning in
+  `ntdll.dll`) are not watched; store-io names every thread it starts and
+  `test_store_io_uses_no_system_thread_pool` holds it to never using that
+  pool.
 - Tests: **one portable format, checked** (`tests/portable.rs`): a fixed
   scenario makes the same container on Linux, Windows and macOS, byte for
   byte except what any two creates differ in (the volume id, the creation
@@ -760,6 +771,22 @@
 
 ### Fixed
 
+- Engine: **a scan's visitor that changed the store could deadlock it**
+  (D-135, since 0.3.0). Metadata changes (provisioning, release, growth,
+  repairs, the table flip) ran under the metadata lock and then waited for
+  a shared queue, while a scan held one for its read and its visitor waited
+  for that lock: with every shared queue so held (one is enough with
+  `queues: 1`), both waited forever. A visitor's own I/O on the same store
+  could also wait for the very queue its scan held. Two lanes now make sure
+  neither waits for a shared queue: a thread holding a store's metadata
+  lock borrows that store's **metadata lane**, used by no one else, and a
+  thread already holding one of the store's shared queues that finds none
+  free borrows its **nested lane**. Each store makes two more queues for
+  them (a read-only store one: it has no metadata lane); both are idle like
+  any queue (`tests/idle.rs`), and their busy marks sit between the
+  parallel and flush lanes' in `oldest_outstanding`. Regression tests
+  (`tests/scan.rs`, `io::tests`) fail within their deadlines on the old
+  code; mutants 713-718 cover both lanes and the thread marks.
 - Tests: **mutants 558 and 559 had lost their only killing test** when
   D-132 rerouted cut-short entries. A new test makes an entry fail the
   entry checks for a fault of its own; both are killed again.

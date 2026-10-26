@@ -107,6 +107,12 @@ SIMP = "crates/store-io-sim/src/platform.rs"
 MODEL = ["-p", "store-io-sim", "--test", "model"]
 DAMAGE = ["-p", "store-io-engine", "--test", "format2_damage"]
 V2_SRC = "crates/store-io-engine/src/v2.rs"
+# D-135: the metadata and nested lanes (no caller waits for a shared queue
+# it, or a thread waiting for its lock, holds). The lane unit tests fail
+# within their 10 s deadlines; the scan tests reach the deadlocks from the
+# public API.
+LANES = ["-p", "store-io-engine", "--lib", "io::tests"]
+SCAN = ["-p", "store-io-engine", "--test", "scan"]
 CRASH_OPEN = ["-p", "store-io-engine", "--test", "format2_crash_open"]
 
 # The macOS backend's files and its own tests (run on macOS only).
@@ -146,7 +152,7 @@ M = [
  ("crates/store-io-engine/src/provision.rs", "            r.consume(extent)?;", "            if false { r.consume(extent)?; }"),
  ("crates/store-io-engine/src/space.rs", "            a.add(e, block);", "            let _ = (e, block, &mut a);"),
  ("crates/store-io-engine/src/space.rs", "        lock_acct(&self.store.inner.acct).unreserve(self.tag, self.bytes);", ""),
- ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(&inner.meta);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(&inner.meta);\n        if !acct.fits(tag, bytes) {"),
+ ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(inner);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(inner);\n        if !acct.fits(tag, bytes) {"),
  ("crates/store-io-engine/src/directory.rs", "        self.platform\n            .sync_dir(&self.dir)\n            .map_err(|raw| self.poison(Op::SyncDir, Some(raw)))\n    }\n\n    /// Takes the directory", "        let _ = self.platform.sync_dir(&self.dir);\n        Ok(())\n    }\n\n    /// Takes the directory"),
  ("crates/store-io-engine/src/directory.rs", "            .set_len(file, len)", "            .set_len(file, len.div_ceil(4096) * 4096)"),
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::FlushAll, Some(raw)))", "            .or(Ok(()))"),
@@ -243,7 +249,7 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '                Ok(store.ticket(state, r.start, r.end))', '                Ok(store.ticket(state, r.start, r.data_end))'),
  (SUB, '    _thread: PhantomData<*const ()>,', '    _thread: PhantomData<()>,'),
  ('crates/store-io-engine/src/optable.rs', '            let _shorter = b.set_len(*len);', '            let _shorter = (b, len);'),
- ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(&inner.meta);', '        let mut meta = lock_meta(&inner.meta);\n        self.retire(r, Retire::Release)?;'),
+ ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(inner);', '        let mut meta = lock_meta(inner);\n        self.retire(r, Retire::Release)?;'),
  ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, _seq)) if self.live > 0 => 2 * self.next_seq + 1,'),
  # D-099: a durable write's receipt only after a flush issued after its
  # completion succeeded; barriers check their tickets; drop waits for flushes
@@ -1082,6 +1088,15 @@ M = [
  (MAC_PROBE, '    let fixed = d.removable == Some(false) && d.ejectable == Some(false);', '    let fixed = d.removable != Some(true) && d.ejectable != Some(true);', MAC_LIB),
  (MAC_PROBE, '        (false, Some(true)) if fixed && lineage => Tri::Yes,', '        (false, Some(true)) if fixed && (lineage || true) => Tri::Yes,', MAC_LIB),
  (MAC_PROBE, '    ok.then(|| CString::new(name).ok()).flatten()', '    (ok || true).then(|| CString::new(name).ok()).flatten()', MAC_LIB),
+ # D-135: the metadata lock's holder borrows the metadata lane, and a
+ # thread already holding a shared queue the nested lane, never waiting for
+ # a shared one; the metadata lock marks its thread while held.
+ (EXEC_SRC, '        if META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', '        if true || META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', LANES),
+ (EXEC_SRC, '        if META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', '        if true || META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', SCAN),
+ (EXEC_SRC, '        if NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', '        if true || NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', LANES),
+ (EXEC_SRC, '        if NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', '        if true || NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', SCAN),
+ (EXEC_SRC, '            prev: META_HELD.with(|c| c.replace(identity)),', '            prev: META_HELD.with(|c| c.replace(identity & 0)),', LANES),
+ (EXEC_SRC, '            held[slot] = (set, held[slot].1 + 1);', '            held[slot] = (set, held[slot].1);', SCAN),
  # Windows (M4): a made directory is removed only through a handle checked
  # to be on it, with POSIX semantics (the name goes at once). Run by the
  # Windows mutation job.

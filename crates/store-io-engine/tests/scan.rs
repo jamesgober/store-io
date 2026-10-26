@@ -281,3 +281,118 @@ fn test_a_large_read_across_a_bad_range_is_a_media_error() {
         })
     ));
 }
+
+/// Runs `f` on its own thread and returns its result, failing the test
+/// (instead of hanging it) when `f` has not returned within ten seconds.
+fn within_deadline<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _sent = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("{what} never returned: a deadlock"))
+}
+
+/// A scan's visitor may change the store's metadata (D-135): with one
+/// shared queue, held by the scan for its read, a visitor that provisions
+/// a region and releases another completes. Before D-135 the metadata
+/// change waited for a shared queue under the metadata lock, and the only
+/// one was the scan's own: the visitor waited forever.
+#[test]
+fn test_a_scan_visitor_that_provisions_and_releases_completes_with_one_queue() {
+    let (named, released) = within_deadline("the scan", || {
+        let p = SimPlatform::new(SimConfig::volatile(41));
+        let s = Store::create(
+            p,
+            Path::new(DIR),
+            StoreOptions {
+                queues: 1,
+                ..opts()
+            },
+        )
+        .unwrap();
+        // One buffer's worth: the scan reads on the caller's shared queue.
+        let wal = s.provision_append_region("wal", CHUNK as u64).unwrap();
+        wal.append_durable(&record(7, 4096)).unwrap();
+        let mut doomed = Some(s.provision_append_region("doomed", 65_536).unwrap());
+        let mut made = None;
+        let mut released = false;
+        wal.scan(0, |item| {
+            if let ScanItem::Data { .. } = item {
+                if made.is_none() {
+                    made = Some(s.provision_append_region("made", 65_536).unwrap());
+                }
+                if let Some(r) = doomed.take() {
+                    r.release().unwrap();
+                    released = true;
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        (made.map(|r| r.len()), released)
+    });
+    assert_eq!(named, Some(65_536));
+    assert!(released);
+}
+
+/// Metadata changes on other threads while a visitor changes metadata
+/// too (D-135): with one shared queue, held by the scan, four threads
+/// provisioning and releasing in a loop and a visitor provisioning on every
+/// item all finish. Before D-135 a thread holding the metadata lock waited
+/// for the scan's queue while the visitor waited for that lock.
+#[test]
+fn test_metadata_changes_on_other_threads_never_wait_for_a_scan() {
+    within_deadline("the scan and the provisioning threads", || {
+        let p = SimPlatform::new(SimConfig::volatile(42));
+        let s = std::sync::Arc::new(
+            Store::create(
+                p,
+                Path::new(DIR),
+                StoreOptions {
+                    queues: 1,
+                    ..opts()
+                },
+            )
+            .unwrap(),
+        );
+        let wal = s.provision_append_region("wal", CHUNK as u64).unwrap();
+        for i in 0..8 {
+            wal.append_durable(&record(i, 4096)).unwrap();
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let workers: Vec<_> = (0..4)
+            .map(|t| {
+                let (s, stop) = (std::sync::Arc::clone(&s), std::sync::Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    let mut n = 0u32;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let r = s
+                            .provision_page_region(&format!("w{t}-{n}"), 65_536)
+                            .unwrap();
+                        r.release().unwrap();
+                        n += 1;
+                    }
+                    n
+                })
+            })
+            .collect();
+        let mut made = 0u32;
+        for _ in 0..20 {
+            wal.scan(0, |item| {
+                if let ScanItem::Data { .. } = item {
+                    s.provision_page_region(&format!("v{made}"), 65_536)
+                        .unwrap()
+                        .release()
+                        .unwrap();
+                    made += 1;
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let rounds: u32 = workers.into_iter().map(|w| w.join().unwrap()).sum();
+        assert!(made >= 20 && rounds > 0);
+    });
+}

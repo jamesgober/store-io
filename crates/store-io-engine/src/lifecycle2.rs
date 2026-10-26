@@ -38,7 +38,7 @@ where
         self.retire(r, Retire::Release)?;
         // The region lock, then the metadata lock, both held throughout.
         let mut header = r.header.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let id = r.id.get();
         let seq = (id & 0xFFFF_FFFF) as u32;
         // Every return before the commit gives the region back.
@@ -176,7 +176,7 @@ where
         // The entry's extent count, read under the metadata lock (taken
         // after the region lock, D-113).
         let committed = {
-            let meta = lock_meta(&self.inner.meta);
+            let meta = lock_meta(&self.inner);
             let id = r.id.get();
             let p = usize::try_from(id >> 32).map_err(|_| corrupt())?;
             let seq = (id & 0xFFFF_FFFF) as u32;

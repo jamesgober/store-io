@@ -100,7 +100,7 @@ where
         // Phase 1, under the metadata lock (spec §12, "choose and mark"):
         // the name and a table slot claimed, the space placed and marked,
         // the tag charged or the reservation's bytes held.
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         self.name_taken2(&meta, &rname)?;
         let (p, seq) = {
             let v2 = meta.v2.as_deref().ok_or_else(corrupt)?;
@@ -315,7 +315,7 @@ where
         // 5. The commit: the page as it is now (other operations may have
         // written it meanwhile) with the entry added, at the next
         // `meta_seq`.
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let meta_seq = crate::v2::next_meta_seq_of(&meta)?;
         let entry = Entry2 {
             seq: pl.seq,
@@ -517,7 +517,7 @@ where
             return;
         }
         let inner = &self.store.inner;
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let container = meta.container_len;
         if let Some(v2) = meta.v2.as_deref_mut() {
             if let Some((page, seq)) = self.claim {

@@ -93,8 +93,9 @@ where
             .filter(|(_, mark)| mark % 2 == 1)
             .collect();
         let now = inner.platform.monotonic_ms();
-        // The flush lanes follow the shared and parallel lanes (D-124).
-        let first_flush = 2 * inner.queues.shared_len();
+        // The flush lanes follow the shared, parallel and metadata lanes
+        // (D-124, D-135).
+        let first_flush = inner.queues.first_flush_mark();
         let mut oldest: Option<(u64, bool)> = None;
         for (i, entry) in seen.lanes.iter_mut().enumerate() {
             if entry.0 % 2 == 0 {

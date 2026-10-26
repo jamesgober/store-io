@@ -787,6 +787,16 @@
   parallel and flush lanes' in `oldest_outstanding`. Regression tests
   (`tests/scan.rs`, `io::tests`) fail within their deadlines on the old
   code; mutants 713-718 cover both lanes and the thread marks.
+- Engine: **a committed release could be reported as an error** (since
+  0.3.0). Once the release's commit (format 1's table flip, format 2's
+  page write) is durable, a header write that submitted nothing (refused
+  by the OS, a buffer or a lane not to be had, the header not to be
+  encoded) now reports the release done, in both formats; the region's
+  data stays in place, as its header still says Ready. Only a poisoned
+  store reports the header's failure. Format 1 returned every such refusal
+  as an error; format 2 already reported `NotWritten` done but returned
+  the other kinds. Regression tests in `format1_writes` and
+  `format2_release`; mutants 402, 719 and 720.
 - Tests: **mutants 558 and 559 had lost their only killing test** when
   D-132 rerouted cut-short entries. A new test makes an entry fail the
   entry checks for a fault of its own; both are killed again.

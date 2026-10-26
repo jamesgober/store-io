@@ -252,3 +252,35 @@ fn test_release_waiting_for_a_submitter_never_blocks_provisioning() {
     owner.join().unwrap();
     assert!(s.append_region("wal").is_err());
 }
+
+/// A release whose table flip (the commit) is durable but whose header
+/// write is refused before it reaches the device is done: `Ok`, the store
+/// not poisoned, the region gone and gone after reopening. Before, the
+/// refusal came back as an error for a release that was committed.
+#[test]
+fn test_a_committed_release_whose_header_write_is_refused_is_done() {
+    let p = SimPlatform::new(SimConfig::volatile(1209));
+    let s = create(&p);
+    let keep = s.provision_append_region("keep", MIB).unwrap();
+    let gone = s.provision_append_region("gone", MIB).unwrap();
+    // The table flip is the next submission; the header's the one after it.
+    p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + 2, 5)));
+    let released = gone.release();
+    p.with_world(|w| w.faults_mut().fail_submit = None);
+    assert!(
+        released.is_ok(),
+        "a committed release reported {released:?}"
+    );
+    assert!(matches!(
+        s.append_region("gone"),
+        Err(Error::NotFound { .. })
+    ));
+    keep.append_durable(b"the store still writes").unwrap();
+    drop((keep, s));
+    let s = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+    assert!(matches!(
+        s.append_region("gone"),
+        Err(Error::NotFound { .. })
+    ));
+    assert_eq!(s.regions().len(), 1);
+}

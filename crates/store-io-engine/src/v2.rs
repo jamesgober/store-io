@@ -1118,7 +1118,7 @@ impl<P: Platform> Drop for Inner<P> {
         {
             return;
         }
-        let mut meta = lock_meta(&self.meta);
+        let mut meta = lock_meta(self);
         if meta.v2.is_none() {
             return;
         }

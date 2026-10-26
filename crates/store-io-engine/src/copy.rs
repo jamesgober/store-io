@@ -366,7 +366,7 @@ where
     /// 2's holds (every unavailable or unknown-kind entry), else the
     /// unavailable regions.
     fn omitted_for_copy(&self) -> Vec<RegionId> {
-        let meta = lock_meta(&self.inner.meta);
+        let meta = lock_meta(&self.inner);
         match meta.v2.as_deref() {
             Some(v2) => {
                 let mut ids: Vec<RegionId> = v2
@@ -398,7 +398,7 @@ where
         r: &LiveRegion,
         regions: &[std::sync::Arc<LiveRegion>],
     ) -> Option<(Vec<(u64, u64)>, u64)> {
-        let meta = lock_meta(&self.inner.meta);
+        let meta = lock_meta(&self.inner);
         let v2 = meta.v2.as_deref()?;
         let page = usize::try_from(r.id.get() >> 32).ok()?;
         if v2.pages.get(page)?.standing != Standing::Unconfirmed {
@@ -489,7 +489,7 @@ where
     /// such page's newest commit may be given up, one releasing `r`, the
     /// other handing its space to a region it created.
     fn at_risk(&self, r: &LiveRegion) -> bool {
-        let meta = lock_meta(&self.inner.meta);
+        let meta = lock_meta(&self.inner);
         let Some(v2) = meta.v2.as_deref() else {
             return false;
         };
@@ -541,7 +541,7 @@ where
             r.generation.get()
         };
         let tag = {
-            let meta = lock_meta(&inner.meta);
+            let meta = lock_meta(inner);
             match meta.v2.as_deref() {
                 Some(v2) => {
                     let id = r.id.get();

@@ -209,7 +209,7 @@ where
         // first call something that takes the metadata lock (provisioning,
         // `space`). Holding the lock while waiting would deadlock.
         self.retire(r, Retire::Release)?;
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         // 1. The table: the only authority on open.
         let mut entries = meta.entries.clone();
         let Some(entry) = entries

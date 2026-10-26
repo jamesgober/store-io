@@ -70,7 +70,7 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 ## Found in v0.4 (2026-10-19), not yet done
 
 - [ ] A release whose table update is durable but whose header rewrite then fails (pool exhausted, a lane that cannot be cleared) returns an error for a release that is committed (since 0.3.0). Report it as done with the header write's failure noted, or retry the header write.
-- [ ] A scan visitor that provisions holds a shared lane while it waits for the metadata lock; with every shared lane so held (one is enough with `queues: 1`), provisioning and release, which need a lane under the lock, wait forever (since the visitor-provisioning case existed). Give metadata changes a lane of their own, as the flush leader has.
+- [x] (2026-10-26, v0.5, D-135: a metadata lane for the metadata lock's holder, and a nested lane for a thread already holding a shared queue) A scan visitor that provisions holds a shared lane while it waits for the metadata lock; with every shared lane so held (one is enough with `queues: 1`), provisioning and release, which need a lane under the lock, wait forever (since the visitor-provisioning case existed). Give metadata changes a lane of their own, as the flush leader has.
 
 - [x] (2026-10-20, v0.5) Harness: G2 (barrier p50 + 2 us, p99 + 5 us) compares two consecutive W1 windows, the drift G1 was moved off (gates_g1.rs); give it the same alternation.
 - [x] (2026-10-20, v0.5: `append_window`, in bytes) `StoreOptions::append_ring` is counted in blocks, so its default (4096) holds only 2 MiB ahead at 512-byte blocks: a `Submitter` appending 1 MiB eight deep there gets `TooManyInFlight` (G6 raises it). A ring sized in bytes, or a default scaled by the block size.

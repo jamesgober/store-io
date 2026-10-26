@@ -79,7 +79,7 @@ where
                 ctx: ErrorContext::default(),
             });
         }
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         // Names are unique among the table's ready entries, including any
         // region this open could not load (its header failed to verify):
         // reusing such a name would make the table undecodable.

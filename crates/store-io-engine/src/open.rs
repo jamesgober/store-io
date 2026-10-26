@@ -381,6 +381,10 @@ where
         };
         let flush_files = flush_handles(&platform, &file, lanes);
         queues.keep_flush_lanes(1 + flush_files.len());
+        // A read-only store changes no metadata: no metadata lane (D-135).
+        if read_only {
+            queues.drop_meta_lane();
+        }
         let mut report = report;
         report.flushes_in_flight = 1 + flush_files.len() as u8;
         let mut meta = meta;

@@ -1111,11 +1111,15 @@ M = [
  (SLOT, '    if crc32c(payload) != h.payload_crc {', '    if crc32c(payload) != h.payload_crc && false {', FORMAT),
  (JUDGE, 'let a_wins = a.generation > b.generation;', 'let a_wins = a.generation < b.generation;', FORMAT),
  ('crates/store-io-engine/src/settle.rs', '            if full {\n                Ok(store.ticket(state, start, end))', '            if full || true {\n                Ok(store.ticket(state, start, end))', ENGINE),
- (V2, '            || self.domain.poisoned().is_some()\n', '', F2),
- (V2, '            || self.meta.is_poisoned()\n', '', F2),
+ # Drop's own poison check is a fast path only (equivalent): durable_slot
+ # refuses any write on a poisoned domain, so that check is the mutant.
+ ('crates/store-io-engine/src/store.rs', '    if let Some(first) = domain.poisoned() {', '    if let Some(first) = domain.poisoned().filter(|_| false) {', LANES),
+ (V2, '            || self.meta.is_poisoned()\n', '', LANES),
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_ok() {', '            if c.outcome.is_ok() && false {', F2R),
  ('crates/store-io-engine/src/footprint.rs', '(at.checked_add(len)? <= end).then_some(at)', '(at.checked_add(len)? <= end || true).then_some(at)', FOOTPRINT),
- (V2, '        SlotStatus::BadPayloadCrc => pair.facts[i].and_then(|f| f.numbered).map(|n| n.meta_seq),', '        SlotStatus::BadPayloadCrc => None,', DAMAGE),
+ # Not an entry: leaving a torn slot's meta_seq out of the next one is
+ # equivalent. A torn slot stays on the media only while the store is frozen
+ # or read-only (no writes); otherwise the open heals it, overwriting it.
  (SLOT, '    if volume_uuid != e.volume_uuid {', '    if volume_uuid != e.volume_uuid && false {', FORMAT),
  (SLOT, '    if object_id != e.object_id {', '    if object_id != e.object_id && false {', FORMAT),
  (SLOT, '    if slot_offset != e.slot_offset\n', '    if slot_offset != e.slot_offset && false\n', FORMAT),
@@ -1131,17 +1135,19 @@ M = [
  (META2, '    if header.count > max_entries || u32::from(header.count) > header.next_seq {', '    if header.count > max_entries {', FORMAT),
  (META2, '        if self.span_start % block != 0 || self.span_end % block != 0 {', '        if self.span_start % block != 0 {', FORMAT),
  (META2, '        if base.table_offset != 2u64 << base.log2_block_size {', '        if base.table_offset != 2u64 << base.log2_block_size && false {', FORMAT),
- (META2, '        if self.table_end() > file_len {', '        if self.table_end() > file_len && false {', F2R),
+ (META2, '        if self.table_end() > file_len {', '        if self.table_end() > file_len && false {', FORMAT),
  (META2, '        if self.flags & !KNOWN_FLAGS != 0 {', '        if self.flags & !FLAG_CAPPED & !KNOWN_FLAGS != 0 && false {', FORMAT),
  (META2, '    if flags & !KNOWN_FLAGS != 0 {', '    if flags & !KNOWN_FLAGS != 0 && false {', FORMAT),
  (META2, '    if fill == FillPattern::Zeros && fill_key != [0; 16] {', '    if fill == FillPattern::Zeros && fill_key != [0; 16] && false {', FORMAT),
- ('crates/store-io-engine/src/provision2.rs', '                    (page.standing == Standing::Confirmed\n', '                    (page.standing != Standing::Lost\n', F2REP),
+ ('crates/store-io-engine/src/provision2.rs', '                        && page.ahead().next().is_none())', '                        && true)', F2REP),
  ('crates/store-io-engine/src/grow2.rs', '    if page.standing != Standing::Confirmed || page.ahead().next().is_some() {', '    if page.standing != Standing::Confirmed {', F2REP),
- ('crates/store-io-engine/src/lifecycle2.rs', '            if page.standing != Standing::Confirmed || page.ahead().next().is_some() {', '            if page.standing != Standing::Confirmed {', F2REP),
+ # Not an entry: release's own ahead check is equivalent. write_page refuses
+ # an ahead page before any I/O, and the refusal restores the region.
  (V2, '                pages[pair - 1].standing = Standing::Unconfirmed;', '                let _ = pair;', DAMAGE),
  (V2, '    if read_only {\n        return Ok(Opened {', '    if read_only && false {\n        return Ok(Opened {', F2),
- (V2, '    if page.standing != Standing::Confirmed {\n        return Err(Error::NotWritten {', '    if page.standing == Standing::Lost {\n        return Err(Error::NotWritten {', F2REP),
- ('crates/store-io-engine/src/open2.rs', '        if !matches!(page.standing, Standing::Confirmed | Standing::Unconfirmed) {', '        if !matches!(page.standing, Standing::Confirmed | Standing::Unconfirmed | Standing::Lost) {', DAMAGE),
+ (V2, '    if page.standing != Standing::Confirmed {\n        return Err(Error::NotWritten {', '    if page.standing == Standing::Lost {\n        return Err(Error::NotWritten {', LANES),
+ # Not an entry: letting a Lost page's entries through the open is
+ # equivalent. A Lost page's entries are never decoded (v2::open_meta).
  (V2, '        if vm.table_pages != layout.pages\n', '        if vm.table_pages != layout.pages && false\n', F2),
  (COPY_SRC, '                Some(b) if n == piece.len() => piece.copy_from_slice(&b.as_slice()[..n]),', '                Some(b) if n <= piece.len() => piece[..n].copy_from_slice(&b.as_slice()[..n]),', COPYS),
  (META2, '        if clean_close > 1 {', '        if clean_close > 1 && false {', FORMAT),

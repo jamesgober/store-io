@@ -1634,3 +1634,54 @@ fn test_a_region_cut_short_over_another_supersedes_nothing() {
     assert!(s.report().metadata.shares_reserved.is_empty());
     assert!(s.unavailable_regions().is_empty());
 }
+
+/// A page holding an entry past its own write (`footprint_seq` ahead of
+/// the page's `meta_seq`: only damage writes one; that entry is
+/// unavailable) is written only to remove that entry: a provisioning goes
+/// to another page, and growing or releasing a healthy region on that page
+/// is refused (`Frozen`), the page left as it is. A rewrite at a later
+/// `meta_seq` would make the open count the ahead entry older than it was,
+/// changing the verdicts that rest on it.
+#[test]
+fn test_a_page_holding_an_ahead_entry_is_never_rewritten_but_to_remove_it() {
+    let p = fresh(1290);
+    let mut ahead = region(0, RegionKind::Page, "ahead", BASE, CAP);
+    ahead.entry.footprint_seq = max_meta_seq(&p) + 50;
+    let healthy = region(1, RegionKind::Page, "b", BASE + 2 * B + CAP, CAP);
+    write_regions(&p, 0, &[ahead, healthy]);
+    let s = open(&p);
+    assert_eq!(s.unavailable_regions().len(), 1);
+    let pair0 = page_at(&p, 0, 0) as usize..page_at(&p, 1, 0) as usize;
+    let page0 = media(&p)[pair0.clone()].to_vec();
+    let n = s.provision_page_region("new", 8 * B).unwrap();
+    // "b"'s header pair, before its refused growth and release.
+    let hb = (BASE + 2 * B + CAP) as usize..(BASE + 4 * B + CAP) as usize;
+    let header_b = media(&p)[hb.clone()].to_vec();
+    let b = s.page_region("b").unwrap();
+    let frozen = |e: &Result<(), Error>| {
+        matches!(
+            e,
+            Err(Error::NotWritten {
+                cause: NotWrittenCause::Frozen,
+                ..
+            })
+        )
+    };
+    let grown = b.grow(2 * CAP).map(drop);
+    assert!(frozen(&grown), "grew: {grown:?}");
+    let released = b.release();
+    assert!(frozen(&released), "released: {released:?}");
+    drop((n, s));
+    assert!(
+        media(&p)[pair0] == page0[..],
+        "the ahead page was rewritten"
+    );
+    assert!(
+        media(&p)[hb] == header_b[..],
+        "a refused growth or release rewrote the region's header"
+    );
+    // Page 0 unchanged, so "new" is on another page: both serve.
+    let s = open(&p);
+    assert!(s.page_region("new").is_ok());
+    assert!(s.page_region("b").is_ok());
+}

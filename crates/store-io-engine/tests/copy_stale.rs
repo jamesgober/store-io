@@ -513,3 +513,36 @@ fn test_regions_two_given_up_commits_may_share_are_reported() {
         "a: possibly accepted"
     );
 }
+
+/// A short read of a stale page's region (fewer bytes than its runs say
+/// are there) fails the copy: it never completes with the missing bytes
+/// left as whatever the buffer held. Every read of a copy is made short in
+/// turn; each copy either fails or holds exactly the source's bytes.
+#[test]
+fn test_a_short_read_of_a_stale_region_fails_the_copy() {
+    let mut failed = 0;
+    for k in 1..=48u64 {
+        let p = fresh(1690);
+        let p_at = BASE;
+        let pr = region(0, RegionKind::Page, "p", p_at, CAP);
+        let q_at = p_at + 2 * B + CAP;
+        let qr = region(1, RegionKind::Append, "q", q_at, CAP);
+        write_regions(&p, 0, &[pr, qr]);
+        let pdata = pattern(3, CAP);
+        put(&p, p_at + 2 * B, &pdata);
+        let qdata = pattern(4, CAP);
+        put(&p, q_at + 2 * B, &qdata);
+        tear_newer_copy_of(&p, 0);
+        p.with_world(|w| w.faults_mut().short_read = Some(w.reads() + k));
+        let got = copy(&p, true);
+        p.with_world(|w| w.faults_mut().short_read = None);
+        if got.is_err() {
+            failed += 1;
+            continue;
+        }
+        let s = target(&p);
+        assert!(page_bytes(&s, "p") == pdata, "read {k} short: p's bytes");
+        assert!(append_bytes(&s, "q") == qdata, "read {k} short: q's bytes");
+    }
+    assert!(failed > 0, "no short read reached the copy's raw reads");
+}

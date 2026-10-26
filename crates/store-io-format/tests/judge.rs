@@ -647,3 +647,29 @@ fn test_a_refused_page_blocks_even_a_volume_heal() {
     assert_eq!(j.heal, None);
     assert!(!j.writable);
 }
+
+/// With both copies of a pair valid, the newer generation wins, in either
+/// slot: never the older copy (a silent rollback of the metadata).
+#[test]
+fn test_with_both_copies_valid_the_newer_generation_wins_in_either_slot() {
+    let mut m = Model::new(3);
+    // Pair 1: written again into B (generation 2); pair 2: twice more,
+    // back into A (generation 3), B holding generation 2.
+    let b = m.write(1);
+    m.write(2);
+    let a = m.write(2);
+    assert_eq!((b, a), (1, 0));
+    let (j, v) = run(&m, false, &[]);
+    assert_eq!(standings(&v), [Standing::Confirmed; 4]);
+    assert_eq!(v[1].winner, Some(SlotIndex::B));
+    assert_eq!(
+        (v[1].a, v[1].b),
+        (SlotVerdict::Nothing, SlotVerdict::Winner)
+    );
+    assert_eq!(v[2].winner, Some(SlotIndex::A));
+    assert_eq!(
+        (v[2].a, v[2].b),
+        (SlotVerdict::Winner, SlotVerdict::Nothing)
+    );
+    assert!(j.writable);
+}

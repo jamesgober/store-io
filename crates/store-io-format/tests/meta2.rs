@@ -163,6 +163,34 @@ fn test_a_page_round_trips_and_its_entries_check() {
     }
 }
 
+/// A page holding more entries than it has ever handed out sequence
+/// numbers (`count > next_seq`) is lost: an entry's sequence number would
+/// have to repeat.
+#[test]
+fn test_a_page_with_more_entries_than_its_next_seq_is_lost() {
+    let raws = [entry(0).to_raw(), entry(1).to_raw()];
+    let h = PageHeader {
+        page_index: 5,
+        next_seq: 1,
+        count: 2,
+    };
+    let mut out = vec![0u8; PAGE_HEADER_LEN + ENTRY2_LEN * raws.len()];
+    let bytes = match encode_page(&mut out, &h, &raws) {
+        Ok(n) => out[..n].to_vec(),
+        // The encoder refuses it too: craft it from a valid page.
+        Err(_) => {
+            let mut b = enc_page(&header(2), &raws);
+            let at = b.windows(4).position(|w| w == 10u32.to_le_bytes()).unwrap();
+            b[at..at + 4].copy_from_slice(&1u32.to_le_bytes());
+            b
+        }
+    };
+    assert_eq!(
+        decode_page(&bytes, 5, 169).err(),
+        Some(MetaError::Field("count"))
+    );
+}
+
 #[test]
 fn test_page_rules_lose_the_page() {
     let raws = [entry(0).to_raw(), entry(1).to_raw()];

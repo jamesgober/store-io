@@ -63,6 +63,23 @@ fn test_an_unclean_stop_is_reported() {
     assert!(!open(&p).report().metadata.clean_close);
 }
 
+/// A store poisoned by a failed durable write records no clean close when
+/// it is dropped: its in-memory state can no longer vouch for the media, so
+/// the next open must judge it as stopped uncleanly.
+#[test]
+fn test_a_poisoned_store_records_no_clean_close() {
+    let p = SimPlatform::new(SimConfig::volatile(74));
+    let s = create(&p);
+    let r = s.provision_append_region("wal", 64 * 1024).unwrap();
+    r.append_durable(b"before").unwrap();
+    p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + 1));
+    assert!(r.append_durable(b"fails").is_err());
+    assert!(s.poisoned().is_some(), "the failed write did not poison");
+    p.with_world(|w| w.faults_mut().fail_write = None);
+    drop((r, s));
+    assert!(!open(&p).report().metadata.clean_close);
+}
+
 #[test]
 fn test_a_torn_volume_record_write_is_healed() {
     let p = SimPlatform::new(SimConfig::volatile(73));
@@ -382,6 +399,59 @@ fn test_an_unknown_read_only_feature_opens_read_only() {
     assert!(s.report().metadata.read_only_reason.is_some());
     drop(s);
     assert!(media(&p) == before);
+}
+
+/// A volume-record copy found only when a failed read is retried must
+/// describe the same table the open laid out from the other copy: with
+/// the newer copy describing one more table page, every open is refused as
+/// corrupt, also when the first read of that copy fails and the retry
+/// finds it (the open never proceeds with a record and a layout that
+/// disagree).
+#[test]
+fn test_a_volume_copy_found_on_a_retried_read_must_describe_the_same_table() {
+    for k in 1..=6u64 {
+        let p = SimPlatform::new(SimConfig::volatile(98));
+        drop(create(&p));
+        let m = media(&p);
+        let b = block(&p) as usize;
+        // Create wrote copy A (generation 1), the clean close copy B (2).
+        assert_eq!(newest_volume_slot(&p), b as u64);
+        let mut vm = store_io_format::meta2::VolumeMeta2::decode(
+            &m[b + 128..b + 128 + store_io_format::meta2::VOLUME_META2_LEN],
+        )
+        .unwrap();
+        vm.table_pages += 1;
+        let mut payload = vec![0u8; store_io_format::meta2::VOLUME_META2_LEN];
+        vm.encode(&mut payload).unwrap();
+        let mut slot = vec![0u8; b];
+        encode(
+            &mut slot,
+            &SlotFields {
+                volume_uuid: m[32..48].try_into().unwrap(),
+                object_id: 0,
+                generation: 3,
+                owner_generation: 1,
+                slot_offset: 0,
+                slot_index: SlotIndex::A,
+                log2_slot_size: m[78],
+                prev_header_crc32c: u32_at(&m, b + 8),
+                format_major: FORMAT_2,
+                meta_seq: max_meta_seq(&p) + 1,
+            },
+            &payload,
+        )
+        .unwrap();
+        put(&p, 0, &slot);
+        p.with_world(|w| {
+            let n = w.reads() + k;
+            w.faults_mut().fail_read = Some((n, 5));
+        });
+        let got = Store::open_readonly(p.clone(), Path::new(DIR), opts()).map(drop);
+        assert!(
+            matches!(got, Err(Error::Corruption { .. })),
+            "read {k} failing: {got:?}"
+        );
+    }
 }
 
 #[test]

@@ -854,6 +854,114 @@ mod tests {
     }
 
     #[test]
+    fn test_a_store_whose_metadata_lock_was_poisoned_records_no_clean_close() {
+        // A panic while the metadata lock was held may have left the
+        // in-memory metadata half-changed: the drop records no clean close.
+        let p = SimPlatform::new(SimConfig::volatile(6));
+        let s = std::sync::Arc::new(
+            Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap(),
+        );
+        let s2 = std::sync::Arc::clone(&s);
+        let panicked = std::thread::spawn(move || {
+            let _meta = crate::store::lock_meta(&s2.inner);
+            panic!("a panic under the metadata lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(s.inner.meta.is_poisoned());
+        drop(s);
+        let s = Store::open(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        assert!(!s.report().metadata.clean_close);
+    }
+
+    #[test]
+    fn test_a_durable_slot_write_on_a_poisoned_store_submits_nothing() {
+        // The backstop under every metadata write (callers check first): on
+        // a poisoned domain `durable_slot` refuses before submitting.
+        let p = SimPlatform::new(SimConfig::volatile(7));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let r = s.provision_append_region("wal", 1 << 16).unwrap();
+        p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + 1));
+        assert!(r.append_durable(b"fails").is_err());
+        p.with_world(|w| w.faults_mut().fail_write = None);
+        assert!(s.inner.domain.poisoned().is_some());
+        let before = p.with_world(|w| w.write_submits());
+        let inner = &s.inner;
+        let mut meta = crate::store::lock_meta(inner);
+        let mut q = inner.queues.get(0);
+        let got = crate::v2::write_volume::<SimPlatform>(
+            &mut q,
+            &inner.file,
+            &inner.pool,
+            &inner.layout,
+            inner.volume,
+            &inner.policy,
+            &inner.domain,
+            &mut meta,
+            inner.owner_generation,
+            true,
+        );
+        drop((q, meta));
+        assert!(
+            matches!(got, Err(store_io_core::error::Error::Poisoned { .. })),
+            "{got:?}"
+        );
+        assert_eq!(
+            p.with_world(|w| w.write_submits()),
+            before,
+            "a write was submitted"
+        );
+    }
+
+    #[test]
+    fn test_a_page_write_to_an_unconfirmed_page_is_refused_before_any_io() {
+        // The backstop under every page commit (callers check first): a
+        // page whose standing is not Confirmed is never written.
+        let p = SimPlatform::new(SimConfig::volatile(8));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let inner = &s.inner;
+        let mut meta = crate::store::lock_meta(inner);
+        let payload = {
+            let v2 = meta.v2.as_deref_mut().unwrap();
+            v2.pages[0].standing = store_io_format::judge::Standing::Unconfirmed;
+            v2.pages[0].pair.payload.clone().unwrap()
+        };
+        let seq = crate::v2::next_meta_seq_of(&meta).unwrap();
+        let before = p.with_world(|w| w.write_submits());
+        let mut q = inner.queues.get(0);
+        let got = crate::v2::write_page::<SimPlatform>(
+            &mut q,
+            &inner.file,
+            &inner.pool,
+            &inner.layout,
+            inner.volume,
+            &inner.policy,
+            &inner.domain,
+            &mut meta,
+            0,
+            &payload,
+            seq,
+            inner.owner_generation,
+        );
+        drop((q, meta));
+        assert!(
+            matches!(
+                got,
+                Err(store_io_core::error::Error::NotWritten {
+                    cause: store_io_core::error::NotWrittenCause::Frozen,
+                    ..
+                })
+            ),
+            "{got:?}"
+        );
+        assert_eq!(
+            p.with_world(|w| w.write_submits()),
+            before,
+            "a write was submitted"
+        );
+    }
+
+    #[test]
     fn test_a_read_only_store_keeps_the_nested_lane_but_no_metadata_lane() {
         let p = SimPlatform::new(SimConfig::volatile(5));
         let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();

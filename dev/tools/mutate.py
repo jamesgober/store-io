@@ -703,7 +703,7 @@ M = [
  # capacity); a release whose header write is refused after the commit
  # still stands
  ('crates/store-io-engine/src/lifecycle2.rs', '        let extents = committed_extents(&header, inner.layout.log2_block, committed);', '        let extents: Vec<(u64, u64)> = r.map.extents().chain(committed_extents(&header, inner.layout.log2_block, 0)).collect();', F2X + ['--test', 'format2_grow_beyond']),
- ('crates/store-io-engine/src/lifecycle2.rs', '            Err(Error::NotWritten { .. }) => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Err(corrupt()),', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_none() => return Err(corrupt()),', F2X),
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
  # header says Released; format 2 never takes format 1's path
@@ -1097,6 +1097,10 @@ M = [
  (EXEC_SRC, '        if NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', '        if true || NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', SCAN),
  (EXEC_SRC, '            prev: META_HELD.with(|c| c.replace(identity)),', '            prev: META_HELD.with(|c| c.replace(identity & 0)),', LANES),
  (EXEC_SRC, '            held[slot] = (set, held[slot].1 + 1);', '            held[slot] = (set, held[slot].1);', SCAN),
+ # A committed release whose header write submitted nothing reports done,
+ # in both formats (only a poisoned store reports the header's failure).
+ ('crates/store-io-engine/src/lifecycle2.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_some() => return Ok(()),', F2X),
+ ('crates/store-io-engine/src/lifecycle.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_some() => return Ok(()),', ['-p', 'store-io-engine', '--test', 'format1_writes']),
  # Windows (M4): a made directory is removed only through a handle checked
  # to be on it, with POSIX semantics (the name goes at once). Run by the
  # Windows mutation job.

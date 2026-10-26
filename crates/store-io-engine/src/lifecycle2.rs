@@ -157,10 +157,14 @@ where
         //    unavailable, not served. A header write refused before it was
         //    submitted leaves the data in place instead (that rollback would
         //    find the region whole); one that failed after submission has
-        //    poisoned the store. Either way the release is committed.
+        //    poisoned the store. Either way the release is committed, so
+        //    any failure that submitted nothing (the store not poisoned:
+        //    refused, a buffer or the lane not to be had, the header not to
+        //    be encoded) reports it done; only a poisoned store reports the
+        //    failure.
         match self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed, None) {
             Ok(_) => {}
-            Err(Error::NotWritten { .. }) => return Ok(()),
+            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),
             Err(e) => return Err(e),
         }
         // 3. The data extents, as format 1 does: every one tried.

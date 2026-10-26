@@ -209,7 +209,7 @@ where
         // first call something that takes the metadata lock (provisioning,
         // `space`). Holding the lock while waiting would deadlock.
         self.retire(r, Retire::Release)?;
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         // 1. The table: the only authority on open.
         let mut entries = meta.entries.clone();
         let Some(entry) = entries
@@ -240,8 +240,15 @@ where
         // the extent released, so a provisioning that ran in between could
         // reuse it, and this release's late writes would then land in the
         // new region (its header slot, and a hole punched through its data).
-        // 2. The header, for tools that list regions from headers.
-        let _generation = self.rewrite_header(r, RegionState::Released)?;
+        // 2. The header, for tools that list regions from headers. The
+        //    release is committed: a header write that submitted nothing
+        //    (the store not poisoned) reports it done, its data left in
+        //    place; a poisoned store reports the failure.
+        match self.rewrite_header(r, RegionState::Released) {
+            Ok(_) => {}
+            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),
+            Err(e) => return Err(e),
+        }
         // 3. The data area. The metadata lock is released on return.
         self.release_extents(r.map.extents(), c)
     }

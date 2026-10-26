@@ -381,8 +381,38 @@ pub(crate) fn io(op: Op, raw: OsError) -> Error {
     }
 }
 
-pub(crate) fn lock_meta(m: &Mutex<Meta>) -> MutexGuard<'_, Meta> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
+/// Takes the store's metadata lock. While the guard lives, every queue
+/// this thread borrows from the store's set is the metadata lane (D-135),
+/// so a metadata change never waits for a shared queue that a thread
+/// waiting for this lock may hold.
+pub(crate) fn lock_meta<P: Platform>(inner: &Inner<P>) -> MetaGuard<'_> {
+    let guard = inner.meta.lock().unwrap_or_else(PoisonError::into_inner);
+    MetaGuard {
+        _held: crate::exec::MetaHeld::enter(inner.queues.identity()),
+        guard,
+    }
+}
+
+/// The metadata lock, held (see [`lock_meta`]). Fields drop in declaration
+/// order: the thread stops routing to the metadata lane before the lock is
+/// released.
+pub(crate) struct MetaGuard<'a> {
+    _held: crate::exec::MetaHeld,
+    guard: MutexGuard<'a, Meta>,
+}
+
+impl core::ops::Deref for MetaGuard<'_> {
+    type Target = Meta;
+
+    fn deref(&self) -> &Meta {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for MetaGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Meta {
+        &mut self.guard
+    }
 }
 
 /// A random 128-bit identity. Uniqueness matters, secrecy does not: the
@@ -522,7 +552,7 @@ where
         }
         // A region the table names but open could not use is corrupt, not
         // missing: a caller must never mistake it for a fresh start (D-090).
-        match lock_meta(&self.inner.meta)
+        match lock_meta(&self.inner)
             .unavailable
             .iter()
             .find(|u| u.name == name.as_str() && u.kind == kind)
@@ -544,7 +574,7 @@ where
     /// Their names stay reserved.
     #[must_use]
     pub fn unavailable_regions(&self) -> Vec<UnavailableRegion> {
-        lock_meta(&self.inner.meta).unavailable.clone()
+        lock_meta(&self.inner).unavailable.clone()
     }
 
     /// Whether allocation is frozen now (format 2: a table page is stale
@@ -562,7 +592,7 @@ where
     /// nothing.
     #[must_use]
     pub fn repairs(&self) -> Vec<crate::report::Repair> {
-        lock_meta(&self.inner.meta).repairs.clone()
+        lock_meta(&self.inner).repairs.clone()
     }
 }
 
@@ -715,7 +745,19 @@ pub(crate) fn make_queues<P: Platform>(
     for _ in 0..flush_lanes.max(1) {
         flush.push(platform.queue(cfg).map_err(|e| io(Op::Queue, e))?);
     }
-    Ok(QueueSet::with_flush_lanes(qs, flush, cfg.depth as usize))
+    // And two that never make a caller wait for a shared queue (D-135):
+    // one for metadata changes, used only under the metadata lock, and one
+    // for a thread already holding a shared queue (a scan's visitor).
+    let own = [
+        platform.queue(cfg).map_err(|e| io(Op::Queue, e))?,
+        platform.queue(cfg).map_err(|e| io(Op::Queue, e))?,
+    ];
+    Ok(QueueSet::with_flush_lanes(
+        qs,
+        flush,
+        own,
+        cfg.depth as usize,
+    ))
 }
 
 /// The flush slots a store runs (D-124): `opts.flushes_in_flight` clamped to

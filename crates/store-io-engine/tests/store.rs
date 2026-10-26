@@ -87,6 +87,39 @@ fn test_second_open_is_locked() {
     ));
 }
 
+/// A lock that fails for any reason but another holder (a file system that
+/// cannot lock: ENOLCK) is a plain `Io` failure of the lock, never
+/// `Locked`, at open (writable and read-only) and at create; and at create
+/// over an existing store a held lock still says it exists.
+#[test]
+fn test_a_lock_that_fails_but_is_not_held_is_io_not_locked() {
+    use store_io_core::error::Op;
+    let enolck = |e: &Error| matches!(e, Error::Io { op: Op::Lock, raw, .. } if raw.code == 37);
+    let p = SimPlatform::new(SimConfig::volatile(7));
+    drop(create(&p));
+    p.with_world(|w| w.faults_mut().fail_lock = Some(37));
+    let e = Store::open(p.clone(), Path::new(DIR), opts())
+        .map(drop)
+        .unwrap_err();
+    assert!(enolck(&e), "writable open: {e:?}");
+    let e = Store::open_readonly(p.clone(), Path::new(DIR), opts())
+        .map(drop)
+        .unwrap_err();
+    assert!(enolck(&e), "read-only open: {e:?}");
+    let q = SimPlatform::new(SimConfig::volatile(8));
+    q.with_world(|w| w.faults_mut().fail_lock = Some(37));
+    let e = Store::create(q, Path::new(DIR), opts())
+        .map(drop)
+        .unwrap_err();
+    assert!(enolck(&e), "create: {e:?}");
+    p.with_world(|w| w.faults_mut().fail_lock = None);
+    let _held = reopen(&p);
+    assert!(matches!(
+        Store::open(p.clone(), Path::new(DIR), opts()),
+        Err(Error::Locked)
+    ));
+}
+
 #[test]
 fn test_receipted_appends_survive_a_crash_that_loses_the_cache() {
     let p = SimPlatform::new(SimConfig::volatile(4));

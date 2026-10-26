@@ -358,3 +358,68 @@ fn test_a_rolled_back_release_finds_the_region_released() {
     assert_eq!(u.len(), 1, "{u:?}");
     assert_eq!(u[0].reason, store_io_engine::Unavailable::HeaderReleased);
 }
+
+/// A release whose commit is durable but whose header write is refused
+/// before it reaches the device (here the OS rejecting the submission) is
+/// done: it returns `Ok`, the store is not poisoned, the region is gone and
+/// stays gone, and its data stays in place (its header still says Ready, so
+/// a rollback of the commit's page would find it whole). Before, it
+/// returned the refusal as an error for a release that was committed.
+#[test]
+fn test_a_committed_release_whose_header_write_is_refused_is_done() {
+    let p = fresh(611);
+    let s = open(&p);
+    s.provision_append_region("keep", CAP).unwrap();
+    let gone = s.provision_append_region("gone", CAP).unwrap();
+    // The page write (the commit) is the next submission; the header's the
+    // one after it.
+    p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + 2, 5)));
+    assert!(
+        gone.release().is_ok(),
+        "a committed release reported an error"
+    );
+    p.with_world(|w| w.faults_mut().fail_submit = None);
+    assert!(s.append_region("gone").is_err());
+    // Its header untouched (its space free, not yet reused).
+    let at = BASE + 2 * B + CAP;
+    assert_eq!(header_state(&p, 1, [at, at + B]), Some(RegionState::Ready));
+    // The store still changes and writes.
+    let r = s.provision_append_region("after", CAP).unwrap();
+    r.append_durable(b"the store still writes").unwrap();
+    drop((r, s));
+    assert_eq!(names(&p), ["keep", "after"]);
+    let s = open(&p);
+    assert!(s.append_region("gone").is_err());
+    assert!(s.report().unavailable.is_empty());
+}
+
+/// Released entries never fill the region table: a release removes its
+/// entry from its page, and the space it frees takes a region of any size.
+/// Three times the table's capacity of regions, every one of a size no
+/// other has, provisioned and released beside one that stays: no
+/// `NoSpace(Table)`, and the container grows no further than its largest
+/// region needs. (Format 1 kept released entries, reused only by a region
+/// of exactly the same size, and could fill its table with them.)
+#[test]
+fn test_released_regions_of_every_size_never_fill_the_table() {
+    let p = fresh(612);
+    let s = open(&p);
+    s.provision_append_region("keep", CAP).unwrap();
+    let mut peak = 0usize;
+    for i in 0..1200u64 {
+        // 4 KiB to 1 MiB, never the same size twice in a row of 256.
+        let size = B * (1 + (i * 37) % 256);
+        let r = s
+            .provision_page_region(&format!("r{i}"), size)
+            .unwrap_or_else(|e| panic!("provisioning {i} ({size} bytes): {e:?}"));
+        r.release().unwrap();
+        if i == 256 {
+            peak = media(&p).len();
+        }
+    }
+    assert!(
+        media(&p).len() <= peak,
+        "released space was not reused: the container grew"
+    );
+    assert_eq!(names(&p), ["keep"]);
+}

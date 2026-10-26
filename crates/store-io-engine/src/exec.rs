@@ -13,7 +13,16 @@
 //! the count and then retries every queue with `try_lock` (read-modify-writes)
 //! while holding the wake mutex. Either the waiter's retry finds the returned
 //! queue, or the returner sees the waiter and signals under the same mutex.
+//!
+//! Metadata changes never wait for a shared queue (D-135). They run under
+//! the store's metadata lock, and a thread holding a shared queue may be
+//! waiting for that very lock (a scan's visitor that provisions). While a
+//! thread holds a store's metadata lock ([`MetaHeld`]), every queue it
+//! borrows from that store's set is the set's metadata lane: one queue that
+//! only the lock's holder uses, so it is never contended, as the flush
+//! leader's lane is never contended.
 
+use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 use store_io_core::observe::{Counter, Observer};
@@ -48,6 +57,14 @@ pub(crate) struct QueueSet<Q> {
     /// set has none.
     flush: Box<[Mutex<Lane<Q>>]>,
     parallel: OnceLock<Box<[Mutex<Lane<Q>>]>>,
+    /// The metadata lane (D-135): used only by the thread holding the
+    /// store's metadata lock, so never contended. `None` for a set made
+    /// without one (tests, the open's own reads) and for a read-only store.
+    meta: Option<Mutex<Lane<Q>>>,
+    /// The nested lane (D-135): used only by a thread that already holds
+    /// one of the shared lanes and finds none free (a scan's visitor
+    /// calling back into the store). `None` for a set made without one.
+    nested: Option<Mutex<Lane<Q>>>,
     /// Serialises creating the parallel lanes.
     parallel_init: Mutex<()>,
     /// The parallel queues' worker threads (`Queue::workers`), once created.
@@ -57,8 +74,9 @@ pub(crate) struct QueueSet<Q> {
     /// call).
     parallel_off: AtomicBool,
     depth: usize,
-    /// One busy mark per shared lane, then one per parallel lane, then one
-    /// per flush lane (at least one, D-095), each alone on its cache line and published
+    /// One busy mark per shared lane, then one per parallel lane, then the
+    /// metadata lane's and the nested lane's (D-135), then one per flush lane (at least one,
+    /// D-095), each alone on its cache line and published
     /// by its lane's op table: odd while an operation is in flight on the
     /// lane (`2 * oldest + 1`, so it changes when the oldest completes),
     /// even otherwise. Only the holder writes it; a watchdog reads it
@@ -199,6 +217,8 @@ impl LaneMark {
 pub(crate) struct LaneGuard<'a, Q: Queue> {
     guard: MutexGuard<'a, Lane<Q>>,
     _notify: Option<Notify<'a, Q>>,
+    /// What the lane marks for its thread (D-135), undone when it drops.
+    _held: Option<Held>,
 }
 
 /// The flush lane, borrowed by the flush leader.
@@ -251,20 +271,26 @@ impl<Q: Queue> DerefMut for LaneGuard<'_, Q> {
 impl<Q: Queue> QueueSet<Q> {
     /// Wraps already-created queues; no flush lane.
     pub(crate) fn new(queues: Vec<Q>, depth: usize) -> Self {
-        Self::build(queues, Vec::new(), depth)
+        Self::build(queues, Vec::new(), None, depth)
     }
 
-    /// Wraps already-created queues and dedicated flush lanes, one per
-    /// flush slot.
-    pub(crate) fn with_flush_lanes(queues: Vec<Q>, flush: Vec<Q>, depth: usize) -> Self {
-        Self::build(queues, flush, depth)
+    /// Wraps already-created queues, dedicated flush lanes (one per flush
+    /// slot), and the metadata and nested lanes (D-135).
+    pub(crate) fn with_flush_lanes(
+        queues: Vec<Q>,
+        flush: Vec<Q>,
+        own: [Q; 2],
+        depth: usize,
+    ) -> Self {
+        Self::build(queues, flush, Some(own), depth)
     }
 
-    fn build(queues: Vec<Q>, flush: Vec<Q>, depth: usize) -> Self {
-        // One mark per shared lane, one per parallel lane, then one per
-        // flush lane (one at least, which stays even when there is none).
+    fn build(queues: Vec<Q>, flush: Vec<Q>, own: Option<[Q; 2]>, depth: usize) -> Self {
+        // One mark per shared lane, one per parallel lane, the metadata and
+        // nested lanes', then one per flush lane (one at least, which stays
+        // even when there is none).
         let n = queues.len();
-        let marks: Box<[Arc<LaneMark>]> = (0..2 * n + flush.len().max(1))
+        let marks: Box<[Arc<LaneMark>]> = (0..2 * n + 2 + flush.len().max(1))
             .map(|_| Arc::new(LaneMark(AtomicU64::new(0))))
             .collect();
         Self {
@@ -275,10 +301,12 @@ impl<Q: Queue> QueueSet<Q> {
                 .collect(),
             flush: flush
                 .into_iter()
-                .zip(&marks[2 * n..])
+                .zip(&marks[2 * n + 2..])
                 .map(|(q, m)| lane(q, m, depth))
                 .collect(),
             parallel: OnceLock::new(),
+            meta: None,
+            nested: None,
             parallel_init: Mutex::new(()),
             parallel_workers: OnceLock::new(),
             parallel_off: AtomicBool::new(false),
@@ -288,6 +316,16 @@ impl<Q: Queue> QueueSet<Q> {
             wake: Mutex::new(()),
             returned: Condvar::new(),
         }
+        .with_own(own)
+    }
+
+    fn with_own(mut self, own: Option<[Q; 2]>) -> Self {
+        if let Some([meta, nested]) = own {
+            let at = 2 * self.queues.len();
+            self.meta = Some(lane(meta, &self.marks[at], self.depth));
+            self.nested = Some(lane(nested, &self.marks[at + 1], self.depth));
+        }
+        self
     }
 
     /// Flush slot `slot`'s lane, for the thread leading a flush on that
@@ -334,6 +372,7 @@ impl<Q: Queue> QueueSet<Q> {
         LaneGuard {
             guard,
             _notify: None,
+            _held: None,
         }
     }
 
@@ -397,13 +436,31 @@ impl<Q: Queue> QueueSet<Q> {
     }
 
     /// The shared lanes (as many parallel lanes follow them).
+    #[cfg(test)]
     pub(crate) fn shared_len(&self) -> usize {
         self.queues.len()
     }
 
+    /// The index of the first flush lane's busy mark in [`Self::marks`].
+    pub(crate) fn first_flush_mark(&self) -> usize {
+        2 * self.queues.len() + 2
+    }
+
+    /// Closes the metadata lane: a store that changes no metadata
+    /// (read-only) keeps no queue for it. Its busy mark stays, always even.
+    pub(crate) fn drop_meta_lane(&mut self) {
+        self.meta = None;
+    }
+
+    /// Whether the set has a metadata lane and a nested lane (D-135).
+    #[cfg(test)]
+    pub(crate) fn own_lanes(&self) -> (bool, bool) {
+        (self.meta.is_some(), self.nested.is_some())
+    }
+
     /// Every lane's busy mark: the shared lanes in order, the parallel lanes,
-    /// then the flush lanes (odd while an operation is in flight on it;
-    /// always even for a lane that does not exist).
+    /// the metadata and nested lanes, then the flush lanes (odd while an operation is in
+    /// flight on it; always even for a lane that does not exist).
     pub(crate) fn marks(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.marks.iter().map(|m| m.0.load(Ordering::Relaxed))
     }
@@ -422,12 +479,28 @@ impl<Q: Queue> QueueSet<Q> {
 
     /// Borrows a free queue, starting the search at `hint`; when all are
     /// busy, waits for the first one returned.
+    ///
+    /// Two callers never wait for a shared queue (D-135):
+    /// - a thread holding this store's metadata lock gets the metadata lane,
+    ///   which only that lock's holder uses;
+    /// - a thread already holding one of this set's shared queues (a scan's
+    ///   visitor calling back into the store) that finds none free gets the
+    ///   nested lane, which only such threads use. Its holders wait for
+    ///   nothing that waits for them: the metadata lock's holder waits for
+    ///   no queue but its own lane.
+    ///
+    /// A borrow nested inside either of those lanes (never made by the
+    /// engine) takes a shared queue as before.
     pub(crate) fn get(&self, hint: usize) -> LaneGuard<'_, Q> {
+        let me = self.identity();
+        if let Some(guard) = self.meta_lane(me) {
+            return guard;
+        }
         if let Some((_, guard)) = self.try_any(hint) {
-            return LaneGuard {
-                guard,
-                _notify: Some(Notify { set: self }),
-            };
+            return self.shared(guard, me);
+        }
+        if let Some(guard) = self.nested_lane(me) {
+            return guard;
         }
         let _registered = self.waiters.fetch_add(1, Ordering::AcqRel);
         let mut wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner);
@@ -442,10 +515,138 @@ impl<Q: Queue> QueueSet<Q> {
         };
         drop(wake);
         let _unregistered = self.waiters.fetch_sub(1, Ordering::AcqRel);
+        self.shared(guard, me)
+    }
+
+    fn shared<'a>(&'a self, guard: MutexGuard<'a, Lane<Q>>, me: usize) -> LaneGuard<'a, Q> {
         LaneGuard {
             guard,
             _notify: Some(Notify { set: self }),
+            _held: Held::shared(me),
         }
+    }
+
+    /// The metadata lane, when this thread holds this set's store's
+    /// metadata lock and does not hold the lane already.
+    fn meta_lane(&self, me: usize) -> Option<LaneGuard<'_, Q>> {
+        if META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {
+            return None;
+        }
+        let m = self.meta.as_ref()?;
+        // Only the metadata lock's holder takes it: uncontended.
+        let guard = m.lock().unwrap_or_else(PoisonError::into_inner);
+        Some(LaneGuard {
+            guard,
+            _notify: None,
+            _held: Some(Held::Meta(META_LANE.with(|c| c.replace(me)))),
+        })
+    }
+
+    /// The nested lane, when this thread holds one of this set's shared
+    /// queues and not the nested lane already.
+    fn nested_lane(&self, me: usize) -> Option<LaneGuard<'_, Q>> {
+        if NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {
+            return None;
+        }
+        let m = self.nested.as_ref()?;
+        let guard = m.lock().unwrap_or_else(PoisonError::into_inner);
+        Some(LaneGuard {
+            guard,
+            _notify: None,
+            _held: Some(Held::Nested(NESTED_LANE.with(|c| c.replace(me)))),
+        })
+    }
+
+    /// This set's identity for [`MetaHeld`]: its address, stable while the
+    /// store that owns it is alive.
+    pub(crate) fn identity(&self) -> usize {
+        core::ptr::from_ref(self).addr()
+    }
+}
+
+/// The sets of which this thread holds shared queues, and how many of each
+/// it holds: room for a thread working in four stores at once (a copy holds
+/// two); past that a borrow is not tracked and waits as before D-135.
+const TRACKED: usize = 4;
+
+thread_local! {
+    /// The set whose store's metadata lock this thread holds (0: none).
+    static META_HELD: Cell<usize> = const { Cell::new(0) };
+    /// The set whose metadata lane this thread holds (0: none).
+    static META_LANE: Cell<usize> = const { Cell::new(0) };
+    /// The set whose nested lane this thread holds (0: none).
+    static NESTED_LANE: Cell<usize> = const { Cell::new(0) };
+    /// The sets of which this thread holds shared queues, with counts.
+    static SHARED_HELD: Cell<[(usize, u32); TRACKED]> = const { Cell::new([(0, 0); TRACKED]) };
+}
+
+fn holds_shared(me: usize) -> bool {
+    SHARED_HELD.with(|c| c.get().iter().any(|&(set, n)| set == me && n > 0))
+}
+
+/// What a borrowed lane marks for its thread until it is returned.
+enum Held {
+    /// The metadata lane: the thread's previous mark.
+    Meta(usize),
+    /// The nested lane: the thread's previous mark.
+    Nested(usize),
+    /// One more shared queue of this set.
+    Shared(usize),
+}
+
+impl Held {
+    /// Counts one more shared queue of `set` held by this thread (`None`
+    /// when four other sets fill the record: not tracked).
+    fn shared(set: usize) -> Option<Self> {
+        SHARED_HELD.with(|c| {
+            let mut held = c.get();
+            let slot = held
+                .iter()
+                .position(|&(s, n)| s == set && n > 0)
+                .or_else(|| held.iter().position(|&(_, n)| n == 0))?;
+            held[slot] = (set, held[slot].1 + 1);
+            c.set(held);
+            Some(Self::Shared(set))
+        })
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        match *self {
+            Self::Meta(prev) => META_LANE.with(|c| c.set(prev)),
+            Self::Nested(prev) => NESTED_LANE.with(|c| c.set(prev)),
+            Self::Shared(set) => SHARED_HELD.with(|c| {
+                let mut held = c.get();
+                if let Some(slot) = held.iter_mut().find(|(s, n)| *s == set && *n > 0) {
+                    slot.1 -= 1;
+                }
+                c.set(held);
+            }),
+        }
+    }
+}
+
+/// Marks, for as long as it lives, that this thread holds the metadata lock
+/// of the store owning set `identity` (D-135): every queue the thread then
+/// borrows from that set is its metadata lane. Created right after the
+/// lock is taken and dropped before it is released. Nests: the previous
+/// mark comes back on drop (a thread holding two stores' locks).
+pub(crate) struct MetaHeld {
+    prev: usize,
+}
+
+impl MetaHeld {
+    pub(crate) fn enter(identity: usize) -> Self {
+        Self {
+            prev: META_HELD.with(|c| c.replace(identity)),
+        }
+    }
+}
+
+impl Drop for MetaHeld {
+    fn drop(&mut self) {
+        META_HELD.with(|c| c.set(self.prev));
     }
 }
 

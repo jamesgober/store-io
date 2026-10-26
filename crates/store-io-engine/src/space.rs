@@ -408,7 +408,7 @@ where
                 ErrorContext::default(),
             ));
         }
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let mut acct = lock_acct(&inner.acct);
         if !acct.fits(tag, bytes) {
             return Err(no_space(tag));
@@ -432,7 +432,7 @@ where
     #[must_use]
     pub fn space(&self) -> SpaceReport {
         let inner = &self.inner;
-        let meta = lock_meta(&inner.meta);
+        let meta = lock_meta(inner);
         let acct = lock_acct(&inner.acct);
         let block = self.block();
         let sum = |state| {

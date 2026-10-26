@@ -43,8 +43,8 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 ## Found in review (2026-10-12), not yet fixed
 
 - [x] (2026-10-20, v0.5) `errno::is_media_error` matches Linux errno numbers only (61, 74 and 117 mean other things on macOS). Harmless while the posix backend is Linux-only; make it per-OS like `is_unsupported` before the macOS backend (v0.5).
-- [ ] A region found unavailable (for example cut off by a short container) has no handle, so it can never be released, and while a truncated one exists the store refuses all growth. The store stays safe but cannot provision again. An explicit, logged repair operation needs a design and James's approval.
-- [ ] The `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` reasons are tested only through their error mapping, never by damaging a real store.
+- [x] (2026-10-26, done in v0.5 E6: `Store::repair_unavailable(id)`, D-112, D-132; GUIDE section 15) A region found unavailable (for example cut off by a short container) has no handle, so it can never be released, and while a truncated one exists the store refuses all growth. The store stays safe but cannot provision again. An explicit, logged repair operation needs a design and James's approval.
+- [x] (2026-10-26, done in v0.5: `tests/format2_regions.rs` and `format2_release.rs` damage real stores for each reason) The `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` reasons are tested only through their error mapping, never by damaging a real store.
 
 ## Supply chain
 
@@ -62,15 +62,15 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 - [ ] Linux probe: NVMe over fabrics transports are reported as a local NVMe bus.
 - [ ] Windows probe: Identify Namespace always asks for namespace 1.
 - [ ] Defined but never produced: `Reason::KnownBug`, `Error::Fenced`, the `Filter` and `VirtualDisk` stack layers, and `DurableReceipt::untorn()` (always false until untorn writes are certified).
-- [ ] Open is lenient where it could be strict: a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently. (Fixed 2026-10-12: a non-zero volume `features` value or a longer record is refused as `Unsupported`, and the volume record's reserved bytes must be zero.)
-- [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
-- [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
-- [ ] A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).
+- [ ] (Format 1 only, read-only since v0.5; format 2's open checks every header against its entry, spec section 9.) Open is lenient where it could be strict: a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently. (Fixed 2026-10-12: a non-zero volume `features` value or a longer record is refused as `Unsupported`, and the volume record's reserved bytes must be zero.)
+- [x] (2026-10-26, v0.5: `errno::is_lock_held` tells a held lock from one the file system cannot take, at open, create, directory changes and copy; `tests/store.rs` holds open and create to it with the simulator's `fail_lock`, mutants 721 and 722) Every lock failure is reported as `Locked`, even when the cause is another error.
+- [x] (2026-10-26, gone with format 2, the only writable format since v0.5: a release removes its entry from its page, and freed space takes a region of any size; `test_released_regions_of_every_size_never_fill_the_table`) Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
+- [x] (2026-10-26, format 2: `test_a_header_with_an_unknown_ro_compat_feature_is_read_only` (the region refuses writes, the rest of the store writes)) A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).
 
 ## Found in v0.4 (2026-10-19), not yet done
 
-- [ ] A release whose table update is durable but whose header rewrite then fails (pool exhausted, a lane that cannot be cleared) returns an error for a release that is committed (since 0.3.0). Report it as done with the header write's failure noted, or retry the header write.
-- [ ] A scan visitor that provisions holds a shared lane while it waits for the metadata lock; with every shared lane so held (one is enough with `queues: 1`), provisioning and release, which need a lane under the lock, wait forever (since the visitor-provisioning case existed). Give metadata changes a lane of their own, as the flush leader has.
+- [x] (2026-10-26, v0.5: a header write that submitted nothing reports the committed release done, both formats; only a poisoned store reports the failure) A release whose table update is durable but whose header rewrite then fails (pool exhausted, a lane that cannot be cleared) returns an error for a release that is committed (since 0.3.0). Report it as done with the header write's failure noted, or retry the header write.
+- [x] (2026-10-26, v0.5, D-135: a metadata lane for the metadata lock's holder, and a nested lane for a thread already holding a shared queue) A scan visitor that provisions holds a shared lane while it waits for the metadata lock; with every shared lane so held (one is enough with `queues: 1`), provisioning and release, which need a lane under the lock, wait forever (since the visitor-provisioning case existed). Give metadata changes a lane of their own, as the flush leader has.
 
 - [x] (2026-10-20, v0.5) Harness: G2 (barrier p50 + 2 us, p99 + 5 us) compares two consecutive W1 windows, the drift G1 was moved off (gates_g1.rs); give it the same alternation.
 - [x] (2026-10-20, v0.5: `append_window`, in bytes) `StoreOptions::append_ring` is counted in blocks, so its default (4096) holds only 2 MiB ahead at 512-byte blocks: a `Submitter` appending 1 MiB eight deep there gets `TooManyInFlight` (G6 raises it). A ring sized in bytes, or a default scaled by the block size.

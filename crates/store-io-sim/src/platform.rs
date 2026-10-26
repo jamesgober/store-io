@@ -492,6 +492,12 @@ impl Platform for SimPlatform {
         // As on Linux, a write lock needs a handle open for writing.
         let mut w = lock(&self.world);
         file.check(&w, true)?;
+        if let Some(code) = w.faults().fail_lock {
+            return Err(OsError {
+                code,
+                source: OsErrorSource::Sim,
+            });
+        }
         w.lock(file.id, false)?;
         Ok(SimLock {
             world: Arc::clone(&self.world),
@@ -528,6 +534,12 @@ impl Platform for SimPlatform {
     fn lock_shared(&self, file: &SimFile) -> RawResult<SimLock> {
         let mut w = lock(&self.world);
         file.check(&w, false)?;
+        if let Some(code) = w.faults().fail_lock {
+            return Err(OsError {
+                code,
+                source: OsErrorSource::Sim,
+            });
+        }
         w.lock(file.id, true)?;
         Ok(SimLock {
             world: Arc::clone(&self.world),

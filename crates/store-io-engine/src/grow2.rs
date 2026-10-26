@@ -75,7 +75,7 @@ where
             return Err(not_written(NotWrittenCause::Frozen, c));
         }
         // The commit's page refusals, before any fill.
-        let _entry = entry_of(&lock_meta(&inner.meta), r)?;
+        let _entry = entry_of(&lock_meta(inner), r)?;
         let block = inner.layout.block();
         let too_large = || not_written(NotWrittenCause::TooLarge, c);
         let new = align_up(new_size, block).ok_or_else(too_large)?;
@@ -104,7 +104,7 @@ where
         // systems).
         self.fill_pieces(&r.map.pieces(len, new), fill, &key)?;
         // 2. The commit: the page with the entry's new data size.
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let (p, payload, old) = page_with(&meta, r, |e| {
             debug_assert_eq!(e.data_size, len, "the map's length is the entry's");
             e.data_size = new;
@@ -141,7 +141,7 @@ where
         let too_large = || not_written(NotWrittenCause::TooLarge, c);
         let no_space = |tag| Error::NoSpace { tag, ctx: c };
         let (len, old_cap) = (r.map.len(), r.map.capacity());
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         // Refusals before any I/O: a capped region, a full extent list, the
         // tag's cap.
         let (_, old) = entry_of(&meta, r)?;
@@ -300,7 +300,7 @@ where
         // submission, the header stays one extent ahead (on disk and here);
         // every later header write lists the entry's extents only, and an
         // open finds the extent free.
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let meta_seq = crate::v2::next_meta_seq_of(&meta)?;
         let (p, payload, _) = page_with(&meta, r, |e| {
             e.data_size = g.new;

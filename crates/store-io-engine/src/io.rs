@@ -796,4 +796,178 @@ mod tests {
         assert_eq!(after.led - before.led, 1, "no flush was led");
         assert!(after.flushes > before.flushes, "no flush was issued");
     }
+    /// Runs `f` on its own thread; `None` when it has not returned within
+    /// ten seconds (a deadlock, left behind).
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _left = std::thread::spawn(move || {
+            let _sent = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10)).ok()
+    }
+
+    fn one_queue(seed: u64) -> std::sync::Arc<Store<SimPlatform>> {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let opts = StoreOptions {
+            queues: 1,
+            ..StoreOptions::default()
+        };
+        std::sync::Arc::new(Store::create(p, Path::new("/db"), opts).unwrap())
+    }
+
+    #[test]
+    fn test_the_metadata_lock_holder_never_waits_for_a_shared_queue() {
+        // D-135, deterministically: the store's only shared queue is held
+        // (as a scan whose visitor waits for the metadata lock holds it),
+        // and a thread holding the metadata lock still gets a queue: the
+        // metadata lane. Before D-135 it waited for the held one forever.
+        let s = one_queue(3);
+        let held = s.inner.queues.get(0);
+        let s2 = std::sync::Arc::clone(&s);
+        let got = within(move || {
+            let _meta = crate::store::lock_meta(&s2.inner);
+            let lane = s2.inner.queues.get(0);
+            drop(lane);
+            true
+        });
+        drop(held);
+        assert_eq!(
+            got,
+            Some(true),
+            "the metadata lock holder waited for a shared queue"
+        );
+    }
+
+    #[test]
+    fn test_a_thread_holding_a_shared_queue_never_waits_for_itself() {
+        // D-135: with one shared queue, a thread already holding it (a
+        // scan's visitor calling back into the store) gets the nested lane
+        // instead of waiting for the queue it holds.
+        let s = one_queue(4);
+        let got = within(move || {
+            let outer = s.inner.queues.get(0);
+            let inner = s.inner.queues.get(0);
+            drop((inner, outer));
+            true
+        });
+        assert_eq!(got, Some(true), "a thread waited for the queue it holds");
+    }
+
+    #[test]
+    fn test_a_store_whose_metadata_lock_was_poisoned_records_no_clean_close() {
+        // A panic while the metadata lock was held may have left the
+        // in-memory metadata half-changed: the drop records no clean close.
+        let p = SimPlatform::new(SimConfig::volatile(6));
+        let s = std::sync::Arc::new(
+            Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap(),
+        );
+        let s2 = std::sync::Arc::clone(&s);
+        let panicked = std::thread::spawn(move || {
+            let _meta = crate::store::lock_meta(&s2.inner);
+            panic!("a panic under the metadata lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(s.inner.meta.is_poisoned());
+        drop(s);
+        let s = Store::open(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        assert!(!s.report().metadata.clean_close);
+    }
+
+    #[test]
+    fn test_a_durable_slot_write_on_a_poisoned_store_submits_nothing() {
+        // The backstop under every metadata write (callers check first): on
+        // a poisoned domain `durable_slot` refuses before submitting.
+        let p = SimPlatform::new(SimConfig::volatile(7));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let r = s.provision_append_region("wal", 1 << 16).unwrap();
+        p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + 1));
+        assert!(r.append_durable(b"fails").is_err());
+        p.with_world(|w| w.faults_mut().fail_write = None);
+        assert!(s.inner.domain.poisoned().is_some());
+        let before = p.with_world(|w| w.write_submits());
+        let inner = &s.inner;
+        let mut meta = crate::store::lock_meta(inner);
+        let mut q = inner.queues.get(0);
+        let got = crate::v2::write_volume::<SimPlatform>(
+            &mut q,
+            &inner.file,
+            &inner.pool,
+            &inner.layout,
+            inner.volume,
+            &inner.policy,
+            &inner.domain,
+            &mut meta,
+            inner.owner_generation,
+            true,
+        );
+        drop((q, meta));
+        assert!(
+            matches!(got, Err(store_io_core::error::Error::Poisoned { .. })),
+            "{got:?}"
+        );
+        assert_eq!(
+            p.with_world(|w| w.write_submits()),
+            before,
+            "a write was submitted"
+        );
+    }
+
+    #[test]
+    fn test_a_page_write_to_an_unconfirmed_page_is_refused_before_any_io() {
+        // The backstop under every page commit (callers check first): a
+        // page whose standing is not Confirmed is never written.
+        let p = SimPlatform::new(SimConfig::volatile(8));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let inner = &s.inner;
+        let mut meta = crate::store::lock_meta(inner);
+        let payload = {
+            let v2 = meta.v2.as_deref_mut().unwrap();
+            v2.pages[0].standing = store_io_format::judge::Standing::Unconfirmed;
+            v2.pages[0].pair.payload.clone().unwrap()
+        };
+        let seq = crate::v2::next_meta_seq_of(&meta).unwrap();
+        let before = p.with_world(|w| w.write_submits());
+        let mut q = inner.queues.get(0);
+        let got = crate::v2::write_page::<SimPlatform>(
+            &mut q,
+            &inner.file,
+            &inner.pool,
+            &inner.layout,
+            inner.volume,
+            &inner.policy,
+            &inner.domain,
+            &mut meta,
+            0,
+            &payload,
+            seq,
+            inner.owner_generation,
+        );
+        drop((q, meta));
+        assert!(
+            matches!(
+                got,
+                Err(store_io_core::error::Error::NotWritten {
+                    cause: store_io_core::error::NotWrittenCause::Frozen,
+                    ..
+                })
+            ),
+            "{got:?}"
+        );
+        assert_eq!(
+            p.with_world(|w| w.write_submits()),
+            before,
+            "a write was submitted"
+        );
+    }
+
+    #[test]
+    fn test_a_read_only_store_keeps_the_nested_lane_but_no_metadata_lane() {
+        let p = SimPlatform::new(SimConfig::volatile(5));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        assert_eq!(s.inner.queues.own_lanes(), (true, true));
+        drop(s);
+        let ro = Store::open_readonly(p, Path::new("/db"), StoreOptions::default()).unwrap();
+        assert_eq!(ro.inner.queues.own_lanes(), (false, true));
+    }
 }

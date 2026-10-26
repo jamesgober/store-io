@@ -38,7 +38,7 @@ where
         self.retire(r, Retire::Release)?;
         // The region lock, then the metadata lock, both held throughout.
         let mut header = r.header.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut meta = lock_meta(&inner.meta);
+        let mut meta = lock_meta(inner);
         let id = r.id.get();
         let seq = (id & 0xFFFF_FFFF) as u32;
         // Every return before the commit gives the region back.
@@ -157,10 +157,14 @@ where
         //    unavailable, not served. A header write refused before it was
         //    submitted leaves the data in place instead (that rollback would
         //    find the region whole); one that failed after submission has
-        //    poisoned the store. Either way the release is committed.
+        //    poisoned the store. Either way the release is committed, so
+        //    any failure that submitted nothing (the store not poisoned:
+        //    refused, a buffer or the lane not to be had, the header not to
+        //    be encoded) reports it done; only a poisoned store reports the
+        //    failure.
         match self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed, None) {
             Ok(_) => {}
-            Err(Error::NotWritten { .. }) => return Ok(()),
+            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),
             Err(e) => return Err(e),
         }
         // 3. The data extents, as format 1 does: every one tried.
@@ -176,7 +180,7 @@ where
         // The entry's extent count, read under the metadata lock (taken
         // after the region lock, D-113).
         let committed = {
-            let meta = lock_meta(&self.inner.meta);
+            let meta = lock_meta(&self.inner);
             let id = r.id.get();
             let p = usize::try_from(id >> 32).map_err(|_| corrupt())?;
             let seq = (id & 0xFFFF_FFFF) as u32;

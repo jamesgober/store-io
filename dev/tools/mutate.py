@@ -107,6 +107,12 @@ SIMP = "crates/store-io-sim/src/platform.rs"
 MODEL = ["-p", "store-io-sim", "--test", "model"]
 DAMAGE = ["-p", "store-io-engine", "--test", "format2_damage"]
 V2_SRC = "crates/store-io-engine/src/v2.rs"
+# D-135: the metadata and nested lanes (no caller waits for a shared queue
+# it, or a thread waiting for its lock, holds). The lane unit tests fail
+# within their 10 s deadlines; the scan tests reach the deadlocks from the
+# public API.
+LANES = ["-p", "store-io-engine", "--lib", "io::tests"]
+SCAN = ["-p", "store-io-engine", "--test", "scan"]
 CRASH_OPEN = ["-p", "store-io-engine", "--test", "format2_crash_open"]
 
 # The macOS backend's files and its own tests (run on macOS only).
@@ -146,7 +152,7 @@ M = [
  ("crates/store-io-engine/src/provision.rs", "            r.consume(extent)?;", "            if false { r.consume(extent)?; }"),
  ("crates/store-io-engine/src/space.rs", "            a.add(e, block);", "            let _ = (e, block, &mut a);"),
  ("crates/store-io-engine/src/space.rs", "        lock_acct(&self.store.inner.acct).unreserve(self.tag, self.bytes);", ""),
- ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(&inner.meta);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(&inner.meta);\n        if !acct.fits(tag, bytes) {"),
+ ("crates/store-io-engine/src/space.rs", "        let mut meta = lock_meta(inner);\n        let mut acct = lock_acct(&inner.acct);\n        if !acct.fits(tag, bytes) {", "        let mut acct = lock_acct(&inner.acct);\n        let mut meta = lock_meta(inner);\n        if !acct.fits(tag, bytes) {"),
  ("crates/store-io-engine/src/directory.rs", "        self.platform\n            .sync_dir(&self.dir)\n            .map_err(|raw| self.poison(Op::SyncDir, Some(raw)))\n    }\n\n    /// Takes the directory", "        let _ = self.platform.sync_dir(&self.dir);\n        Ok(())\n    }\n\n    /// Takes the directory"),
  ("crates/store-io-engine/src/directory.rs", "            .set_len(file, len)", "            .set_len(file, len.div_ceil(4096) * 4096)"),
  ("crates/store-io-engine/src/directory.rs", "            .map_err(|raw| self.poison(Op::FlushAll, Some(raw)))", "            .or(Ok(()))"),
@@ -243,7 +249,7 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '                Ok(store.ticket(state, r.start, r.end))', '                Ok(store.ticket(state, r.start, r.data_end))'),
  (SUB, '    _thread: PhantomData<*const ()>,', '    _thread: PhantomData<()>,'),
  ('crates/store-io-engine/src/optable.rs', '            let _shorter = b.set_len(*len);', '            let _shorter = (b, len);'),
- ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(&inner.meta);', '        let mut meta = lock_meta(&inner.meta);\n        self.retire(r, Retire::Release)?;'),
+ ('crates/store-io-engine/src/lifecycle.rs', '        self.retire(r, Retire::Release)?;\n        let mut meta = lock_meta(inner);', '        let mut meta = lock_meta(inner);\n        self.retire(r, Retire::Release)?;'),
  ('crates/store-io-engine/src/optable.rs', '            Some(&(_, seq)) if self.live > 0 => 2 * seq + 1,', '            Some(&(_, _seq)) if self.live > 0 => 2 * self.next_seq + 1,'),
  # D-099: a durable write's receipt only after a flush issued after its
  # completion succeeded; barriers check their tickets; drop waits for flushes
@@ -697,7 +703,7 @@ M = [
  # capacity); a release whose header write is refused after the commit
  # still stands
  ('crates/store-io-engine/src/lifecycle2.rs', '        let extents = committed_extents(&header, inner.layout.log2_block, committed);', '        let extents: Vec<(u64, u64)> = r.map.extents().chain(committed_extents(&header, inner.layout.log2_block, 0)).collect();', F2X + ['--test', 'format2_grow_beyond']),
- ('crates/store-io-engine/src/lifecycle2.rs', '            Err(Error::NotWritten { .. }) => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Err(corrupt()),', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_none() => return Err(corrupt()),', F2X),
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
  # header says Released; format 2 never takes format 1's path
@@ -1082,6 +1088,72 @@ M = [
  (MAC_PROBE, '    let fixed = d.removable == Some(false) && d.ejectable == Some(false);', '    let fixed = d.removable != Some(true) && d.ejectable != Some(true);', MAC_LIB),
  (MAC_PROBE, '        (false, Some(true)) if fixed && lineage => Tri::Yes,', '        (false, Some(true)) if fixed && (lineage || true) => Tri::Yes,', MAC_LIB),
  (MAC_PROBE, '    ok.then(|| CString::new(name).ok()).flatten()', '    (ok || true).then(|| CString::new(name).ok()).flatten()', MAC_LIB),
+ # D-135: the metadata lock's holder borrows the metadata lane, and a
+ # thread already holding a shared queue the nested lane, never waiting for
+ # a shared one; the metadata lock marks its thread while held.
+ (EXEC_SRC, '        if META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', '        if true || META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', LANES),
+ (EXEC_SRC, '        if META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', '        if true || META_HELD.with(Cell::get) != me || META_LANE.with(Cell::get) == me {', SCAN),
+ (EXEC_SRC, '        if NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', '        if true || NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', LANES),
+ (EXEC_SRC, '        if NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', '        if true || NESTED_LANE.with(Cell::get) == me || !holds_shared(me) {', SCAN),
+ (EXEC_SRC, '            prev: META_HELD.with(|c| c.replace(identity)),', '            prev: META_HELD.with(|c| c.replace(identity & 0)),', LANES),
+ (EXEC_SRC, '            held[slot] = (set, held[slot].1 + 1);', '            held[slot] = (set, held[slot].1);', SCAN),
+ # A committed release whose header write submitted nothing reports done,
+ # in both formats (only a poisoned store reports the header's failure).
+ ('crates/store-io-engine/src/lifecycle2.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_some() => return Ok(()),', F2X),
+ ('crates/store-io-engine/src/lifecycle.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_some() => return Ok(()),', ['-p', 'store-io-engine', '--test', 'format1_writes']),
+ # A lock that fails but is not held is `Io`, never `Locked` (open, create).
+ ('crates/store-io-engine/src/open.rs', '            if store_io_core::errno::is_lock_held(raw) {', '            if store_io_core::errno::is_lock_held(raw) || true {', ['-p', 'store-io-engine', '--test', 'store']),
+ ('crates/store-io-engine/src/create.rs', '                    if store_io_core::errno::is_lock_held(raw) {', '                    if store_io_core::errno::is_lock_held(raw) || true {', ['-p', 'store-io-engine', '--test', 'store']),
+ # v0.5 exit audit: format-2 integrity guards with no entry until now
+ # (slot CRCs and identity, pair judgement, field decoders, page standing,
+ # read-only and clean-close guards, copy's short reads).
+ (SLOT, '    if crc != stored_crc {', '    if crc != stored_crc && false {', FORMAT),
+ (SLOT, '    if crc32c(payload) != h.payload_crc {', '    if crc32c(payload) != h.payload_crc && false {', FORMAT),
+ (JUDGE, 'let a_wins = a.generation > b.generation;', 'let a_wins = a.generation < b.generation;', FORMAT),
+ ('crates/store-io-engine/src/settle.rs', '            if full {\n                Ok(store.ticket(state, start, end))', '            if full || true {\n                Ok(store.ticket(state, start, end))', ENGINE),
+ # Drop's own poison check is a fast path only (equivalent): durable_slot
+ # refuses any write on a poisoned domain, so that check is the mutant.
+ ('crates/store-io-engine/src/store.rs', '    if let Some(first) = domain.poisoned() {', '    if let Some(first) = domain.poisoned().filter(|_| false) {', LANES),
+ (V2, '            || self.meta.is_poisoned()\n', '', LANES),
+ ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_ok() {', '            if c.outcome.is_ok() && false {', F2R),
+ ('crates/store-io-engine/src/footprint.rs', '(at.checked_add(len)? <= end).then_some(at)', '(at.checked_add(len)? <= end || true).then_some(at)', FOOTPRINT),
+ # Not an entry: leaving a torn slot's meta_seq out of the next one is
+ # equivalent. A torn slot stays on the media only while the store is frozen
+ # or read-only (no writes); otherwise the open heals it, overwriting it.
+ (SLOT, '    if volume_uuid != e.volume_uuid {', '    if volume_uuid != e.volume_uuid && false {', FORMAT),
+ (SLOT, '    if object_id != e.object_id {', '    if object_id != e.object_id && false {', FORMAT),
+ (SLOT, '    if slot_offset != e.slot_offset\n', '    if slot_offset != e.slot_offset && false\n', FORMAT),
+ (META2, '        if h.state != RegionState::Ready {', '        if h.state != RegionState::Ready && false {', F2X),
+ (META2, '        if RegionState::from_u8(self.state)? != RegionState::Ready {', '        if RegionState::from_u8(self.state)? != RegionState::Ready && false {', FORMAT),
+ (META2, '        if self.span_start >= self.span_end || self.span_end > lim.file_len {', '        if self.span_start >= self.span_end {', FORMAT),
+ (META2, '        if h.kind != self.kind {', '        if h.kind != self.kind && false {', FORMAT),
+ (META2, '        if h.region_id != region_id {', '        if h.region_id != region_id && false {', FORMAT),
+ (META2, '    if region_generation == 0 {', '    if region_generation == 0 && false {', FORMAT),
+ (META2, '    if !(log2 == log2_block || (log2 == 9 && kind == RegionKind::Append)) {', '    if !(log2 == log2_block || log2 == 9) {', FORMAT),
+ (META2, '        } else if self.extent_count == 0 {', '        } else if self.extent_count == 0 && false {', FORMAT),
+ (META2, '        if extent_count != 0 {\n            return Err(MetaError::Field("extent_count"));', '        if extent_count != 0 && false {\n            return Err(MetaError::Field("extent_count"));', FORMAT),
+ (META2, '    if header.count > max_entries || u32::from(header.count) > header.next_seq {', '    if header.count > max_entries {', FORMAT),
+ (META2, '        if self.span_start % block != 0 || self.span_end % block != 0 {', '        if self.span_start % block != 0 {', FORMAT),
+ (META2, '        if base.table_offset != 2u64 << base.log2_block_size {', '        if base.table_offset != 2u64 << base.log2_block_size && false {', FORMAT),
+ (META2, '        if self.table_end() > file_len {', '        if self.table_end() > file_len && false {', FORMAT),
+ (META2, '        if self.flags & !KNOWN_FLAGS != 0 {', '        if self.flags & !FLAG_CAPPED & !KNOWN_FLAGS != 0 && false {', FORMAT),
+ (META2, '    if flags & !KNOWN_FLAGS != 0 {', '    if flags & !KNOWN_FLAGS != 0 && false {', FORMAT),
+ (META2, '    if fill == FillPattern::Zeros && fill_key != [0; 16] {', '    if fill == FillPattern::Zeros && fill_key != [0; 16] && false {', FORMAT),
+ ('crates/store-io-engine/src/provision2.rs', '                        && page.ahead().next().is_none())', '                        && true)', F2REP),
+ ('crates/store-io-engine/src/grow2.rs', '    if page.standing != Standing::Confirmed || page.ahead().next().is_some() {', '    if page.standing != Standing::Confirmed {', F2REP),
+ # Not an entry: release's own ahead check is equivalent. write_page refuses
+ # an ahead page before any I/O, and the refusal restores the region.
+ (V2, '                pages[pair - 1].standing = Standing::Unconfirmed;', '                let _ = pair;', DAMAGE),
+ (V2, '    if read_only {\n        return Ok(Opened {', '    if read_only && false {\n        return Ok(Opened {', F2),
+ (V2, '    if page.standing != Standing::Confirmed {\n        return Err(Error::NotWritten {', '    if page.standing == Standing::Lost {\n        return Err(Error::NotWritten {', LANES),
+ # Not an entry: letting a Lost page's entries through the open is
+ # equivalent. A Lost page's entries are never decoded (v2::open_meta).
+ (V2, '        if vm.table_pages != layout.pages\n', '        if vm.table_pages != layout.pages && false\n', F2),
+ (COPY_SRC, '                Some(b) if n == piece.len() => piece.copy_from_slice(&b.as_slice()[..n]),', '                Some(b) if n <= piece.len() => piece[..n].copy_from_slice(&b.as_slice()[..n]),', COPYS),
+ (META2, '        if clean_close > 1 {', '        if clean_close > 1 && false {', FORMAT),
+ (META2, '        if reserved0 != 0 || reserved1 != 0 {', '        if reserved0 != 0 && reserved1 != 0 {', FORMAT),
+ (META2, '        if c[38] != 0 || c[39] != 0 {', '        if c[38] != 0 && c[39] != 0 {', FORMAT),
+ (META2, '    if r.bytes(20)?.iter().any(|&b| b != 0) {', '    if r.bytes(20)?.iter().any(|&b| b != 0) && false {', FORMAT),
  # Windows (M4): a made directory is removed only through a handle checked
  # to be on it, with POSIX semantics (the name goes at once). Run by the
  # Windows mutation job.

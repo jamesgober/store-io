@@ -48,6 +48,14 @@
     `DeviceFacts::internal`). FAT, exFAT, FUSE and network volumes are
     Unsafe. Nothing is power-safe.
   - See PLATFORMS.md section 5.
+- Simulator: `FaultPlan::fail_lock` (every `lock_exclusive` and
+  `lock_shared` fails with the given raw code, held or not: a file system
+  that cannot lock).
+- Tests: a lock that fails but is not held is `Io(Lock)`, never `Locked`,
+  at writable and read-only opens and at create (`tests/store.rs`, mutants
+  721 and 722); released format-2 regions of every size never fill the
+  region table (1,200 regions of shifting sizes through a 400-entry table,
+  the container never growing past its peak; `tests/format2_release.rs`).
 - Tests: **one portable format, checked** (`tests/portable.rs`): a fixed
   scenario makes the same container on Linux, Windows and macOS, byte for
   byte except what any two creates differ in (the volume id, the creation
@@ -771,6 +779,32 @@
 
 ### Fixed
 
+- Engine: **a scan's visitor that changed the store could deadlock it**
+  (D-135, since 0.3.0). Metadata changes (provisioning, release, growth,
+  repairs, the table flip) ran under the metadata lock and then waited for
+  a shared queue, while a scan held one for its read and its visitor waited
+  for that lock: with every shared queue so held (one is enough with
+  `queues: 1`), both waited forever. A visitor's own I/O on the same store
+  could also wait for the very queue its scan held. Two lanes now make sure
+  neither waits for a shared queue: a thread holding a store's metadata
+  lock borrows that store's **metadata lane**, used by no one else, and a
+  thread already holding one of the store's shared queues that finds none
+  free borrows its **nested lane**. Each store makes two more queues for
+  them (a read-only store one: it has no metadata lane); both are idle like
+  any queue (`tests/idle.rs`), and their busy marks sit between the
+  parallel and flush lanes' in `oldest_outstanding`. Regression tests
+  (`tests/scan.rs`, `io::tests`) fail within their deadlines on the old
+  code; mutants 713-718 cover both lanes and the thread marks.
+- Engine: **a committed release could be reported as an error** (since
+  0.3.0). Once the release's commit (format 1's table flip, format 2's
+  page write) is durable, a header write that submitted nothing (refused
+  by the OS, a buffer or a lane not to be had, the header not to be
+  encoded) now reports the release done, in both formats; the region's
+  data stays in place, as its header still says Ready. Only a poisoned
+  store reports the header's failure. Format 1 returned every such refusal
+  as an error; format 2 already reported `NotWritten` done but returned
+  the other kinds. Regression tests in `format1_writes` and
+  `format2_release`; mutants 402, 719 and 720.
 - Tests: **mutants 558 and 559 had lost their only killing test** when
   D-132 rerouted cut-short entries. A new test makes an entry fail the
   entry checks for a fault of its own; both are killed again.

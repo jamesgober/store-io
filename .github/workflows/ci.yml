@@ -162,6 +162,25 @@ jobs:
         env:
           STORE_IO_TEST_DIR: /mnt/sio
 
+  # v0.5 exit criterion on the other systems: an idle store is silent (60 s)
+  # on macOS (per-thread CPU ticks, process storage bytes) and Windows
+  # (per-thread switches and cycles). Linux runs it on real file systems in
+  # conformance-linux and in the kernel VMs.
+  idle:
+    name: Idle store is silent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Idle window (60 s)
+        run: cargo test --test idle -- --ignored --test-threads=1 --nocapture
+
   # The CI kernel matrix (v0.4): conformance, the end-to-end tests and the
   # Linux backend's tests on older kernels, each booted in a virtme-ng VM
   # (KVM) with an ext4 disk. 5.15 lacks SUBMIT_ALL (5.18), so io_uring is

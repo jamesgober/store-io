@@ -95,6 +95,21 @@ store-io-posix = { path = "crates/store-io-posix", version = "0.4.1" }
 store-io-conformance = { path = "crates/store-io-conformance", version = "0.4.1" }
 store-io-format = { path = "crates/store-io-format", version = "0.4.1" }
 
+# The idle test's per-thread counters (tests/idle.rs): the crates the
+# backends already depend on, with the features that read them.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc = { version = "0.2.190", default-features = false }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_System_SystemInformation",
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
 
 # WORKSPACE
 # #################################

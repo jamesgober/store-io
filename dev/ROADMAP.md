@@ -145,7 +145,7 @@ macOS backend (`F_FULLFSYNC` for every flush; never classed power-safe); contain
 Exit criteria:
 - [x] Conformance on APFS (CI runner), NTFS and ext4. (APFS: the macOS backend, M2-M4; every CI run on macOS stable and 1.85.)
 - [x] Containers made by the same operations on Linux, Windows and macOS identical in structure and data (field by field and byte for byte, except the fields that differ between any two creates: ids, times, fill keys), and each opens on every system. (`tests/portable.rs`, on every CI system: the masked container hashes the same, and a container made on Linux opens, reads and writes on all three.)
-- [ ] Zero idle wakeups.
+- [x] Zero idle wakeups. (`tests/idle.rs` on every system: Linux on both tiers in conformance-linux, macOS and Windows in CI job "Idle store is silent"; system-started threads on Windows are excluded and store-io's own non-use of the system thread pool is tested.)
 - [ ] Every new integrity guard has a mutation entry; the simulator enumerates every crash point of every format-2 change.
 
 ---

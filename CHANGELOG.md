@@ -37,6 +37,17 @@
     `DeviceFacts::internal`). FAT, exFAT, FUSE and network volumes are
     Unsafe. Nothing is power-safe.
   - See PLATFORMS.md section 5.
+- Tests: **an idle store is silent on every system** (`tests/idle.rs`, CI
+  job "Idle store is silent" on macOS and Windows beside the Linux runs):
+  after the store is exercised and every thread it started is asleep, none
+  of them may run for 60 s. macOS reads each thread's CPU ticks
+  (`PROC_PIDTHREADCOUNTS`) and the process's storage bytes; Windows reads
+  each thread's context switches and cycles. A control thread's single
+  wakeup must be seen, or the test fails as blind. Threads the system
+  starts in the process (Windows' own thread pool, unnamed, beginning in
+  `ntdll.dll`) are not watched; store-io names every thread it starts and
+  `test_store_io_uses_no_system_thread_pool` holds it to never using that
+  pool.
 - Tests: **one portable format, checked** (`tests/portable.rs`): a fixed
   scenario makes the same container on Linux, Windows and macOS, byte for
   byte except what any two creates differ in (the volume id, the creation

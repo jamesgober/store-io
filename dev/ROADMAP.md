@@ -146,7 +146,7 @@ Exit criteria:
 - [x] Conformance on APFS (CI runner), NTFS and ext4. (APFS: the macOS backend, M2-M4; every CI run on macOS stable and 1.85.)
 - [x] Containers made by the same operations on Linux, Windows and macOS identical in structure and data (field by field and byte for byte, except the fields that differ between any two creates: ids, times, fill keys), and each opens on every system. (`tests/portable.rs`, on every CI system: the masked container hashes the same, and a container made on Linux opens, reads and writes on all three.)
 - [x] Zero idle wakeups. (`tests/idle.rs` in CI on every system: Linux on both tiers, macOS and Windows; 60 s with no thread of the store switched in or on a CPU.)
-- [ ] Every new integrity guard has a mutation entry; the simulator enumerates every crash point of every format-2 change.
+- [x] Every new integrity guard has a mutation entry; the simulator enumerates every crash point of every format-2 change. (An audit of every format-2 guard and change, 2026-10-26: 50 entries added, layered guards as joint entries, unreachable backstops and invariants listed in `dev/tools/mutate.py` with why; ten more crash enumerations. Fates past ten cached writes are sampled; two threads' interleavings are not enumerated, their commits are, one after the other.)
 
 ---
 

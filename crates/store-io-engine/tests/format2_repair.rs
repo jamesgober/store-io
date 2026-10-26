@@ -502,7 +502,8 @@ fn is_frozen(e: &Error) -> bool {
 /// rests on it. Here it supersedes a live region on another page: no
 /// repair or release that rewrites its page is made, no provisioning
 /// lands there, the region stays superseded after a reopen, and the entry
-/// itself is not repaired while the region lives.
+/// itself is not repaired while the region lives. No growth there
+/// writes anything either.
 #[test]
 fn test_a_page_with_an_entry_past_its_write_is_never_rewritten_around_it() {
     let p = fresh(1222);
@@ -527,6 +528,9 @@ fn test_a_page_with_an_entry_past_its_write_is_never_rewritten_around_it() {
     let e = s.repair_unavailable(id_of(&s, "y")).unwrap_err();
     assert!(is_frozen(&e), "{e:?}");
     let e = s.page_region("w").unwrap().release().unwrap_err();
+    assert!(is_frozen(&e), "{e:?}");
+    // A growth is refused before its fill (the writes below count none).
+    let e = s.page_region("w").unwrap().grow(2 * CAP).unwrap_err();
     assert!(is_frozen(&e), "{e:?}");
     let e = s.repair_unavailable(id_of(&s, "x")).unwrap_err();
     assert!(is_overlap(&e, 1 << 32), "{e:?}");

@@ -461,3 +461,57 @@ fn test_keyed_fill_in_format_2() {
     pr.read(pr.pos(0).unwrap(), &mut out).unwrap();
     assert!(out.iter().any(|&b| b != 0), "a keyed fill reads as zeros");
 }
+
+/// A provisioning whose write failed after submission may have landed: the
+/// store is poisoned and the provisioning's space stays held (counted,
+/// never given back).
+#[test]
+fn test_a_failed_provisioning_keeps_its_space() {
+    let mut poisoned = 0;
+    for k in 1..=4 {
+        let p = fresh(313);
+        let s = open(&p);
+        let before = s.space().regions;
+        p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + k));
+        let r = s.provision_page_region("n", CAP);
+        if matches!(r, Err(Error::DurabilityUnknown { .. })) {
+            assert!(s.poisoned().is_some(), "write {k}");
+            assert!(
+                s.space().regions > before,
+                "write {k}: its space was given back"
+            );
+            poisoned += 1;
+        }
+    }
+    assert!(poisoned > 0, "no write failed after submission");
+}
+
+/// A panic inside a provisioning (here from the platform, at each of its
+/// steps in turn) once a write was submitted fail-stops the store: that
+/// write may land.
+#[test]
+fn test_a_panic_inside_a_provisioning_poisons_the_store() {
+    let mut after_a_write = 0;
+    for k in 1..=8u64 {
+        let p = fresh(314);
+        let s = open(&p);
+        let writes = p.with_world(|w| w.writes());
+        let steps = Arc::new(AtomicU64::new(0));
+        let c = Arc::clone(&steps);
+        p.with_world(|w| {
+            w.set_step_probe(Some(Arc::new(move || {
+                assert!(c.fetch_add(1, Ordering::Relaxed) + 1 != k, "a platform bug");
+                false
+            })));
+        });
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            s.provision_page_region("n", CAP)
+        }));
+        p.with_world(|w| w.set_step_probe(None));
+        if r.is_err() && p.with_world(|w| w.writes()) > writes {
+            assert!(s.poisoned().is_some(), "step {k}");
+            after_a_write += 1;
+        }
+    }
+    assert!(after_a_write > 0, "no panic came after a write");
+}

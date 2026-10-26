@@ -19,7 +19,8 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use format2_util::audit::{
-    assert_closed_in, audit_allowing_extra, audit_closed, audit_in, audit_space, audit_space_in,
+    assert_closed_in, audit, audit_allowing_extra, audit_closed, audit_in, audit_space,
+    audit_space_in, header_of,
 };
 use format2_util::craft::{region, tear_newer_copy_of, write_regions};
 use format2_util::enumerate::{
@@ -27,8 +28,10 @@ use format2_util::enumerate::{
 };
 use format2_util::*;
 use store_io_core::error::Error;
-use store_io_engine::{CONTAINER, CopyOptions, RegionOptions, Store, copy_store};
+use store_io_engine::{CONTAINER, CopyOptions, RegionOptions, Store, StoreOptions, copy_store};
+use store_io_format::fill::fill_keyed_v1;
 use store_io_format::meta::RegionKind;
+use store_io_platform::Platform;
 use store_io_sim::{SimConfig, SimPlatform};
 
 const B: u64 = 4096;
@@ -144,6 +147,64 @@ fn test_every_crash_of_a_create() {
     }
 }
 
+/// A crashed create on the media: the power cut before the create's `k`-th
+/// step, its file's name and length settled, every cached write lost. Only
+/// if that left a container no open accepts (a create to take over).
+fn crashed_create(seed: u64, k: usize) -> Option<SimPlatform> {
+    let p = SimPlatform::new(SimConfig::volatile(seed));
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = std::sync::Arc::clone(&steps);
+    p.with_world(|w| {
+        w.set_step_probe(Some(std::sync::Arc::new(move || {
+            c.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == k
+        })));
+    });
+    drop(Store::create(p.clone(), Path::new(DIR), opts()));
+    p.with_world(|w| {
+        w.set_step_probe(None);
+        w.settle_metadata();
+        w.crash(&store_io_sim::CrashMode::LoseAll);
+        w.restore_power();
+    });
+    let file = p.with_world(|w| w.media_of(&DIR.into(), CONTAINER).is_some());
+    (file && Store::open(p.clone(), Path::new(DIR), opts()).is_err()).then_some(p)
+}
+
+/// The create that takes over a crashed one (spec §12): crashed at every
+/// point itself, it leaves a crashed create again (taken over by the next)
+/// or the store, never a container an open half-accepts.
+#[test]
+fn test_every_crash_of_a_takeover() {
+    let k = (1..64)
+        .find(|&k| crashed_create(1743, k).is_some())
+        .expect("no crash leaves a create to take over");
+    let seen = Outcomes::default();
+    let covered = enumerate_with(
+        1743,
+        true,
+        || (crashed_create(1743, k).unwrap(), RefCell::new(None)),
+        |p, s| {
+            *s.borrow_mut() = Store::create(p.clone(), Path::new(DIR), opts()).ok();
+        },
+        |p, case| {
+            if let Ok(s) = Store::open(p.clone(), Path::new(DIR), opts()) {
+                assert!(s.regions().is_empty(), "{case:?}");
+                seen.saw(case, "store");
+            } else {
+                let file = p.with_world(|w| w.media_of(&DIR.into(), CONTAINER).is_some());
+                seen.saw(case, if file { "taken over" } else { "none" });
+                drop(
+                    Store::create(p.clone(), Path::new(DIR), opts())
+                        .unwrap_or_else(|e| panic!("{case:?}: {e:?}")),
+                );
+            }
+            audit_closed(p);
+        },
+    );
+    report("takeover", covered);
+    seen.expect(&["store", "taken over"], "store");
+}
+
 /// Provisioning (spec §12: before its entry is written, no region and
 /// nothing of it allocated; after, the region whole) of each kind: a page
 /// region, an append region, a slot, a capped page region, and one from a
@@ -206,6 +267,113 @@ fn test_every_crash_of_each_kind_of_provisioning() {
         report(&format!("provisioning {name}"), covered);
         seen.expect(&["none", "whole"], "whole");
     }
+}
+
+/// Provisioning with a keyed fill into the space a released region left
+/// (spec §12: the fill durable before the header; first fit reuses freed
+/// space): whenever the region exists after a crash, its data reads as its
+/// fill pattern, never the old region's bytes or zeros.
+#[test]
+fn test_every_crash_of_a_keyed_provisioning_into_freed_space() {
+    const N: u64 = 8 * B;
+    let keyed = || StoreOptions {
+        keyed_fill: true,
+        ..opts()
+    };
+    let seen = Outcomes::default();
+    let reused = std::cell::Cell::new(None);
+    let covered = enumerate_settled(
+        1730,
+        || {
+            let p = SimPlatform::new(SimConfig::volatile(1730));
+            let s = Store::create(p.clone(), Path::new(DIR), keyed()).unwrap();
+            let old = s.provision_page_region("old", N).unwrap();
+            old.write_durable(old.pos(0).unwrap(), &[0xAB; N as usize])
+                .unwrap();
+            let at = audit(&p).into_iter().find(|f| f.name == "old").unwrap();
+            reused.set(Some(at.data_offset));
+            old.release().unwrap();
+            (p, s)
+        },
+        |s| {
+            s.provision_page_region("r", N);
+        },
+        |p, case| {
+            let s = open(p);
+            match s.page_region("r") {
+                Ok(r) => {
+                    let f = audit(p).into_iter().find(|f| f.name == "r").unwrap();
+                    assert_eq!(Some(f.data_offset), reused.get(), "{case:?}: not first fit");
+                    let h = header_of(p, f.id, f.header_at).unwrap();
+                    let mut want = vec![0u8; N as usize];
+                    fill_keyed_v1(&h.header.fill_key, 0, &mut want);
+                    let mut got = vec![0u8; N as usize];
+                    r.read(r.pos(0).unwrap(), &mut got).unwrap();
+                    let at = got.iter().zip(&want).position(|(g, w)| g != w);
+                    assert_eq!(at, None, "{case:?}: the fill is not durable");
+                    seen.saw(case, "whole");
+                }
+                Err(e) => {
+                    assert!(not_found(&e), "{case:?}: {e:?}");
+                    seen.saw(case, "none");
+                }
+            }
+            assert!(s.unavailable_regions().is_empty(), "{case:?}");
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
+        },
+    );
+    report("keyed provisioning into freed space", covered);
+    seen.expect(&["none", "whole"], "whole");
+}
+
+/// Two provisionings committed to the same table page, one after the other:
+/// a crash in the second never loses the first (the page's older copy holds
+/// it); never the second without the first.
+#[test]
+fn test_every_crash_of_two_commits_to_one_page() {
+    let seen = Outcomes::default();
+    let covered = enumerate_settled(
+        1736,
+        || created(1736),
+        |s| {
+            if s.provision_page_region("a", 4 * B).is_ok() {
+                s.provision_append_region("b", 4 * B);
+            }
+        },
+        |p, case| {
+            let s = open(p);
+            let a = s.page_region("a").map(|r| r.len());
+            let b = s.append_region("b").map(|r| r.capacity());
+            match (&a, &b) {
+                (Err(ea), Err(eb)) => {
+                    assert!(not_found(ea) && not_found(eb), "{case:?}");
+                    seen.saw(case, "none");
+                }
+                (Ok(n), Err(eb)) => {
+                    assert_eq!(*n, 4 * B, "{case:?}");
+                    assert!(not_found(eb), "{case:?}: {eb:?}");
+                    seen.saw(case, "a");
+                }
+                (Ok(n), Ok(c)) => {
+                    assert_eq!(*n, 4 * B, "{case:?}");
+                    assert!(*c >= 4 * B, "{case:?}");
+                    seen.saw(case, "both");
+                }
+                (Err(e), Ok(_)) => panic!("{case:?}: b without a ({e:?})"),
+            }
+            let pages: std::collections::HashSet<u64> =
+                audit(p).iter().map(|f| f.id >> 32).collect();
+            assert!(pages.len() <= 1, "{case:?}: not one page: {pages:?}");
+            assert!(s.unavailable_regions().is_empty(), "{case:?}");
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
+        },
+    );
+    report("two commits to one page", covered);
+    seen.expect(&["a", "both", "none"], "both");
 }
 
 /// Growth within capacity (spec §12: one table write): the old size or the
@@ -280,6 +448,64 @@ fn test_every_crash_of_a_growth_beyond_capacity() {
     seen.expect(&["new", "old"], "new");
 }
 
+/// "p" (`CAP`) with "q" right after it, and p's header one extent ahead:
+/// a growth beyond capacity whose page write was refused before submission
+/// (the `k`-th write submission of the growth). The store is open and not
+/// poisoned.
+fn header_ahead(seed: u64, k: u64) -> Option<(SimPlatform, Store<SimPlatform>)> {
+    let (p, s) = created(seed);
+    s.provision_page_region("p", CAP).unwrap();
+    s.provision_page_region("q", CAP).unwrap();
+    let pages = s.page_region("p").unwrap();
+    p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + k, 5)));
+    let failed = pages.grow(CAP + 2 * B).is_err();
+    p.with_world(|w| w.faults_mut().fail_submit = None);
+    let f = audit_allowing_extra(&p)
+        .into_iter()
+        .find(|f| f.name == "p")
+        .unwrap();
+    let ahead = f.extra.is_some();
+    drop(pages);
+    (failed && ahead && s.poisoned().is_none()).then_some((p, s))
+}
+
+/// Growth beyond capacity from a header already one extent ahead (grow2:
+/// the header rewritten back to its committed extents, then forward with
+/// the new one, then the table): the old size or the new, never a region
+/// the open refuses, "q" untouched.
+#[test]
+fn test_every_crash_of_a_growth_from_a_header_one_extent_ahead() {
+    let k = (1..32)
+        .find(|&k| header_ahead(1735, k).is_some())
+        .expect("no refused commit after a header write");
+    let seen = Outcomes::default();
+    let covered = enumerate_settled(
+        1735,
+        || header_ahead(1735, k).unwrap(),
+        |s| {
+            s.page_region("p").unwrap().grow(CAP + 4 * B);
+        },
+        |p, case| {
+            let s = open(p);
+            assert!(s.unavailable_regions().is_empty(), "{case:?}");
+            let r = s.page_region("p").unwrap();
+            match r.len() {
+                CAP => seen.saw(case, "old"),
+                n if n == CAP + 4 * B => seen.saw(case, "new"),
+                n => panic!("{case:?}: {n}"),
+            }
+            assert_eq!(s.page_region("q").unwrap().len(), CAP, "{case:?}");
+            drop(r);
+            audit_space(p, &s);
+            drop(s);
+            audit_allowing_extra(p);
+            assert_closed_in(p, DIR);
+        },
+    );
+    report("growth from a header one extent ahead", covered);
+    seen.expect(&["new", "old"], "new");
+}
+
 /// A release (spec §12: header Released, then the table): the region whole,
 /// or gone with its name free; the other region kept.
 #[test]
@@ -322,6 +548,51 @@ fn test_every_crash_of_a_release() {
         },
     );
     report("release", covered);
+    seen.expect(&["kept", "released"], "released");
+}
+
+/// A release of a region of two extents (grown beyond capacity past "q"):
+/// the region whole, or gone with its name free and both extents free; "q"
+/// kept.
+#[test]
+fn test_every_crash_of_a_release_of_two_extents() {
+    const GROWN: u64 = CAP + 2 * B;
+    let seen = Outcomes::default();
+    let covered = enumerate_settled(
+        1737,
+        || {
+            let (p, s) = created(1737);
+            s.provision_page_region("p", CAP).unwrap();
+            s.provision_page_region("q", CAP).unwrap();
+            s.page_region("p").unwrap().grow(GROWN).unwrap();
+            let f = audit(&p).into_iter().find(|f| f.name == "p").unwrap();
+            assert_eq!(f.extents.len(), 2, "p is not in two extents");
+            (p, s)
+        },
+        |s| {
+            s.page_region("p").unwrap().release();
+        },
+        |p, case| {
+            let s = open(p);
+            assert_eq!(s.page_region("q").unwrap().len(), CAP, "{case:?}");
+            match s.page_region("p") {
+                Ok(r) => {
+                    assert_eq!(r.len(), GROWN, "{case:?}");
+                    seen.saw(case, "kept");
+                }
+                Err(e) => {
+                    assert!(not_found(&e), "{case:?}: {e:?}");
+                    s.provision_page_region("p", B).unwrap();
+                    seen.saw(case, "released");
+                }
+            }
+            assert!(s.unavailable_regions().is_empty(), "{case:?}");
+            audit_space(p, &s);
+            drop(s);
+            audit_closed(p);
+        },
+    );
+    report("release of two extents", covered);
     seen.expect(&["kept", "released"], "released");
 }
 
@@ -478,6 +749,168 @@ fn test_every_crash_of_an_accept() {
     seen.expect(&["accepted", "stale"], "accepted");
 }
 
+/// `accept_page_rollback` of two stale pages (each one's winner rewritten
+/// in turn): both still stale, the first accepted alone, or both, the
+/// regions writable once nothing is stale.
+#[test]
+fn test_every_crash_of_an_accept_of_two_pages() {
+    let seen = Outcomes::default();
+    let covered = enumerate(
+        1738,
+        || {
+            let p = fresh(1738);
+            write_regions(&p, 0, &[region(0, RegionKind::Page, "a", BASE, CAP)]);
+            write_regions(
+                &p,
+                1,
+                &[region(0, RegionKind::Page, "b", BASE + 2 * B + CAP, CAP)],
+            );
+            tear_newer_copy_of(&p, 0);
+            tear_newer_copy_of(&p, 1);
+            let s = open(&p);
+            assert_eq!(s.report().metadata.stale_pages, [0, 1]);
+            (p, s)
+        },
+        |s| {
+            s.accept_page_rollback(&[0, 1]);
+        },
+        |p, case| {
+            let s = open(p);
+            let stale = s.report().metadata.stale_pages.clone();
+            match stale.as_slice() {
+                [0, 1] => seen.saw(case, "stale"),
+                [1] => seen.saw(case, "first"),
+                [] => {
+                    for name in ["a", "b"] {
+                        let r = s.page_region(name).unwrap();
+                        r.write_durable(r.pos(0).unwrap(), &[4; B as usize])
+                            .unwrap_or_else(|e| panic!("{case:?} {name}: {e:?}"));
+                    }
+                    audit_space(p, &s);
+                    drop(s);
+                    audit_closed(p);
+                    seen.saw(case, "accepted");
+                }
+                other => panic!("{case:?}: stale {other:?}"),
+            }
+        },
+    );
+    report("accept of two pages", covered);
+    seen.expect(&["accepted", "first", "stale"], "accepted");
+}
+
+/// `accept_page_rollback` of a stale page holding a region whose header
+/// lists an extent past its entry (a growth whose commit may be the page's
+/// lost one, counted allocated while the page is stale): still stale, or
+/// accepted with that extent free again and the region growing.
+#[test]
+fn test_every_crash_of_an_accept_with_an_extra_extent() {
+    let k = (1..32)
+        .find(|&k| header_ahead(1744, k).is_some())
+        .expect("no refused commit after a header write");
+    let seen = Outcomes::default();
+    let covered = enumerate(
+        1744,
+        || {
+            let (p, s) = header_ahead(1744, k).unwrap();
+            drop(s);
+            tear_newer_copy_of(&p, 0);
+            let s = open(&p);
+            assert_eq!(s.report().metadata.stale_pages, [0]);
+            assert_eq!(s.report().metadata.extra_extents.len(), 1);
+            (p, s)
+        },
+        |s| {
+            s.accept_page_rollback(&[0]);
+        },
+        |p, case| {
+            let s = open(p);
+            let r = s.page_region("p").unwrap();
+            assert_eq!(r.len(), CAP, "{case:?}");
+            if s.frozen() {
+                assert_eq!(s.report().metadata.stale_pages, [0], "{case:?}");
+                // The extent still counted allocated (it may be the newest
+                // growth).
+                assert_eq!(s.report().metadata.extra_extents.len(), 1, "{case:?}");
+                seen.saw(case, "stale");
+            } else {
+                r.grow(CAP + 4 * B)
+                    .unwrap_or_else(|e| panic!("{case:?}: {e:?}"));
+                drop(r);
+                audit_space(p, &s);
+                drop(s);
+                audit_allowing_extra(p);
+                assert_closed_in(p, DIR);
+                seen.saw(case, "accepted");
+            }
+        },
+    );
+    report("accept with an extra extent", covered);
+    seen.expect(&["accepted", "stale"], "accepted");
+}
+
+/// A repair of a region cut short (its span past the container's end, the
+/// cut inside its second extent): still unavailable, or gone with its name
+/// free; the other region kept.
+#[test]
+fn test_every_crash_of_a_repair_of_a_cut_short_region() {
+    let tail = BASE + 2 * (2 * B + CAP);
+    let seen = Outcomes::default();
+    let covered = enumerate(
+        1739,
+        || {
+            let p = fresh(1739);
+            let mut cut = region(0, RegionKind::Page, "cut", BASE, CAP);
+            cut.extents.push((tail, CAP));
+            cut.entry.extent_count = 2;
+            cut.header.extent_count = 2;
+            cut.entry.capacity = 2 * CAP;
+            cut.entry.span_end = tail + CAP;
+            let fine = region(1, RegionKind::Page, "fine", BASE + 2 * B + CAP, CAP);
+            write_regions(&p, 0, &[cut, fine]);
+            {
+                let dir = p.open_dir(Path::new(DIR), false).unwrap();
+                let file = p
+                    .open_file(
+                        &dir,
+                        &store_io_platform::FileName::new(CONTAINER).unwrap(),
+                        store_io_platform::FileMode::ReadWrite,
+                    )
+                    .unwrap();
+                p.set_len(&file, tail + CAP / 2).unwrap();
+                p.flush_all(&file).unwrap();
+            }
+            let s = open(&p);
+            assert_eq!(s.unavailable_regions().len(), 1, "cut is not unavailable");
+            (p, s)
+        },
+        |s| {
+            let id = s.unavailable_regions()[0].id;
+            s.repair_unavailable(id);
+        },
+        |p, case| {
+            let s = open(p);
+            assert!(s.page_region("fine").is_ok(), "{case:?}");
+            match s.unavailable_regions().len() {
+                0 => {
+                    s.provision_page_region("cut", B).unwrap();
+                    audit_space(p, &s);
+                    drop(s);
+                    audit_closed(p);
+                    seen.saw(case, "repaired");
+                }
+                1 => {
+                    audit_space(p, &s);
+                    seen.saw(case, "unavailable");
+                }
+                n => panic!("{case:?}: {n} unavailable"),
+            }
+        },
+    );
+    report("repair of a cut-short region", covered);
+    seen.expect(&["repaired", "unavailable"], "repaired");
+}
+
 /// A clean close after writes (spec §12: the volume record's last write):
 /// the data intact whether or not the record came to say clean.
 #[test]
@@ -524,29 +957,83 @@ fn test_every_crash_of_a_clean_close() {
 /// source's bytes never written.
 #[test]
 fn test_every_crash_of_a_copy() {
+    copy_crash(1728, "copy", create, CopyOptions::default);
+}
+
+/// As [`test_every_crash_of_a_copy`], from a format-1 source.
+#[test]
+fn test_every_crash_of_a_copy_from_format_1() {
+    copy_crash(
+        1741,
+        "copy from format 1",
+        |p| {
+            let o = StoreOptions {
+                container_format: 1,
+                ..opts()
+            };
+            Store::create(p.clone(), Path::new(DIR), o).unwrap()
+        },
+        CopyOptions::default,
+    );
+}
+
+/// As [`test_every_crash_of_a_copy`], from a source whose page is stale (its
+/// newest commit torn), copied with `accept_stale_pages`.
+#[test]
+fn test_every_crash_of_a_copy_accepting_stale_pages() {
+    copy_crash(1742, "copy accepting stale pages", create, || CopyOptions {
+        accept_stale_pages: true,
+        ..CopyOptions::default()
+    });
+}
+
+/// `copy_store` to "/copy" with `options` (its store options `opts()`),
+/// crashed at every point, from a source `make` creates in `DIR` and this
+/// fills (a page region "p" with a block of 8s, a slot "s" holding "slot");
+/// with `accept_stale_pages`, the page holding them is then made stale.
+fn copy_crash(
+    seed: u64,
+    name: &str,
+    make: fn(&SimPlatform) -> Store<SimPlatform>,
+    options: fn() -> CopyOptions,
+) {
+    let stale = options().accept_stale_pages;
     let setup = || {
-        let (p, s) = created(1728);
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let s = make(&p);
         let r = s.provision_page_region("p", 4 * B).unwrap();
         r.write_durable(r.pos(0).unwrap(), &[8; B as usize])
             .unwrap();
         s.provision_slot("s").unwrap().commit(b"slot").unwrap();
         drop((r, s));
+        if stale {
+            tear_newer_copy_of(&p, 0);
+            let s = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+            assert_eq!(
+                s.report().metadata.stale_pages,
+                [0],
+                "the page is not stale"
+            );
+        }
         (p, ())
+    };
+    let copy = |p: &SimPlatform| {
+        let o = CopyOptions {
+            store: opts(),
+            ..options()
+        };
+        copy_store(p.clone(), Path::new(DIR), Path::new("/copy"), o)
     };
     // The source's bytes as this run made them (a store's ids are random).
     let source = RefCell::new(Vec::new());
     let seen = Outcomes::default();
     let covered = enumerate_with(
-        1728,
+        seed,
         true,
         setup,
         |p, ()| {
             *source.borrow_mut() = media(p);
-            let o = CopyOptions {
-                store: opts(),
-                ..CopyOptions::default()
-            };
-            copy_store(p.clone(), Path::new(DIR), Path::new("/copy"), o);
+            copy(p);
         },
         |p, case| {
             assert!(media(p) == *source.borrow(), "the source written: {case:?}");
@@ -574,19 +1061,14 @@ fn test_every_crash_of_a_copy() {
                 // What a crashed copy left (a temporary file, durable under
                 // its name when the metadata settled) does not stop the
                 // next copy.
-                let o = CopyOptions {
-                    store: opts(),
-                    ..CopyOptions::default()
-                };
-                copy_store(p.clone(), Path::new(DIR), Path::new("/copy"), o)
-                    .unwrap_or_else(|e| panic!("the next copy: {e:?} {case:?}"));
+                copy(p).unwrap_or_else(|e| panic!("the next copy: {e:?} {case:?}"));
                 audit_in(p, "/copy");
                 assert_closed_in(p, "/copy");
                 seen.saw(case, "none");
             }
         },
     );
-    report("copy", covered);
+    report(name, covered);
     seen.expect(&["copy", "none"], "copy");
 }
 

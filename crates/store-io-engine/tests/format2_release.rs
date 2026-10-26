@@ -358,3 +358,22 @@ fn test_a_rolled_back_release_finds_the_region_released() {
     assert_eq!(u.len(), 1, "{u:?}");
     assert_eq!(u[0].reason, store_io_engine::Unavailable::HeaderReleased);
 }
+
+/// The commit's page write failing after submission: the release may have
+/// landed, so the region is never given back (no read of it is served),
+/// and the store is poisoned.
+#[test]
+fn test_a_failed_commit_never_gives_the_region_back() {
+    let p = fresh(610);
+    let s = open(&p);
+    let pages = s.provision_page_region("p", CAP).unwrap();
+    pages
+        .write(pages.pos(0).unwrap(), &[7u8; B as usize])
+        .unwrap();
+    p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + 1));
+    assert!(pages.clone().release().is_err());
+    assert!(s.poisoned().is_some());
+    let mut out = vec![0u8; B as usize];
+    let r = pages.read(pages.pos(0).unwrap(), &mut out);
+    assert!(r.is_err(), "a read was served: {r:?}");
+}

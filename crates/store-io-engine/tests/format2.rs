@@ -18,7 +18,7 @@ use store_io_engine::{CONTAINER, Healed, Store, StoreOptions};
 use store_io_format::crc32c::crc32c;
 use store_io_format::slot::{FORMAT_2, SlotFields, SlotIndex, encode};
 use store_io_platform::{FileMode, FileName, Platform};
-use store_io_sim::{CrashMode, SimConfig, SimPlatform};
+use store_io_sim::{CrashMode, FaultPlan, SimConfig, SimPlatform};
 
 mod format2_util;
 use format2_util::*;
@@ -587,4 +587,98 @@ fn test_a_store_found_read_only_runs_one_flush() {
         reopens,
         "opened a flush handle"
     );
+}
+
+/// A store poisoned by a failed flush records no clean close when it is
+/// dropped: a write it gave up on may still land, so the next open must
+/// judge the store as not closed cleanly.
+#[test]
+fn test_a_poisoned_store_records_no_clean_close() {
+    let p = SimPlatform::new(SimConfig::volatile(118));
+    let s = create(&p);
+    let log = s.provision_append_region("log", 1 << 20).unwrap();
+    p.with_world(|w| w.faults_mut().fail_flush = Some(w.flushes() + 1));
+    assert!(log.append_durable(&[1u8; 4096]).is_err());
+    assert!(s.poisoned().is_some());
+    p.with_world(|w| *w.faults_mut() = FaultPlan::default());
+    drop((log, s));
+    assert!(!open(&p).report().metadata.clean_close);
+}
+
+/// The heal of the newest write (torn) and the open's own volume-record
+/// write leave the numbers dense: the highest `meta_seq` afterwards is one
+/// above the torn copy's (spec §7), no number skipped.
+#[test]
+fn test_a_heal_leaves_the_numbers_dense() {
+    let p = SimPlatform::new(SimConfig::volatile(119));
+    drop(create(&p));
+    let s = open(&p);
+    let log = s.provision_append_region("log", 1 << 20).unwrap();
+    drop((log, s));
+    // The newest write, the clean close's volume record, torn: its header
+    // (and its number) intact.
+    tear(&p, newest_volume_slot(&p));
+    let torn = max_meta_seq(&p);
+    let s = open(&p);
+    assert_eq!(s.report().metadata.healed, Some(Healed::VolumeRecord));
+    assert_eq!(max_meta_seq(&p), torn + 1);
+}
+
+/// A torn copy's number counts (spec §7): a stale page's torn newer copy
+/// keeps its `meta_seq`, and the open's volume-record write is numbered
+/// above it, so no two slots ever share a number.
+#[test]
+fn test_a_torn_copys_number_is_never_reused() {
+    let p = SimPlatform::new(SimConfig::volatile(120));
+    drop(create(&p));
+    format2_util::craft::tear_newer_copy_of(&p, 0);
+    let torn = max_meta_seq(&p);
+    let s = open(&p);
+    let r = s.report().clone();
+    assert!(r.metadata.healed.is_none(), "{:?}", r.metadata);
+    let volume = newest_volume_slot(&p);
+    let numbered = u64_at(&media(&p), volume as usize + 96);
+    assert!(
+        numbered > torn,
+        "the volume record took {numbered}, the torn copy has {torn}"
+    );
+    drop(s);
+}
+
+/// Slot B's newer volume-record copy naming one more table page than slot
+/// A's (its CRCs redone): a record describing another table.
+fn volume_copy_b_other_table(pf: &SimPlatform) -> Vec<u8> {
+    let mut slot = volume_copy_b(pf, 2, false);
+    let len = u32_at(&slot, 72) as usize;
+    let pages = u32_at(&slot, 128 + 48) + 1;
+    slot[128 + 48..128 + 52].copy_from_slice(&pages.to_le_bytes());
+    let crc = crc32c(&slot[128..128 + len]);
+    slot[28..32].copy_from_slice(&crc.to_le_bytes());
+    rehash(&mut slot);
+    slot
+}
+
+/// A volume record read again after a failed read may be the newer copy:
+/// it must describe the same table as the copy the open began with, or the
+/// store is corrupt; it is never opened on a table the record does not
+/// describe.
+#[test]
+fn test_a_reread_volume_record_naming_another_table_is_corrupt() {
+    for k in 0..=6 {
+        let p = SimPlatform::new(SimConfig::volatile(121));
+        crash_open(&p, create(&p));
+        put(&p, block(&p), &volume_copy_b_other_table(&p));
+        if k > 0 {
+            p.with_world(|w| {
+                let n = w.reads() + k;
+                w.faults_mut().fail_read = Some((n, 5));
+            });
+        }
+        let r = Store::open(p.clone(), Path::new(DIR), opts());
+        assert!(
+            matches!(r, Err(Error::Corruption { .. })),
+            "read {k} failed: {:?}",
+            r.map(|s| s.report().metadata.clone())
+        );
+    }
 }

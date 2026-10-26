@@ -13,6 +13,21 @@
 
 ### Added
 
+- Tests: **every format-2 integrity guard has a mutation entry** (v0.5).
+  An audit of every guard and every change format 2 makes found 58
+  guards without one: 50 now have an entry its tests kill, and 8 are
+  listed with why they have none (backstops no outside path reaches,
+  behind the store-wide frozen refusal; an invariant; an exactness rule;
+  an equivalent check). `dev/tools/mutate.py` gained joint entries for
+  guards held in layers. New tests: a poisoned store's close, a failed
+  release's region, a panic inside a provisioning, the 2^32-block
+  growth bound, a torn copy's `meta_seq` never reused, a reread volume
+  record naming another table. Ten more crash enumerations: a
+  takeover, a keyed provisioning into freed space, two commits to one
+  page, growth from a header one extent ahead, a release of two
+  extents, a repair of a region cut short, an accept of two pages and
+  one of a page whose region lists an extra extent, `copy_store` from
+  format 1 and with `accept_stale_pages`.
 - Tests: **the idle check on every system** (v0.5). `tests/idle.rs`
   ran on Linux only; it now also runs on macOS (per-thread CPU time
   from `proc_pidinfo`, storage bytes from `proc_pid_rusage`) and on

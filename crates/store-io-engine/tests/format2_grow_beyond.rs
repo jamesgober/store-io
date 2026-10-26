@@ -770,3 +770,26 @@ fn test_windows_fills_the_whole_extent() {
     let (at, len) = f.extents[1];
     assert_eq!(media_at(&p, at, len), pattern(&p, &f, CAP, len));
 }
+
+/// Growth to 2^32 blocks or more is refused before anything is written:
+/// the append frontier cannot address it.
+#[test]
+fn test_growth_to_four_billion_blocks_is_refused() {
+    let p = fresh(761);
+    let s = store(&p);
+    let pages = s.provision_page_region("p", CAP).unwrap();
+    let writes = p.with_world(|w| w.writes());
+    let r = pages.grow(u64::from(u32::MAX) * B);
+    assert!(
+        matches!(
+            r,
+            Err(Error::NotWritten {
+                cause: NotWrittenCause::TooLarge,
+                ..
+            })
+        ),
+        "{r:?}"
+    );
+    assert_eq!(pages.len(), CAP);
+    assert_eq!(p.with_world(|w| w.writes()), writes, "a write was made");
+}

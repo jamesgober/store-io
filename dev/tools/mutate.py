@@ -118,6 +118,48 @@ MAC_LIB = ["-p", "store-io-posix", "--lib"]
 # The Windows backend's own tests (run on Windows only).
 WIN_LIB = ["-p", "store-io-win", "--lib"]
 
+class Joint(tuple):
+    """Several mutations made together: one property held by guards in
+    layers, each the others' backstop, so removing one alone changes
+    nothing; every layer is removed at once. `Joint(parts, tests)`, parts a
+    list of (file, pattern, replacement), each pattern found once in its
+    file and applied in order."""
+
+    def __new__(cls, parts, tests):
+        f, a, b = parts[0]
+        return super().__new__(cls, (f, a, b, tests))
+
+    def __init__(self, parts, tests):
+        super().__init__()
+        self.parts = list(parts)
+
+
+def parts_of(entry):
+    """An entry's mutations: (file, pattern, replacement) each."""
+    return getattr(entry, "parts", None) or [tuple(entry[:3])]
+
+
+# v0.5 audit entries' test sets.
+M2_SRC = "crates/store-io-format/src/meta2.rs"
+SLOT_SRC = "crates/store-io-format/src/slot.rs"
+AUD_CODEC = ["-p", "store-io-format"]
+AUD_RO = ["-p", "store-io-engine", "--test", "format2_regions", "--test", "format2_repair"]
+AUD_OPEN = ["-p", "store-io-engine", "--test", "format2_regions", "--test", "format2_open",
+            "--test", "format2_repair", "--test", "format2_damage", "--test", "format2_release",
+            "--test", "format2_grow_beyond"]
+AUD_STALE = ["-p", "store-io-engine", "--test", "format2_repair", "--test", "format2_grow",
+             "--test", "format2_grow_beyond", "--test", "format2_release", "--test", "format2_recycle",
+             "--test", "format2_provision", "--test", "format2_crash_open"]
+AUD_SEQ = ["-p", "store-io-engine", "--test", "format2", "--test", "format2_create",
+           "--test", "format2_damage", "--test", "format2_crash_open"]
+# The flush before provisioning's header is accounting (a power-safe device
+# needs none): the header's own durable write flushes the fill before the
+# page commit, so no crash state tells it apart.
+AUD_FLUSHES = ["-p", "store-io-engine", "--test", "batch", "--test", "store"]
+AUD_PROV = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "format2_concurrent",
+            "--test", "format2_grow", "--test", "format2_grow_beyond", "--test", "format2_release",
+            "--test", "format2_recycle"]
+
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
  ("crates/store-io-engine/src/io.rs", "                self.offset += buf.len() as u64;", "                self.offset += buf.len() as u64 + 4096;"),
@@ -1087,6 +1129,83 @@ M = [
  # Windows mutation job.
  ('crates/store-io-win/src/dir.rs', '    if sys::file_id(&d)? != sys::file_id(h)? {', '    if sys::file_id(&d)? != sys::file_id(h)? && false {', WIN_LIB),
  ('crates/store-io-win/src/dir.rs', '    match sys::set_file_info(&d, FileDispositionInfoEx, &flags.to_le_bytes()) {', '    match sys::set_file_info(&d, FileDispositionInfo, &[u8::from(flags != 0)]) {', WIN_LIB),
+ # v0.5 audit (.dev/design/v05-guard-audit.md): guards without an entry.
+ # G1: a read-only region refuses writes.
+ ('crates/store-io-engine/src/io.rs', '        if r.is_read_only() {\n            return Err(not_written(NotWrittenCause::ReadOnly, ctx(r)));', '        if r.is_read_only() && false {\n            return Err(not_written(NotWrittenCause::ReadOnly, ctx(r)));', AUD_RO),
+ # G2: the open's free space leaves out everything allocated.
+ ('crates/store-io-engine/src/open2.rs', '                    allocated.push(range);\n                    stale_extra.push', '                    let _ = range;\n                    stale_extra.push', AUD_OPEN),
+ ('crates/store-io-engine/src/open2.rs', '                allocated.push((e.span_start, e.span_end - e.span_start));\n                reserved.push', '                reserved.push', AUD_OPEN),
+ ('crates/store-io-engine/src/open2.rs', '    let mut allocated: Vec<Extent> = gone.iter().filter_map(|g| g.1).collect();\n    // Every unavailable region\'s span: those above, then the demoted.\n    let mut reserved: Vec<Extent> = allocated.clone();', '    let mut allocated: Vec<Extent> = Vec::new();\n    // Every unavailable region\'s span: those above, then the demoted.\n    let mut reserved: Vec<Extent> = gone.iter().filter_map(|g| g.1).collect();', AUD_OPEN),
+ ('crates/store-io-engine/src/open2.rs', '        allocated.extend_from_slice(&ranges);', '        let _ = &ranges;', AUD_OPEN),
+ ('crates/store-io-engine/src/open2.rs', 'FreeMap::complement(table_end, container_len, &mut allocated.clone())', 'FreeMap::complement(table_end, container_len, &mut Vec::new())', AUD_OPEN),
+ # G3: placement stays inside free space; names tie.
+ ('crates/store-io-engine/src/footprint.rs', '            (at.checked_add(len)? <= end).then_some(at)', '            (at.checked_add(len)? <= end.saturating_add(4096)).then_some(at)', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        if len > at {\n            free.push((at, len));', '        if len > at && false {\n            free.push((at, len));', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '            core::cmp::Ordering::Equal => e.1 += 1,', '            core::cmp::Ordering::Equal => {}', FOOTPRINT),
+ ('crates/store-io-engine/src/footprint.rs', '        while next < set.len() && set[next].start < q.start {', '        while next < set.len() && set[next].start <= q.start {', FOOTPRINT),
+ # G4: a stale page is never rewritten unasked.
+ # (No entries for the per-page standing checks: write_page's (v2.rs), growth's
+ # (grow2.rs), release's (lifecycle2.rs), provisioning's commit
+ # (provision2.rs) and repair's (repair.rs). They cannot be reached: the
+ # store-wide `frozen` flag is set while any page is stale or lost, cleared
+ # only once every page is Confirmed, and every operation refuses on it
+ # first (an entry for each). Kept as backstops.)
+ (V2, '            .filter(move |e| e.footprint_seq > ms)', '            .filter(move |e| e.footprint_seq > ms && false)', AUD_STALE),
+ ('crates/store-io-engine/src/grow2.rs', '    if page.standing != Standing::Confirmed || page.ahead().next().is_some() {\n        return Err(not_written(NotWrittenCause::Frozen, ctx(r)));', '    if page.standing != Standing::Confirmed {\n        return Err(not_written(NotWrittenCause::Frozen, ctx(r)));', AUD_STALE),
+ Joint([('crates/store-io-engine/src/lifecycle2.rs', '            if page.standing != Standing::Confirmed || page.ahead().next().is_some() {\n                return Err(refused(not_written(NotWrittenCause::Frozen, c)));', '            if page.standing != Standing::Confirmed {\n                return Err(refused(not_written(NotWrittenCause::Frozen, c)));'),
+        (V2, '        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)))', '        .find(|e| ahead.contains(&(e.seq, e.footprint_seq)) && false)')], F2REP),
+ # G6: meta_seq numbering counts a torn copy, and skips only the slot replaced.
+ (V2, '        SlotStatus::BadPayloadCrc => pair.facts[i].and_then(|f| f.numbered).map(|n| n.meta_seq),', '        SlotStatus::BadPayloadCrc => pair.facts[i].and_then(|f| f.numbered).map(|n| n.meta_seq).filter(|_| false),', AUD_SEQ),
+ # (No entry for next_meta_seq's skip of the slot a write replaces: without
+ # it a write is numbered higher, never lower, so no number is reused;
+ # an exactness rule, not an integrity guard.)
+ # G8: provisioning flushes before its header; a failed or panicked
+ # provisioning keeps its holds; no clean close when poisoned.
+ ('crates/store-io-engine/src/provision2.rs', '        self.flush_all_accounted()?;\n        self.verify_ready(pl.offset, filled)?;', '        self.verify_ready(pl.offset, filled)?;', AUD_FLUSHES),
+ ('crates/store-io-engine/src/provision2.rs', '        if std::thread::panicking() {\n            self.store\n                .inner\n                .domain\n                .poison(', '        if std::thread::panicking() && false {\n            self.store\n                .inner\n                .domain\n                .poison(', AUD_PROV),
+ ('crates/store-io-engine/src/provision2.rs', '        if self.store.inner.domain.poisoned().is_some() {\n            return;\n        }\n        let inner = &self.store.inner;', '        if self.store.inner.domain.poisoned().is_some() && false {\n            return;\n        }\n        let inner = &self.store.inner;', AUD_PROV),
+ # (No entry for the clean close's own poisoned check, v2.rs Drop: equivalent,
+ # since durable_slot refuses every slot write on a poisoned domain;
+ # format2.rs test_a_poisoned_store_records_no_clean_close holds the pair.)
+ # G10: lower-risk guards.
+ (V2, '        if vm.table_pages != layout.pages\n            || vm.base.log2_block_size != layout.log2_block\n            || vm.base.log2_table_slot_size != layout.log2_table\n        {', '        if false\n        {', AUD_SEQ),
+ # (No entry for the heal's slot match, v2.rs: plan_next writes the slot not
+ # holding the winner, and a torn copy is never the winner, so the heal
+ # always lands on the torn slot; an invariant, not a reachable refusal.)
+ ('crates/store-io-engine/src/lifecycle2.rs', '                if inner.domain.poisoned().is_none() {\n                    r.gate.restore();', '                if true {\n                    r.gate.restore();', AUD_PROV),
+ ('crates/store-io-engine/src/provision2.rs', '        if live\n            || meta.unavailable', '        if (live && false)\n            || meta.unavailable', AUD_PROV),
+ ('crates/store-io-engine/src/grow2.rs', '        if new / block >= u64::from(u32::MAX) {\n            return Err(too_large());', '        if new / block >= u64::from(u32::MAX) && false {\n            return Err(too_large());', AUD_PROV),
+ # G11: the format crate's field checks (fail safe: unavailable or corrupt).
+ # (Each `A || B` check: one entry removes A, another B.)
+ (M2_SRC, '        if self.span_start % block != 0 || self.span_end % block != 0 {', '        if self.span_end % block != 0 {', AUD_CODEC),
+ (M2_SRC, '        if reserved0 != 0 || reserved1 != 0 {', '        if (reserved0 != 0 && false) || reserved1 != 0 {', AUD_CODEC),
+ (M2_SRC, '    if header.count > max_entries || u32::from(header.count) > header.next_seq {', '    if (header.count > max_entries && false) || u32::from(header.count) > header.next_seq {', AUD_CODEC),
+ (M2_SRC, '        if h.region_id != region_id {', '        if h.region_id != region_id && false {', AUD_CODEC),
+ (M2_SRC, '        if h.kind != self.kind {', '        if h.kind != self.kind && false {', AUD_CODEC),
+ (M2_SRC, '        if h.flags != self.flags {', '        if h.flags != self.flags && false {', AUD_CODEC),
+ (M2_SRC, '        if h.state != RegionState::Ready {', '        if h.state != RegionState::Ready && false {', AUD_CODEC),
+ (M2_SRC, '        if self.flags & !KNOWN_FLAGS != 0 {\n            return Err(MetaError::Field("flags"));\n        }\n        if !LOG2_RANGE', '        if self.flags & !KNOWN_FLAGS != 0 && false {\n            return Err(MetaError::Field("flags"));\n        }\n        if !LOG2_RANGE', AUD_CODEC),
+ (M2_SRC, '        if !LOG2_RANGE.contains(&lim.log2_block) {', '        if !LOG2_RANGE.contains(&lim.log2_block) && false {', AUD_CODEC),
+ (M2_SRC, '        if RegionState::from_u8(self.state)? != RegionState::Ready {', '        if RegionState::from_u8(self.state)? != RegionState::Ready && false {', AUD_CODEC),
+ (M2_SRC, '        if self.span_start >= self.span_end || self.span_end > lim.file_len {', '        if self.span_end > lim.file_len {', AUD_CODEC),
+ (M2_SRC, '        if self.span_start >= self.span_end || self.span_end > lim.file_len {', '        if self.span_start >= self.span_end {', AUD_CODEC),
+ (M2_SRC, '        if self.span_start % block != 0 || self.span_end % block != 0 {', '        if self.span_start % block != 0 || self.span_end % block != 0 && false {', AUD_CODEC),
+ (M2_SRC, '            if h % block != 0 {', '            if h % block != 0 && false {', AUD_CODEC),
+ (M2_SRC, '        } else if self.extent_count == 0 {', '        } else if self.extent_count == 0 && false {', AUD_CODEC),
+ (M2_SRC, '        } else if self.capacity == 0 {', '        } else if self.capacity == 0 && false {', AUD_CODEC),
+ (M2_SRC, '        if reserved0 != 0 || reserved1 != 0 {', '        if reserved0 != 0 || reserved1 != 0 && false {', AUD_CODEC),
+ (M2_SRC, '        if base.table_offset != 2u64 << base.log2_block_size {', '        if base.table_offset != 2u64 << base.log2_block_size && false {', AUD_CODEC),
+ (M2_SRC, '        if clean_close > 1 {', '        if clean_close > 1 && false {', AUD_CODEC),
+ (M2_SRC, '        if self.table_end() > file_len {', '        if self.table_end() > file_len && false {', AUD_CODEC),
+ (M2_SRC, '    if r.bytes(14)?.iter().any(|&b| b != 0) {', '    if r.bytes(14)?.iter().any(|&b| b != 0) && false {', AUD_CODEC),
+ (M2_SRC, '    if header.count > max_entries || u32::from(header.count) > header.next_seq {', '    if header.count > max_entries || u32::from(header.count) > header.next_seq && false {', AUD_CODEC),
+ (M2_SRC, '    if flags & !KNOWN_FLAGS != 0 {\n        return Err(MetaError::Field("flags"));\n    }\n    let kind = RegionKind::from_u8(kind)?;', '    if flags & !KNOWN_FLAGS != 0 && false {\n        return Err(MetaError::Field("flags"));\n    }\n    let kind = RegionKind::from_u8(kind)?;', AUD_CODEC),
+ (M2_SRC, '    if r.bytes(20)?.iter().any(|&b| b != 0) {', '    if r.bytes(20)?.iter().any(|&b| b != 0) && false {', AUD_CODEC),
+ (M2_SRC, '    if !(log2 == log2_block || (log2 == 9 && kind == RegionKind::Append)) {', '    if !(log2 == log2_block || (log2 == 9 && kind == RegionKind::Append)) && false {', AUD_CODEC),
+ (M2_SRC, '    if region_generation == 0 {', '    if region_generation == 0 && false {', AUD_CODEC),
+ (M2_SRC, '    if fill == FillPattern::Zeros && fill_key != [0; 16] {', '    if fill == FillPattern::Zeros && fill_key != [0; 16] && false {', AUD_CODEC),
+ (M2_SRC, '        if object_len != 0\n            || extent_count == 0', '        if false\n            || extent_count == 0', AUD_CODEC),
+ (SLOT_SRC, '        || slot[..HEADER_LEN].iter().all(|&b| b == 0)\n        || slot[..8] != MAGIC[..]', '        || slot[..HEADER_LEN].iter().all(|&b| b == 0)', AUD_CODEC),
 ]
 
 def kill_stuck_tests():
@@ -1140,12 +1259,17 @@ def check_patterns():
     twice: run before each commit."""
     bad = check_names()
     for i, entry in enumerate(M):
-        f, a = entry[0], entry[1]
-        with open(os.path.join(ROOT, *f.split("/")), encoding="utf-8") as fh:
-            n = fh.read().count(a)
-        if n != 1:
-            print(f"[{i}] {f}: pattern found {n} times: {a[:60]!r}", flush=True)
-            bad.append(i)
+        texts = {}
+        for f, a, b in parts_of(entry):
+            if f not in texts:
+                with open(os.path.join(ROOT, *f.split("/")), encoding="utf-8") as fh:
+                    texts[f] = fh.read()
+            n = texts[f].count(a)
+            if n != 1:
+                print(f"[{i}] {f}: pattern found {n} times: {a[:60]!r}", flush=True)
+                bad.append(i)
+                break
+            texts[f] = texts[f].replace(a, b)
     print(f"{len(M)} entries, {len(bad)} bad", flush=True)
     sys.exit(1 if bad else 0)
 
@@ -1178,28 +1302,39 @@ def main():
     survived, missing, invalid = [], [], []
     skipped = []
     for i, entry in enumerate(M):
-        f, a, b = entry[:3]
+        f = entry[0]
         pkgs = pkgs_of(entry)
         env = {**os.environ, **entry[4]} if len(entry) > 4 else None
         if only and i not in only:
             continue
-        p = os.path.join(ROOT, *f.split("/"))
-        with open(p, encoding="utf-8") as fh:
-            src = fh.read()
-        if src.count(a) != 1:
-            print(f"[{i}] PATTERN NOT FOUND ({src.count(a)}) in {f}: {a[:50]!r}", flush=True)
+        # Every file the entry mutates: its original text, then the mutated.
+        originals, mutated, found = {}, {}, True
+        for pf, a, b in parts_of(entry):
+            path = os.path.join(ROOT, *pf.split("/"))
+            if path not in originals:
+                with open(path, encoding="utf-8") as fh:
+                    originals[path] = fh.read()
+                mutated[path] = originals[path]
+            if mutated[path].count(a) != 1:
+                print(f"[{i}] PATTERN NOT FOUND ({mutated[path].count(a)}) in {pf}: {a[:50]!r}", flush=True)
+                found = False
+                break
+            mutated[path] = mutated[path].replace(a, b)
+        if not found:
             missing.append(i)
             continue
         # After the pattern check, so a stale entry is reported everywhere.
-        need = platform_of(f, pkgs)
+        needs = {platform_of(pf, pkgs) for pf, _, _ in parts_of(entry)} - {None}
+        need = next(iter(needs), None)
         if need and not sys.platform.startswith(need):
             print(f"[{i}] {f}: skipped ({need} only)", flush=True)
             skipped.append(i)
             continue
-        with open(p, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(src.replace(a, b))
         phase = "build"
         try:
+            for path, text in mutated.items():
+                with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(text)
             try:
                 # Build first, test second, so a build failure can never be
                 # mistaken for a caught mutation. A failed build is retried
@@ -1240,8 +1375,9 @@ def main():
             elif not killed:
                 survived.append(i)
         finally:
-            with open(p, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(src)
+            for path, text in originals.items():
+                with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(text)
     print("survived:", survived, "missing:", missing, "invalid:", invalid,
           "skipped:", skipped, flush=True)
     sys.exit(1 if survived or missing or invalid else 0)

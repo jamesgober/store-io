@@ -13,6 +13,17 @@
 
 ### Added
 
+- Tests: **the idle check on every system** (v0.5). `tests/idle.rs`
+  ran on Linux only; it now also runs on macOS (per-thread CPU time
+  from `proc_pidinfo`, storage bytes from `proc_pid_rusage`) and on
+  Windows (per-thread context switches and CPU cycles, from
+  `NtQuerySystemInformation` and `QueryThreadCycleTime`), in CI. An
+  exercised store left idle for 60 s: no thread it started wakes,
+  runs, starts or exits. A control thread woken once mid-window must
+  be seen, so the counters cannot be blind. On Windows the system's
+  own thread-pool workers (unnamed, started in `ntdll.dll`; CI runners
+  start them now and then in a process with no store at all) are not
+  watched, and a test holds store-io to never using that pool.
 - Platforms: **the macOS backend** (v0.5 macOS M1-M4, D-133, D-134):
   `store-io-posix` builds on macOS, and `NativePlatform` is its
   `PosixPlatform` there.

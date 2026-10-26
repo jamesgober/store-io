@@ -70,6 +70,7 @@ Source: [`crates/store-io-win/src/queue.rs`](../crates/store-io-win/src/queue.rs
 - Completions are reaped with `GetQueuedCompletionStatusEx`, waiting either `INFINITE` or not at all. No wait in the backend has a finite timeout.
 - A data flush runs synchronously inside `submit`. The trailing flush of a durable write runs where its completion is observed.
 - Dropping a queue with operations in flight cancels them (`CancelIoEx`) and waits for every completion packet before any buffer or handle is freed. If the port cannot be waited on, buffers and handles are leaked rather than freed under the kernel.
+- **Idle.** An idle store makes no system calls and has no timers: none of its threads is switched in or runs a CPU cycle (checked in CI).
 
 ### Flushes
 
@@ -230,7 +231,7 @@ The macOS backend is `store-io-posix`'s `mac/` modules (D-133, D-134): the POSIX
 
 ### The I/O queue
 
-One tier, synchronous: every data operation is one system call (`pwrite`, `pread`, or the flush). A queue for one operation at a time performs it inline in `submit`; a parallel queue (a `Submitter`'s, the blocking API's parallel lanes) runs on the submit pool's worker threads, started on first use and parked while idle. POSIX AIO is not used (small limits, and its `aio_fsync` never reaches the drive). One call transfers at most `INT_MAX` bytes; a longer buffer transfers short. `StoreReport::io` names the path.
+One tier, synchronous: every data operation is one system call (`pwrite`, `pread`, or the flush). A queue for one operation at a time performs it inline in `submit`; a parallel queue (a `Submitter`'s, the blocking API's parallel lanes) runs on the submit pool's worker threads, started on first use and parked while idle. POSIX AIO is not used (small limits, and its `aio_fsync` never reaches the drive). One call transfers at most `INT_MAX` bytes; a longer buffer transfers short. `StoreReport::io` names the path. An idle store makes no system calls and has no timers: none of its threads runs on a CPU, and it moves no byte to or from storage (checked in CI).
 
 ### Flushes and the flush check
 

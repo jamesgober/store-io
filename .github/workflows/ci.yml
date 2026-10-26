@@ -58,6 +58,10 @@ jobs:
         run: cargo test -p store-io-engine -p store-io-sim -p store-io
         env:
           STORE_IO_SIM_INLINE: "1"
+      # Linux's idle check runs in conformance-linux, on both tiers.
+      - name: Idle store is silent (60 s)
+        if: runner.os != 'Linux' && matrix.rust == 'stable'
+        run: cargo test --test idle -- --ignored --test-threads=1 --nocapture
       - name: Doc (all features)
         run: cargo doc --workspace --no-deps --all-features
         env:

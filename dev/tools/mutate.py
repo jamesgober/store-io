@@ -1101,6 +1101,9 @@ M = [
  # in both formats (only a poisoned store reports the header's failure).
  ('crates/store-io-engine/src/lifecycle2.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_some() => return Ok(()),', F2X),
  ('crates/store-io-engine/src/lifecycle.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_some() => return Ok(()),', ['-p', 'store-io-engine', '--test', 'format1_writes']),
+ # A lock that fails but is not held is `Io`, never `Locked` (open, create).
+ ('crates/store-io-engine/src/open.rs', '            if store_io_core::errno::is_lock_held(raw) {', '            if store_io_core::errno::is_lock_held(raw) || true {', ['-p', 'store-io-engine', '--test', 'store']),
+ ('crates/store-io-engine/src/create.rs', '                    if store_io_core::errno::is_lock_held(raw) {', '                    if store_io_core::errno::is_lock_held(raw) || true {', ['-p', 'store-io-engine', '--test', 'store']),
  # Windows (M4): a made directory is removed only through a handle checked
  # to be on it, with POSIX semantics (the name goes at once). Run by the
  # Windows mutation job.

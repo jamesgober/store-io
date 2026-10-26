@@ -392,3 +392,34 @@ fn test_a_committed_release_whose_header_write_is_refused_is_done() {
     assert!(s.append_region("gone").is_err());
     assert!(s.report().unavailable.is_empty());
 }
+
+/// Released entries never fill the region table: a release removes its
+/// entry from its page, and the space it frees takes a region of any size.
+/// Three times the table's capacity of regions, every one of a size no
+/// other has, provisioned and released beside one that stays: no
+/// `NoSpace(Table)`, and the container grows no further than its largest
+/// region needs. (Format 1 kept released entries, reused only by a region
+/// of exactly the same size, and could fill its table with them.)
+#[test]
+fn test_released_regions_of_every_size_never_fill_the_table() {
+    let p = fresh(612);
+    let s = open(&p);
+    s.provision_append_region("keep", CAP).unwrap();
+    let mut peak = 0usize;
+    for i in 0..1200u64 {
+        // 4 KiB to 1 MiB, never the same size twice in a row of 256.
+        let size = B * (1 + (i * 37) % 256);
+        let r = s
+            .provision_page_region(&format!("r{i}"), size)
+            .unwrap_or_else(|e| panic!("provisioning {i} ({size} bytes): {e:?}"));
+        r.release().unwrap();
+        if i == 256 {
+            peak = media(&p).len();
+        }
+    }
+    assert!(
+        media(&p).len() <= peak,
+        "released space was not reused: the container grew"
+    );
+    assert_eq!(names(&p), ["keep"]);
+}

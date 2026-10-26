@@ -37,6 +37,14 @@
     `DeviceFacts::internal`). FAT, exFAT, FUSE and network volumes are
     Unsafe. Nothing is power-safe.
   - See PLATFORMS.md section 5.
+- Simulator: `FaultPlan::fail_lock` (every `lock_exclusive` and
+  `lock_shared` fails with the given raw code, held or not: a file system
+  that cannot lock).
+- Tests: a lock that fails but is not held is `Io(Lock)`, never `Locked`,
+  at writable and read-only opens and at create (`tests/store.rs`, mutants
+  721 and 722); released format-2 regions of every size never fill the
+  region table (1,200 regions of shifting sizes through a 400-entry table,
+  the container never growing past its peak; `tests/format2_release.rs`).
 - Tests: **an idle store is silent on every system** (`tests/idle.rs`, CI
   job "Idle store is silent" on macOS and Windows beside the Linux runs):
   after the store is exercised and every thread it started is asleep, none

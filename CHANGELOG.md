@@ -542,6 +542,11 @@
 
 ### Changed
 
+- Engine: **the flush domain's statistics `led`, `peak_in_flight` and
+  `out_of_order` are counted under the slot lock** a leader holds anyway,
+  not as atomics on a cache line of their own: per durable write, two
+  locked read-modify-writes and about 13 cold cache lines fewer (G1 P4a).
+  `domain_stats()` reads them under that lock: a consistent snapshot.
 - Format 2: **a slot's `compat_flags` are kept on every rewrite** (they
   were written as 0). A pair's first write records 0; each later write
   carries its winner's bits, known or not, so the may-ignore bits a

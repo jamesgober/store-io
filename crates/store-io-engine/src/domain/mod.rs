@@ -185,16 +185,16 @@ impl Wakes {
     }
 }
 
-/// Observability counters, on a cache line of their own: incrementing them
-/// must not evict the line every barrier reads (`issued`, `done`).
+/// Observability counters counted without the slot lock, on a cache line of
+/// their own: incrementing them must not evict the line every barrier reads
+/// (`issued`, `done`). Those counted under the lock live in [`Slots`], on
+/// the line a leader holds anyway (no locked add, no line of its own, per
+/// flush).
 #[derive(Debug)]
 #[repr(align(128))]
 struct Counters {
     joined: AtomicU64,
-    led: AtomicU64,
     already_durable: AtomicU64,
-    peak: AtomicU64,
-    out_of_order: AtomicU64,
 }
 
 /// What the slot lock guards. `done` changes only under it.
@@ -214,6 +214,11 @@ struct Slots {
     /// them, so a full flush waits at most for the flush running on slot 0
     /// (and any full flush ahead of it).
     main_waiting: u32,
+    /// Flushes led, the most in flight at once, and those that finished
+    /// before an earlier one (observability).
+    led: u64,
+    peak: u64,
+    out_of_order: u64,
 }
 
 /// A flush domain.
@@ -254,10 +259,7 @@ impl Domain {
             done: AtomicU64::new(0),
             counters: Counters {
                 joined: AtomicU64::new(0),
-                led: AtomicU64::new(0),
                 already_durable: AtomicU64::new(0),
-                peak: AtomicU64::new(0),
-                out_of_order: AtomicU64::new(0),
             },
             poison: OnceLock::new(),
             slots: slots.clamp(1, MAX_FLUSH_SLOTS) as u32,
@@ -271,6 +273,9 @@ impl Domain {
                 designate: None,
                 shared: 0,
                 main_waiting: 0,
+                led: 0,
+                peak: 0,
+                out_of_order: 0,
             }),
             bucket_words: (0..BUCKETS)
                 .map(|_| CachePadded::new(WaitWord::new()))
@@ -299,16 +304,18 @@ impl Domain {
         self.notify();
     }
 
-    /// Observability counters.
+    /// Observability counters: a consistent snapshot, read under the slot
+    /// lock (briefly; every barrier takes it), so not for a hot loop.
     #[must_use]
     pub fn stats(&self) -> DomainStats {
+        let st = self.lock();
         DomainStats {
             flushes: self.issued.load(Ordering::Acquire),
             joined: self.counters.joined.load(Ordering::Relaxed),
-            led: self.counters.led.load(Ordering::Relaxed),
+            led: st.led,
             already_durable: self.counters.already_durable.load(Ordering::Relaxed),
-            peak_in_flight: self.counters.peak.load(Ordering::Relaxed),
-            out_of_order: self.counters.out_of_order.load(Ordering::Relaxed),
+            peak_in_flight: st.peak,
+            out_of_order: st.out_of_order,
         }
     }
 
@@ -424,16 +431,13 @@ impl Domain {
             // flush can use, is taken by data leaders last.
             let slot = 31 - free.leading_zeros();
             st.busy |= 1 << slot;
-            let _peak = self
-                .counters
-                .peak
-                .fetch_max(u64::from(st.busy.count_ones()), Ordering::Relaxed);
+            st.peak = st.peak.max(u64::from(st.busy.count_ones()));
+            st.led += 1;
             // k = issued + 1 >= need: issued only grows, and the ticket
             // read need - 1 before this.
             let k = self.issued.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
             drop(st);
             led_flush = true;
-            let _count = self.counters.led.fetch_add(1, Ordering::Relaxed);
             // A flush that panics leaves the device's state unknown: the
             // guard poisons the domain and frees the slot, so no later
             // barrier waits for a leader that is gone.
@@ -483,7 +487,7 @@ impl Domain {
         // k > done: flush k has not been counted, and done only covers
         // finished flushes; k - done <= WINDOW by the issue rule.
         if k > done + 1 {
-            let _count = self.counters.out_of_order.fetch_add(1, Ordering::Relaxed);
+            st.out_of_order += 1;
         }
         st.ahead |= 1u64 << (k - done - 1);
         while st.ahead & 1 == 1 {

@@ -120,20 +120,24 @@ fn test_durable_writes_end_the_same_on_both_paths() {
 }
 
 /// A write refused before any I/O (the platform refuses the submission):
-/// `Io`, nothing poisoned, the media as it was; the store writes again.
+/// `Io`, nothing poisoned, the media as it was; the store writes again. A
+/// write of one piece (performed directly) and of several (refused at the
+/// pump's first piece).
 #[test]
 fn test_a_refused_write_ends_the_same_on_both_paths() {
-    let e = both(1501, |p, pages| {
-        p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + 1, 5)));
-        let r = pages.write_durable(pages.pos(0).unwrap(), &record(2, B));
-        p.with_world(|w| w.faults_mut().fail_submit = None);
-        assert!(matches!(r, Err(Error::Io { .. })), "{r:?}");
-        pages
-            .write_durable(pages.pos(B as u64).unwrap(), &record(3, B))
-            .map(drop)?;
-        r.map(drop)
-    });
-    assert!(e.starts_with("Io poisoned=false"), "{e}");
+    for (seed, len) in [(1501, B), (1512, 3 * CHUNK)] {
+        let e = both(seed, |p, pages| {
+            p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + 1, 5)));
+            let r = pages.write_durable(pages.pos(0).unwrap(), &record(2, len));
+            p.with_world(|w| w.faults_mut().fail_submit = None);
+            assert!(matches!(r, Err(Error::Io { .. })), "{len}: {r:?}");
+            pages
+                .write_durable(pages.pos(len as u64).unwrap(), &record(3, B))
+                .map(drop)?;
+            r.map(drop)
+        });
+        assert!(e.starts_with("Io poisoned=false"), "{len}: {e}");
+    }
     // Refused at its second piece, the first already written: unknown.
     let e = both(1506, |p, pages| {
         p.with_world(|w| w.faults_mut().fail_submit = Some((w.write_submits() + 2, 5)));
@@ -144,19 +148,21 @@ fn test_a_refused_write_ends_the_same_on_both_paths() {
     assert!(e.starts_with("DurabilityUnknown poisoned=true"), "{e}");
 }
 
-/// A write failing at completion (EIO), a short transfer, a later piece of
-/// a write of several failing, and a failed flush: unknown, poisoned, the
-/// bytes acknowledged before kept.
+/// A write failing at completion (EIO), a short transfer (of one piece,
+/// performed directly, and of a write of several, in the pump), a later
+/// piece of a write of several failing, and a failed flush: unknown,
+/// poisoned, the bytes acknowledged before kept.
 #[test]
 fn test_failed_writes_and_flushes_end_the_same_on_both_paths() {
-    let cases: [(&str, u64, usize); 4] = [
-        ("eio", 1, B),
-        ("short", 1, B),
-        ("eio", 2, 3 * CHUNK),
-        ("flush", 1, B),
+    let cases: [(u64, &str, u64, usize); 5] = [
+        (1502, "eio", 1, B),
+        (1503, "short", 1, B),
+        (1513, "short", 1, 3 * CHUNK),
+        (1504, "eio", 2, 3 * CHUNK),
+        (1505, "flush", 1, B),
     ];
-    for (k, (fault, nth, len)) in cases.into_iter().enumerate() {
-        let e = both(1502 + k as u64, |p, pages| {
+    for (seed, fault, nth, len) in cases {
+        let e = both(seed, |p, pages| {
             p.with_world(|w| match fault {
                 "eio" => w.faults_mut().fail_write = Some(w.writes() + nth),
                 "short" => w.faults_mut().short_write = Some(w.writes() + nth),

@@ -295,15 +295,16 @@ pub fn run(ctx: &Ctx) -> Section {
         });
         g5.push(gates_extra::read_qd128(ctx));
     }
-    // G6: the Submitter's sequential writer alternates with fio's QD8
-    // sequential write on this file, three times each.
-    let (mut g6, mut f6) = (Vec::new(), Vec::new());
+    // G6: the Submitter's sequential writer, 8 deep and 1 deep, alternates
+    // with fio's QD8 sequential write on this file, three times each.
+    let (mut g6, mut g6q1, mut f6) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..3 {
         f6.push(job(
             &[aio, "--rw=write", "--bs=1m", "--iodepth=8", "--end_fsync=1"],
             "write",
         ));
-        g6.push(gates_seq::seq_write(ctx));
+        g6.push(gates_seq::seq_write(ctx, 8));
+        g6q1.push(gates_seq::seq_write(ctx, 1));
     }
     let fio_runs = [
         ("fio durable (1)", &fio_d1),
@@ -516,10 +517,12 @@ pub fn run(ctx: &Ctx) -> Section {
         },
     });
     // G6: sequential write, at least 90% of fio's best: the Submitter's
-    // zero-copy writer and fio's QD8 write alternated (medians), fio's
-    // synchronous write (two runs) as its other configuration. The simple API's
+    // zero-copy writer (8 deep and 1 deep, its better median) and fio's QD8
+    // write alternated (medians), fio's synchronous write (two runs) as its
+    // other configuration: each side's best configuration. The simple API's
     // `append(&[u8])` copies the caller's bytes first (W5, reported).
     let ours: Vec<f64> = g6.iter().filter_map(|p| val(p, "mb_per_s")).collect();
+    let ours1: Vec<f64> = g6q1.iter().filter_map(|p| val(p, "mb_per_s")).collect();
     let q8w: Vec<f64> = f6
         .iter()
         .filter_map(|r| ok(r).map(|s| s.bytes_per_s / 1e6))
@@ -528,8 +531,10 @@ pub fn run(ctx: &Ctx) -> Section {
         ok(&fio_sw).map(|s| s.bytes_per_s / 1e6),
         ok(&fio_sw2).map(|s| s.bytes_per_s / 1e6),
     );
-    let whole = ours.len() == 3 && q8w.len() == 3 && sa.is_some() && sb.is_some();
-    let (sw, q8m, psm) = (med(&ours), med(&q8w), mean(sa, sb));
+    let whole =
+        ours.len() == 3 && ours1.len() == 3 && q8w.len() == 3 && sa.is_some() && sb.is_some();
+    let sw = med(&ours).zip(med(&ours1)).map(|(a, b)| a.max(b));
+    let (q8m, psm) = (med(&q8w), mean(sa, sb));
     let best = q8m.zip(psm).map(|(a, b)| a.max(b));
     let range = |v: &[f64], m: Option<f64>| {
         let (lo, hi) = v
@@ -548,16 +553,21 @@ pub fn run(ctx: &Ctx) -> Section {
     );
     rows.push(Row {
         id: "G6",
-        gate: "Sequential write (1 MiB) at least 90% of fio's best (store-io: Submitter appends 8 deep from pool buffers, no copy; medians of 3 alternated runs)",
+        gate: "Sequential write (1 MiB) at least 90% of fio's best (store-io: Submitter appends from pool buffers, no copy, 8 deep and 1 deep, its better), and 8 deep at least 90% of fio's QD8 (medians of 3 alternated runs)",
         measured: format!(
-            "store-io {ours:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio {} {} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
+            "store-io QD8 {ours:.0?}, QD1 {ours1:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio {} {} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
             fio::sync_engine(),
             f(psm, 0),
             wspread * 100.0,
             f(simple, 0)
         ),
         verdict: if whole {
-            at_least(sw, best, 0.9, wspread)
+            // Each side's best, and the pipeline itself: a QD8 that fell to
+            // QD1's rate must not pass on QD1's strength.
+            worse(
+                at_least(sw, best, 0.9, wspread),
+                at_least(med(&ours), q8m, 0.9, range(&q8w, q8m)),
+            )
         } else {
             Verdict::Fail
         },
@@ -852,6 +862,7 @@ pub fn run(ctx: &Ctx) -> Section {
     pts.extend(g3d);
     pts.extend(g5);
     pts.extend(g6);
+    pts.extend(g6q1);
     pts.extend(g4);
     pts.extend(g15.points);
     sec.points = pts;

@@ -542,6 +542,14 @@
 
 ### Changed
 
+- Harness: **G6 measures store-io's zero-copy sequential writer both 8
+  deep and 1 deep** and gates the better against fio's better (its QD8
+  asynchronous run or its synchronous one), each side's best
+  configuration; and the 8-deep run must still reach 90% of fio's QD8
+  (a broken pipeline must not pass on the 1-deep run). On a runner where
+  fio's synchronous loop beat its QD8
+  run (10,277 against 8,784 MB/s) G6 failed although store-io's QD8 run
+  matched fio's (97%): it had no 1-deep run to compare.
 - Engine: **the flush domain's statistics `led`, `peak_in_flight` and
   `out_of_order` are counted under the slot lock** a leader holds anyway,
   not as atomics on a cache line of their own: per durable write, two

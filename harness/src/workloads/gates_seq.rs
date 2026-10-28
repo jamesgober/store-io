@@ -1,9 +1,10 @@
-//! G6's measurement: sequential 1 MiB appends kept 8 deep through a
-//! `Submitter`, from the store's pool buffers (no copy: the engine layer's
-//! sequential writer), then one `barrier_all`, against fio's best
-//! sequential write. The simple API's `append(&[u8])` copies the caller's
-//! bytes into an aligned buffer first; at memory speed that copy costs as
-//! much as the write, so it is reported (W5), not gated.
+//! G6's measurement: sequential 1 MiB appends kept `qd` deep through a
+//! `Submitter` (8, as fio's asynchronous run; 1, as its synchronous run),
+//! from the store's pool buffers (no copy: the engine layer's sequential
+//! writer), then one `barrier_all`, against fio's best sequential write.
+//! The simple API's `append(&[u8])` copies the caller's bytes into an
+//! aligned buffer first; at memory speed that copy costs as much as the
+//! write, so it is reported (W5), not gated.
 
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,6 @@ use crate::sio::Plat;
 /// The log, recycled each time it fills.
 const REGION: u64 = 1 << 30;
 const CHUNK: u64 = 1 << 20;
-const QD: usize = 8;
 /// Appends read back after the run.
 const CHECKS: usize = 256;
 /// The append window, in bytes: far more than QD appends of CHUNK, since on
@@ -28,7 +28,7 @@ const CHECKS: usize = 256;
 /// never refused as too far ahead (as before the window was in bytes).
 const WINDOW: u64 = 256 << 20;
 
-/// Fills the region with 1 MiB appends 8 deep from pool buffers until the
+/// Fills the region with 1 MiB appends `qd` deep from pool buffers until the
 /// window ends, recycling it whenever it fills; MB/s over the measured
 /// window plus one final `barrier_all` (fio's `--end_fsync`).
 ///
@@ -37,10 +37,10 @@ const WINDOW: u64 = 256 << 20;
 /// block number and the generation ([`stamp::stamp_ends`]), and afterwards
 /// a sample of the last generation's appends reads back with every block's
 /// ends.
-pub fn seq_write(ctx: &Ctx) -> Point {
+pub fn seq_write(ctx: &Ctx, qd: usize) -> Point {
     let p = Point::new(
         System::StoreIo,
-        "Submitter append(1 MiB) x QD8 + barrier_all",
+        format!("Submitter append(1 MiB) x QD{qd} + barrier_all"),
     );
     let opts = StoreOptions {
         append_window: WINDOW.max(ctx.opts.append_window),
@@ -51,7 +51,7 @@ pub fn seq_write(ctx: &Ctx) -> Point {
             .provision_append_region("g6", REGION)
             .map_err(|e| sioerr("provision", &e))?;
         let mut sub = store
-            .submitter(SubmitterConfig::default().with_depth(QD as u32))
+            .submitter(SubmitterConfig::default().with_depth(qd as u32))
             .map_err(|e| sioerr("submitter", &e))?;
         let per = CHUNK / BLOCK as u64;
         let warm_end = Instant::now() + Duration::from_secs_f64(ctx.warmup);
@@ -68,7 +68,7 @@ pub fn seq_write(ctx: &Ctx) -> Point {
             }
             // A fresh generation always gets one append, so the read-back
             // has something to check even when time ran out mid-recycle.
-            while live < QD && (now < stop || k == 0) && !full {
+            while live < qd && (now < stop || k == 0) && !full {
                 let mut b = sub
                     .take_buf(CHUNK as usize)
                     .map_err(|e| sioerr("take_buf", &e))?;
@@ -144,9 +144,9 @@ pub fn seq_write(ctx: &Ctx) -> Point {
         let secs = t0.elapsed().as_secs_f64();
         p.metric("mb_per_s", (secs > 0.0).then(|| bytes as f64 / secs / 1e6));
         p.metric("generations", Some(generation as f64));
-        if opts.append_window != ctx.opts.append_window {
+        if qd > 1 && opts.append_window != ctx.opts.append_window {
             p.notes.push(format!(
-                "append_window raised to {} bytes (the configured {} leaves QD8 x 1 MiB little slack for out-of-order completions)",
+                "append_window raised to {} bytes (the configured {} leaves QD{qd} x 1 MiB little slack for out-of-order completions)",
                 opts.append_window, ctx.opts.append_window
             ));
         }

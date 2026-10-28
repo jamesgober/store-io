@@ -14,6 +14,7 @@ use std::ops::ControlFlow;
 
 use crate::exec::{Lane, LaneGuard, Next, Pumped, Ran, Source, clear_stale, pump, run};
 use crate::frontier::{AppendFrontier, Reservation};
+use crate::mapped::Mapped;
 use crate::receipt::{DurableReceipt, WriteTicket};
 use crate::scan::ScanItem;
 use crate::settle::settle_read;
@@ -363,6 +364,93 @@ where
         let _at = stream.fill(&mut first);
         stream.first = Some(first);
         Ok(stream)
+    }
+
+    /// Stages `data` (non-empty, whole blocks after padding) and writes it at
+    /// region offset `offset` of `r`, reporting the outcome as the pump does
+    /// (G1 P4b). Data of one chunk lying in one run is one write: on an idle
+    /// lane of a queue that performs operations at once it is performed here,
+    /// with no stream, no mapping and no pump, settled exactly as the pump
+    /// settles a performed write (the buffer back to the pool, a short
+    /// transfer or an error a failure, a refusal before submission
+    /// `Refused`); on any other lane the same staged buffer goes to the
+    /// pump. Anything larger or crossing a run takes the pump as before.
+    pub(crate) fn write_staged(
+        &self,
+        r: &LiveRegion,
+        offset: u64,
+        data: &[u8],
+        c: ErrorContext,
+    ) -> Result<Pumped, Error> {
+        let (block, chunk) = (self.block() as usize, self.chunk());
+        let padded = data.len().div_ceil(block) * block;
+        if data.len() > chunk || r.map.run_left(offset) < padded as u64 {
+            let mut stream = self.stage(data, c)?;
+            stream.at(offset);
+            let mut lane = self.lane(r, Op::Write)?;
+            return Ok(self.pump(&mut lane, &mut Mapped::new(&r.map, &mut stream)));
+        }
+        // As `stage` fills its first buffer, and in the same order: the
+        // buffer, then the lane.
+        let mut buf = self.take(padded, c)?;
+        let dst = buf.as_mut_capacity();
+        dst[..data.len()].copy_from_slice(data);
+        dst[data.len()..padded].fill(0);
+        // `padded <= chunk <= capacity`: the length always fits.
+        let _fits = buf.set_len(padded);
+        let mut lane = self.lane(r, Op::Write)?;
+        let obs = &self.inner.observer;
+        let op = IoOp::Write {
+            file: &self.inner.file,
+            offset: r.map.locate(offset, padded as u64),
+            buf,
+            dsync: self.inner.policy.dsync,
+        };
+        // One span for the write, however it goes (as `Self::pump`'s).
+        let _timed = obs.span(Stage::Write);
+        match lane.perform(op) {
+            Ok(Ok((buf, result))) => {
+                obs.add(Counter::Writes, 1);
+                obs.add(Counter::WriteBytes, padded as u64);
+                Ok(match (result, buf) {
+                    (Ok(n), Some(buf)) if n == buf.len() => Pumped::All,
+                    (result, _) => Pumped::Failed(result.err()),
+                })
+            }
+            // Not performed here: the pump, with the buffer already staged,
+            // inside this span (`Self::pump`'s accounting: one chunk in one
+            // run is never split).
+            Ok(Err(IoOp::Write { buf, .. })) => {
+                let mut stream = Stream {
+                    data,
+                    staged: data.len(),
+                    base: 0,
+                    block,
+                    chunk,
+                    first: Some(buf),
+                    spare: Vec::new(),
+                };
+                stream.at(offset);
+                let outcome = pump(
+                    &mut lane,
+                    &self.inner.file,
+                    self.inner.policy.dsync,
+                    &mut Mapped::new(&r.map, &mut stream),
+                    obs,
+                );
+                if matches!(outcome, Pumped::Refused(_)) {
+                    obs.add(Counter::Refused, 1);
+                }
+                Ok(outcome)
+            }
+            // The operation came back as something else (a backend breaking
+            // its contract): what it did is unknown, so it fails.
+            Ok(Err(_)) => Ok(Pumped::Failed(None)),
+            Err(rejected) => {
+                obs.add(Counter::Refused, 1);
+                Ok(Pumped::Refused(rejected.raw))
+            }
+        }
     }
 
     /// Submits a staged write on `lane`.

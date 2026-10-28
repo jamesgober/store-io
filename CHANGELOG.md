@@ -542,6 +542,13 @@
 
 ### Changed
 
+- Engine: **a page write of one chunk within one run is one direct write**
+  on an idle inline queue (`PageRegion::write`, so `write_durable`): no
+  stream, mapping or pump between the copy and the system call, settled
+  exactly as the pump settles a performed write; any other lane gets the
+  same staged buffer through the pump (G1 P4b). Per durable write: about
+  29 cold instruction lines, 16 cold data lines and 260 instructions
+  fewer.
 - Harness: **G6 measures store-io's zero-copy sequential writer both 8
   deep and 1 deep** and gates the better against fio's better (its QD8
   asynchronous run or its synchronous one), each side's best

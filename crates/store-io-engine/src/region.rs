@@ -704,10 +704,7 @@ where
         s.ready_for(&self.state)?;
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
-        let mut stream = s.stage(data, c)?;
-        stream.at(pos.offset);
-        let mut lane = s.lane(&self.state, Op::Write)?;
-        let outcome = s.pump(&mut lane, &mut Mapped::new(&self.state.map, &mut stream));
+        let outcome = s.write_staged(&self.state, pos.offset, data, c)?;
         let wrote = Wrote::Page {
             start: pos.offset,
             end,

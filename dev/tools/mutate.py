@@ -160,6 +160,10 @@ AUD_PROV = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "f
             "--test", "format2_grow", "--test", "format2_grow_beyond", "--test", "format2_release",
             "--test", "format2_recycle"]
 
+P4B = ["-p", "store-io-engine", "--test", "inline", "--test", "format2_extents",
+       "--test", "store", "--test", "durable"]
+INLINE_ENV = {"STORE_IO_SIM_INLINE": "1"}
+
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
  ("crates/store-io-engine/src/io.rs", "                self.offset += buf.len() as u64;", "                self.offset += buf.len() as u64 + 4096;"),
@@ -1209,6 +1213,12 @@ M = [
  # A slot's compat_flags carried on every rewrite (unknown bits kept).
  ('crates/store-io-engine/src/slots.rs', '            info.compat_flags,\n        ),', '            0,\n        ),', F2),
  (SLOT_SRC, '    w.u32(f.compat_flags)?;', '    w.u32(0)?;', F2),
+ # G1 P4b: the direct single-chunk write takes only what it can settle as
+ # the pump would (inline queues: the simulator's inline mode).
+ ('crates/store-io-engine/src/io.rs', '        if data.len() > chunk || r.map.run_left(offset) < padded as u64 {', '        if r.map.run_left(offset) < padded as u64 {', P4B, INLINE_ENV),
+ ('crates/store-io-engine/src/io.rs', '        if data.len() > chunk || r.map.run_left(offset) < padded as u64 {', '        if data.len() > chunk {', P4B, INLINE_ENV),
+ ('crates/store-io-engine/src/io.rs', '                    (Ok(n), Some(buf)) if n == buf.len() => Pumped::All,', '                    (Ok(_), Some(_)) => Pumped::All,', P4B, INLINE_ENV),
+ ('crates/store-io-engine/src/io.rs', '                obs.add(Counter::Refused, 1);\n                Ok(Pumped::Refused(rejected.raw))', '                obs.add(Counter::Refused, 1);\n                Ok(Pumped::Failed(rejected.raw))', P4B, INLINE_ENV),
 ]
 
 def kill_stuck_tests():

@@ -102,6 +102,7 @@ impl Model {
             prev_header_crc32c: prev,
             format_major: FORMAT_2,
             meta_seq: seq,
+            compat_flags: 0,
         };
         let crc = encode(&mut p.slots[slot], &f, b"page payload").unwrap();
         p.winner = Some((slot, generation, crc));
@@ -498,6 +499,7 @@ fn test_a_candidate_must_be_exactly_the_next_generation() {
             prev_header_crc32c: crc,
             format_major: FORMAT_2,
             meta_seq: m.meta_seq + 1,
+            compat_flags: 0,
         };
         encode(&mut m.pairs[1].slots[s], &f, b"page payload").unwrap();
         m.pairs[1].slots[s][130] ^= 0xFF;

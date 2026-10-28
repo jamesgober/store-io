@@ -124,6 +124,7 @@ fn test_a_leftover_image_out_of_place_proves_no_crashed_create() {
                 prev_header_crc32c: 0,
                 format_major: store_io_format::slot::FORMAT_2,
                 meta_seq: 1,
+                compat_flags: 0,
             },
             &if object == 0 {
                 vec![1u8; store_io_format::meta2::VOLUME_META2_LEN]

@@ -120,6 +120,10 @@ pub struct SlotFields {
     /// Format 2: the store-wide metadata sequence number of this write (0 for
     /// an object that is not numbered). Format 1: must be 0.
     pub meta_seq: u64,
+    /// May-ignore flags: 0 for a first write; a rewrite carries the winner's
+    /// bits, known or not (a later release's bits survive an earlier
+    /// release's rewrite).
+    pub compat_flags: u32,
 }
 
 /// Why a slot could not be encoded. These are caller bugs, never media errors.
@@ -168,7 +172,7 @@ impl std::error::Error for EncodeError {}
 /// let fields = SlotFields {
 ///     volume_uuid: [7; 16], object_id: 1, generation: 1, owner_generation: 1,
 ///     slot_offset: 8192, slot_index: SlotIndex::A, log2_slot_size: 12,
-///     prev_header_crc32c: 0, format_major: 2, meta_seq: 1,
+///     prev_header_crc32c: 0, format_major: 2, meta_seq: 1, compat_flags: 0,
 /// };
 /// let mut slot = vec![0u8; 4096];
 /// encode(&mut slot, &fields, b"payload")?;
@@ -221,8 +225,10 @@ fn write_header(
     w.u16(HEADER_LEN as u16)?;
     w.u16(f.format_major)?;
     w.u32(0)?; // incompat_flags
+    // None is defined, and a winner with an unknown bit is never rewritten;
+    // a bit defined later is carried as `compat_flags` is.
     w.u32(0)?; // ro_compat_flags
-    w.u32(0)?; // compat_flags
+    w.u32(f.compat_flags)?;
     w.u32(payload_crc)?;
     w.bytes(&f.volume_uuid)?;
     w.u64(f.object_id)?;
@@ -561,6 +567,7 @@ mod tests {
             prev_header_crc32c: 0,
             format_major: FORMAT_1,
             meta_seq: 0,
+            compat_flags: 0,
         }
     }
 

@@ -511,6 +511,8 @@ pub(crate) struct NextSlot<'a> {
     pub(crate) payload: &'a [u8],
     /// Format 2, numbered objects: this write's `meta_seq` (0 otherwise).
     pub(crate) meta_seq: u64,
+    /// The winner's `compat_flags`, carried (0 for a first write).
+    pub(crate) compat_flags: u32,
 }
 
 /// Writes one complete slot as one device I/O. Returns what was written:
@@ -550,6 +552,7 @@ pub(crate) fn write_slot<Q: Queue>(
         prev_header_crc32c: next.prev_header_crc,
         format_major: at.format,
         meta_seq: next.meta_seq,
+        compat_flags: next.compat_flags,
     };
     let crc = encode(buf.as_mut_slice(), &fields, next.payload).map_err(|e| match e {
         store_io_format::slot::EncodeError::Format => Error::Unsupported {
@@ -635,7 +638,7 @@ pub(crate) fn plan_next<'a>(
         ctx: ErrorContext::default(),
     };
     let index = read.report.next_write().ok_or_else(fork)?;
-    let (generation, prev) = match read.report.winner_info() {
+    let (generation, prev, compat_flags) = match read.report.winner_info() {
         Some((_, info)) if !info.writable() => {
             return Err(Error::Unsupported {
                 what: store_io_core::error::Capability::FormatVersion,
@@ -644,8 +647,9 @@ pub(crate) fn plan_next<'a>(
         Some((_, info)) => (
             info.generation.checked_add(1).ok_or_else(fork)?,
             info.header_crc32c,
+            info.compat_flags,
         ),
-        None => (1, 0),
+        None => (1, 0, 0),
     };
     Ok(NextSlot {
         index,
@@ -654,6 +658,7 @@ pub(crate) fn plan_next<'a>(
         prev_header_crc: prev,
         payload,
         meta_seq: 0,
+        compat_flags,
     })
 }
 

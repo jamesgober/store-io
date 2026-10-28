@@ -1206,6 +1206,9 @@ M = [
  (M2_SRC, '    if fill == FillPattern::Zeros && fill_key != [0; 16] {', '    if fill == FillPattern::Zeros && fill_key != [0; 16] && false {', AUD_CODEC),
  (M2_SRC, '        if object_len != 0\n            || extent_count == 0', '        if false\n            || extent_count == 0', AUD_CODEC),
  (SLOT_SRC, '        || slot[..HEADER_LEN].iter().all(|&b| b == 0)\n        || slot[..8] != MAGIC[..]', '        || slot[..HEADER_LEN].iter().all(|&b| b == 0)', AUD_CODEC),
+ # A slot's compat_flags carried on every rewrite (unknown bits kept).
+ ('crates/store-io-engine/src/slots.rs', '            info.compat_flags,\n        ),', '            0,\n        ),', F2),
+ (SLOT_SRC, '    w.u32(f.compat_flags)?;', '    w.u32(0)?;', F2),
 ]
 
 def kill_stuck_tests():

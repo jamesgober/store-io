@@ -182,6 +182,7 @@ mod tests {
             prev_header_crc32c: prev,
             format_major: crate::slot::FORMAT_1,
             meta_seq: 0,
+            compat_flags: 0,
         };
         let mut buf = vec![0u8; 4096];
         assert!(encode(&mut buf, &fields, b"p").is_ok());

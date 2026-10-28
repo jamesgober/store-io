@@ -198,6 +198,7 @@ mod scale {
                         prev_header_crc32c: 0,
                         format_major: FORMAT_2,
                         meta_seq: 0,
+                        compat_flags: 0,
                     },
                     &payload[..len],
                 )
@@ -235,6 +236,7 @@ mod scale {
                     prev_header_crc32c: u32_at(&meta, a + 8),
                     format_major: FORMAT_2,
                     meta_seq,
+                    compat_flags: 0,
                 },
                 &payload[..len],
             )

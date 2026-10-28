@@ -192,6 +192,7 @@ fn crafted(
             prev_header_crc32c: prev,
             format_major: FORMAT_2,
             meta_seq: max_meta_seq(p) + 1,
+            compat_flags: 0,
         },
         &empty_page(holds),
     )

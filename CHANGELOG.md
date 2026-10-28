@@ -542,6 +542,12 @@
 
 ### Changed
 
+- Format 2: **a slot's `compat_flags` are kept on every rewrite** (they
+  were written as 0). A pair's first write records 0; each later write
+  carries its winner's bits, known or not, so the may-ignore bits a
+  later release sets survive an earlier release's rewrite. No bit is
+  defined yet, so no container changes. Decided before the format
+  freeze (the format-2 draft's open item).
 - Engine: **a `Store::open` whose probe fails reports `DurabilityUnknown {
   op: Probe }`** (create and directory mode keep `Io`). On macOS the probe's flush check is the first flush after
   a dead owner, like the drain after it. A read-only open's stays `Io`.

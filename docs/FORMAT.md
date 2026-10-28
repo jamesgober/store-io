@@ -175,7 +175,7 @@ Every piece of metadata is stored as a **pair** of slots, A and B, in two separa
 | 14 | 2 | u16 | `format_major` | `2` |
 | 16 | 4 | u32 | `incompat_flags` | `0`. Any unknown bit: the slot is refused. |
 | 20 | 4 | u32 | `ro_compat_flags` | `0`. Any unknown bit: readable, but must not be rewritten. |
-| 24 | 4 | u32 | `compat_flags` | `0`. Unknown bits are ignored. |
+| 24 | 4 | u32 | `compat_flags` | `0` in a first write; a rewrite carries the winner's bits. Unknown bits are ignored, and kept. |
 | 28 | 4 | u32 | `payload_crc32c` | CRC-32C of the payload bytes |
 | 32 | 16 | bytes | `volume_uuid` | The container's volume id |
 | 48 | 8 | u64 | `object_id` | The object this pair stores (section 3) |
@@ -208,7 +208,7 @@ Region data carries no store-io checksums: the caller's records must carry their
 
 ### Writing a slot
 
-The writer fills the whole slot with zeros, copies in the payload, writes the header with `header_crc32c` as zero, computes the header CRC over `[0, 128)`, and stores it at offset 8. Generation 0 is never written. store-io always writes `incompat_flags`, `ro_compat_flags` and `compat_flags` as zero. The next write of a pair is planned from its current winner (section 6):
+The writer fills the whole slot with zeros, copies in the payload, writes the header with `header_crc32c` as zero, computes the header CRC over `[0, 128)`, and stores it at offset 8. Generation 0 is never written. store-io always writes `incompat_flags` and `ro_compat_flags` as zero; `compat_flags` is zero in a pair's first write, and every later write carries the winner's bits, known or not, so a later release's may-ignore bits survive an earlier release's rewrite. The next write of a pair is planned from its current winner (section 6):
 
 | Winner | Slot the next update writes | Its generation | Its `prev_header_crc32c` |
 |---|---|---|---|
@@ -777,7 +777,7 @@ Source: [`crates/store-io-engine/src/footprint.rs`](../crates/store-io-engine/sr
 | `format_major` | Every slot, offset 14 | `2`. Fixes every layout in Part I. A change a format-2 reader must understand is a new `format_major` or a must-understand bit. A slot of another value in a format-2 container is `UnsupportedVersion`: the open fails `Unsupported(FormatVersion)` when it is in the volume record or a table page, and the region is unavailable (`HeaderUnreadable`) when it is in a region header. |
 | `incompat_flags` | Every slot, offset 16 | No bit is defined. Any set bit refuses the pair, as above. |
 | `ro_compat_flags` | Every slot, offset 20 | No bit is defined. An unknown bit in the winner of the volume record or a page opens the store read-only; in a region header's winner, that region read-only. Such a slot is never rewritten. |
-| `compat_flags` | Every slot, offset 24 | No bit is defined. Unknown bits are ignored, and every slot store-io writes has `compat_flags = 0`. |
+| `compat_flags` | Every slot, offset 24 | No bit is defined. Unknown bits are ignored and kept: a pair's first write has `compat_flags = 0`, and every later write carries its winner's bits. A bit defined here may only assert what stays true when a release that does not know it rewrites the pair (its payload as that release writes it) or writes anything else; whatever else a new bit means belongs in `ro_compat_flags`. |
 | `header_len` | Every slot, offset 12 | Exactly 128 in format 2; any other value that passes the header CRC is `Malformed`. |
 | `features` | Volume record, offset 32 | Must be `0`: non-zero is `Unsupported(FormatVersion)`. |
 | `flags` | Volume record, offset 56 | Must be `0`: non-zero is `Unsupported(FormatVersion)`. |

@@ -119,6 +119,7 @@ pub(crate) fn slot(
             prev_header_crc32c: prev_crc,
             format_major: FORMAT_2,
             meta_seq,
+            compat_flags: 0,
         },
         payload,
     )

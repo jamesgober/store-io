@@ -22,6 +22,7 @@ fn fields(meta_seq: u64) -> SlotFields {
         prev_header_crc32c: 0x1234_5678,
         format_major: FORMAT_2,
         meta_seq,
+        compat_flags: 0,
     }
 }
 

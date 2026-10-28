@@ -90,6 +90,7 @@ fn build(
         prev_header_crc32c: prev,
         format_major: FORMAT_2,
         meta_seq: u64::from(byte(4) % 12) + 1,
+        compat_flags: 0,
     };
     let mut s = [0u8; 512];
     let Ok(crc) = encode(&mut s, &f, b"payload") else {

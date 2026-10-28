@@ -147,6 +147,7 @@ fuzz_target!(|data: &[u8]| {
         prev_header_crc32c: info.prev_header_crc32c,
         format_major: e.format_major,
         meta_seq: info.meta_seq,
+        compat_flags: 0,
     };
     let mut out = vec![0u8; len];
     let crc = slot::encode(&mut out, &fields, payload).expect("an accepted slot re-encodes");

@@ -171,6 +171,7 @@ pub(crate) fn page_copy_b_of(pf: &SimPlatform, p: u32, payload: &[u8], torn: boo
             prev_header_crc32c: u32_at(&m, a + 8),
             format_major: FORMAT_2,
             meta_seq: max_meta_seq(pf) + 1,
+            compat_flags: 0,
         },
         payload,
     )
@@ -242,6 +243,7 @@ pub(crate) fn volume_copy_b_longer(
             prev_header_crc32c: u32_at(&m, 8),
             format_major: FORMAT_2,
             meta_seq: max_meta_seq(pf) + 1,
+            compat_flags: 0,
         },
         &payload,
     )

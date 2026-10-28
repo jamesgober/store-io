@@ -75,6 +75,7 @@ fn version(
         prev_header_crc32c: prev,
         format_major: store_io_format::slot::FORMAT_1,
         meta_seq: 0,
+        compat_flags: 0,
     };
     let crc = slot::encode(&mut s, &f, payload).expect("valid fields encode");
     (s, crc)

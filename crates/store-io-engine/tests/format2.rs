@@ -263,6 +263,7 @@ fn test_a_volume_record_of_a_newer_format_is_refused() {
             prev_header_crc32c: u32_at(&m, 8),
             format_major: FORMAT_2,
             meta_seq: max_meta_seq(&p) + 1,
+            compat_flags: 0,
         },
         &payload,
     )
@@ -681,4 +682,38 @@ fn test_a_reread_volume_record_naming_another_table_is_corrupt() {
             r.map(|s| s.report().metadata.clone())
         );
     }
+}
+
+/// A slot's `compat_flags` (may-ignore bits, none defined yet) survive every
+/// rewrite: an earlier release never erases a later one's bits (spec §5).
+#[test]
+fn test_compat_flags_survive_a_rewrite() {
+    const BIT: u32 = 0x8000_0000;
+    let p = SimPlatform::new(SimConfig::volatile(122));
+    drop(create(&p));
+    let at = newest_volume_slot(&p) as usize;
+    let mut slot = media(&p)[at..at + block(&p) as usize].to_vec();
+    slot[24..28].copy_from_slice(&BIT.to_le_bytes());
+    rehash(&mut slot);
+    put(&p, at as u64, &slot);
+    // The open's volume-record write, from that winner.
+    let s = open(&p);
+    assert!(!s.report().read_only, "{:?}", s.report());
+    let now = newest_volume_slot(&p) as usize;
+    assert_ne!(now, at, "the open wrote no volume record");
+    assert_eq!(u32_at(&media(&p), now + 24), BIT, "the open's write");
+    // The clean close's, from the open's.
+    drop(s);
+    let last = newest_volume_slot(&p) as usize;
+    assert_ne!(last, now, "the close wrote no volume record");
+    assert_eq!(
+        u32_at(&media(&p), last + 24),
+        BIT,
+        "the clean close's write"
+    );
+    // The carried bit breaks no chain and no judgement.
+    let s = open(&p);
+    let r = s.report();
+    assert!(!r.read_only && r.metadata.clean_close, "{r:?}");
+    assert_eq!(r.metadata.healed, None, "{r:?}");
 }

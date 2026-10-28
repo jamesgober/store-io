@@ -449,6 +449,7 @@ fn test_a_newer_volume_record_is_refused_as_unsupported() {
                 prev_header_crc32c: info.header_crc32c,
                 format_major: store_io_format::slot::FORMAT_1,
                 meta_seq: 0,
+                compat_flags: 0,
             },
             &payload,
         )

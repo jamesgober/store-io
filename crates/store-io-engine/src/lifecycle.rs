@@ -240,8 +240,16 @@ where
         // the extent released, so a provisioning that ran in between could
         // reuse it, and this release's late writes would then land in the
         // new region (its header slot, and a hole punched through its data).
-        // 2. The header, for tools that list regions from headers.
-        let _generation = self.rewrite_header(r, RegionState::Released)?;
+        // 2. The header, for tools that list regions from headers. The
+        //    release is committed: a header write that failed with nothing
+        //    on the device (the store not poisoned) leaves the data in
+        //    place, as format 2 does; one that failed after submission has
+        //    poisoned the store, and fails the call.
+        match self.rewrite_header(r, RegionState::Released) {
+            Ok(_) => {}
+            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),
+            Err(e) => return Err(e),
+        }
         // 3. The data area. The metadata lock is released on return.
         self.release_extents(r.map.extents(), c)
     }

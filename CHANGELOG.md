@@ -812,6 +812,14 @@
 
 ### Fixed
 
+- Engine: **a release whose commit was durable could still fail** (since
+  0.3.0): when the queue for its Released header write could not be
+  prepared (an operation abandoned on it, whose wait then failed), the
+  release returned `Io` although the region table no longer listed the
+  region. Once the commit is durable a release now fails only on a
+  poisoned store (a header write that failed after submission); any
+  earlier failure of the header write is a success, as a refused one
+  already was.
 - Probe: **a device reached over a network was classed like a local
   drive.** On Linux an NVMe namespace over fabrics (TCP, RDMA, Fibre
   Channel, loop) was reported as a local NVMe bus, and could be

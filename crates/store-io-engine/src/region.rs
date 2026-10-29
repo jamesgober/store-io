@@ -285,18 +285,24 @@ where
         })
     }
 
-    /// Releases the region: waits for every operation in flight, marks it
-    /// released in the region table and its header (both durable), and gives
-    /// its space back to the file system. Its contents are undefined from
-    /// then on; every handle to it is refused (`NotReady`), and its space is
-    /// reused by later provisioning. Not from a thread with unreaped
-    /// [`crate::Submitter`] operations on it (see [`Self::recycle`]).
+    /// Releases the region: waits for every operation in flight, records
+    /// the release in the region table (durable: from then on the release
+    /// stands), marks its header released (durable), and gives its space
+    /// back to the file system. Its contents are undefined from then on;
+    /// every handle to it is refused (`NotReady`), and its space is reused
+    /// by later provisioning. A header write that fails before it reaches
+    /// the device (refused, a queue that could not be prepared, a header
+    /// pair that would not encode or plan) still returns success: the space
+    /// is free for provisioning, but not given back to the file system. Not
+    /// from a thread with unreaped [`crate::Submitter`] operations on it
+    /// (see [`Self::recycle`]).
     ///
     /// # Errors
     ///
     /// `NotWritten(StaleGeneration | NotReady)`, `Poisoned`,
     /// `DurabilityUnknown`, or `Io` if the space could not be deallocated
-    /// (the region is released either way).
+    /// (the region is released either way). Once the table records the
+    /// release, a release fails only on a poisoned store or with that `Io`.
     pub fn release(self) -> Result<(), Error> {
         self.store.release_region(&self.state)
     }

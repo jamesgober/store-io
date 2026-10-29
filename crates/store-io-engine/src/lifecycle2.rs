@@ -154,13 +154,15 @@ where
         }
         // 2. The header says Released: should the commit's page ever be
         //    rolled back (its newer copy found damaged), the region is then
-        //    unavailable, not served. A header write refused before it was
-        //    submitted leaves the data in place instead (that rollback would
-        //    find the region whole); one that failed after submission has
-        //    poisoned the store. Either way the release is committed.
+        //    unavailable, not served. A header write that failed before it
+        //    was submitted (refused, a lane that could not be cleared, a
+        //    header pair that would not encode or plan) leaves the data in
+        //    place instead (that rollback would find the region whole); one
+        //    that failed after submission has poisoned the store, and fails
+        //    the call. Either way the release is committed.
         match self.rewrite_header2(r, &mut header, RegionState::Released, 0, committed, None) {
             Ok(_) => {}
-            Err(Error::NotWritten { .. }) => return Ok(()),
+            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),
             Err(e) => return Err(e),
         }
         // 3. The data extents, as format 1 does: every one tried.

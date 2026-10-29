@@ -265,6 +265,78 @@ fn test_a_failed_clear_during_recycle_leaves_the_region_usable() {
         .unwrap();
 }
 
+/// A release whose commit is durable is done, whatever then fails before
+/// its Released header is written: with an operation abandoned on the lane
+/// the header write takes (a second lane, so the commit's own lane is
+/// another), each wait of the release failed in turn gives success, or a
+/// poisoned store (a write's fate unknown), never an error for a release
+/// that stands. The case of the lane that cannot be cleared is reached, in
+/// both formats; the region is gone, its space free, and it stays gone
+/// after a reopen.
+#[test]
+fn test_a_committed_release_never_fails_unpoisoned() {
+    for format in [2u16, 1] {
+        committed_release_never_fails_unpoisoned(format);
+    }
+}
+
+fn committed_release_never_fails_unpoisoned(format: u16) {
+    let opts = StoreOptions {
+        queues: 2,
+        container_format: format,
+        ..StoreOptions::default()
+    };
+    let mut cleared_failed = false;
+    for nth in 1..=12u64 {
+        let p = SimPlatform::new(waited(620));
+        let s = Store::create(p.clone(), Path::new("/db"), opts.clone()).unwrap();
+        // "gone" on a lane other than the commit's (format 2 commits on
+        // lane 0, format 1 on lane 1; a region's calls start their search at
+        // its id's lane): "pad" moves it there in format 1. The assertion
+        // below checks that the case is reached.
+        s.provision_page_region("keep", MIB as u64).unwrap();
+        if format == 1 {
+            s.provision_page_region("pad", MIB as u64).unwrap();
+        }
+        let gone = s.provision_page_region("gone", MIB as u64).unwrap();
+        let bs = gone.block_size() as usize;
+        let free = s.space().released;
+        // Abandon a read on gone's lane.
+        fail_next_wait(&p);
+        let mut one = vec![0u8; bs];
+        assert!(gone.read(gone.pos(0).unwrap(), &mut one).is_err());
+        assert!(s.poisoned().is_none());
+        p.with_world(|w| {
+            let at = w.waits() + nth;
+            w.faults_mut().fail_wait = Some((at, EIO));
+        });
+        let r = gone.release();
+        let failed_here = p.with_world(|w| w.waits())
+            >= p.with_world(|w| w.faults_mut().fail_wait.map_or(0, |f| f.0));
+        p.with_world(|w| w.faults_mut().fail_wait = None);
+        assert!(
+            r.is_ok() || s.poisoned().is_some(),
+            "format {format}, wait {nth}: {r:?} with the store not poisoned"
+        );
+        if r.is_ok() && failed_here && s.poisoned().is_none() {
+            cleared_failed = true;
+            assert!(s.page_region("gone").is_err(), "wait {nth}: still listed");
+            assert!(s.space().released > free, "wait {nth}: space not freed");
+            drop(s);
+            let s = Store::open_readonly(p.clone(), Path::new("/db"), opts.clone()).unwrap();
+            assert!(
+                s.page_region("gone").is_err(),
+                "wait {nth}: back after a reopen"
+            );
+            assert!(s.page_region("keep").is_ok());
+        }
+    }
+    assert!(
+        cleared_failed,
+        "format {format}: no wait failed the header write's lane clearing"
+    );
+}
+
 /// Provisioning whose queue wait fails at any step never makes the region
 /// ready with a fill write still in flight, and never reads an abandoned
 /// write as "out of space" (even when the failed wait's code is ENOSPC).

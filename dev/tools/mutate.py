@@ -751,7 +751,7 @@ M = [
  # capacity); a release whose header write is refused after the commit
  # still stands
  ('crates/store-io-engine/src/lifecycle2.rs', '        let extents = committed_extents(&header, inner.layout.log2_block, committed);', '        let extents: Vec<(u64, u64)> = r.map.extents().chain(committed_extents(&header, inner.layout.log2_block, 0)).collect();', F2X + ['--test', 'format2_grow_beyond']),
- ('crates/store-io-engine/src/lifecycle2.rs', '            Err(Error::NotWritten { .. }) => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Err(corrupt()),', F2X),
+ ('crates/store-io-engine/src/lifecycle2.rs', '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if inner.domain.poisoned().is_none() => return Err(corrupt()),', F2X),
  # E2b/E3 C6: release in format 2: refused while frozen; next_seq kept;
  # the footprint and usage leave memory; free space recomputed; the
  # header says Released; format 2 never takes format 1's path
@@ -1259,6 +1259,9 @@ M = [
  (SCAN_SRC, '        self.scan_region(r, from, to, true, |item| {', '        self.scan_region(r, from, to, false, |item| {', SCAN_TEST),
  (SCAN_SRC, '                if lane.is_none() {\n                    match take() {', '                if false {\n                    match take() {', SCAN_TEST),
  ('crates/store-io-engine/src/io.rs', '                    drop(lane);\n                    if !f.wait_completed(seen + 1', '                    if !f.wait_completed(seen + 1', SUBMITTER_TEST),
+ # A release whose commit is durable succeeds unless the store is poisoned.
+ ("crates/store-io-engine/src/lifecycle2.rs", '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Ok(()),', ["-p", "store-io-engine", "--test", "abandoned"]),
+ ("crates/store-io-engine/src/lifecycle.rs", '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if false => return Ok(()),', ["-p", "store-io-engine", "--test", "abandoned"]),
 ]
 
 def kill_stuck_tests():

@@ -205,8 +205,10 @@ fn median_comparisons(runs: &[&Section]) -> Vec<Comparison> {
         .collect()
 }
 
-/// Runs again the workload a G13 row judges.
+/// Runs again the workload a G13 row judges, after the settle every
+/// workload gets.
 fn rerun(ctx: &Ctx, id: &str) -> Section {
+    ctx.settle(&format!("gates: {id} rerun"));
     match id {
         "G13a" => page_batch::run(ctx),
         "G13b" => caller_batch::run(ctx),
@@ -230,12 +232,19 @@ pub fn run(ctx: &Ctx) -> Section {
         "G1 and G2 are measured in 20 alternated rounds (`gates_g1`, `gates_g2`, G2 at p50 and p99): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate.".to_owned(),
         "The latency gates (+2 µs, +5 µs) are far below the spread of a virtual disk's flush (milliseconds): on such a disk they are expected to be NOT RESOLVABLE; certified results need bare metal (dev/TODO.md).".to_owned(),
     ];
+    // Each inner workload idles first, as the top-level ones do.
     let l1 = lone::run(ctx);
+    ctx.settle("gates: lone (second run)");
     let l2 = lone::run(ctx);
+    ctx.settle("gates: concurrent");
     let w2 = concurrent::run(ctx);
+    ctx.settle("gates: caller-batch");
     let w3 = caller_batch::run(ctx);
+    ctx.settle("gates: page-batch");
     let w4 = page_batch::run(ctx);
+    ctx.settle("gates: sequential");
     let w5 = sequential::run(ctx);
+    ctx.settle("gates: fio controls");
     // fio controls.
     let file = ctx.path("gates-fio");
     let laid = fio::lay_out(&file, SPAN);

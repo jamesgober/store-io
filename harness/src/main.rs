@@ -42,12 +42,13 @@ use cli::{Args, Command};
 use report::{Header, Section};
 use workloads::Ctx;
 
-/// A workload: its command, its entry point and its point count (for the
-/// hang limit and the time estimate).
+/// A workload: its command, its entry point, its point count and the most
+/// settles it makes inside (both for the hang limit and the time estimate).
 struct Workload {
     command: Command,
     run: fn(&Ctx) -> Section,
     points: usize,
+    settles: usize,
 }
 
 const WORKLOADS: [Workload; 7] = [
@@ -55,31 +56,37 @@ const WORKLOADS: [Workload; 7] = [
         command: Command::Lone,
         run: workloads::lone::run,
         points: 8,
+        settles: 0,
     },
     Workload {
         command: Command::Concurrent,
         run: workloads::concurrent::run,
         points: 28,
+        settles: 0,
     },
     Workload {
         command: Command::CallerBatch,
         run: workloads::caller_batch::run,
         points: 72,
+        settles: 0,
     },
     Workload {
         command: Command::PageBatch,
         run: workloads::page_batch::run,
         points: 16,
+        settles: 0,
     },
     Workload {
         command: Command::Sequential,
         run: workloads::sequential::run,
         points: 11,
+        settles: 0,
     },
     Workload {
         command: Command::Submitter,
         run: workloads::submitter::run,
         points: 16,
+        settles: 0,
     },
     Workload {
         command: Command::Gates,
@@ -87,6 +94,9 @@ const WORKLOADS: [Workload; 7] = [
         // W1 twice, W2-W5, G13's reruns (Windows: W2 and W3 twice more),
         // G15's 21 points, the gate-only measurements and fio.
         points: 400,
+        // Before its second W1, W2-W5 and the fio controls (6), and before
+        // each of G13's reruns (at most 4, on Windows).
+        settles: 10,
     },
 ];
 
@@ -169,7 +179,13 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
         .map_err(|e| format!("fsys::builder().build(): {e}"))?;
     let env = env::collect(base, &setup.fs_kind, args.commit.as_deref());
     let device = env::short_device_name(setup.device_model.as_deref());
-    let ctx = Ctx::new(base.to_path_buf(), args.secs, setup.opts.clone(), fsys);
+    let ctx = Ctx::new(
+        base.to_path_buf(),
+        args.secs,
+        args.settle,
+        setup.opts.clone(),
+        fsys,
+    );
     let header = Header {
         device: device.clone(),
         backend: sio::BACKEND.to_owned(),
@@ -184,6 +200,7 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
         fsys: fsys_cmp::describe(&ctx.fsys),
         secs: ctx.secs,
         warmup: ctx.warmup,
+        settle: args.settle,
         command: args.command.name().to_owned(),
         diagnostics: Vec::new(),
         raw: vec![raw::PRIMITIVE.to_owned(), raw::READ_PRIMITIVE.to_owned()],
@@ -244,15 +261,27 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
         .iter()
         .map(|w| w.points as f64 * ctx.point_secs())
         .sum();
+    let idle =
+        (selected.len() + selected.iter().map(|w| w.settles).sum::<usize>()) as f64 * args.settle;
     eprintln!(
-        "running {} workload(s), {} points, at most ~{:.0} s of measurement plus setup",
+        "running {} workload(s), {} points, at most ~{:.0} s of measurement plus setup{}",
         selected.len(),
         selected.iter().map(|w| w.points).sum::<usize>(),
-        est
+        est,
+        if idle > 0.0 {
+            format!(", plus at most {idle:.0} s idle (--settle)")
+        } else {
+            String::new()
+        }
     );
     for w in selected {
         let name = w.command.name();
-        let limit = Duration::from_secs_f64(w.points as f64 * ctx.point_secs() * 4.0 + 300.0);
+        // The settle before the workload runs outside the watch; those
+        // inside it are added.
+        let limit = Duration::from_secs_f64(
+            w.points as f64 * ctx.point_secs() * 4.0 + 300.0 + w.settles as f64 * args.settle,
+        );
+        ctx.settle(name);
         eprintln!("[{name}] running ...");
         dog.enter(name, limit);
         let t = Instant::now();

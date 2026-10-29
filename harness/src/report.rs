@@ -372,6 +372,8 @@ pub struct Header {
     pub secs: f64,
     /// Warm-up seconds per point.
     pub warmup: f64,
+    /// Idle seconds before each workload.
+    pub settle: f64,
     /// Workloads requested.
     pub command: String,
     /// One-off diagnostics run before the workloads.
@@ -412,7 +414,7 @@ pub fn markdown(
     }
     let _ = writeln!(o, "## Run\n");
     let mut t = Table::new("", &["item", "value"]);
-    let rows: [(&str, String); 16] = [
+    let rows: [(&str, String); 17] = [
         ("date (UTC)", e.started.clone()),
         ("command", h.command.clone()),
         ("store-io commit", e.commit.clone()),
@@ -430,6 +432,17 @@ pub fn markdown(
                 "{:.1} s measured after {:.1} s warm-up (time-boxed; a point may end early at region capacity, noted where it does)",
                 h.secs, h.warmup
             ),
+        ),
+        (
+            "settle",
+            if h.settle > 0.0 {
+                format!(
+                    "{:.1} s idle before each workload, and before each of `gates`' inner workloads (the device recovers from the previous workload's writes; the first system of a workload would otherwise pay for them)",
+                    h.settle
+                )
+            } else {
+                "none (--settle 0)".to_owned()
+            },
         ),
         ("fsys", h.fsys.clone()),
         ("raw primitives", h.raw.join("; ")),
@@ -606,6 +619,7 @@ pub fn json(h: &Header, sections: &[Section], total_s: f64, incomplete: Option<&
                 ("backend", Json::str(&h.backend)),
                 ("secs_per_point", Json::Num(h.secs)),
                 ("warmup_secs", Json::Num(h.warmup)),
+                ("settle_secs", Json::Num(h.settle)),
                 ("total_secs", Json::Num(total_s)),
                 ("fsys", Json::str(&h.fsys)),
                 (

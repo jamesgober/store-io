@@ -13,6 +13,15 @@
 
 ### Added
 
+- Harness: **`--settle <S>`**, seconds idle before each workload, each
+  of `gates`' inner workloads and each of G13's reruns (10 by default, 0
+  to skip; recorded in the report; CI's gates on a memory-backed device
+  run with 0), so that a workload's first system does not pay for a
+  consumer drive's recovery from the previous workload's writes (v0.5).
+  One earlier run measured store-io's durable appends at 0.12x raw right
+  after another workload, and the same calls, run again moments later,
+  at 0.8x.
+
 - Tests: **the open TODO test gaps closed** (v0.5). A region header pair
   whose winner has an unknown read-only-compatible feature keeps its
   bytes through every call that could touch it (its release is refused);

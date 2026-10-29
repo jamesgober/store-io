@@ -357,8 +357,9 @@ jobs:
         run: |
           set -eux
           mkdir -p "$RUNNER_TEMP/gates"
+          # --settle 0: a memory-backed device has no recovery to wait for.
           harness/target/release/store-io-harness gates --secs 3 --tier uring \
-            --dir /mnt/gates --out "$RUNNER_TEMP/gates"
+            --settle 0 --dir /mnt/gates --out "$RUNNER_TEMP/gates"
           f=$(ls "$RUNNER_TEMP"/gates/*-gates.md)
           sed -n '/^| gate |/,/^$/p' "$f"
           grep -q "every measurement completed and every integrity check passed" "$f"

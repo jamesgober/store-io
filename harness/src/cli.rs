@@ -25,6 +25,10 @@ COMMANDS:
 
 OPTIONS:
     --secs <S>       measured seconds per point (default 5; warm-up is 10%, 0.2..1 s)
+    --settle <S>     idle seconds before each workload (and each of `gates`'
+                     inner workloads), so none starts while the device is
+                     still recovering from the previous one's writes
+                     (default 10; 0 to skip)
     --dir <PATH>     directory for stores and files (default: %TEMP% on Windows,
                      $HOME on Linux); a unique subdirectory is created and removed
     --out <PATH>     report directory (default: the harness's results/ folder)
@@ -104,6 +108,8 @@ pub struct Args {
     pub command: Command,
     /// Measured seconds per point.
     pub secs: f64,
+    /// Idle seconds before each workload.
+    pub settle: f64,
     /// Parent of the run directory.
     pub dir: PathBuf,
     /// Report directory.
@@ -133,6 +139,7 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut a = Args {
         command,
         secs: 5.0,
+        settle: 10.0,
         dir: default_dir(),
         out: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/results")),
         commit: None,
@@ -148,6 +155,14 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     .ok()
                     .filter(|s| s.is_finite() && *s > 0.0 && *s <= 3600.0)
                     .ok_or_else(|| format!("bad --secs `{v}` (0 < S <= 3600)"))?;
+            }
+            "--settle" => {
+                let v = value()?;
+                a.settle = v
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|s| s.is_finite() && (0.0..=600.0).contains(s))
+                    .ok_or_else(|| format!("bad --settle `{v}` (0 <= S <= 600)"))?;
             }
             "--dir" => a.dir = PathBuf::from(value()?),
             "--out" => a.out = PathBuf::from(value()?),
@@ -184,6 +199,9 @@ mod tests {
         assert!((a.secs - 2.5).abs() < 1e-12);
         assert_eq!(a.dir, PathBuf::from("x"));
         assert_eq!(a.commit.as_deref(), Some("abc"));
+        assert!((a.settle - 10.0).abs() < 1e-12);
+        let a = args(&["all", "--settle", "0"]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(a.settle.abs() < 1e-12);
         assert_eq!(
             args(&["caller-batch"]).map(|a| a.command),
             Ok(Command::CallerBatch)
@@ -196,6 +214,8 @@ mod tests {
         assert!(args(&["nope"]).is_err());
         assert!(args(&["all", "--secs", "0"]).is_err());
         assert!(args(&["all", "--secs"]).is_err());
+        assert!(args(&["all", "--settle", "-1"]).is_err());
+        assert!(args(&["all", "--settle", "601"]).is_err());
         assert!(args(&["all", "--bogus", "1"]).is_err());
     }
 }

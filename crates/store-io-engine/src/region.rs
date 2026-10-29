@@ -436,6 +436,13 @@ where
     /// Returns the bytes read, fewer than `out.len()` only at the end of the
     /// region's data area.
     ///
+    /// The bytes are read into store-io's own aligned buffers and copied
+    /// into `out`: direct I/O needs aligned memory, and a read whose wait
+    /// fails stays in flight, so it must never target the caller's memory.
+    /// To read with no copy, use [`Self::scan`] (it lends store-io's
+    /// buffers) or a [`crate::Submitter`]'s `read_append` (it reads into a
+    /// buffer taken from the store).
+    ///
     /// # Errors
     ///
     /// `NotWritten` for a misaligned or out-of-range read;
@@ -779,6 +786,13 @@ where
     /// Reads at `pos` into `out` (any length; reads whole blocks internally).
     /// Returns the bytes read, fewer than `out.len()` only at the end of the
     /// region.
+    ///
+    /// The bytes are read into store-io's own aligned buffers and copied
+    /// into `out`: direct I/O needs aligned memory, and a read whose wait
+    /// fails stays in flight, so it must never target the caller's memory.
+    /// To read with no copy, use [`Self::scan`] (it lends store-io's
+    /// buffers) or a [`crate::Submitter`]'s `read_page` (it reads into a
+    /// buffer taken from the store).
     ///
     /// # Errors
     ///

@@ -90,7 +90,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `sync_through(&WriteTicket) -> Result<DurableReceipt>` | Makes everything appended up to and including the ticket durable. |
 | `append_durable(&[u8]) -> Result<(RegionPos, DurableReceipt)>` | `append` then `sync_through`. |
 | `batch() -> AppendBatch` | A batch of appends; see [Batches](#4-batches). |
-| `read(offset, &mut [u8]) -> Result<usize>` | Reads raw bytes at a block-aligned offset (any length). |
+| `read(offset, &mut [u8]) -> Result<usize>` | Reads raw bytes at a block-aligned offset (any length). Copies from store-io's own aligned buffers (direct I/O needs aligned memory, and a read whose wait fails stays in flight, so it never targets your memory); `scan` lends those buffers, and a `Submitter`'s `read_append` reads into one you take with `take_buf`: no copy. |
 | `scan(from, visit) -> Result<ScanSummary>` | Reads the region in order; see [Scans](#8-scans). |
 | `resume_at(offset) -> Result<u64>` | After a reopen, positions the next append at `offset` rounded up to a block. Appends are refused (`NotPositioned`) until called. Never moves backwards. Refused on a read-only store (`NotWritten(ReadOnly)`), which flushes nothing at open. |
 | `recycle() -> Result<AppendRegion>` | Starts the next generation with its append position at 0; returns its handle. |
@@ -112,7 +112,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `sync_through(&WriteTicket) -> Result<DurableReceipt>` | Makes the ticket's write durable, with every other write to the store that completed before the call. |
 | `write_durable(RegionPos, &[u8]) -> Result<DurableReceipt>` | `write` then `sync_through`. |
 | `batch() -> PageBatch` | A batch of page writes. |
-| `read(RegionPos, &mut [u8]) -> Result<usize>` | Reads any length at a position. |
+| `read(RegionPos, &mut [u8]) -> Result<usize>` | Reads any length at a position. Copies, as an append region's `read` does; `scan` and a `Submitter`'s `read_page` do not. |
 | `scan`, `recycle`, `release`, `generation`, `block_size`, `len`, `is_empty` | As for append regions. |
 
 ---

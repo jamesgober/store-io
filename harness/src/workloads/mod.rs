@@ -41,6 +41,8 @@ pub struct Ctx {
     pub secs: f64,
     /// Warm-up seconds per point (not measured).
     pub warmup: f64,
+    /// Idle seconds before each workload (`--settle`).
+    pub settle: f64,
     /// Options for every store.
     pub opts: StoreOptions,
     /// Payload source.
@@ -51,12 +53,30 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Idles `settle` seconds before the workload `name`: every workload's
+    /// first system follows the previous workload's (or the diagnostics')
+    /// writes, and a consumer drive's recovery from them must not be
+    /// charged to that system.
+    pub fn settle(&self, name: &str) {
+        if self.settle > 0.0 {
+            eprintln!("[{name}] settling {:.1} s ...", self.settle);
+            std::thread::sleep(Duration::from_secs_f64(self.settle));
+        }
+    }
+
     /// A context.
-    pub fn new(base: PathBuf, secs: f64, opts: StoreOptions, fsys: fsys::Handle) -> Self {
+    pub fn new(
+        base: PathBuf,
+        secs: f64,
+        settle: f64,
+        opts: StoreOptions,
+        fsys: fsys::Handle,
+    ) -> Self {
         Self {
             base,
             secs,
             warmup: (secs * 0.1).clamp(0.2, 1.0),
+            settle,
             opts,
             pool: Pool::new(),
             fsys,

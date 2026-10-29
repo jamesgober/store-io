@@ -14,11 +14,14 @@
 //! created there under a temporary container name, every region recreated
 //! with its name, kind, data size, cap, tag, region generation, fill
 //! pattern and fill key (laid out anew, one extent each) and its data
-//! copied, made durable by one barrier, closed, and only then renamed into
+//! copied (an append or page region's as its fill, durable before its
+//! header, D-137; a stale page's full copies made durable by one barrier
+//! after them all), closed, and only then renamed into
 //! place by a rename that never replaces (a store created there meanwhile
 //! is kept, the copy refused): a crash leaves no store under the target
 //! name, or the whole copy.
 
+use std::ops::ControlFlow;
 use std::path::Path;
 
 use store_io_core::errno::{is_already_exists, is_lock_held, is_not_found};
@@ -33,8 +36,8 @@ use store_io_platform::{FileMode, FileName, IoOp, Platform};
 use crate::exec::{Ran, clear_stale, run};
 use crate::settle::settle_read;
 
-use crate::RegionOptions;
 use crate::store::{CONTAINER, LiveRegion, Store, StoreOptions, io, lock_meta};
+use crate::{RegionOptions, ScanItem};
 
 /// The temporary name a copy's target is built under (no live store ever
 /// has it: one left by a crashed copy is removed by the next).
@@ -149,6 +152,170 @@ struct Facts {
     source: std::sync::Arc<LiveRegion>,
 }
 
+/// The largest piece a copy's reader hands the fill (a scan buffer is cut
+/// into pieces this size or smaller), and how many it keeps queued (D-137):
+/// at most `FEED_DEPTH + 2` pieces exist at once (queued, the one being
+/// built, the one being consumed), 10 MiB whatever `max_io` is.
+const FEED_PIECE: usize = 1 << 20;
+/// See [`FEED_PIECE`].
+const FEED_DEPTH: usize = 8;
+
+/// A copied region's bytes, in order, from the source's scan on another
+/// thread (D-137): the scan's reads stay in flight while the fill writes.
+struct Feed {
+    pieces: std::sync::mpsc::Receiver<Result<(u64, Vec<u8>), Error>>,
+    spent: std::sync::mpsc::Sender<Vec<u8>>,
+    /// The piece being consumed and how much of it is.
+    current: Vec<u8>,
+    start: u64,
+    used: usize,
+    /// The source region, named in an error.
+    region: RegionId,
+}
+
+impl Feed {
+    /// Starts the reader of `r` (its region offsets `[0, len)`) on a
+    /// thread of `s`. The thread ends when the scan does, on the first
+    /// error (sent), or once the returned `Feed` is dropped.
+    ///
+    /// # Errors
+    ///
+    /// `Io { op: Queue }` if the thread cannot be started.
+    fn start<'s, P: Platform>(
+        s: &'s std::thread::Scope<'s, '_>,
+        src: &'s Store<P>,
+        r: &'s LiveRegion,
+        len: u64,
+    ) -> Result<(std::thread::ScopedJoinHandle<'s, Result<(), Error>>, Self), Error>
+    where
+        P::Queue: Send,
+    {
+        let (put, pieces) = std::sync::mpsc::sync_channel(FEED_DEPTH);
+        let (spent, back) = std::sync::mpsc::channel::<Vec<u8>>();
+        let handle = std::thread::Builder::new()
+            .name("store-io-copy".into())
+            .spawn_scoped(s, move || {
+                let mut fail = None;
+                let scanned = src.scan_region(r, 0, len, false, |item| match item {
+                    ScanItem::Data { offset, bytes } => {
+                        for (i, part) in bytes.chunks(FEED_PIECE).enumerate() {
+                            let at = offset + (i * FEED_PIECE) as u64;
+                            let mut v = back.try_recv().unwrap_or_default();
+                            v.clear();
+                            // Memory the pool does not account for: a failed
+                            // allocation is reported, never an abort.
+                            if v.try_reserve_exact(part.len()).is_err() {
+                                fail = Some(crate::io::not_written(
+                                    NotWrittenCause::PoolExhausted,
+                                    crate::io::ctx_range(r, at, at + part.len() as u64),
+                                ));
+                                return ControlFlow::Break(());
+                            }
+                            v.extend_from_slice(part);
+                            if put.send(Ok((at, v))).is_err() {
+                                // The fill stopped: so does the scan.
+                                return ControlFlow::Break(());
+                            }
+                        }
+                        ControlFlow::Continue(())
+                    }
+                    ScanItem::Unreadable { start, end } => {
+                        fail = Some(Error::Corruption {
+                            kind: store_io_core::error::CorruptionKind::MediaError,
+                            ctx: crate::io::ctx_range(r, start, end),
+                        });
+                        ControlFlow::Break(())
+                    }
+                });
+                let failed = match (scanned, fail) {
+                    (_, Some(e)) | (Err(e), None) => Some(e),
+                    (Ok(_), None) => None,
+                };
+                if let Some(e) = failed {
+                    // The fill may already have stopped: then nobody reads
+                    // it, and its own error stands.
+                    let _sent = put.send(Err(e.clone()));
+                    return Err(e);
+                }
+                Ok(())
+            })
+            .map_err(|e| Error::Io {
+                op: Op::Queue,
+                raw: os_error(&e),
+                ctx: ErrorContext {
+                    region: Some(r.id),
+                    ..ErrorContext::default()
+                },
+            })?;
+        Ok((
+            handle,
+            Self {
+                pieces,
+                spent,
+                current: Vec::new(),
+                start: 0,
+                used: 0,
+                region: r.id,
+            },
+        ))
+    }
+
+    /// Fills `dst` with the region's bytes from offset `index` (the fill
+    /// asks for them in order, with no gap).
+    fn read(&mut self, index: u64, dst: &mut [u8]) -> Result<(), Error> {
+        let mut done = 0usize;
+        while done < dst.len() {
+            if self.used == self.current.len() {
+                let (start, piece) = match self.pieces.recv() {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => return Err(e),
+                    // The scan ended before the region did: bytes its map
+                    // says exist are not there.
+                    Err(_) => return Err(self.wrong(index + done as u64, index + dst.len() as u64)),
+                };
+                let old = std::mem::replace(&mut self.current, piece);
+                let _recycled = self.spent.send(old);
+                self.start = start;
+                self.used = 0;
+            }
+            // In order and without a gap, or the copy is wrong.
+            if self.start + self.used as u64 != index + done as u64 {
+                return Err(self.wrong(index + done as u64, index + dst.len() as u64));
+            }
+            let n = (self.current.len() - self.used).min(dst.len() - done);
+            dst[done..done + n].copy_from_slice(&self.current[self.used..self.used + n]);
+            self.used += n;
+            done += n;
+        }
+        Ok(())
+    }
+
+    /// The source's bytes `[start, end)` did not arrive as its map says.
+    fn wrong(&self, start: u64, end: u64) -> Error {
+        let mut e = crate::store::corrupt();
+        if let Error::Corruption { ctx, .. } = &mut e {
+            *ctx = ErrorContext {
+                region: Some(self.region),
+                range: Some(store_io_core::error::ByteRange { start, end }),
+            };
+        }
+        e
+    }
+}
+
+/// A thread's start failure as an [`OsError`](store_io_core::error::OsError).
+fn os_error(e: &std::io::Error) -> store_io_core::error::OsError {
+    use store_io_core::error::{OsError, OsErrorSource};
+    OsError {
+        code: e.raw_os_error().unwrap_or(0),
+        source: if cfg!(windows) {
+            OsErrorSource::Win32
+        } else {
+            OsErrorSource::Errno
+        },
+    }
+}
+
 /// Copies the store in `from` into a new format-2 store in `to`, whose
 /// directory must hold no store. See the module docs.
 ///
@@ -176,7 +343,12 @@ struct Facts {
 /// (and, on the second look under the lock, the copy lock's file) is
 /// created;
 /// `NotWritten(Misaligned)` if the target's device needs larger blocks
-/// than the source's, or a region's data size is not whole target blocks;
+/// than the source's, or a region's data size is not whole target blocks
+/// (naming the source's region, before that region is provisioned);
+/// `Io { op: Queue }` if a region's reader thread cannot be started; a
+/// copied region's read errors as a scan's (`Corruption(MediaError)`
+/// naming the source's region and range, also for a read cut short),
+/// `NotWritten(PoolExhausted)` if the reader's pieces cannot be allocated;
 /// then any error of provisioning, reading or writing (the target left
 /// under its temporary name, removed by the next copy into `to`);
 /// `DurabilityUnknown` if the rename or the directory flush after it
@@ -300,8 +472,8 @@ where
         for f in &facts {
             bytes += dst.recreate(&src, f)?;
         }
-        // One barrier for every byte written (the clean close is best
-        // effort and reports nothing).
+        // One barrier for every byte not written as a fill (a stale page's
+        // full copies; the clean close is best effort and reports nothing).
         dst.flush_all_accounted()?;
         // Closed here (the drop writes the clean-close record).
     }
@@ -596,29 +768,101 @@ where
         })
     }
 
-    /// Recreates `f` (a region of `src`) in this store and copies its data
-    /// (not yet durable: the caller's one barrier makes every copy so).
-    /// Returns the bytes copied.
+    /// Recreates `f` (a region of `src`) in this store and copies its data:
+    /// an append or page region's as its provisioning's fill (durable and
+    /// verified before its header, D-137), a full copy's after it (not yet
+    /// durable: the caller's one barrier makes it so). Returns the bytes
+    /// copied.
     fn recreate(&self, src: &Store<P>, f: &Facts) -> Result<u64, Error> {
         let mut opts = RegionOptions::default().size(f.data_size);
         if let Some(cap) = f.cap {
             opts = opts.max_size(cap);
         }
-        let made = self.provision2(&f.name, f.kind, opts, None, Some(&f.attrs))?;
-        debug_assert_eq!(made.generation.get(), f.attrs.generation, "{}", f.name);
-        // The data size as the source's (one not of whole target blocks
-        // would have been rounded up).
-        if made.map.len() != f.data_size {
+        // A data size the target's blocks cannot hold exactly would be
+        // rounded up: refused before anything is read or written, naming
+        // the source's region.
+        if f.kind != RegionKind::Slot && f.data_size % self.block() != 0 {
             return Err(Error::NotWritten {
                 cause: NotWrittenCause::Misaligned,
                 ctx: ErrorContext {
-                    region: Some(made.id),
+                    region: Some(f.source.id),
                     ..ErrorContext::default()
                 },
             });
         }
-        let mut buf = vec![0u8; CHUNK];
+        // An append or page region read whole through its own map is
+        // copied as its provisioning's fill (D-137): one write per byte,
+        // the source's reads in flight on a second thread.
+        if f.full.is_none() && f.kind != RegionKind::Slot && f.data_size > 0 {
+            let made = std::thread::scope(|s| {
+                // The reader starts at the fill's first request, after the
+                // region is placed: a region read in one piece is then read
+                // while this thread waits for it, in a fixed order with this
+                // thread's steps (the simulator's crash enumerations count
+                // them). It may wait on its queue holding a lane of the
+                // source, and the fill on it holding the target's queue 0:
+                // both stores are this copy's own, opened by it, so nothing
+                // else waits for either (D-136 forbids it in general).
+                let mut feed = None;
+                let mut content = |index: u64, dst: &mut [u8]| -> Result<(), Error> {
+                    // A request for nothing (a first chunk all header
+                    // zeros) starts nothing: the reader starts at the first
+                    // request it must answer.
+                    if dst.is_empty() {
+                        return Ok(());
+                    }
+                    if feed.is_none() {
+                        feed = Some(Feed::start(s, src, &f.source, f.data_size)?);
+                    }
+                    match feed.as_mut() {
+                        Some((_, reader)) => reader.read(index, dst),
+                        None => Err(crate::store::corrupt()),
+                    }
+                };
+                let made = self.provision2(
+                    &f.name,
+                    f.kind,
+                    opts,
+                    None,
+                    Some(&f.attrs),
+                    Some(&mut content),
+                );
+                // A failed provisioning stops the reader (its queue closed)
+                // before it is joined. The provisioning's error comes first
+                // (a reader's error reached it through the queue); else one
+                // the reader met after the last byte was taken.
+                let fed = match feed.take() {
+                    None => Ok(()),
+                    Some((handle, reader)) => {
+                        drop(reader);
+                        match handle.join() {
+                            Ok(fed) => fed,
+                            // A panic in the reader is the caller's, as it
+                            // would be on this thread.
+                            Err(panic) => std::panic::resume_unwind(panic),
+                        }
+                    }
+                };
+                match (made, fed) {
+                    (Ok(made), Ok(())) => Ok(made),
+                    (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+                }
+            })?;
+            debug_assert_eq!(made.generation.get(), f.attrs.generation, "{}", f.name);
+            // Every byte of the data area was asked for: one the fill did
+            // not cover would be committed unread (a backstop: the check
+            // above makes the sizes equal).
+            if made.map.len() != f.data_size {
+                return Err(crate::store::corrupt());
+            }
+            return Ok(f.data_size);
+        }
+        let made = self.provision2(&f.name, f.kind, opts, None, Some(&f.attrs), None)?;
+        debug_assert_eq!(made.generation.get(), f.attrs.generation, "{}", f.name);
+        // The data size as the source's (checked above).
+        debug_assert_eq!(made.map.len(), f.data_size, "{}", f.name);
         if let Some((ranges, _)) = &f.full {
+            let mut buf = vec![0u8; CHUNK];
             let mut at = 0u64;
             for &(file, len) in ranges {
                 let mut done = 0u64;
@@ -648,33 +892,14 @@ where
                 let _receipt = self.slot(&f.name)?.commit(object)?;
                 Ok(object.len() as u64)
             }
-            RegionKind::Page => {
-                let (from, to) = (src.page_region(&f.name)?, self.page_region(&f.name)?);
-                let mut at = 0u64;
-                while at < f.data_size {
-                    let n = (f.data_size - at).min(CHUNK as u64) as usize;
-                    let got = from.read(from.pos(at)?, &mut buf[..n])?;
-                    if got == 0 {
-                        return Err(crate::store::corrupt());
-                    }
-                    let _ticket = to.write(to.pos(at)?, &buf[..got])?;
-                    at += got as u64;
+            // Empty: every other one was copied as its fill (D-137). A
+            // region with data reaching here would be committed holding its
+            // fill instead: refused (a backstop).
+            RegionKind::Page | RegionKind::Append => {
+                if f.data_size != 0 {
+                    return Err(crate::store::corrupt());
                 }
-                Ok(f.data_size)
-            }
-            RegionKind::Append => {
-                let (from, to) = (src.append_region(&f.name)?, self.append_region(&f.name)?);
-                let mut at = 0u64;
-                while at < f.data_size {
-                    let n = (f.data_size - at).min(CHUNK as u64) as usize;
-                    let got = from.read(at, &mut buf[..n])?;
-                    if got == 0 {
-                        return Err(crate::store::corrupt());
-                    }
-                    let _ticket = to.append(&buf[..got])?;
-                    at += got as u64;
-                }
-                Ok(f.data_size)
+                Ok(0)
             }
         }
     }

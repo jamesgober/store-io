@@ -560,6 +560,25 @@
 
 ### Changed
 
+- Engine: **`copy_store` about 2-3x faster** (D-137). A copied append or
+  page region's data is now its provisioning's fill: the source's bytes
+  are written once, into the data area, instead of the fill pattern
+  first and the data over it, and the source is read by its scan
+  pipeline on a second thread while the fill writes. The same flush,
+  verification, header and table commit follow, so a crash still leaves
+  no store under the target name, or the whole copy. Measured on the dev
+  box's NVMe drive (NTFS), a 4 GiB region: 0.83-1.31 GB/s before,
+  2.51-3.01 GB/s after, about 60% of the slower of the drive's read and
+  write (the streaming copy of v0.6 is to reach 80%). Slot regions, and
+  the full copies of a stale page's regions (`accept_stale_pages`), are
+  copied as before. A
+  data size the target's blocks cannot hold is refused before that
+  region is provisioned, naming the source's region; a reader thread
+  that cannot be started is `Io { op: Queue }`; a source read cut short
+  in such a region is `Corruption(MediaError)` at the missing bytes (was
+  `Corruption(Metadata)`). The reader holds at most 10 MiB of the
+  source's bytes (outside the buffer pool), whatever `max_io` is.
+
 - Engine: **a page write of one chunk within one run is one direct write**
   on an idle inline queue (`PageRegion::write`, so `write_durable`): no
   stream, mapping or pump between the copy and the system call, settled

@@ -21,6 +21,11 @@ use crate::slots::{PairRead, plan_next};
 use crate::space::{Reservation, lock_acct, no_space};
 use crate::store::*;
 
+/// What a fill writes past its zeros: `content(index, dst)` fills `dst`
+/// with the bytes of region offsets `index..` (the pattern, or a copy's
+/// source bytes, D-137).
+pub(crate) type Content<'a> = dyn FnMut(u64, &mut [u8]) -> Result<(), Error> + 'a;
+
 impl<P: Platform> Store<P>
 where
     P::Queue: Send,
@@ -56,7 +61,7 @@ where
         // format 1 cannot record.
         opts.validate()?;
         if inner.layout.format == store_io_format::slot::FORMAT_2 {
-            return self.provision2(name, kind, opts, from, None);
+            return self.provision2(name, kind, opts, from, None, None);
         }
         if opts.max_size_bytes().is_some() {
             return Err(Error::Unsupported {
@@ -304,6 +309,31 @@ where
         key: &[u8; 16],
         key_at: u64,
     ) -> Result<(), Error> {
+        self.write_range(offset, extent, zeros, key_at, &mut |index, dst| {
+            match fill {
+                FillPattern::KeyedV1 => fill_keyed_v1(key, index, dst),
+                FillPattern::Zeros => dst.fill(0),
+            }
+            Ok(())
+        })
+    }
+
+    /// Writes `[offset, offset + extent)` of the container: its first
+    /// `zeros` bytes zero, every later byte from `content(index, dst)`, which
+    /// fills `dst` with the bytes of region offsets `index..` (`key_at` for
+    /// the first byte past the zeros). One write in flight at a time. A
+    /// write that failed after submission poisons (`DurabilityUnknown`);
+    /// running out of space is `NoSpace`, unpoisoned; an error from
+    /// `content` stops the fill before that piece is written, unpoisoned
+    /// (the region never became Ready).
+    pub(crate) fn write_range(
+        &self,
+        offset: u64,
+        extent: u64,
+        zeros: u64,
+        key_at: u64,
+        content: &mut Content<'_>,
+    ) -> Result<(), Error> {
         let inner = &self.inner;
         let block = inner.layout.block();
         let chunk = (self.chunk() as u64).min(1 << 20).max(block);
@@ -312,18 +342,13 @@ where
         while at < extent {
             let len = chunk.min(extent - at);
             let mut buf = self.take(len as usize, ErrorContext::default())?;
-            // The pattern from the first byte past the zeros, even inside a
+            // The content from the first byte past the zeros, even inside a
             // chunk that also covers some of them.
             let dst = buf.as_mut_slice();
             let z = zeros.saturating_sub(at).min(len) as usize;
             dst[..z].fill(0);
-            match fill {
-                FillPattern::KeyedV1 => {
-                    let index = key_at + (at + z as u64).saturating_sub(zeros);
-                    fill_keyed_v1(key, index, &mut dst[z..]);
-                }
-                FillPattern::Zeros => dst[z..].fill(0),
-            }
+            let index = key_at + (at + z as u64).saturating_sub(zeros);
+            content(index, &mut dst[z..])?;
             let ran = run(
                 &mut q,
                 IoOp::Write {

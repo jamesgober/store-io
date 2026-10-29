@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use format2_util::audit::{audit, audit_in, header_in};
 use format2_util::craft::{region, tear_newer_copy_of, write_regions};
 use format2_util::*;
-use store_io_core::error::{Error, NotWrittenCause, ReserveTag};
+use store_io_core::error::{CorruptionKind, Error, NotWrittenCause, Op, ReserveTag};
 use store_io_engine::{
     CONTAINER, COPY_LOCK, COPYING, CopyOptions, RegionOptions, Store, StoreOptions, copy_store,
 };
@@ -475,6 +475,11 @@ fn test_sizes_that_would_change_are_refused() {
     odd.entry.data_size = 3 * 512;
     odd.header.log2_block = 9;
     write_regions(&p, 0, &[odd]);
+    let odd_id = audit_in(&p, DIR)
+        .into_iter()
+        .find(|f| f.name == "odd")
+        .unwrap()
+        .id;
     let s = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
     assert_eq!(
         s.append_region("odd").unwrap().len(),
@@ -484,7 +489,7 @@ fn test_sizes_that_would_change_are_refused() {
     drop(s);
     let e = copy(&p, DIR, OTHER).unwrap_err();
     assert!(
-        matches!(e, Error::NotWritten { cause: NotWrittenCause::Misaligned, ctx } if ctx.region.is_some()),
+        matches!(e, Error::NotWritten { cause: NotWrittenCause::Misaligned, ctx } if ctx.region.map(|r| r.get()) == Some(odd_id)),
         "{e:?}"
     );
 }
@@ -601,4 +606,264 @@ fn test_a_failed_clean_close_loses_nothing() {
     p.with_world(|w| w.crash(&CrashMode::Random));
     assert!(!open(&p).report().metadata.clean_close);
     assert!(after_a_failure(&p, "the clean close"), "the copy in place");
+}
+
+/// A copied region the device cannot read in part fails the copy with the
+/// exact unreadable range (the source region's offsets), and nothing is
+/// put in place (D-137: the source is read on the fill's reader thread).
+#[test]
+fn test_a_media_error_in_a_copied_region_names_its_range() {
+    let p = SimPlatform::new(SimConfig::volatile(1016));
+    drop(source(&p, 2));
+    let log = audit_in(&p, OTHER)
+        .into_iter()
+        .find(|f| f.name == "log")
+        .unwrap();
+    let file = p.with_world(|w| w.file_id(&PathBuf::from(OTHER), CONTAINER).unwrap());
+    let bad = log.data_offset + 3 * B;
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, bad, bad + B)]);
+    let e = copy(&p, OTHER, DIR).unwrap_err();
+    p.with_world(|w| w.faults_mut().bad_ranges.clear());
+    match e {
+        Error::Corruption {
+            kind: CorruptionKind::MediaError,
+            ctx,
+        } => {
+            let r = ctx.range.unwrap();
+            assert_eq!((r.start, r.end), (3 * B, 4 * B), "the exact range");
+            assert_eq!(
+                ctx.region.map(|r| r.get()),
+                Some(log.id),
+                "the source's region"
+            );
+        }
+        e => panic!("{e:?}"),
+    }
+    assert!(
+        !files(&p, DIR).contains(&CONTAINER),
+        "a failed copy put a store in place"
+    );
+}
+
+/// A source in `OTHER` holding one append region of 4 MiB, written in
+/// full: more than one fill write.
+fn big_source(seed: u64) -> SimPlatform {
+    let p = SimPlatform::new(SimConfig::volatile(seed));
+    let s = Store::create(p.clone(), Path::new(OTHER), src_opts(2)).unwrap();
+    let a = s.provision_append_region("big", 4 << 20).unwrap();
+    let mut last = None;
+    for i in 0..4u8 {
+        last = Some(a.append(&vec![0x50 + i; 1 << 20]).unwrap());
+    }
+    a.sync_through(&last.unwrap()).unwrap();
+    drop(a);
+    drop(s);
+    p
+}
+
+/// The copy of [`big_source`] in `DIR` is whole: the region's every byte.
+fn big_copied(p: &SimPlatform, what: &str) {
+    let src = Store::open_readonly(p.clone(), Path::new(OTHER), opts()).unwrap();
+    let (a, b) = (
+        src.append_region("big").unwrap(),
+        open(p).append_region("big").unwrap(),
+    );
+    assert_eq!(a.len(), b.len(), "{what}");
+    let (mut x, mut y) = (vec![0u8; a.len() as usize], vec![1u8; b.len() as usize]);
+    a.read(0, &mut x).unwrap();
+    b.read(0, &mut y).unwrap();
+    assert!(x == y, "{what}: the data");
+}
+
+fn writes(p: &SimPlatform) -> u64 {
+    p.with_world(|w| w.writes())
+}
+
+/// A write failing anywhere in a copy whose region takes several fill
+/// writes (D-137: its data is its fill) fails the copy with nothing put in
+/// place, or (a failure past the copy's one barrier) leaves the whole copy.
+/// A failed write poisons the target (`DurabilityUnknown`) in most of them:
+/// the fill's, the header's and the table's.
+#[test]
+fn test_a_write_failing_in_a_copy_places_nothing_half_made() {
+    let setup = || big_source(1017);
+    let p = setup();
+    let before = writes(&p);
+    copy(&p, OTHER, DIR).unwrap();
+    let n = writes(&p) - before;
+    assert!(n > 4, "the fill takes several writes ({n} in all)");
+    let mut poisoned = 0;
+    for k in 1..=n {
+        let p = setup();
+        p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + k));
+        let r = copy(&p, OTHER, DIR);
+        p.with_world(|w| w.faults_mut().fail_write = None);
+        match r {
+            Err(e) => {
+                if matches!(e, Error::DurabilityUnknown { op: Op::Write, .. }) {
+                    poisoned += 1;
+                }
+                assert!(
+                    !files(&p, DIR).contains(&CONTAINER),
+                    "write {k}: {e:?}, yet a store was put in place"
+                );
+            }
+            Ok(_) => big_copied(&p, &format!("write {k}")),
+        }
+    }
+    assert!(
+        poisoned >= 4,
+        "the copied data's writes failed in {poisoned} runs"
+    );
+}
+
+/// On Windows a copied capped region's slack is still written with its
+/// pattern at provisioning (D-137: the data area is the source's bytes, the
+/// slack the fill, as a provisioning writes it): the copy's slack holds the
+/// source's keyed pattern (the same key and offsets), never unwritten
+/// space.
+#[test]
+fn test_a_copied_capped_region_keeps_its_slack_written_on_windows() {
+    let probe = SimPlatform::new(SimConfig::volatile(1018));
+    let mut evidence = Store::create(probe, Path::new(DIR), opts())
+        .unwrap()
+        .report()
+        .evidence
+        .clone();
+    evidence.platform = store_io_core::evidence::PlatformKind::Windows;
+    let mut o = src_opts(2);
+    o.trust.override_refusal = true;
+    let p = SimPlatform::new(SimConfig {
+        evidence: Some(evidence),
+        valid_data_model: true,
+        ..SimConfig::volatile(1019)
+    });
+    let s = Store::create(p.clone(), Path::new(OTHER), o.clone()).unwrap();
+    let r = s
+        .provision_page_region_with(
+            "capped",
+            RegionOptions::default().size(16 * B).max_size(256 * B),
+        )
+        .unwrap();
+    r.write_durable(r.pos(0).unwrap(), &[9; B as usize])
+        .unwrap();
+    drop(r);
+    drop(s);
+    let copts = CopyOptions {
+        store: o,
+        ..CopyOptions::default()
+    };
+    copy_store(p.clone(), Path::new(OTHER), Path::new(DIR), copts).unwrap();
+    let slack = |dir: &str| {
+        let f = audit_in(&p, dir)
+            .into_iter()
+            .find(|f| f.name == "capped")
+            .unwrap();
+        assert_eq!(f.capacity, 256 * B, "{dir}");
+        let (from, to) = (f.data_offset + 16 * B, f.data_offset + 256 * B);
+        p.with_world(|w| {
+            w.media_of(&PathBuf::from(dir), CONTAINER).unwrap()[from as usize..to as usize].to_vec()
+        })
+    };
+    let (want, got) = (slack(OTHER), slack(DIR));
+    assert!(want.iter().any(|&b| b != 0), "the source's slack is keyed");
+    assert!(got == want, "the copy's slack is the pattern, written");
+}
+
+/// The power cut after any write of a copy whose region takes several fill
+/// writes (D-137): the source is never written, no store is put in place
+/// (no write follows the rename: a cut after it is `format2_crash`'s), and
+/// a later copy puts the whole copy in place. Cut by the count of writes,
+/// not of steps: the source's reads run on the reader thread, in no fixed
+/// order with the copying thread's steps, while every write is the copying
+/// thread's, one at a time.
+#[test]
+fn test_a_power_cut_after_any_write_of_a_copy() {
+    let p = big_source(1020);
+    let before = writes(&p);
+    copy(&p, OTHER, DIR).unwrap();
+    let n = writes(&p) - before;
+    for k in 0..=n {
+        let p = big_source(1020);
+        let source = p.with_world(|w| {
+            w.media_of(&PathBuf::from(OTHER), CONTAINER)
+                .unwrap()
+                .to_vec()
+        });
+        let cut = writes(&p) + k;
+        let q = p.clone();
+        p.with_world(|w| {
+            w.set_step_probe(Some(Arc::new(move || q.with_world(|w| w.writes()) >= cut)))
+        });
+        let r = copy(&p, OTHER, DIR);
+        p.with_world(|w| {
+            assert!(
+                w.powered_off(),
+                "cut after write {k}: the power was never cut"
+            );
+            w.set_step_probe(None);
+            w.crash(&CrashMode::Random);
+        });
+        let after = p.with_world(|w| {
+            w.media_of(&PathBuf::from(OTHER), CONTAINER)
+                .unwrap()
+                .to_vec()
+        });
+        assert!(after == source, "cut after write {k}: the source written");
+        assert!(r.is_err(), "cut after write {k}: the copy reported done");
+        assert!(
+            !files(&p, DIR).contains(&CONTAINER),
+            "cut after write {k}: a store was put in place"
+        );
+        copy(&p, OTHER, DIR)
+            .unwrap_or_else(|e| panic!("cut after write {k}: the next copy: {e:?}"));
+        big_copied(&p, &format!("cut after write {k}, copied again"));
+    }
+}
+
+/// A copy whose scan reads 4 MiB at a time and whose region holds more
+/// pieces than the reader queues (D-137): every scan buffer cut into
+/// pieces, every byte copied; and a write failing at each point, also while
+/// the reader waits on its full queue, ends the copy (the reader stopped,
+/// never a hang) with nothing half-made in place.
+#[test]
+fn test_a_large_region_copied_through_a_full_queue() {
+    let setup = || {
+        let p = SimPlatform::new(SimConfig::volatile(1021));
+        let s = Store::create(p.clone(), Path::new(OTHER), src_opts(2)).unwrap();
+        let a = s.provision_append_region("big", 16 << 20).unwrap();
+        let mut last = None;
+        for i in 0..16u8 {
+            last = Some(a.append(&vec![0x30 + i; 1 << 20]).unwrap());
+        }
+        a.sync_through(&last.unwrap()).unwrap();
+        drop(a);
+        drop(s);
+        p
+    };
+    let wide = || CopyOptions {
+        store: StoreOptions {
+            max_io: 4 << 20,
+            ..opts()
+        },
+        ..CopyOptions::default()
+    };
+    let p = setup();
+    let before = writes(&p);
+    copy_store(p.clone(), Path::new(OTHER), Path::new(DIR), wide()).unwrap();
+    let n = writes(&p) - before;
+    big_copied(&p, "a 16 MiB region");
+    for k in 1..=n {
+        let p = setup();
+        p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + k));
+        let r = copy_store(p.clone(), Path::new(OTHER), Path::new(DIR), wide());
+        p.with_world(|w| w.faults_mut().fail_write = None);
+        match r {
+            Err(e) => assert!(
+                !files(&p, DIR).contains(&CONTAINER),
+                "write {k}: {e:?}, yet a store was put in place"
+            ),
+            Ok(_) => big_copied(&p, &format!("write {k}")),
+        }
+    }
 }

@@ -52,6 +52,7 @@ where
         opts: crate::RegionOptions,
         from: Option<&mut Reservation<P>>,
         copied: Option<&crate::copy::CopyAttrs>,
+        data: Option<&mut crate::provision::Content<'_>>,
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
         let data_size = opts.size_bytes();
@@ -232,7 +233,7 @@ where
         };
         // Any return before the commit drops `holds` armed: every hold
         // given back.
-        self.fill_and_commit2(&placed, &mut holds)
+        self.fill_and_commit2(&placed, &mut holds, data)
     }
 
     /// Phases 2 and 3 of a format-2 provisioning placed and marked by
@@ -248,6 +249,7 @@ where
         &self,
         pl: &Placed<'_>,
         holds: &mut Holds<'_, P>,
+        data: Option<&mut crate::provision::Content<'_>>,
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
         let block = inner.layout.block();
@@ -260,7 +262,26 @@ where
         } else {
             2 * block + pl.data_size
         };
-        self.fill(pl.offset, filled, block, fill, &fill_key)?;
+        match data {
+            None => self.fill(pl.offset, filled, block, fill, &fill_key)?,
+            // A region `copy_store` recreates (D-137): its data area is the
+            // source's bytes instead of the pattern; the header blocks zero
+            // and any slack the pattern, as a fill writes them.
+            Some(data) => {
+                let head = 2 * block + pl.data_size;
+                self.write_range(pl.offset, head, 2 * block, 0, data)?;
+                if filled > head {
+                    self.fill_range(
+                        pl.offset + head,
+                        filled - head,
+                        0,
+                        fill,
+                        &fill_key,
+                        pl.data_size,
+                    )?;
+                }
+            }
+        }
         if filled < pl.extent {
             inner
                 .platform

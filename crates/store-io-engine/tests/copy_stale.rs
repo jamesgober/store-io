@@ -25,7 +25,7 @@ use store_io_core::error::{Error, NotWrittenCause};
 use store_io_core::id::RegionId;
 use store_io_engine::{CopyOptions, CopyReport, Store, copy_store};
 use store_io_format::meta::{RegionKind, RegionState};
-use store_io_sim::{SimConfig, SimPlatform};
+use store_io_sim::{CrashMode, SimConfig, SimPlatform};
 
 const B: u64 = 4096;
 const BASE: u64 = 2 * B + 2 * PAGES as u64 * TABLE;
@@ -512,4 +512,34 @@ fn test_regions_two_given_up_commits_may_share_are_reported() {
         ["a".to_owned(), "b".to_owned()],
         "a: possibly accepted"
     );
+}
+
+/// A stale page's region is copied in full by writes the copy's one
+/// barrier makes durable (D-137: not as a fill): with the clean close's
+/// flush failing (best effort, unreported) and every cached write then
+/// lost, the copy put in place still holds every byte.
+#[test]
+fn test_a_full_copy_is_durable_without_the_clean_close() {
+    let setup = || {
+        let p = fresh(1610);
+        write_regions(&p, 0, &[region(0, RegionKind::Page, "p", BASE, CAP)]);
+        let data = pattern(3, CAP);
+        put(&p, BASE + 2 * B, &data);
+        tear_newer_copy_of(&p, 0);
+        (p, data)
+    };
+    let flushes = |p: &SimPlatform| p.with_world(|w| w.flushes());
+    let (p, _) = setup();
+    let before = flushes(&p);
+    copy(&p, true).unwrap();
+    let last = flushes(&p) - before;
+    let (p, data) = setup();
+    p.with_world(|w| w.faults_mut().fail_flush = Some(w.flushes() + last));
+    copy(&p, true).unwrap();
+    p.with_world(|w| {
+        w.faults_mut().fail_flush = None;
+        w.crash(&CrashMode::LoseAll);
+    });
+    let s = target(&p);
+    assert!(page_bytes(&s, "p") == data, "the full copy's bytes");
 }

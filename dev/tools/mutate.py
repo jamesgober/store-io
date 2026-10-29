@@ -911,7 +911,9 @@ M = [
  (COPY_SRC, "(m.fill, m.fill_key, false)", "(m.fill, [0; 16], false)", COPYT),
  (COPY_SRC, "                tag,\n            },", "                tag: tag & 0,\n            },", COPYT),
  (COPY_SRC, "cap: capped.then(|| r.map.capacity().max(data_size)),", "cap: capped.then(|| r.map.capacity().max(data_size)).and(None),", COPYT),
- (COPY_SRC, "        dst.flush_all_accounted()?;", "", COPYT),
+ # The copy's one barrier makes a stale page's full copies durable (not
+ # written as a fill, D-137), also when the clean close's flush fails.
+ (COPY_SRC, "        dst.flush_all_accounted()?;", "", COPYT + ["--test", "copy_stale"]),
  (COPY_SRC, "    match platform.unlink(&dir, &temp) {", "    match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
  (COPY_SRC, "    platform\n        .sync_dir(&dir)\n", "    Ok::<(), store_io_platform::OsError>(())\n", COPYT),
  (COPY_SRC, "let src = Store::open_readonly(platform.clone(), from, opts.store.clone())?;", "let src = Store::open(platform.clone(), from, opts.store.clone())?;", COPYT),
@@ -925,7 +927,7 @@ M = [
  (COPY_SRC, "    holds_store()?;\n    match platform.unlink(&dir, &temp) {", "    drop(_lock);\n    holds_store()?;\n    match platform.unlink(&dir, &temp) {", COPYT),
  (COPY_SRC, "        Err(raw) if is_not_found(raw) => Ok(()),\n        Err(raw) => Err(io(Op::Open, raw)),", "        Err(_) => Ok(()),", COPYT),
  (COPY_SRC, "if dst.report().block_size != block {", "if dst.report().block_size != block && false {", COPYT),
- (COPY_SRC, "if made.map.len() != f.data_size {", "if made.map.len() != f.data_size && false {", COPYT),
+ (COPY_SRC, "if f.kind != RegionKind::Slot && f.data_size % self.block() != 0 {", "if f.kind != RegionKind::Slot && f.data_size % self.block() != 0 && false {", COPYT),
  ('crates/store-io-engine/src/open.rs', '            Found::V1(_) if !read_only => {', '            Found::V1(_) if !read_only && false => {', F1T),
  ('crates/store-io-engine/src/create.rs', '    placed\n        && (torn', '    (placed || true)\n        && (torn', F2),
  ('crates/store-io-engine/src/create.rs', '        return torn && at == 0;', '        return torn;', F2),
@@ -935,8 +937,8 @@ M = [
  ('crates/store-io-engine/src/store.rs', '            container_format: store_io_format::slot::FORMAT_2,', '            container_format: store_io_format::slot::FORMAT_1,', F1T),
  ('crates/store-io-engine/src/provision2.rs', 'let data_size = if slot || (data_size == 0 && copied.is_some()) {', 'let data_size = if slot || (data_size == 0 && copied.is_some() && false) {', COPYT),
  ('crates/store-io-sim/src/world.rs', '        if d.entries.contains_key(to) {\n            return Err(EEXIST);', '        if d.entries.contains_key(to) && false {\n            return Err(EEXIST);', COPYT),
- (COPY_SRC, "let _ticket = to.append(&buf[..got])?;", "let _ticket = to.append(&vec![0; got])?;", COPYT),
- (COPY_SRC, "let _ticket = to.write(to.pos(at)?, &buf[..got])?;", "let _ticket = to.write(to.pos(at)?, &vec![0; got])?;", COPYT),
+ (COPY_SRC, "            dst[done..done + n].copy_from_slice(&self.current[self.used..self.used + n]);", "            dst[done..done + n].fill(0);", COPYT),
+ (COPY_SRC, "                            if v.try_reserve_exact(part.len()).is_err() {", "                            if v.try_reserve_exact(part.len()).is_err() || true {", COPYT),
  ('crates/store-io-engine/src/provision2.rs', '            region_generation: pl.generation.get(),', '            region_generation: 1,', COPYT),
  ('crates/store-io-engine/src/provision2.rs', '            generation: pl.generation,', '            generation: Generation::FIRST,', COPYT),
  ('crates/store-io-engine/src/provision2.rs', '            Some(c) => (c.fill, c.fill_key),', '            Some(c) => (c.fill, if c.fill_key == [0; 16] { random_uuid() } else { random_uuid() }),', COPYT),
@@ -1277,6 +1279,27 @@ M = [
  # released, makes its region unavailable.
  ('crates/store-io-engine/src/open.rs', '            if rm.region_id != e.region_id || rm.kind != e.kind {', '            if rm.kind != e.kind {', ["-p", "store-io-engine", "--test", "format1"]),
  ('crates/store-io-engine/src/open.rs', '            if rm.state != RegionState::Ready {', '            if rm.state != RegionState::Ready && false {', ["-p", "store-io-engine", "--test", "format1"]),
+ # A copied region's data is its fill (D-137): a source media error fails
+ # the copy with its range; the data lands past the zeroed header blocks;
+ # a capped region's slack is still the pattern (Windows writes it). Noted,
+ # no entry: the backstops refusing a non-empty append or page region past
+ # the fill path (every one with data takes it) and a data area the fill
+ # did not cover (the pre-check makes the sizes equal); the empty request
+ # starting nothing (step order only); the feed's in-order check
+ # and its early-end error
+ # (backstops: the scan delivers every byte in order, D-136); a reader that
+ # keeps scanning after the fill stopped (wasted reads, then it ends); the
+ # reader's error after the last byte was taken (the scan reads nothing
+ # past the region's data size); the reader thread's start failure
+ # (`Io { op: Queue }`: no test can make a thread fail to start) and a panic
+ # in it (resumed on the copying thread).
+ (COPY_SRC, "                    (_, Some(e)) | (Err(e), None) => Some(e),\n                    (Ok(_), None) => None,", "                    (Err(e), _) => Some(e),\n                    (Ok(_), _) => None,", COPYT),
+ (COPY_SRC, "        if f.full.is_none() && f.kind != RegionKind::Slot && f.data_size > 0 {", "        if f.full.is_none() && f.kind != RegionKind::Slot && f.data_size > 0 && false {", COPYT),
+ (COPY_SRC, "                            let at = offset + (i * FEED_PIECE) as u64;", "                            let at = offset + (i * 0) as u64;", COPYT),
+ (COPY_SRC, "                        drop(reader);\n                        match handle.join() {", "                        let _kept = &reader;\n                        match handle.join() {", COPYT),
+ ("crates/store-io-engine/src/provision2.rs", "                self.write_range(pl.offset, head, 2 * block, 0, data)?;", "                self.write_range(pl.offset, head, 0, 0, data)?;", COPYT),
+ ("crates/store-io-engine/src/provision2.rs", "                if filled > head {", "                if filled > head && false {", COPYT),
+ ("crates/store-io-engine/src/provision2.rs", "                        &fill_key,\n                        pl.data_size,\n", "                        &fill_key,\n                        0,\n", COPYT),
 ]
 
 def kill_stuck_tests():

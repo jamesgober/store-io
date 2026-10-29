@@ -21,7 +21,7 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 
 - [ ] Linux: FUA write vs write + flush, per kernel and filesystem (needs bare metal + PLP drive).
 - [ ] Linux: raw block device flush counts and latency (bare metal).
-- [ ] Linux: flush sharing between concurrent writers (bare metal).
+- [ ] Linux: flush sharing between concurrent writers (bare metal). On CI's virtual machines (2026-10-29, D-138), eight sharing writers made 0.62-0.64x the durable writes of eight writers each flushing its own over null_blk, on every runner CPU. The cost is the follower's sleep and wake, not who leads: leading on a free slot, and flushes side by side, gained nothing. Bare metal's wakes are expected to be cheaper; measure the same there with `harness/examples/g15probe.rs`.
 - [ ] Linux: lock release vs a crashed owner's in-flight writes, across kernels (bare metal or VMs).
 - [ ] Linux: io_uring wake-up and reap costs; null_blk per-core ceilings (bare metal).
 - [ ] Linux: G1 (QD1 4 KiB durable write p50 within the raw primitive + 2 us) on bare metal. On CI's VM it is NOT RESOLVABLE: 20 alternated rounds drift +-5 us against each other. store-io's own cost is 0.1-0.35 us per write (simulator; CI A/B against the raw call on the store's own container, 2026-10-19).

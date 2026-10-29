@@ -15,6 +15,19 @@
 //! fio's eight synchronous 4 KiB writers with no flush show that ceiling;
 //! the same writers flushing after every write show what eight writers get
 //! without sharing.
+//!
+//! And a third control, the machine's own wake (D-138): a shared flush saves
+//! each follower a flush and costs it a sleep and a wake by the leader. Where
+//! one writer's whole durable write takes less than one cross-thread wake,
+//! sharing did not lift eight writers to 1.5x one, whoever led (measured on
+//! CI over null_blk: the Xeon 8370C and 8573C runners, a durable write in
+//! 7-8 µs against a 9-13 µs wake, eight writers at 1.2-1.3x one; the EPYC
+//! runners, 12-15 µs against 7-9 µs, at 1.8-2.1x). There G15 cannot judge
+//! sharing, as long as flushes are shared and eight writers are not slower
+//! than one.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use store_io_engine::StoreOptions;
 
@@ -35,6 +48,45 @@ pub fn diag_queues() -> usize {
         .max(16)
 }
 
+/// Round trips (two wakes each) timed per round by [`wake_us`], after as
+/// many unmeasured.
+const TRIPS: u64 = 50_000;
+
+/// One cross-thread wake on this machine, one way, in µs: two threads hand
+/// a turn back and forth through `park` / `unpark` (a futex on Linux), as a
+/// leader wakes a barrier asleep on a word.
+#[must_use]
+pub fn wake_us() -> f64 {
+    let turn = AtomicU64::new(0);
+    let main = std::thread::current();
+    let mut timed = None;
+    std::thread::scope(|sc| {
+        let other = sc.spawn(|| {
+            for i in 0..2 * TRIPS {
+                while turn.load(Ordering::Acquire) != 2 * i + 1 {
+                    std::thread::park();
+                }
+                turn.store(2 * i + 2, Ordering::Release);
+                main.unpark();
+            }
+        });
+        let mut start = Instant::now();
+        for i in 0..2 * TRIPS {
+            if i == TRIPS {
+                start = Instant::now();
+            }
+            turn.store(2 * i + 1, Ordering::Release);
+            other.thread().unpark();
+            while turn.load(Ordering::Acquire) != 2 * i + 2 {
+                std::thread::park();
+            }
+        }
+        // Before the other thread's exit and join.
+        timed = Some(start.elapsed());
+    });
+    timed.map_or(f64::NAN, |t| t.as_secs_f64() * 1e6 / (2 * TRIPS) as f64)
+}
+
 /// Flushes in flight measured beside the run's own setting, at eight
 /// writers (D-124: the default is chosen from these).
 pub const SWEEP: [u8; 3] = [1, 2, 4];
@@ -47,6 +99,8 @@ pub struct G15 {
     pub eight: Vec<f64>,
     /// Flushes per append at eight writers.
     pub flushes_at_eight: Vec<f64>,
+    /// One cross-thread wake, µs ([`wake_us`]), one per round.
+    pub wake: Vec<f64>,
     /// fio, eight synchronous writers, no flush: writes per second.
     pub fio_writes: Vec<f64>,
     /// fio, eight synchronous writers, a data flush after every write.
@@ -93,6 +147,7 @@ pub fn measure(
         one: Vec::new(),
         eight: Vec::new(),
         flushes_at_eight: Vec::new(),
+        wake: Vec::new(),
         fio_writes: Vec::new(),
         fio_durable: Vec::new(),
         fio_errors: Vec::new(),
@@ -112,6 +167,7 @@ pub fn measure(
             g.ran_at_eight = g.ran_at_eight.max(r as u8);
         }
         g.points.extend([p1, p8]);
+        g.wake.push(wake_us());
     }
     // The sweep, alternated round by round like the points above.
     for _ in 0..ROUNDS {
@@ -167,6 +223,9 @@ impl G15 {
     pub(super) fn row(&self) -> Row {
         let (one, eight) = (&self.one, &self.eight);
         let (o1, o8, f8) = (med(one), med(eight), med(&self.flushes_at_eight));
+        let wake = med(&self.wake);
+        // One writer's durable write, µs.
+        let write = o1.map(|a| 1e6 / a);
         let sweep = self
             .sweep
             .iter()
@@ -179,11 +238,14 @@ impl G15 {
             .join(", ");
         Row {
             id: "G15",
-            gate: "Concurrent writers: durable ops/s rises with writers through flush sharing (8 writers at least 1.5x one, under 0.9 flushes per op; medians of 3 alternated runs)",
+            gate: "Concurrent writers: durable ops/s rises with writers through flush sharing (8 writers at least 1.5x one, under 0.9 flushes per op; medians of 3 alternated runs; NOT RESOLVABLE where flushes are shared and 8 writers are no slower than one, but one writer's durable write takes less than one cross-thread wake on this machine, so a shared flush costs a follower more than flushing on its own)",
             measured: format!(
-                "1 writer {one:.0?} /s, 8 writers {eight:.0?} /s, {} flushes per op at 8 ({} in flight); 8 writers by flushes in flight: {sweep}; diagnostics at 8 writers: a region each {:.0?} /s, {} queues {:.0?} /s; fio 8 writers ({}): writes alone {:.0?} /s, each flushed {:.0?} /s",
+                "1 writer {one:.0?} /s ({} µs a durable write), 8 writers {eight:.0?} /s, {} flushes per op at 8 ({} in flight); one wake {:.1?} µs (median {} µs); 8 writers by flushes in flight: {sweep}; diagnostics at 8 writers: a region each {:.0?} /s, {} queues {:.0?} /s; fio 8 writers ({}): writes alone {:.0?} /s, each flushed {:.0?} /s",
+                f(write, 1),
                 f(f8, 2),
                 self.ran_at_eight,
+                self.wake,
+                f(wake, 1),
                 self.own_regions,
                 diag_queues(),
                 self.many_queues,
@@ -197,6 +259,16 @@ impl G15 {
                 // of the eight-writer runs: this disk cannot tell.
                 (true, Some(a), Some(_), Some(x))
                     if x < 0.9 && eight.iter().copied().fold(f64::MIN, f64::max) >= 1.5 * a =>
+                {
+                    Verdict::NotResolvable
+                }
+                // Sharing flushes, eight writers no slower than one, but a
+                // durable write is cheaper than the wake a shared flush
+                // costs each follower (D-138). Slower than one stays FAIL.
+                (true, Some(a), Some(b), Some(x))
+                    if x < 0.9
+                        && b >= a
+                        && matches!((write, wake), (Some(w), Some(k)) if w < k) =>
                 {
                     Verdict::NotResolvable
                 }

@@ -62,6 +62,11 @@ jobs:
       - name: Idle store is silent (60 s)
         if: runner.os != 'Linux' && matrix.rust == 'stable'
         run: cargo test --test idle -- --ignored --test-threads=1 --nocapture
+      # 512 MiB of writes in flight at each of four kills: once, on stable.
+      - name: Killed owner's lock waits for its writes
+        if: runner.os == 'Windows' && matrix.rust == 'stable'
+        timeout-minutes: 10
+        run: cargo test -p store-io-win --test kill -- --ignored --nocapture
       - name: Doc (all features)
         run: cargo doc --workspace --no-deps --all-features
         env:

@@ -13,6 +13,22 @@
 
 ### Added
 
+- Tests: **fencing after a killed owner on Windows** (`store-io-win`'s
+  `tests/kill.rs`, run once in CI). A child process holds the ownership
+  lock with 512 MiB of unbuffered writes in flight (odd rounds issue them
+  from threads that have exited) and is killed; the new owner's writes,
+  made the moment it holds the lock, are never overwritten by the dead
+  owner's. The lock is on the store's own handle and the writes go
+  through the queue's own handles, so this rests on behaviour Microsoft
+  does not document: a killed process's lock is not free until its
+  in-flight writes have completed or been cancelled. On the dev box it
+  held in 250 rounds at 512 MiB in flight (1,250 in all); the same
+  writes made at the kill without waiting for the lock were overwritten
+  in 7 of 10 rounds, and the test without that wait failed 5 runs of 5.
+  PLATFORMS.md drops "fencing after a killed process is unverified" from
+  Windows' known limitations, and DURABILITY.md the kill test from its
+  planned work.
+
 - Harness: **`--settle <S>`**, seconds idle before each workload, each
   of `gates`' inner workloads and each of G13's reruns (10 by default, 0
   to skip; recorded in the report; CI's gates on a memory-backed device

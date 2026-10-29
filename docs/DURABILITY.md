@@ -323,7 +323,7 @@ Rustdoc `compile_fail` tests show that an integer cannot be passed as a position
 
 The Windows backend has integration tests on NTFS and the Linux backend on the machine's own file system, and the simple API runs end to end on both; CI also runs the conformance and end-to-end tests on loop-mounted ext4 and XFS images with barriers on. Linux tests read the actual mount options and accept kernel-dependent answers, because CI runners differ from development machines (GitHub's Ubuntu runners mount their root `nobarrier`, which store-io classes as `Unsafe`).
 
-On Linux, CI replays a workload on a real ext4 and XFS through a `dm-log-writes` device (`tests/crash.rs`): appends, batches, page writes, slot commits, a submitter, provisioning, growth within and beyond capacity, recycle, release, and a repair after the container is cut short. The device is rebuilt at every logged write, flush and mark, each state mounted (its journal recovered) and opened, and every acknowledgement passed by then must hold; subsets of the writes a cache could still lose are checked too. A `dm-error` job checks that the store stops at the first failed write or flush, and that every record it acknowledged reads back once the device is healed. NTFS has no such write log, so on Windows the simulator's enumeration stands for the crash states.
+On Linux, CI replays a workload on a real ext4 and XFS through a `dm-log-writes` device (`tests/crash.rs`): appends, batches, page writes, slot commits, a submitter, provisioning, growth within and beyond capacity, recycle, release, and a repair after the container is cut short. The device is rebuilt at every logged write, flush and mark, each state mounted (its journal recovered) and opened, and every acknowledgement passed by then must hold; subsets of the writes a cache could still lose are checked too. A `dm-error` job checks that the store stops at the first failed write or flush, and that every record it acknowledged reads back once the device is healed. NTFS has no such write log, so on Windows the simulator's enumeration stands for the crash states. A killed owner is tested on Windows itself (`crates/store-io-win/tests/kill.rs`): a process holding the ownership lock with 512 MiB of writes in flight is killed, and none of its writes lands over those of the owner that takes the lock next ([platforms](./PLATFORMS.md#3-windows)).
 
 ### Mutation testing
 
@@ -333,7 +333,6 @@ On Linux, CI replays a workload on a real ext4 and XFS through a `dm-log-writes`
 
 These are on the [roadmap](../dev/ROADMAP.md) and the [later list](../dev/TODO.md):
 
-- **A Windows kill test**: kill a process with writes in flight and prove the ownership lock is not released until they have landed.
 - **Power-cut certification** (1.x, after the 1.0 API and format freeze): a rig that cuts the test machine's power while a second machine logs acknowledgements (a whole-machine cut leaves the drive the power supply's hold-up time, often 10-20 ms, which can hide a drive that acknowledges flushes it has not done; cutting the drive's own power is the stronger test, and is the follow-up); at least 500 cycles per device class and 3,000 per certified model and firmware, with the rig logs published with the release. Until then, no store-io receipt has been checked against a real power cut.
 - **Fuzz campaigns** (1.0).
 

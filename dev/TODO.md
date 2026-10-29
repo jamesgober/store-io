@@ -28,7 +28,7 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 - [ ] Probe golden captures from real drives (bare metal + PLP drive).
 - [ ] macOS: flush costs per model, directory flush support (Mac).
 - [ ] Windows: does a flush stall writes in the driver or the drive? (ETW timeline; can run on the dev box later).
-- [ ] Windows: kill a process with writes in flight and prove the ownership lock is not released until they have landed (can run on the dev box). Until it passes, fencing on Windows rests on the lock alone and is not certified.
+- [x] (2026-10-29, `crates/store-io-win/tests/kill.rs`; `.dev/experiments/win-kill`) Windows: kill a process with writes in flight and prove the ownership lock is not released until they have landed (can run on the dev box). Until it passes, fencing on Windows rests on the lock alone and is not certified. (Now: no late write in 250 rounds at 512 MiB in flight on the dev box, NTFS; the test runs once per CI run on Windows' runner.)
 
 ## Settings changes James runs and reverts
 

@@ -241,7 +241,7 @@ None of these can be constructed outside store-io.
 | `Corruption { kind, ctx }` | `MediaError`, `HeaderCrc`, `IdentityMismatch`, `Metadata`, `Fork`, `Truncated` (the container is shorter than its metadata says). |
 | `UnsafeDevice { reasons }`, `Unverified { missing, reasons }` | The device was refused. |
 | `Unsupported { what }` | A capability the platform lacks; or (`FormatVersion`) a newer on-disk format, or a format-1 store opened for writing (copy it with `copy_store`). |
-| `Fenced { stale }`, `Locked` | Ownership: a newer owner exists; another holder has the lock (another handle, in this or another process, holds the store, or another handle or process is replacing in a directory). |
+| `Fenced { stale }`, `Locked` | Ownership: a newer owner exists (never returned today: ownership is the OS lock with the acquire barrier, which no newer owner passes while a handle holds the store, D-049; reserved until the 1.0 API freeze); another holder has the lock (another handle, in this or another process, holds the store, or another handle or process is replacing in a directory). |
 | `NotFound { what }`, `AlreadyExists { what }` | Store, region or slot lookups. `NotFound` means no such name exists in the store at all. |
 | `Io { op, raw, ctx }` | A setup or metadata failure; durable data unaffected. |
 

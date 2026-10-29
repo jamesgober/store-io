@@ -363,7 +363,11 @@ pub enum Error {
         /// The missing capability.
         what: Capability,
     },
-    /// The store was taken over by a newer owner.
+    /// The store was taken over by a newer owner. Never returned today:
+    /// ownership is the operating system's lock with the acquire barrier
+    /// (D-049), which no newer owner passes while a handle holds the store,
+    /// so no handle can be fenced; reserved until the 1.0 API freeze
+    /// decides whether it stays.
     Fenced {
         /// This handle's generation.
         stale: Generation,

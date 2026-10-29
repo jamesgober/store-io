@@ -42,7 +42,9 @@ pub(crate) fn parse_identify_controller(buf: &[u8]) -> Option<IdentifyController
 /// Identify Namespace fields store-io uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct IdentifyNamespace {
-    /// NSFEAT bit 3: NAWUPF, NABSPF and NABO are valid.
+    /// NSZE (bytes 0..8): the namespace's size in logical blocks.
+    pub nsze: u64,
+    /// NSFEAT bit 1 (NSABP): NAWUPF, NABSPF and NABO are valid.
     pub nsabp: bool,
     /// NAWUPF (bytes 36..38), 0-based; 0 means "same as AWUPF".
     pub nawupf: u16,
@@ -75,8 +77,9 @@ pub(crate) fn parse_identify_namespace(buf: &[u8]) -> Option<IdentifyNamespace> 
     if !(9..=31).contains(&lbads) {
         return None;
     }
-    let nsabp = nsfeat & 0b1000 != 0;
+    let nsabp = nsfeat & 0b10 != 0;
     Some(IdentifyNamespace {
+        nsze: r.u64(0)?,
         nsabp,
         nawupf: if nsabp { r.u16(36)? } else { 0 },
         nabo: if nsabp { r.u16(42)? } else { 0 },
@@ -88,6 +91,15 @@ pub(crate) fn parse_identify_namespace(buf: &[u8]) -> Option<IdentifyNamespace> 
         },
         lba_bytes: 1u32 << lbads,
     })
+}
+
+/// Whether an Identify Namespace answer can be the disk's own namespace:
+/// its size (NSZE blocks of the format in use) is exactly the disk's length
+/// in bytes. The query names a namespace id the disk's handle does not
+/// report, so an answer of another size is another namespace's, and its
+/// format and atomic fields are not this disk's.
+pub(crate) fn namespace_matches(ns: &IdentifyNamespace, disk_bytes: u64) -> bool {
+    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)
 }
 
 /// Critical Warning byte of the SMART / Health log. Bit 4: volatile memory
@@ -147,7 +159,8 @@ mod tests {
 
     fn namespace(flbas: u8, nlbaf: u8) -> Vec<u8> {
         let mut b = vec![0u8; 4096];
-        b[24] = 0b1_1000; // NSABP + OPTPERF
+        b[0..8].copy_from_slice(&1_000_000u64.to_le_bytes()); // NSZE
+        b[24] = 0b1_0010; // NSABP (bit 1) + OPTPERF (bit 4)
         b[25] = nlbaf;
         b[26] = flbas;
         b[36..38].copy_from_slice(&7u16.to_le_bytes());
@@ -165,6 +178,7 @@ mod tests {
         assert_eq!(
             n,
             IdentifyNamespace {
+                nsze: 1_000_000,
                 nsabp: true,
                 nawupf: 7,
                 nabo: 2,
@@ -198,6 +212,13 @@ mod tests {
         let n = parse_identify_namespace(&b).unwrap_or_default();
         assert!(!n.nsabp);
         assert_eq!((n.nawupf, n.nabo, n.nabspf, n.npwg), (0, 0, 0, None));
+        // UIDREUSE (bit 3) is not NSABP.
+        b[24] = 0b1000;
+        assert!(!parse_identify_namespace(&b).unwrap_or_default().nsabp);
+        b[24] = 0b10;
+        let n = parse_identify_namespace(&b).unwrap_or_default();
+        assert!(n.nsabp);
+        assert_eq!((n.nawupf, n.nabo, n.nabspf, n.npwg), (7, 2, 15, None));
     }
 
     #[test]
@@ -214,6 +235,25 @@ mod tests {
         assert_eq!(parse_identify_namespace(&namespace(0, 1)[..130]), None);
         assert_eq!(parse_identify_namespace(&[0u8; 10]), None);
         assert_eq!(parse_identify_namespace(&[]), None);
+    }
+
+    /// Namespace 1's answer is the disk's only when its size is exactly the
+    /// disk's: another size (another namespace), an unknown disk length or
+    /// an overflowing size is not.
+    #[test]
+    fn test_namespace_matches_only_the_disks_own_size() {
+        let ns = parse_identify_namespace(&namespace(0, 1)).unwrap_or_default();
+        assert!(namespace_matches(&ns, 1_000_000 * 512));
+        assert!(!namespace_matches(&ns, 1_000_000 * 4096));
+        assert!(!namespace_matches(&ns, 1_000_000 * 512 - 512));
+        assert!(!namespace_matches(&ns, 0));
+        let big = IdentifyNamespace {
+            nsze: u64::MAX,
+            ..ns
+        };
+        assert!(!namespace_matches(&big, u64::MAX));
+        let empty = IdentifyNamespace { nsze: 0, ..ns };
+        assert!(!namespace_matches(&empty, 0));
     }
 
     #[test]

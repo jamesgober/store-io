@@ -100,6 +100,10 @@ flag_enum! {
         KnownBug = 20,
         /// device not known to be internal (an external drive, a disk image, or not identified)
         DeviceNotInternal = 21,
+        /// device kept by another system: over a network or fabric (NVMe over fabrics, iSCSI, Fibre Channel, NBD, RBD) or a user-space server
+        RemoteTarget = 22,
+        /// a storage pool (Windows Storage Spaces) with its own resiliency and caching sits under the volume
+        StoragePool = 23,
     }
 }
 

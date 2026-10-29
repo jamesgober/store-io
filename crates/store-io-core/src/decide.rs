@@ -290,6 +290,12 @@ fn unverified_reasons(ev: &Evidence) -> ReasonSet {
     if ev.hypervisor.is_some() || d.bus == Bus::Virtual {
         r.insert(Reason::Hypervisor);
     }
+    if d.bus == Bus::Remote {
+        r.insert(Reason::RemoteTarget);
+    }
+    if ev.stack.contains(&StackLayer::Pool) {
+        r.insert(Reason::StoragePool);
+    }
     r
 }
 
@@ -454,13 +460,15 @@ mod tests {
 
     #[test]
     fn test_each_unverified_rule_and_attestation_lifts_it() {
-        let edits: [fn(&mut Evidence); 6] = [
+        let edits: [fn(&mut Evidence); 8] = [
             |e| e.fs.kind = FsKind::Btrfs,
             |e| e.fs.weak_error_mode = true,
             |e| e.device.bus = Bus::Usb,
             |e| e.stack.push(StackLayer::WriteBehind),
             |e| e.stack.push(StackLayer::Loop),
             |e| e.hypervisor = Some(Hypervisor::HyperV),
+            |e| e.device.bus = Bus::Remote,
+            |e| e.stack.push(StackLayer::Pool),
         ];
         for edit in edits {
             let mut ev = consumer_linux();
@@ -476,6 +484,25 @@ mod tests {
             let d = decide(&ev, &t);
             assert_eq!(d.class, DurabilityClass::FlushRequired);
             assert_eq!(d.label, ReceiptLabel::Attested(CertId(7)));
+        }
+    }
+
+    /// A remote target and a storage pool each have their own reason (not
+    /// `Hypervisor`), even over a device that reports power-loss protection.
+    #[test]
+    fn test_a_remote_target_and_a_storage_pool_are_unverified_for_what_they_are() {
+        let mut remote = plp_linux();
+        remote.device.bus = Bus::Remote;
+        let mut pooled = plp_linux();
+        pooled.stack.push(StackLayer::Pool);
+        for (ev, reason) in [
+            (remote, Reason::RemoteTarget),
+            (pooled, Reason::StoragePool),
+        ] {
+            let d = decide(&ev, &Trust::default());
+            assert_eq!(d.class, DurabilityClass::Unverified, "{reason:?}");
+            assert!(d.reasons.contains(reason), "{reason:?}");
+            assert!(!d.reasons.contains(Reason::Hypervisor), "{reason:?}");
         }
     }
 

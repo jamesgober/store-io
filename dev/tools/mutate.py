@@ -117,6 +117,12 @@ MAC_PROBE = "crates/store-io-posix/src/mac/probe.rs"
 MAC_LIB = ["-p", "store-io-posix", "--lib"]
 # The Windows backend's own tests (run on Windows only).
 WIN_LIB = ["-p", "store-io-win", "--lib"]
+# The class rules' own tests, and the Linux probe's (Linux only).
+DECIDE = ["-p", "store-io-core", "--lib", "decide::"]
+LINUX_PROBE = ["-p", "store-io-posix", "--lib", "probe::"]
+BLOCK = "crates/store-io-posix/src/probe/block.rs"
+WIN_STORAGE = "crates/store-io-win/src/probe/storage.rs"
+WIN_NVME = "crates/store-io-win/src/probe/nvme.rs"
 
 class Joint(tuple):
     """Several mutations made together: one property held by guards in
@@ -1219,6 +1225,28 @@ M = [
  ('crates/store-io-engine/src/io.rs', '        if data.len() > chunk || r.map.run_left(offset) < padded as u64 {', '        if data.len() > chunk {', P4B, INLINE_ENV),
  ('crates/store-io-engine/src/io.rs', '                    (Ok(n), Some(buf)) if n == buf.len() => Pumped::All,', '                    (Ok(_), Some(_)) => Pumped::All,', P4B, INLINE_ENV),
  ('crates/store-io-engine/src/io.rs', '                obs.add(Counter::Refused, 1);\n                Ok(Pumped::Refused(rejected.raw))', '                obs.add(Counter::Refused, 1);\n                Ok(Pumped::Failed(rejected.raw))', P4B, INLINE_ENV),
+ # Remote targets and storage pools are Unverified for what they are; an
+ # NVMe namespace is local only over known-local transports, all of them;
+ # Windows uses namespace 1's answer only when it is the disk's size.
+ ('crates/store-io-core/src/decide.rs', '    if d.bus == Bus::Remote {', '    if false {', DECIDE),
+ ('crates/store-io-core/src/decide.rs', '    if ev.stack.contains(&StackLayer::Pool) {', '    if false {', DECIDE),
+ (BLOCK, '        return if transports.is_empty() {', '        return if false {', LINUX_PROBE),
+ (BLOCK, '            .all(|t| matches!(*t, "pcie" | "apple-nvme"))', '            .all(|_| true)', LINUX_PROBE),
+ (BLOCK, '        c.strip_prefix("session")\n            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))\n            || c.starts_with("rport-")', '        false\n            || c.starts_with("rport-")', LINUX_PROBE),
+ (BLOCK, '        c.strip_prefix("session")\n            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))', '        c.strip_prefix("session")\n            .is_some_and(|_| true)', LINUX_PROBE),
+ (BLOCK, '            || c.starts_with("rport-")', '            || false', LINUX_PROBE),
+ (BLOCK, '        n.strip_prefix("nvme")\n            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))', '        n.strip_prefix("nvme")\n            .is_some_and(|_| true)', LINUX_PROBE),
+ (BLOCK, '    if !name.starts_with("nvme-subsys") {', '    if false {', LINUX_PROBE),
+ (BLOCK, '        .map(|c| read_sysfs(&c.join("transport")).map(|t| t.trim().to_owned()))\n        .collect::<Option<_>>()\n        .unwrap_or_default()', '        .filter_map(|c| read_sysfs(&c.join("transport")).map(|t| t.trim().to_owned()))\n        .collect()', LINUX_PROBE),
+ (BLOCK, '    leaf.name.starts_with("nvme") && leaf.bus == Bus::Nvme', '    leaf.name.starts_with("nvme")', LINUX_PROBE),
+ (BLOCK, '    .any(|p| name.starts_with(p))', '    .any(|_| false)', LINUX_PROBE),
+ (BLOCK, '    matches!(\n        driver,\n        "ib_srp"', '    driver.is_empty() && matches!(\n        driver,\n        "ib_srp"', LINUX_PROBE),
+ (WIN_STORAGE, '        BUS_ISCSI | BUS_FIBRE => Bus::Remote,', '        BUS_ISCSI | BUS_FIBRE => Bus::Scsi,', WIN_LIB),
+ (WIN_STORAGE, '    (code == BUS_SPACES).then_some(StackLayer::Pool)', '    (code == BUS_SPACES && false).then_some(StackLayer::Pool)', WIN_LIB),
+ (WIN_NVME, '    let nsabp = nsfeat & 0b10 != 0;', '    let nsabp = nsfeat & 0b1000 != 0;', WIN_LIB),
+ (BLOCK, ' || name.starts_with("nullb")', '', LINUX_PROBE),
+ (WIN_NVME, '    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)', '    ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)', WIN_LIB),
+ (WIN_NVME, '    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)', '    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)).is_some()', WIN_LIB),
 ]
 
 def kill_stuck_tests():

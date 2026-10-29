@@ -58,10 +58,10 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 
 ## Found while documenting (2026-10-09), not yet fixed
 
-- [ ] Windows probe: a Storage Spaces disk reports a virtual bus and is classed `Unverified` with the reason `Hypervisor`; it should be a storage-stack layer with its own reason.
-- [ ] Linux probe: NVMe over fabrics transports are reported as a local NVMe bus.
-- [ ] Windows probe: Identify Namespace always asks for namespace 1.
-- [ ] Defined but never produced: `Reason::KnownBug`, `Error::Fenced`, the `Filter` and `VirtualDisk` stack layers, and `DurableReceipt::untorn()` (always false until untorn writes are certified).
+- [x] (2026-10-28, v0.5) Windows probe: a Storage Spaces disk reports a virtual bus and is classed `Unverified` with the reason `Hypervisor`; it should be a storage-stack layer with its own reason. (Now `StackLayer::Pool`, reason `StoragePool`.)
+- [x] (2026-10-28, v0.5) Linux probe: NVMe over fabrics transports are reported as a local NVMe bus. (Now `Bus::Remote`, reason `RemoteTarget`, also for iSCSI and Fibre Channel on Linux and Windows; every controller of a multipath subsystem counted.)
+- [x] (2026-10-28, v0.5) Windows probe: Identify Namespace always asks for namespace 1. (Its answer is now used only when the namespace is the disk's size; two namespaces of one size still cannot be told apart.)
+- [ ] Defined but never produced: `Error::Fenced` (D-049 makes fencing the OS lock and the acquire barrier, so nothing can raise it): remove it, or document it as never returned, before the 1.0 API freeze. Reserved and documented as such: `Reason::KnownBug` (no rule yet), `StackLayer::Filter` (no backend detects one), `DurableReceipt::untorn()` (false until untorn writes are certified). (`StackLayer::VirtualDisk` is produced, for a macOS disk image.)
 - [ ] Open is lenient where it could be strict: a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently. (Fixed 2026-10-12: a non-zero volume `features` value or a longer record is refused as `Unsupported`, and the volume record's reserved bytes must be zero.)
 - [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
 - [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.

@@ -222,7 +222,7 @@ pub(super) fn f(v: Option<f64>, d: usize) -> String {
 pub fn run(ctx: &Ctx) -> Section {
     let mut sec = Section::new(
         "gates",
-        "Performance gates (flush-required device; relative, Unverified per D-066)",
+        "Performance gates (a device whose flushes reach it; relative, under an override per D-066)",
     );
     sec.method = vec![
         "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS), and `gates_g1` and `gates_g2` (G1 and G2, alternated rounds).".to_owned(),

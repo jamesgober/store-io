@@ -11,7 +11,7 @@
 #[cfg(windows)]
 use core::mem::offset_of;
 
-use store_io_core::evidence::{Bus, Hypervisor};
+use store_io_core::evidence::{Bus, Hypervisor, StackLayer};
 #[cfg(windows)]
 use windows_sys::Win32::System::Ioctl::{
     NVMeDataTypeFeature, NVMeDataTypeIdentify, NVMeDataTypeLogPage, PropertyStandardQuery,
@@ -25,6 +25,7 @@ const SPSD_LEN: usize = 40;
 /// `STORAGE_BUS_TYPE` values (`ntddstor.h`).
 const BUS_SCSI: i32 = 0x1;
 const BUS_ATA: i32 = 0x3;
+const BUS_FIBRE: i32 = 0x6;
 const BUS_USB: i32 = 0x7;
 const BUS_RAID: i32 = 0x8;
 const BUS_ISCSI: i32 = 0x9;
@@ -42,6 +43,7 @@ const _: () = {
     assert!(SPSD_LEN == size_of::<STORAGE_PROTOCOL_SPECIFIC_DATA>());
     assert!(BUS_SCSI == fs::BusTypeScsi);
     assert!(BUS_ATA == fs::BusTypeAta);
+    assert!(BUS_FIBRE == fs::BusTypeFibre);
     assert!(BUS_USB == fs::BusTypeUsb);
     assert!(BUS_RAID == fs::BusTypeRAID);
     assert!(BUS_ISCSI == fs::BusTypeiScsi);
@@ -197,6 +199,12 @@ pub(crate) fn parse_numa(buf: &[u8]) -> Option<Option<u16>> {
     Some(u16::try_from(node).ok())
 }
 
+/// `DISK_GEOMETRY_EX`: the disk's length in bytes (`DiskSize`, after the
+/// 24-byte `DISK_GEOMETRY`).
+pub(crate) fn parse_disk_size(buf: &[u8]) -> Option<u64> {
+    Reader::new(buf).u64(24)
+}
+
 /// `STORAGE_DEVICE_NUMBER`: the disk number.
 pub(crate) fn parse_device_number(buf: &[u8]) -> Option<u32> {
     Reader::new(buf).u32(4)
@@ -212,16 +220,24 @@ pub(crate) fn parse_disk_extents(buf: &[u8]) -> Option<(u32, u32)> {
     Some((count, r.u32(8)?))
 }
 
-/// Maps a `STORAGE_BUS_TYPE` to the evidence vocabulary.
+/// Maps a `STORAGE_BUS_TYPE` to the evidence vocabulary. A Storage Spaces
+/// disk has no bus of its own (its pool's disks do): it is a stack layer
+/// ([`layer_from_code`]), not a hypervisor's virtual disk.
 pub(crate) fn bus_from_code(code: i32) -> Bus {
     match code {
         BUS_NVME => Bus::Nvme,
         BUS_SATA | BUS_ATA => Bus::Sata,
-        BUS_SCSI | BUS_SAS | BUS_ISCSI | BUS_RAID => Bus::Scsi,
+        BUS_SCSI | BUS_SAS | BUS_RAID => Bus::Scsi,
+        BUS_ISCSI | BUS_FIBRE => Bus::Remote,
         BUS_USB => Bus::Usb,
-        BUS_VIRTUAL | BUS_FILE_BACKED_VIRTUAL | BUS_SPACES => Bus::Virtual,
+        BUS_VIRTUAL | BUS_FILE_BACKED_VIRTUAL => Bus::Virtual,
         _ => Bus::Unknown,
     }
+}
+
+/// The stack layer a `STORAGE_BUS_TYPE` stands for, if any.
+pub(crate) fn layer_from_code(code: i32) -> Option<StackLayer> {
+    (code == BUS_SPACES).then_some(StackLayer::Pool)
 }
 
 /// A hypervisor inferred from the disk's bus and model string. Windows runs
@@ -351,6 +367,10 @@ mod tests {
         assert_eq!(parse_disk_extents(&ext), Some((2, 5)));
         assert_eq!(parse_disk_extents(&le(&[0, 0, 5, 0])), None);
         assert_eq!(parse_disk_extents(&le(&[1])), None);
+        let mut geo = vec![0u8; 24];
+        geo.extend_from_slice(&4_000_787_030_016u64.to_le_bytes());
+        assert_eq!(parse_disk_size(&geo), Some(4_000_787_030_016));
+        assert_eq!(parse_disk_size(&geo[..31]), None);
     }
 
     #[test]
@@ -381,10 +401,22 @@ mod tests {
         assert_eq!(bus_from_code(11), Bus::Sata);
         assert_eq!(bus_from_code(3), Bus::Sata);
         assert_eq!(bus_from_code(10), Bus::Scsi);
+        assert_eq!(bus_from_code(8), Bus::Scsi);
+        assert_eq!(bus_from_code(9), Bus::Remote);
+        assert_eq!(bus_from_code(6), Bus::Remote);
         assert_eq!(bus_from_code(7), Bus::Usb);
         assert_eq!(bus_from_code(14), Bus::Virtual);
         assert_eq!(bus_from_code(15), Bus::Virtual);
-        assert_eq!(bus_from_code(16), Bus::Virtual);
+        // Storage Spaces: a pool layer over no known bus, no hypervisor.
+        assert_eq!(bus_from_code(16), Bus::Unknown);
+        assert_eq!(layer_from_code(16), Some(StackLayer::Pool));
+        assert_eq!(
+            hypervisor_from(bus_from_code(16), Some("Microsoft Storage Space Device")),
+            None
+        );
+        for code in [-1, 1, 9, 14, 17, 99] {
+            assert_eq!(layer_from_code(code), None, "{code}");
+        }
         assert_eq!(bus_from_code(-1), Bus::Unknown);
         assert_eq!(bus_from_code(99), Bus::Unknown);
         assert_eq!(

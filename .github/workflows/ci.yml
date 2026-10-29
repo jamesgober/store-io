@@ -306,11 +306,12 @@ jobs:
             ${{ runner.temp }}/subset.img
           if-no-files-found: ignore
 
-  # The performance gates on the CI kernel (D-066: relative, Unverified):
-  # the harness's `gates` on ext4 over a memory-backed device with a
-  # write-back cache (null_blk, or a loop device on tmpfs: a flush-required
-  # device whose flushes cost nothing, so the microsecond gates are
-  # resolvable), against fio on the same file system. Fails on any FAIL
+  # The performance gates on the CI kernel (D-066: relative, under an
+  # override: the runner is a virtual machine, and null_blk is classed as
+  # memory): the harness's `gates` on ext4 over a memory-backed device with
+  # a write-back cache (null_blk, or a loop device on tmpfs: flushes are
+  # issued and cost nothing, so the microsecond gates are resolvable),
+  # against fio on the same file system. Fails on any FAIL
   # verdict, anomaly or integrity failure; the report is kept either way.
   gates:
     name: Performance gates (memory-backed device, io_uring)
@@ -324,7 +325,7 @@ jobs:
           workspaces: harness
       - name: Build the harness
         run: cargo build --release --manifest-path harness/Cargo.toml
-      - name: A flush-required memory-backed device
+      - name: A memory-backed device with a write-back cache
         run: |
           set -eux
           sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"

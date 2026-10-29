@@ -9,7 +9,7 @@
 
 use crate::probe::block::{
     bus_for, classify_dm, classify_md, clean, parse_cache_mode, parse_id_ctrl, parse_id_ns,
-    parse_numa, parse_smart, sectors_kb_to_bytes,
+    parse_numa, parse_smart, remote_scsi_driver, sectors_kb_to_bytes,
 };
 use crate::probe::fs::{
     basename, find_mount, mount_facts, parse_mountinfo_line, uevent_devname, unescape,
@@ -103,8 +103,10 @@ pub fn run(data: &[u8]) {
             let _ = classify_md(level, opt(policy), opt(backlog));
         }
         8 => {
-            let [name, path, transport, vendor, model] = fields::<5>(t);
-            let _ = bus_for(name, path, opt(transport), opt(vendor), opt(model));
+            let [name, path, transports, vendor, model] = fields::<5>(t);
+            let transports: Vec<&str> = transports.split(',').filter(|t| !t.is_empty()).collect();
+            let _ = bus_for(name, path, &transports, opt(vendor), opt(model));
+            let _ = remote_scsi_driver(vendor);
         }
         9 => {
             let [fstype, options, super_options] = fields::<3>(t);

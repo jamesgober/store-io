@@ -46,7 +46,13 @@ pub enum Bus {
     Usb,
     /// A virtual device presented by a hypervisor or cloud.
     Virtual,
-    /// RAM-backed block device.
+    /// A device another system keeps: reached over a network or storage
+    /// fabric (NVMe over fabrics, iSCSI, SRP, Fibre Channel, NBD, Ceph RBD,
+    /// DRBD, ATA over Ethernet) or served from user space (ublk): what it
+    /// acknowledges is that system's to keep.
+    Remote,
+    /// RAM-backed block device (null_blk too: its data is in memory, or
+    /// nowhere).
     Ram,
     /// Not determined.
     #[default]
@@ -232,6 +238,9 @@ pub enum StackLayer {
     VirtualDisk,
     /// A filter driver or software encryption (BitLocker) on Windows.
     Filter,
+    /// A storage pool that places and caches data itself (Windows Storage
+    /// Spaces).
+    Pool,
 }
 
 /// A hypervisor or cloud environment detected under the OS.

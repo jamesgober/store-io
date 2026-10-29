@@ -278,11 +278,14 @@ pub(crate) fn leaf_facts(leaf: &Path) -> LeafFacts {
     let firmware = read_sysfs(&dev.join("firmware_rev"))
         .or_else(|| read_sysfs(&dev.join("rev")))
         .and_then(|s| clean(&s));
-    let transport = read_sysfs(&dev.join("transport"));
     let real = fs::canonicalize(leaf).unwrap_or_else(|_| leaf.to_path_buf());
     let path = real.to_string_lossy().into_owned();
-    let ctrl = fs::canonicalize(&dev)
-        .ok()
+    let ctrls = fs::canonicalize(&dev)
+        .map(|d| nvme_controllers(&d))
+        .unwrap_or_default();
+    let transports = controller_transports(&ctrls);
+    let ctrl = ctrls
+        .first()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
     LeafFacts {
         cache_mode: cache.as_deref().map(parse_cache_mode).unwrap_or_default(),
@@ -312,17 +315,21 @@ pub(crate) fn leaf_facts(leaf: &Path) -> LeafFacts {
             })
             .unwrap_or(0),
         numa: numa_node(&real),
-        bus: bus_for(
-            &name,
-            &path,
-            transport.as_deref(),
-            vendor.as_deref(),
-            model.as_deref(),
-        ),
+        bus: if scsi_host_driver(&path).is_some_and(|d| remote_scsi_driver(&d)) {
+            Bus::Remote
+        } else {
+            bus_for(
+                &name,
+                &path,
+                &transports.iter().map(String::as_str).collect::<Vec<_>>(),
+                vendor.as_deref(),
+                model.as_deref(),
+            )
+        },
         nsid: read_sysfs(&leaf.join("nsid"))
             .as_deref()
             .and_then(parse_u32),
-        ctrl: ctrl.filter(|c| c.starts_with("nvme")),
+        ctrl,
         name,
         model,
         firmware,
@@ -390,12 +397,105 @@ pub(crate) fn clean(s: &str) -> Option<String> {
     if t.is_empty() { None } else { Some(t) }
 }
 
+/// Whether a leaf is an NVMe namespace known to be local: only then do its
+/// controller's Identify and SMART pages describe the device the store's
+/// data lands on (a remote target's, or one over a transport that could
+/// not be read, could vouch for no volatile cache it does not control).
+pub(crate) fn local_nvme(leaf: &LeafFacts) -> bool {
+    leaf.name.starts_with("nvme") && leaf.bus == Bus::Nvme
+}
+
+/// The NVMe controllers behind a namespace's `device`: the controller itself
+/// (`nvme0`), or, for a namespace of a multipath subsystem (`device` is
+/// `nvme-subsys0`), every controller the subsystem links to. Empty when
+/// `device` is neither.
+fn nvme_controllers(device: &Path) -> Vec<PathBuf> {
+    let is_ctrl = |n: &str| {
+        n.strip_prefix("nvme")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let name = device
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if is_ctrl(&name) {
+        return vec![device.to_path_buf()];
+    }
+    if !name.starts_with("nvme-subsys") {
+        return Vec::new();
+    }
+    let mut ctrls: Vec<PathBuf> = fs::read_dir(device)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| is_ctrl(&e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .collect();
+    ctrls.sort();
+    ctrls
+}
+
+/// The driver of the SCSI host above a device (`/sys/class/scsi_host/hostN/
+/// proc_name`, the `hostN` named in its sysfs path), if it has one.
+fn scsi_host_driver(path: &str) -> Option<String> {
+    let host = path.split('/').find(|c| {
+        c.strip_prefix("host")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    })?;
+    read_sysfs(
+        &Path::new("/sys/class/scsi_host")
+            .join(host)
+            .join("proc_name"),
+    )
+    .map(|d| d.trim().to_owned())
+}
+
+/// Whether a SCSI host driver reaches its disks over a network or fabric:
+/// SRP, iSCSI (software, iSER, offload HBAs) and Fibre Channel HBAs. A
+/// backstop for a path that names no iSCSI session or FC remote port (an
+/// SRP target's port sits beside its SCSI target, not above it).
+pub(crate) fn remote_scsi_driver(driver: &str) -> bool {
+    matches!(
+        driver,
+        "ib_srp"
+            | "iscsi_tcp"
+            | "iscsi_iser"
+            | "qla4xxx"
+            | "bnx2i"
+            | "be2iscsi"
+            | "cxgb3i"
+            | "cxgb4i"
+            | "qedi"
+            | "lpfc"
+            | "qla2xxx"
+            | "qedf"
+            | "bfa"
+            | "fnic"
+            | "zfcp"
+            | "fcoe"
+            | "bnx2fc"
+            | "csiostor"
+            | "ibmvfc"
+    )
+}
+
+/// Every controller's `transport`, or none if one of them cannot be read
+/// (one unreadable path of a multipath namespace leaves it unknown).
+fn controller_transports(ctrls: &[PathBuf]) -> Vec<String> {
+    ctrls
+        .iter()
+        .map(|c| read_sysfs(&c.join("transport")).map(|t| t.trim().to_owned()))
+        .collect::<Option<_>>()
+        .unwrap_or_default()
+}
+
 /// The interconnect from the kernel name, the sysfs device path, the NVMe
-/// transport, and the SCSI vendor and model.
+/// controllers' transports (empty if unknown), and the SCSI vendor and
+/// model.
 pub(crate) fn bus_for(
     name: &str,
     path: &str,
-    transport: Option<&str>,
+    transports: &[&str],
     vendor: Option<&str>,
     model: Option<&str>,
 ) -> Bus {
@@ -403,14 +503,48 @@ pub(crate) fn bus_for(
     let v = vendor.unwrap_or("").to_ascii_lowercase();
     let m = model.unwrap_or("").to_ascii_lowercase();
     if name.starts_with("nvme") {
-        let _fabrics = transport.is_some_and(|t| t.trim() != "pcie");
-        return Bus::Nvme;
+        // Local only when every controller is known to be: `pcie`, or Apple
+        // silicon's `apple-nvme`. Over `tcp`, `rdma`, `fc` or `loop` the
+        // namespace is a remote target's; a transport that cannot be read
+        // leaves the bus unknown (and no NVMe-derived untorn unit).
+        return if transports.is_empty() {
+            Bus::Unknown
+        } else if transports
+            .iter()
+            .all(|t| matches!(*t, "pcie" | "apple-nvme"))
+        {
+            Bus::Nvme
+        } else {
+            Bus::Remote
+        };
     }
-    if name.starts_with("ram") || name.starts_with("zram") {
+    // Memory only: RAM disks, and null_blk (in memory, or nowhere).
+    if name.starts_with("ram") || name.starts_with("zram") || name.starts_with("nullb") {
         return Bus::Ram;
+    }
+    // Devices another system or a server keeps: NBD, Ceph RBD, RNBD (RDMA),
+    // DRBD (replicated over the network), ATA over Ethernet, ublk (a
+    // user-space server), s390 DASD (channel-attached), PowerFlex and
+    // Portworx volumes.
+    if [
+        "nbd", "rbd", "rnbd", "drbd", "etherd!", "ublkb", "dasd", "scini", "pxd",
+    ]
+    .iter()
+    .any(|p| name.starts_with(p))
+    {
+        return Bus::Remote;
     }
     if name.starts_with("vd") || name.starts_with("xvd") {
         return Bus::Virtual;
+    }
+    // An iSCSI session (`session3`) or a Fibre Channel remote port
+    // (`rport-5:0-2`) above the SCSI target.
+    if p.split('/').any(|c| {
+        c.strip_prefix("session")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            || c.starts_with("rport-")
+    }) {
+        return Bus::Remote;
     }
     if p.contains("/usb") {
         return Bus::Usb;
@@ -487,7 +621,7 @@ pub(crate) fn nvme_facts(leaf: &LeafFacts) -> NvmeFacts {
         Missing::CacheEnabled,
         Missing::AtomicFields,
     ];
-    if !leaf.name.starts_with("nvme") {
+    if !local_nvme(leaf) {
         for m in all {
             f.missing.insert(m);
         }
@@ -798,7 +932,7 @@ mod tests {
             bus_for(
                 "nvme0n1",
                 "/sys/devices/pci0000:00/0000:00:1d.0/nvme/nvme0/nvme0n1",
-                Some("pcie"),
+                &["pcie"],
                 None,
                 None
             ),
@@ -808,7 +942,7 @@ mod tests {
             bus_for(
                 "sdd",
                 "/sys/devices/LNXSYSTM:00/.../0:0:0:3/block/sdd",
-                None,
+                &[],
                 Some("Msft"),
                 Some("Virtual Disk")
             ),
@@ -818,7 +952,7 @@ mod tests {
             bus_for(
                 "sda",
                 "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host4/target4:0:0/4:0:0:0/block/sda",
-                None,
+                &[],
                 Some("SanDisk"),
                 Some("Extreme")
             ),
@@ -828,7 +962,7 @@ mod tests {
             bus_for(
                 "sda",
                 "/sys/devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0/block/sda",
-                None,
+                &[],
                 Some("ATA"),
                 Some("Samsung SSD")
             ),
@@ -838,7 +972,7 @@ mod tests {
             bus_for(
                 "sdb",
                 "/sys/devices/pci0000:00/0000:03:00.0/host0/target0:2:0/0:2:0:0/block/sdb",
-                None,
+                &[],
                 Some("DELL"),
                 Some("PERC")
             ),
@@ -848,46 +982,195 @@ mod tests {
             bus_for(
                 "vda",
                 "/sys/devices/pci0000:00/0000:00:04.0/virtio1/block/vda",
-                None,
-                None,
-                None
-            ),
-            Bus::Virtual
-        );
-        assert_eq!(
-            bus_for(
-                "xvda",
-                "/sys/devices/vbd-51712/block/xvda",
-                None,
+                &[],
                 None,
                 None
             ),
             Bus::Virtual
         );
         assert_eq!(
-            bus_for("ram0", "/sys/devices/virtual/block/ram0", None, None, None),
+            bus_for("xvda", "/sys/devices/vbd-51712/block/xvda", &[], None, None),
+            Bus::Virtual
+        );
+        assert_eq!(
+            bus_for("ram0", "/sys/devices/virtual/block/ram0", &[], None, None),
             Bus::Ram
         );
         assert_eq!(
-            bus_for(
-                "zram0",
-                "/sys/devices/virtual/block/zram0",
-                None,
-                None,
-                None
-            ),
+            bus_for("zram0", "/sys/devices/virtual/block/zram0", &[], None, None),
             Bus::Ram
         );
         assert_eq!(
             bus_for(
                 "mmcblk0",
                 "/sys/devices/platform/mmc/mmcblk0",
-                None,
+                &[],
                 None,
                 None
             ),
             Bus::Unknown
         );
+    }
+
+    /// NVMe is local only over known-local transports, on every controller;
+    /// an iSCSI session or a Fibre Channel remote port makes a SCSI disk
+    /// remote.
+    #[test]
+    fn test_remote_targets_are_classed_remote() {
+        let ns = "/sys/devices/virtual/nvme-fabrics/ctl/nvme1/nvme1n1";
+        for (transports, bus) in [
+            (&["pcie"][..], Bus::Nvme),
+            (&["apple-nvme"], Bus::Nvme),
+            (&["pcie", "pcie"], Bus::Nvme),
+            (&["tcp"], Bus::Remote),
+            (&["rdma"], Bus::Remote),
+            (&["fc"], Bus::Remote),
+            (&["loop"], Bus::Remote),
+            (&["pcie", "tcp"], Bus::Remote),
+            (&[], Bus::Unknown),
+        ] {
+            assert_eq!(
+                bus_for("nvme1n1", ns, transports, None, None),
+                bus,
+                "{transports:?}"
+            );
+        }
+        assert_eq!(
+            bus_for(
+                "sdb",
+                "/sys/devices/platform/host3/session1/target3:0:0/3:0:0:0/block/sdb",
+                &[],
+                Some("LIO-ORG"),
+                Some("disk0")
+            ),
+            Bus::Remote
+        );
+        assert_eq!(
+            bus_for(
+                "sdc",
+                "/sys/devices/pci0000:00/0000:00:03.0/0000:05:00.0/host5/rport-5:0-2/target5:0:0/5:0:0:1/block/sdc",
+                &[],
+                Some("NETAPP"),
+                Some("LUN C-Mode")
+            ),
+            Bus::Remote
+        );
+        // Neither a word containing "session" nor a SAS port is a session.
+        assert_eq!(
+            bus_for(
+                "sdd",
+                "/sys/devices/pci0000:00/0000:00:1f.0/host0/port-0:0/end_device-0:0/target0:0:0/0:0:0:0/sessions/block/sdd",
+                &[],
+                Some("SEAGATE"),
+                Some("ST4000NM")
+            ),
+            Bus::Scsi
+        );
+    }
+
+    /// Network block devices and remote SCSI host drivers are remote; local
+    /// HBAs, virtual SCSI and RAID drivers are not.
+    #[test]
+    fn test_network_block_devices_and_remote_scsi_hosts() {
+        for name in [
+            "nbd0",
+            "rbd3",
+            "rnbd1",
+            "drbd0",
+            "etherd!e0.1",
+            "ublkb0",
+            "dasda",
+            "scinia",
+            "pxd1",
+        ] {
+            let path = format!("/sys/devices/virtual/block/{name}");
+            assert_eq!(bus_for(name, &path, &[], None, None), Bus::Remote, "{name}");
+        }
+        assert_eq!(
+            bus_for(
+                "nullb0",
+                "/sys/devices/virtual/block/nullb0",
+                &[],
+                None,
+                None
+            ),
+            Bus::Ram
+        );
+        for d in [
+            "ib_srp",
+            "iscsi_tcp",
+            "iscsi_iser",
+            "qla4xxx",
+            "lpfc",
+            "qla2xxx",
+            "fcoe",
+            "csiostor",
+            "ibmvfc",
+        ] {
+            assert!(remote_scsi_driver(d), "{d}");
+        }
+        for d in [
+            "ahci",
+            "mpt3sas",
+            "megaraid_sas",
+            "virtio_scsi",
+            "storvsc",
+            "usb-storage",
+            "",
+        ] {
+            assert!(!remote_scsi_driver(d), "{d}");
+        }
+    }
+
+    /// Admin data counts only for a namespace known to be local.
+    #[test]
+    fn test_nvme_admin_data_only_for_a_local_namespace() {
+        let leaf = |name: &str, bus| LeafFacts {
+            name: name.to_owned(),
+            bus,
+            ..LeafFacts::default()
+        };
+        assert!(local_nvme(&leaf("nvme0n1", Bus::Nvme)));
+        assert!(!local_nvme(&leaf("nvme0n1", Bus::Remote)));
+        assert!(!local_nvme(&leaf("nvme0n1", Bus::Unknown)));
+        assert!(!local_nvme(&leaf("sda", Bus::Nvme)));
+    }
+
+    /// A namespace's controllers: the controller itself, or every
+    /// controller a multipath subsystem links to (not its namespaces).
+    #[test]
+    fn test_nvme_controllers_of_a_namespace() {
+        let root = std::env::temp_dir().join(format!("sio-nvme-ctrls-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let subsys = root.join("nvme-subsys0");
+        for d in [
+            "nvme3",
+            "nvme-subsys0/nvme1",
+            "nvme-subsys0/nvme0",
+            "nvme-subsys0/nvme0n1",
+            "virtio1/nvme9",
+        ] {
+            assert!(fs::create_dir_all(root.join(d)).is_ok());
+        }
+        assert_eq!(
+            nvme_controllers(&root.join("nvme3")),
+            vec![root.join("nvme3")]
+        );
+        assert_eq!(
+            nvme_controllers(&subsys),
+            vec![subsys.join("nvme0"), subsys.join("nvme1")]
+        );
+        // Only a subsystem is searched for controllers.
+        assert!(nvme_controllers(&root.join("virtio1")).is_empty());
+        assert!(nvme_controllers(&root.join("missing")).is_empty());
+        // Transports: every controller's, or none while one is unreadable.
+        let ctrls = nvme_controllers(&subsys);
+        assert!(fs::write(subsys.join("nvme0/transport"), "tcp\n").is_ok());
+        assert!(controller_transports(&ctrls).is_empty());
+        assert!(fs::write(subsys.join("nvme1/transport"), "pcie\n").is_ok());
+        assert_eq!(controller_transports(&ctrls), ["tcp", "pcie"]);
+        assert!(controller_transports(&[]).is_empty());
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn id_ctrl_bytes() -> Vec<u8> {

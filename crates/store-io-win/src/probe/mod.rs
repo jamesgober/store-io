@@ -19,10 +19,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileStorageInfo, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
 };
 use windows_sys::Win32::System::Ioctl::{
-    IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, StorageAccessAlignmentProperty,
-    StorageAdapterProperty, StorageDeviceNumaProperty, StorageDeviceProperty,
-    StorageDeviceProtocolSpecificProperty, StorageDeviceWriteCacheProperty, WriteCacheDisabled,
-    WriteCacheEnabled, WriteCacheTypeNone, WriteCacheTypeWriteBack, WriteCacheTypeWriteThrough,
+    IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+    IOCTL_STORAGE_QUERY_PROPERTY, StorageAccessAlignmentProperty, StorageAdapterProperty,
+    StorageDeviceNumaProperty, StorageDeviceProperty, StorageDeviceProtocolSpecificProperty,
+    StorageDeviceWriteCacheProperty, WriteCacheDisabled, WriteCacheEnabled, WriteCacheTypeNone,
+    WriteCacheTypeWriteBack, WriteCacheTypeWriteThrough,
 };
 
 use crate::dir::WinDir;
@@ -141,6 +142,14 @@ fn disk_number(root: &[u16]) -> Option<u32> {
     storage::parse_disk_extents(&ext[..n.min(ext.len())]).map(|(_count, first)| first)
 }
 
+/// The disk's length in bytes (`IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`, which
+/// needs no access rights).
+fn disk_size(drive: &Handle) -> Option<u64> {
+    let mut out = [0u8; 40];
+    let n = sys::ioctl(drive, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, &[], &mut out).ok()?;
+    storage::parse_disk_size(&out[..n.min(out.len())])
+}
+
 /// One `IOCTL_STORAGE_QUERY_PROPERTY` with a plain query.
 fn query(drive: &Handle, id: i32, out_len: usize) -> Option<Vec<u8>> {
     let q = storage::property_query(id);
@@ -231,6 +240,9 @@ fn probe_drive(drive: &Handle, ev: &mut Evidence) {
     {
         d.max_transfer = max_transfer;
         d.bus = storage::bus_from_code(i32::from(bus));
+        if let Some(layer) = storage::layer_from_code(i32::from(bus)) {
+            ev.stack.push(layer);
+        }
     }
 
     if let Some(desc) =
@@ -239,6 +251,11 @@ fn probe_drive(drive: &Handle, ev: &mut Evidence) {
         let bus = storage::bus_from_code(desc.bus);
         if bus != Bus::Unknown {
             d.bus = bus;
+        }
+        if let Some(layer) = storage::layer_from_code(desc.bus) {
+            if !ev.stack.contains(&layer) {
+                ev.stack.push(layer);
+            }
         }
         d.model = match (desc.vendor, desc.product) {
             (Some(v), Some(p)) => Some(format!("{v} {p}")),
@@ -304,6 +321,9 @@ fn probe_nvme(drive: &Handle, ev: &mut Evidence) {
         }
     }
 
+    // Namespace 1, used only if it is this disk's (its size is the disk's):
+    // otherwise its format and atomic fields are missing, not borrowed.
+    let disk_bytes = disk_size(drive);
     match nvme(
         drive,
         NvmeQuery::Identify {
@@ -313,6 +333,7 @@ fn probe_nvme(drive: &Handle, ev: &mut Evidence) {
         4096,
     )
     .and_then(|(data, _)| nvme::parse_identify_namespace(&data))
+    .filter(|ns| disk_bytes.is_some_and(|b| nvme::namespace_matches(ns, b)))
     {
         Some(ns) => {
             d.atomic.nsabp = ns.nsabp;
@@ -326,7 +347,12 @@ fn probe_nvme(drive: &Handle, ev: &mut Evidence) {
                 d.optimal_write = (u32::from(npwg) + 1).saturating_mul(ns.lba_bytes);
             }
         }
-        None => ev.missing.insert(Missing::AtomicFields),
+        // Not this disk's namespace (or unreadable): no atomic evidence at
+        // all, AWUPF included (another namespace's NAWUPF may be smaller).
+        None => {
+            d.atomic = Default::default();
+            ev.missing.insert(Missing::AtomicFields);
+        }
     }
 
     match nvme(

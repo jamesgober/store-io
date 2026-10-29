@@ -812,6 +812,39 @@
 
 ### Fixed
 
+- Probe: **a device reached over a network was classed like a local
+  drive.** On Linux an NVMe namespace over fabrics (TCP, RDMA, Fibre
+  Channel, loop) was reported as a local NVMe bus, and could be
+  `FlushRequired`, or power-safe from the remote target's Identify data,
+  with an untorn unit read from it; an iSCSI, SRP or Fibre Channel SCSI
+  disk was a local SCSI disk, and NBD, RBD, RNBD, DRBD and AoE devices
+  had an unknown bus (raising nothing), as did ublk, DASD, PowerFlex and
+  Portworx devices; on Windows an iSCSI disk was a local SCSI disk and a
+  Fibre Channel one had an unknown bus. Such a device is now `Bus::Remote`, `Unverified` with
+  the new reason `RemoteTarget`. An NVMe namespace is local only when
+  every controller's transport is known to be (`pcie`, or Apple
+  silicon's `apple-nvme`), each controller of a multipath subsystem
+  counted; one that cannot be read leaves the bus unknown, and its
+  Identify and SMART data are not used. A multipath namespace's
+  controller is now one of the subsystem's (its char node), not the
+  subsystem.
+- Probe (Windows): **a Storage Spaces disk was classed as a hypervisor's
+  virtual disk.** It is now a pool layer (`StackLayer::Pool`) over an
+  unknown bus, `Unverified` with the new reason `StoragePool`.
+- Probe (Windows): **Identify Namespace answers were used whatever
+  namespace they described.** The query names namespace 1; its answer is
+  now used only when the namespace is exactly the disk's size, else no
+  atomic-write evidence is used (AWUPF included, so no untorn unit) and
+  the LBA size is the class driver's.
+- Probe (Windows): **the namespace atomic fields' valid bit was read from
+  the wrong bit** (NSFEAT bit 3, UIDREUSE, instead of bit 1, NSABP): a
+  drive's NAWUPF, NABSPF and NABO were ignored, or used when not valid.
+- Probe (Linux): **a null_blk device was a device of unknown bus**, so
+  it could be `FlushRequired`; it keeps data in memory or nowhere, and is
+  now a RAM device (`Unsafe`).
+- Tests: **mutants 638 and 641 had lost their killing tests** when the
+  direct single-chunk write (P4b) moved 4 KiB writes off the pump; the
+  inline tests now also refuse and cut short a write of three pieces.
 - Tests: **mutants 558 and 559 had lost their only killing test** when
   D-132 rerouted cut-short entries. A new test makes an entry fail the
   entry checks for a fault of its own; both are killed again.

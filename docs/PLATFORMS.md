@@ -100,8 +100,8 @@ Everything runs unprivileged. The physical drive is opened with desired access 0
 | Bus, largest transfer | `StorageAdapterProperty`, `StorageDeviceProperty` |
 | Model, firmware | `StorageDeviceProperty`, then NVMe Identify |
 | NUMA node | `StorageDeviceNumaProperty` |
-| NVMe: volatile cache present, AWUPF, multiple controllers | Identify Controller (CNS 01h) |
-| NVMe: atomic fields, LBA size, preferred write granularity | Identify Namespace (CNS 00h) for namespace 1 |
+| NVMe: volatile cache present, AWUPF, multiple controllers | Identify Controller (CNS 01h); AWUPF dropped when namespace 1 is not the disk's (below) |
+| NVMe: atomic fields, LBA size, preferred write granularity | Identify Namespace (CNS 00h) for namespace 1, used only when its size (NSZE times its LBA size) is the disk's length (`IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`) |
 | NVMe: volatile cache enabled | Get Features, Volatile Write Cache (FID 06h) |
 | NVMe: backup failed | SMART / Health log (LID 02h), critical warning bit 4 |
 | Hypervisor | The disk's model string and bus (a virtual-disk model or bus) |
@@ -112,8 +112,9 @@ The write-cache property query makes the class driver send one device cache flus
 
 ### Known limitations
 
-- **NVMe namespace 1 only.** Identify Namespace is always asked for namespace 1. On a drive whose volume lives in another namespace, the atomic-write fields, LBA size and write granularity come from the wrong namespace.
-- **No storage-stack walk.** The layers below the volume (BitLocker, Storage Spaces, other filter drivers) are not inspected, and `Stack` is always reported missing. A Storage Spaces disk reports a virtual bus and is therefore classed `Unverified` with the reason `Hypervisor`.
+- **NVMe namespace 1 only.** Identify Namespace is asked for namespace 1 (the disk's handle does not report its namespace id), and the answer is used only when that namespace is exactly the disk's size. On a drive whose volume lives in another namespace of a different size, no atomic-write evidence is used (AWUPF included, so no untorn unit) and the LBA size comes from the class driver; two namespaces of one size cannot be told apart.
+- **NVMe over fabrics.** No Windows bus type in the SDK names an NVMe-over-fabrics initiator; one that reports the NVMe bus type would be classed as a local NVMe drive.
+- **No storage-stack walk.** The layers below the volume (BitLocker, other filter drivers) are not inspected, and `Stack` is always reported missing. A Storage Spaces disk is reported as a pool layer (`StoragePool`, `Unverified`); its pool's own disks are not probed.
 - **Fencing after a killed process is unverified.** Whether the ownership lock can be released before a killed owner's in-flight writes have landed has not been tested; a kill test is planned ([later list](../dev/TODO.md)). The device report does not show this yet.
 - **No certified fast write path.** Write-through (FUA) writes are not used until a power-cut rig can certify or rule them out (1.x).
 - **No crash replay on NTFS.** Windows has no write log like Linux's `dm-log-writes`, so a real NTFS cannot be rebuilt at every point a power cut could leave it. NTFS gets the conformance tests; its crash states are the simulator's enumeration (each format-2 change crashed at every step, the open's own writes, and a matrix of damage to the metadata: `crates/store-io-engine/tests/format2_crash.rs`, `format2_crash_open.rs`, `format2_damage.rs`). On a real ext4 and XFS a workload of the same kinds of change is replayed at every state the device log shows (`tests/crash.rs`: appends, page writes, slot commits, provisioning, growth within and beyond capacity, recycle, release, a repair; not an accept, a copy, a crashed create or close, which only the simulator enumerates).
@@ -192,7 +193,7 @@ The probe is unprivileged, never writes a file, and parses every sysfs, procfs a
 | The mount | `/proc/self/mountinfo`, by `statx` mount id, else by device number and the longest matching mount point |
 | Mount options | `mountinfo` per-mount and superblock options; for ext4 also `/proc/fs/ext4/<dev>/options`, which prints effective defaults such as `barrier` |
 | Storage stack | A walk of `/sys/dev/block/<major>:<minor>` through partitions, device-mapper (crypt, VDO, LVM linear, thin, snapshot, cache and writecache, multipath; classified by name and uuid), MD (level, consistency policy, write-behind backlog), loop and bcache, down to the first leaf disk |
-| Cache mode, FUA, block sizes, minimum I/O, largest transfer, NUMA node, bus | The leaf's `queue/` attributes and sysfs path |
+| Cache mode, FUA, block sizes, minimum I/O, largest transfer, NUMA node, bus | The leaf's `queue/` attributes and sysfs path; for NVMe, every controller's `transport` (the controller itself, or each controller of a multipath subsystem); for SCSI, the host's driver (`/sys/class/scsi_host/hostN/proc_name`) |
 | NVMe cache presence and state, atomic fields, model, firmware, health | NVMe admin commands through `/dev/<namespace>` or `/dev/<controller>`, whichever opens: Identify Controller, Identify Namespace (the namespace id from sysfs), Get Features (volatile write cache), SMART / Health log |
 | Hypervisor | DMI vendor and product, `/sys/hypervisor/type`, the CPU `hypervisor` flag, vmbus and virtio devices, a WSL kernel release |
 | Page-cache query available | A `cachestat` call |
@@ -208,7 +209,7 @@ How the evidence maps: the OS is taken to pass flushes when the leaf's `queue/wr
 - **Device facts need the device node.** The volatile-cache presence, its enabled state, the atomic-write fields and the health log come only from NVMe admin commands, through a device node an unprivileged user usually cannot open. Without them a device can be at most `FlushRequired`; power-safe needs readable Identify and SMART data, or a certificate. SATA and SAS cache presence is not read at all.
 - **One leaf.** Only the first leaf device of a stack is inspected; the other members of a mirror or array are not.
 - **Anonymous devices.** btrfs, overlay, network and FUSE mounts have no block device to walk from, so the stack and device facts are missing.
-- **NVMe over fabrics** is reported as an NVMe bus like a local drive; the transport is read but not used.
+- **An NVMe controller without a `transport` attribute** (old kernels) leaves the bus unknown and the namespace's Identify and SMART data unused, so such a drive is at most `FlushRequired`.
 - **Device-mapper targets** are inferred from names and uuids (reading the target table needs root); an unrecognised one marks the stack uncertain. An MD parity array whose consistency policy cannot be read is treated as having a write hole.
 - **Virtual machines.** Any detected hypervisor makes the device `Unverified`, so cloud and CI virtual machines need an attestation or an override. GitHub's Ubuntu runners also mount their root file system `nobarrier`, which is `Unsafe`.
 - **Kernel features by version:** `openat2` 5.6, OFD locks 3.15, `statx` direct-I/O alignment 6.1, `cachestat` 6.5, `statx` atomic-write fields 6.11. Older kernels lose the corresponding evidence or confinement, as described above. No kernel-specific bug rules exist yet.

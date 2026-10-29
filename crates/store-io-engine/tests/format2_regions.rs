@@ -259,6 +259,81 @@ fn test_a_header_with_an_unknown_ro_compat_feature_is_read_only() {
     assert!(plain.append_durable(&[1u8; B as usize]).is_ok());
 }
 
+/// A header pair whose winner has an unknown read-only-compatible feature
+/// is never rewritten (spec §18): its bytes stay as they were through every
+/// call that could touch it (an append and a recycle of the region, the
+/// store's other writes, a slot commit, a clean close and reopen, and a
+/// release of the region itself, which is refused).
+#[test]
+fn test_an_unknown_ro_compat_header_pair_is_never_rewritten() {
+    let p = fresh(214);
+    let mut r = append(0, "foreign", BASE);
+    r.ro_compat = 1 << 31;
+    write_regions(&p, 0, &[r, append(1, "plain", NEXT)]);
+    let pair = |p: &SimPlatform| media(p)[BASE as usize..(BASE + 2 * B) as usize].to_vec();
+    let before = pair(&p);
+    let s = open(&p);
+    let f = s.append_region("foreign").unwrap();
+    assert!(is_read_only(
+        &f.append_durable(&[1u8; B as usize]).unwrap_err()
+    ));
+    assert!(is_read_only(&f.recycle().unwrap_err()));
+    let plain = s.append_region("plain").unwrap();
+    plain.resume_at(0).unwrap();
+    plain.append_durable(&[2u8; B as usize]).unwrap();
+    s.provision_page_region("more", CAP).unwrap();
+    s.provision_slot("cfg")
+        .unwrap()
+        .commit(b"settings")
+        .unwrap();
+    drop((f, plain, s));
+    assert!(
+        pair(&p) == before,
+        "rewritten by the store's other calls or its close"
+    );
+    let s = open(&p);
+    let f = s.append_region("foreign").unwrap();
+    // Its release would rewrite the pair: refused, nothing committed.
+    assert!(is_read_only(&f.release().unwrap_err()));
+    drop(s);
+    assert!(pair(&p) == before, "rewritten by its release");
+    assert!(open(&p).append_region("foreign").is_ok(), "released");
+}
+
+/// An unknown read-only-compatible feature in the winner of a table page or
+/// of the volume record opens the store read-only (spec §14), and the open
+/// writes nothing.
+#[test]
+fn test_an_unknown_ro_compat_page_or_volume_record_opens_read_only() {
+    for (seed, volume) in [(215u64, false), (216, true)] {
+        let p = fresh(seed);
+        write_regions(&p, 0, &[append(0, "log", BASE)]);
+        // The winner: the page as crafted (its slot B), or the volume
+        // record's newest copy.
+        let (off, len) = if volume {
+            (newest_volume_slot(&p), B)
+        } else {
+            (page_at(&p, 0, 1), TABLE)
+        };
+        let mut slot = media(&p)[off as usize..(off + len) as usize].to_vec();
+        slot[20..24].copy_from_slice(&(1u32 << 31).to_le_bytes());
+        rehash(&mut slot);
+        put(&p, off, &slot);
+        let before = media(&p);
+        let s = open(&p);
+        assert!(s.report().read_only, "volume {volume}");
+        assert!(
+            s.append_region("log").is_ok(),
+            "volume {volume}: still readable"
+        );
+        drop(s);
+        assert!(
+            media(&p) == before,
+            "volume {volume}: a read-only open wrote"
+        );
+    }
+}
+
 /// A 512 B append region (spec §13, not built): the store opens read-only,
 /// with the reason, and the open writes nothing at all.
 #[test]

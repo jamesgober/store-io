@@ -88,4 +88,8 @@ pub struct FaultPlan {
     /// Every `Platform::probe` fails with this raw code (for example 5,
     /// EIO, as the macOS flush check's `F_FULLFSYNC` failing).
     pub fail_probe: Option<i32>,
+    /// The n-th `Platform::lock_exclusive` or `lock_shared` (1-based) fails
+    /// with this raw code (for example 37, ENOLCK: a file system that cannot
+    /// lock) and locks nothing.
+    pub fail_lock: Option<(u64, i32)>,
 }

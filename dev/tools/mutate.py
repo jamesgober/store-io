@@ -1262,6 +1262,21 @@ M = [
  # A release whose commit is durable succeeds unless the store is poisoned.
  ("crates/store-io-engine/src/lifecycle2.rs", '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(Error::NotWritten { .. }) => return Ok(()),', ["-p", "store-io-engine", "--test", "abandoned"]),
  ("crates/store-io-engine/src/lifecycle.rs", '            Err(_) if inner.domain.poisoned().is_none() => return Ok(()),', '            Err(_) if false => return Ok(()),', ["-p", "store-io-engine", "--test", "abandoned"]),
+ # A header pair with an unknown ro_compat bit: its region served read-only.
+ ('crates/store-io-engine/src/open2.rs', '                    c.decoded = Some((view.header.region_generation, info.writable()));', '                    c.decoded = Some((view.header.region_generation, true));', ["-p", "store-io-engine", "--test", "format2_regions"]),
+ # (No entry for plan_next's unknown-ro_compat refusal, slots.rs: every
+ # caller is refused first, the region served read-only, a store with
+ # such a page or volume record opened read-only; a backstop.)
+ # A lock failure other than a holder is `Io`, never `Locked`.
+ ('crates/store-io-engine/src/open.rs', '            if store_io_core::errno::is_lock_held(raw) {', '            if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "store"]),
+ ('crates/store-io-engine/src/create.rs', '                    if store_io_core::errno::is_lock_held(raw) {', '                    if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "store"]),
+ ('crates/store-io-engine/src/create.rs', '            if store_io_core::errno::is_lock_held(raw) {\n                exists()', '            if store_io_core::errno::is_lock_held(raw) || true {\n                exists()', ["-p", "store-io-engine", "--test", "store"]),
+ ('crates/store-io-engine/src/copy.rs', '        if is_lock_held(raw) {', '        if is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "copy"]),
+ ('crates/store-io-engine/src/directory.rs', '            if store_io_core::errno::is_lock_held(raw) {', '            if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "directory_changes"]),
+ # Format 1's read-only open: a header that names another region, or says
+ # released, makes its region unavailable.
+ ('crates/store-io-engine/src/open.rs', '            if rm.region_id != e.region_id || rm.kind != e.kind {', '            if rm.kind != e.kind {', ["-p", "store-io-engine", "--test", "format1"]),
+ ('crates/store-io-engine/src/open.rs', '            if rm.state != RegionState::Ready {', '            if rm.state != RegionState::Ready && false {', ["-p", "store-io-engine", "--test", "format1"]),
 ]
 
 def kill_stuck_tests():

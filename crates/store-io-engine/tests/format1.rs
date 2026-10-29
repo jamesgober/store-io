@@ -12,8 +12,12 @@
 
 use std::path::{Path, PathBuf};
 
+mod format2_util;
+
 use store_io_core::error::{Capability, Error};
-use store_io_engine::{CONTAINER, CopyOptions, Store, StoreOptions, copy_store};
+use store_io_engine::{CONTAINER, CopyOptions, Store, StoreOptions, Unavailable, copy_store};
+use store_io_format::crc32c::crc32c;
+use store_io_format::meta::{RegionMeta, RegionState};
 use store_io_format::slot::FORMAT_1;
 use store_io_sim::{CrashMode, SimConfig, SimPlatform};
 
@@ -122,4 +126,75 @@ fn test_a_format_1_store_opens_read_only_and_copies_to_a_writable_one() {
         .unwrap();
     pages.read(pages.pos(B).unwrap(), &mut back).unwrap();
     assert!(back == [9; B as usize]);
+}
+
+/// The offset of the newest slot of region `region_id`'s header pair (its
+/// object `2^32 + id`), found by its magic and object id on 4 KiB blocks.
+fn header_slot(m: &[u8], region_id: u32) -> Option<usize> {
+    let object = (1u64 << 32) | u64::from(region_id);
+    (0..m.len() / B as usize)
+        .map(|i| i * B as usize)
+        .filter(|&at| &m[at..at + 8] == b"SIOSLOT\0")
+        .filter(|&at| u64::from_le_bytes(m[at + 48..at + 56].try_into().unwrap()) == object)
+        .max_by_key(|&at| u64::from_le_bytes(m[at + 56..at + 64].try_into().unwrap()))
+}
+
+/// A format-1 region whose header slot is valid but says the wrong thing
+/// (released while its entry is ready, another region's id, a payload that
+/// does not decode) is unavailable with that reason, on a real damaged
+/// store; the other region is served.
+#[test]
+fn test_format_1_header_damage_has_its_reason() {
+    type Edit = fn(&mut RegionMeta, &mut [u8]);
+    let cases: [(Edit, Unavailable); 3] = [
+        (
+            |h, _| h.state = RegionState::Released,
+            Unavailable::HeaderReleased,
+        ),
+        (|h, _| h.region_id += 7, Unavailable::HeaderMismatch),
+        (|_, raw| raw[7] = 1, Unavailable::HeaderInvalid),
+    ];
+    for (k, (edit, reason)) in cases.into_iter().enumerate() {
+        let p = SimPlatform::new(SimConfig::volatile(1300 + k as u64));
+        let s = Store::create(
+            p.clone(),
+            Path::new(DIR),
+            StoreOptions {
+                container_format: FORMAT_1,
+                ..opts()
+            },
+        )
+        .unwrap();
+        s.provision_append_region("keep", 64 * B).unwrap();
+        let hurt = s.provision_append_region("hurt", 64 * B).unwrap();
+        hurt.append_durable(&[3u8; 100]).unwrap();
+        drop((hurt, s));
+        let mut m = media(&p);
+        // The region whose header names "hurt" has the higher id of the two.
+        let at = (0u32..8)
+            .filter_map(|id| header_slot(&m, id))
+            .next_back()
+            .unwrap();
+        let len = u32::from_le_bytes(m[at + 72..at + 76].try_into().unwrap()) as usize;
+        let payload = at + 128..at + 128 + len;
+        let mut h = RegionMeta::decode(&m[payload.clone()]).unwrap();
+        let mut raw = m[payload.clone()].to_vec();
+        edit(&mut h, &mut raw);
+        if raw == m[payload.clone()] {
+            h.encode(&mut raw).unwrap();
+        }
+        m[payload.clone()].copy_from_slice(&raw);
+        let crc = crc32c(&m[payload]);
+        m[at + 28..at + 32].copy_from_slice(&crc.to_le_bytes());
+        m[at + 8..at + 12].fill(0);
+        let crc = crc32c(&m[at..at + 128]);
+        m[at + 8..at + 12].copy_from_slice(&crc.to_le_bytes());
+        format2_util::put(&p, at as u64, &m[at..at + B as usize]);
+        let s = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+        let u = &s.report().unavailable;
+        assert_eq!(u.len(), 1, "{reason:?}: {u:?}");
+        assert_eq!((u[0].name.as_str(), u[0].reason), ("hurt", reason));
+        assert!(s.append_region("keep").is_ok());
+        assert!(s.append_region("hurt").is_err());
+    }
 }

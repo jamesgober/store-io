@@ -274,7 +274,8 @@ where
     /// # Errors
     ///
     /// `NotWritten(StaleGeneration | NotReady)` if the region was already
-    /// recycled or released; `Io` if the store's queue could not be prepared
+    /// recycled or released; `NotWritten(ReadOnly)` if the store or the
+    /// region is read-only; `Io` if the store's queue could not be prepared
     /// (nothing was written; the region stays usable); `Poisoned`;
     /// `DurabilityUnknown`.
     pub fn recycle(&self) -> Result<Self, Error> {
@@ -299,10 +300,15 @@ where
     ///
     /// # Errors
     ///
-    /// `NotWritten(StaleGeneration | NotReady)`, `Poisoned`,
-    /// `DurabilityUnknown`, or `Io` if the space could not be deallocated
-    /// (the region is released either way). Once the table records the
-    /// release, a release fails only on a poisoned store or with that `Io`.
+    /// `NotWritten(StaleGeneration | NotReady)` if the region was already
+    /// recycled or released; `NotWritten(ReadOnly)` if the store or the
+    /// region is read-only; on format 2, `NotWritten(Frozen)` while a table
+    /// page is stale or lost, and `NotWritten(Overlap)` when removing the
+    /// entry would change another region's verdict at the next open;
+    /// `Poisoned`; `DurabilityUnknown`; or `Io` if the space could not be
+    /// deallocated (the region is released either way). Once the table
+    /// records the release, a release fails only on a poisoned store or
+    /// with that `Io`.
     pub fn release(self) -> Result<(), Error> {
         self.store.release_region(&self.state)
     }

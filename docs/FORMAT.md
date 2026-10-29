@@ -727,7 +727,7 @@ This is how store-io opens a format-2 container. An independent reader that foll
 12. **Decide read-only.** The open is read-only if it was asked to be; if section 14 forbids writing; if a metadata winner has an unknown `ro_compat_flags` bit; or if a usable append region has 512-byte blocks. Everything above writes nothing, so this verdict comes before the first write.
 13. **(Writable) Heal and take over.** Heal the in-flight write (section 14), then write the volume record's next version: `owner_generation` one higher, `clean_close = 0`, the next `meta_seq`, durably.
 
-A region is served **read-only** when its page is Unconfirmed; when its page is possibly accepted while some page is Unconfirmed or Lost; when it is possibly superseded; or when its header winner has an unknown `ro_compat_flags` bit.
+A region is served **read-only** when its page is Unconfirmed; when its page is possibly accepted while some page is Unconfirmed or Lost; when it is possibly superseded; or when its header winner has an unknown `ro_compat_flags` bit. A region served read-only is neither recycled nor released (both would write its metadata).
 
 The open's report lists every candidate and damaged slot, every Unconfirmed or Lost page, every entry that cannot be listed as a region, every extra extent, every possibly superseded region and every region that shares reserved bytes, the stale pages' agreement, every possibly lost header write, every unavailable region with its reason, and whether the last writer closed cleanly.
 

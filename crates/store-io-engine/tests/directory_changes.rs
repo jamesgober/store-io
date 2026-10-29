@@ -23,6 +23,25 @@ fn open(p: &SimPlatform) -> Directory<SimPlatform> {
     Directory::open(p.clone(), Path::new(DIR), true, Trust::default()).unwrap()
 }
 
+/// A change lock that fails for another reason than a holder (ENOLCK) is
+/// `Io` for the lock, not `Locked`, and changes nothing.
+#[test]
+fn test_a_change_lock_failure_that_is_not_a_holder_is_io() {
+    let p = SimPlatform::new(SimConfig::volatile(2201));
+    let d = open(&p);
+    d.replace("m", &[1u8; 100]).unwrap();
+    p.with_world(|w| {
+        let at = w.lock_calls() + 1;
+        w.faults_mut().fail_lock = Some((at, 37));
+    });
+    let r = d.replace("m", &[2u8; 100]);
+    assert!(
+        matches!(r, Err(Error::Io { op: store_io_core::error::Op::Lock, raw, .. }) if raw.code == 37),
+        "{r:?}"
+    );
+    assert!(d.read("m").unwrap() == [1u8; 100]);
+}
+
 /// While one handle is inside a replace, another handle's replace fails
 /// `Locked` and writes nothing; the first one's bytes are what the
 /// directory holds, before and after a power failure.

@@ -358,6 +358,47 @@ fn test_read_only_open_modifies_nothing_and_cannot_write() {
     assert_eq!(before, after, "a read-only open changed the container");
 }
 
+/// A lock that fails for any reason but another holder (ENOLCK: a file
+/// system that cannot lock) is `Io` for the lock, never `Locked`: at create
+/// (also over a crashed create's leftover), at a writable open and at a
+/// read-only open.
+#[test]
+fn test_a_lock_failure_that_is_not_a_holder_is_io_not_locked() {
+    let is_lock_io = |r: Result<Store<SimPlatform>, Error>| {
+        matches!(
+            r,
+            Err(Error::Io {
+                op: store_io_core::error::Op::Lock,
+                raw,
+                ..
+            }) if raw.code == 37
+        )
+    };
+    let fail_next = |p: &SimPlatform| {
+        p.with_world(|w| {
+            let at = w.lock_calls() + 1;
+            w.faults_mut().fail_lock = Some((at, 37));
+        });
+    };
+    let p = SimPlatform::new(SimConfig::volatile(14));
+    fail_next(&p);
+    assert!(is_lock_io(Store::create(p.clone(), Path::new(DIR), opts())));
+    // That create left its empty container: the next create reclaims it,
+    // and its lock failing there is `Io` too, not "already exists".
+    fail_next(&p);
+    assert!(is_lock_io(Store::create(p.clone(), Path::new(DIR), opts())));
+    drop(create(&p));
+    fail_next(&p);
+    assert!(is_lock_io(Store::open(p.clone(), Path::new(DIR), opts())));
+    fail_next(&p);
+    assert!(is_lock_io(Store::open_readonly(
+        p.clone(),
+        Path::new(DIR),
+        opts()
+    )));
+    drop(reopen(&p));
+}
+
 /// D-092: a read-only open needs no write rights, so it works on read-only
 /// media; readers share the store, and readers and the writer exclude each
 /// other. Before 0.4 a read-only open opened the container read-write to

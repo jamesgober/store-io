@@ -338,6 +338,36 @@ fn test_refusals_create_nothing() {
     }
 }
 
+/// Each lock a copy takes (the source's, the copy lock, the new store's)
+/// failing for another reason than a holder (ENOLCK) is `Io` for the lock,
+/// not `Locked`; past its last lock the copy succeeds.
+#[test]
+fn test_a_copy_lock_failure_that_is_not_a_holder_is_io() {
+    let mut failed = 0;
+    for nth in 1..=6u64 {
+        let p = SimPlatform::new(SimConfig::volatile(1011));
+        drop(source(&p, 2));
+        p.with_world(|w| {
+            let at = w.lock_calls() + nth;
+            w.faults_mut().fail_lock = Some((at, 37));
+        });
+        match copy(&p, OTHER, DIR) {
+            Ok(_) => assert!(failed > 0, "lock {nth}: no lock failed before"),
+            Err(e) => {
+                assert!(
+                    matches!(e, Error::Io { op: store_io_core::error::Op::Lock, raw, .. } if raw.code == 37),
+                    "lock {nth}: {e:?}"
+                );
+                failed += 1;
+            }
+        }
+    }
+    assert_eq!(
+        failed, 3,
+        "the source's lock, the copy lock, the new store's"
+    );
+}
+
 /// Another copy into the directory holds the copy lock: `Locked`, and the
 /// other copy's temporary store untouched.
 #[test]

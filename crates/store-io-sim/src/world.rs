@@ -344,6 +344,7 @@ pub struct World {
     clock_ms: u64,
     waits: u64,
     write_submits: u64,
+    lock_calls: u64,
     pub(crate) submit_probe: SubmitProbe,
     /// Run first by every `Platform::release_range`, outside the world lock.
     pub(crate) release_probe: SubmitProbe,
@@ -384,6 +385,7 @@ impl World {
             clock_ms: 0,
             waits: 0,
             write_submits: 0,
+            lock_calls: 0,
             submit_probe: SubmitProbe::default(),
             release_probe: SubmitProbe::default(),
             step_probe: StepProbe::default(),
@@ -510,6 +512,12 @@ impl World {
     /// on the caller's thread and outside the world lock.
     pub fn set_release_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
         self.release_probe = SubmitProbe(probe);
+    }
+
+    /// Lock calls so far (see [`FaultPlan::fail_lock`]).
+    #[must_use]
+    pub fn lock_calls(&self) -> u64 {
+        self.lock_calls
     }
 
     /// Write submissions so far (see [`FaultPlan::fail_submit`]).
@@ -758,6 +766,15 @@ impl World {
     // ----- locks -------------------------------------------------------------
 
     pub(crate) fn lock(&mut self, file: FileId, shared: bool) -> Result<(), OsError> {
+        self.lock_calls += 1;
+        if let Some((at, code)) = self.cfg.faults.fail_lock {
+            if at == self.lock_calls {
+                return Err(OsError {
+                    code,
+                    source: OsErrorSource::Sim,
+                });
+            }
+        }
         match (self.locks.get_mut(&file), shared) {
             (None, _) => {
                 let _none = self.locks.insert(file, shared.then_some(1));

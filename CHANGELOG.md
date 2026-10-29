@@ -13,6 +13,15 @@
 
 ### Added
 
+- Tests: **the open TODO test gaps closed** (v0.5). A region header pair
+  whose winner has an unknown read-only-compatible feature keeps its
+  bytes through every call that could touch it (its release is refused);
+  such a feature in a table page or the volume record opens the store
+  read-only, writing nothing. A lock failure other than a holder is `Io`
+  at create, open, read-only open, copy and directory changes. Format 1's
+  `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` on a damaged
+  store. The simulator gained `FaultPlan::fail_lock` (the n-th lock).
+
 - Tests: **every format-2 integrity guard has a mutation entry** (v0.5).
   An audit of every guard and every change format 2 makes found 58
   guards without one: 50 now have an entry its tests kill, and 8 are

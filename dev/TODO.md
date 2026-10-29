@@ -44,7 +44,7 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 
 - [x] (2026-10-20, v0.5) `errno::is_media_error` matches Linux errno numbers only (61, 74 and 117 mean other things on macOS). Harmless while the posix backend is Linux-only; make it per-OS like `is_unsupported` before the macOS backend (v0.5).
 - [ ] A region found unavailable (for example cut off by a short container) has no handle, so it can never be released, and while a truncated one exists the store refuses all growth. The store stays safe but cannot provision again. An explicit, logged repair operation needs a design and James's approval.
-- [ ] The `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` reasons are tested only through their error mapping, never by damaging a real store.
+- [x] (2026-10-28, v0.5: format 2 in tests/format2_regions.rs and format2_release.rs; format 1 in tests/format1.rs) The `HeaderInvalid`, `HeaderMismatch` and `HeaderReleased` reasons are tested only through their error mapping, never by damaging a real store.
 
 ## Supply chain
 
@@ -63,9 +63,9 @@ A local test box is approved (2026-10-20), not yet bought: a bare-metal Linux ma
 - [x] (2026-10-28, v0.5) Windows probe: Identify Namespace always asks for namespace 1. (Its answer is now used only when the namespace is the disk's size; two namespaces of one size still cannot be told apart.)
 - [ ] Defined but never produced: `Error::Fenced` (D-049 makes fencing the OS lock and the acquire barrier, so nothing can raise it): remove it, or document it as never returned, before the 1.0 API freeze. Reserved and documented as such: `Reason::KnownBug` (no rule yet), `StackLayer::Filter` (no backend detects one), `DurableReceipt::untorn()` (false until untorn writes are certified). (`StackLayer::VirtualDisk` is produced, for a macOS disk image.)
 - [x] (2026-10-28, v0.5: format 2 checks every region header against its table entry, `check_region` and `Entry2::check_header`; the gap and chain-break flags never change a winner and format 2 does not act on them by its spec, FORMAT.md Part I; format 1 opens read-only, its map from the entry) Open is lenient where it could be strict: a region header's data offset and size are not compared with its table entry; unconfirmed winners and the generation-gap and chain-break flags are accepted silently. (Fixed 2026-10-12: a non-zero volume `features` value or a longer record is refused as `Unsupported`, and the volume record's reserved bytes must be zero.)
-- [ ] Every lock failure is reported as `Locked`, even when the cause is another error.
+- [x] (2026-10-28, v0.5: fixed by the 0.5 audit, `errno::is_lock_held` at every lock; tested with the simulator's `fail_lock` at create, open, read-only open, copy and directory changes) Every lock failure is reported as `Locked`, even when the cause is another error.
 - [ ] Released table entries are reused only by a region of exactly the same size: a store that releases many differently sized regions can fill its region table with released entries (`NoSpace(Table)`). Needs merging or compaction of released entries.
-- [ ] A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).
+- [x] (2026-10-28, v0.5: tests/format2_regions.rs, a region header pair through every call, and a table page or volume record opening read-only) A test that a pair carrying an unknown read-only-compatible flag is never overwritten (needs a slot writer that can set flags).
 
 ## Found in v0.4 (2026-10-19), not yet done
 

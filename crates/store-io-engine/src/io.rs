@@ -505,24 +505,56 @@ where
         }
     }
 
-    /// Reserves `len` bytes on an append frontier, waiting (never failing)
-    /// while too many appends are in flight ahead of it.
-    pub(crate) fn reserve_append<'a>(
+    /// A lane for an append on `r` (cleared first, as [`Self::lane`]) and
+    /// its reservation of `len` bytes on `f`, waiting (never failing) while
+    /// too many appends are in flight ahead of it, as
+    /// [`AppendFrontier::reserve_wait`] does, but with no lane held: the
+    /// appends ahead may be a `Submitter`'s, which complete only when its
+    /// owner reaps them, and the owner may first need a shared lane.
+    ///
+    /// # Errors
+    ///
+    /// `Io` if a lane could not be cleared (nothing reserved), `Poisoned`, or
+    /// `NotWritten` as [`AppendFrontier::reserve`].
+    pub(crate) fn lane_and_reservation<'a>(
         &'a self,
+        r: &LiveRegion,
         f: &'a AppendFrontier,
         len: u64,
         c: ErrorContext,
-    ) -> Result<Reserved<'a, P>, Error> {
+    ) -> Result<(LaneGuard<'a, P::Queue>, Reserved<'a, P>), Error> {
         let domain = &self.inner.domain;
-        match f.reserve_wait(len, || domain.poisoned().is_some()) {
-            Ok(r) => Ok(Reserved {
-                store: self,
-                r: Some(r),
-            }),
-            Err(cause) => match domain.poisoned() {
-                Some(first) => Err(Error::Poisoned { first }),
-                None => Err(not_written(cause, c)),
-            },
+        let refused = |cause| match domain.poisoned() {
+            Some(first) => Error::Poisoned { first },
+            None => not_written(cause, c),
+        };
+        loop {
+            let lane = self.lane(r, Op::Write)?;
+            // Never reserve on a poisoned store (`reserve_wait`'s rule).
+            if domain.poisoned().is_some() {
+                return Err(refused(NotWrittenCause::TooManyInFlight));
+            }
+            // The prefix a refusal is judged against, read before the
+            // reservation (`reserve_wait`'s reasoning).
+            let seen = f.completed();
+            match f.reserve(len) {
+                Ok(res) => {
+                    return Ok((
+                        lane,
+                        Reserved {
+                            store: self,
+                            r: Some(res),
+                        },
+                    ));
+                }
+                Err(NotWrittenCause::TooManyInFlight) => {
+                    drop(lane);
+                    if !f.wait_completed(seen + 1, || domain.poisoned().is_some()) {
+                        return Err(refused(NotWrittenCause::TooManyInFlight));
+                    }
+                }
+                Err(cause) => return Err(refused(cause)),
+            }
         }
     }
 
@@ -760,7 +792,7 @@ where
     /// transient failure is still reported, never hidden).
     fn first_unreadable(&self, r: &LiveRegion, start: u64, end: u64) -> Result<(u64, u64), Error> {
         let mut first = None;
-        let _summary = self.scan_region(r, start, end, |item| match item {
+        let _summary = self.scan_region(r, start, end, false, |item| match item {
             ScanItem::Unreadable { start, end } => {
                 first = Some((start, end));
                 ControlFlow::Break(())
@@ -783,7 +815,7 @@ where
     ) -> Result<usize, Error> {
         let mut copied = 0usize;
         let mut unreadable = None;
-        let summary = self.scan_region(r, offset, offset + len, |item| match item {
+        let summary = self.scan_region(r, offset, offset + len, false, |item| match item {
             ScanItem::Data { offset: at, bytes } => {
                 let start = (at - offset) as usize;
                 if start < out.len() {
@@ -841,9 +873,15 @@ mod tests {
         let s = Store::create(p, Path::new("/db"), StoreOptions::default()).unwrap();
         let wal = s.provision_append_region("wal", 1 << 20).unwrap();
         let (f, _pass) = wal.writable().unwrap();
-        let reserved = s
-            .reserve_append(f, 100, store_io_core::error::ErrorContext::default())
+        let (lane, reserved) = s
+            .lane_and_reservation(
+                wal.state(),
+                f,
+                100,
+                store_io_core::error::ErrorContext::default(),
+            )
             .unwrap();
+        drop(lane);
         assert!(s.inner.domain.poisoned().is_none());
         drop(reserved);
         assert!(s.inner.domain.poisoned().is_some());

@@ -810,6 +810,62 @@ fn test_release_waiting_for_a_submitter_never_blocks_provisioning() {
     assert!(s.append_region("wal").is_err());
 }
 
+/// An append waiting for room in its window holds no lane. The window is
+/// full of a submitter's appends, which complete only when its owner reaps
+/// them; the owner's own call (a read, with the store's one shared lane)
+/// still runs, then it reaps, and the waiting append lands after them.
+/// Waiting with the lane held, the read and the append would wait for each
+/// other forever (and so would any provisioning behind them).
+#[test]
+fn test_an_append_waiting_for_room_holds_no_lane() {
+    let p = SimPlatform::new(SimConfig::volatile(830));
+    let s = Store::create(
+        p,
+        Path::new("/db"),
+        StoreOptions {
+            append_window: 4 << 12,
+            ..opts()
+        },
+    )
+    .unwrap();
+    let wal = s.provision_append_region("wal", MIB).unwrap();
+    let (done_tx, done_rx) = mpsc::channel();
+    let owner = {
+        let wal = wal.clone();
+        std::thread::spawn(move || {
+            let mut sub = sub(&s, 64);
+            // Fill the window, reaping nothing.
+            let mut held = 0;
+            loop {
+                match sub.append(&wal, filled(&sub, b"ahead"), WriteMode::Plain, held) {
+                    Ok(_) => held += 1,
+                    Err(r) => {
+                        assert!(is_cause(&r.error, NotWrittenCause::TooManyInFlight));
+                        break;
+                    }
+                }
+            }
+            let waiter = {
+                let wal = wal.clone();
+                std::thread::spawn(move || wal.append(b"waits for room").unwrap())
+            };
+            while wal.waiting_on_appends() == 0 {
+                std::thread::yield_now();
+            }
+            let mut back = [0u8; 4096];
+            wal.read(0, &mut back).unwrap();
+            assert_eq!(sub.wait(held as usize).unwrap().count(), held as usize);
+            let ticket = waiter.join().unwrap();
+            assert_eq!(ticket.pos().offset(), held * wal.block_size());
+            done_tx.send(()).unwrap();
+        })
+    };
+    done_rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("an append waiting for room deadlocked the submitter's owner");
+    owner.join().unwrap();
+}
+
 /// When the oldest operation finishes while a newer one is still in flight,
 /// the age restarts for the newer one: it is a different operation.
 #[test]

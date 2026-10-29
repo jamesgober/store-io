@@ -73,6 +73,8 @@ F2O = ["-p", "store-io-engine", "--test", "format2_open"]
 ENGINE_LIB_LIFECYCLE = ["-p", "store-io-engine", "--lib", "lifecycle::"]
 # The Submitter's tests.
 SUBMITTER_TEST = ["-p", "store-io-engine", "--test", "submitter"]
+SCAN_TEST = ["-p", "store-io-engine", "--test", "scan"]
+SCAN_SRC = "crates/store-io-engine/src/scan.rs"
 # Format-2 regions of several extents.
 F2E = ["-p", "store-io-engine", "--test", "format2_extents"]
 # Format-2 growth within capacity.
@@ -721,7 +723,7 @@ M = [
  # its row holds it
  ('crates/store-io-engine/src/lifecycle.rs', '        for (at, len) in extents.into_iter().filter(|x| x.1 > 0) {', '        for (at, len) in extents.into_iter().filter(|x| x.1 > 0).take(1) {', ENGINE_LIB_LIFECYCLE),
  ('crates/store-io-engine/src/lifecycle.rs', '            Some(_) if windows => Ok(()),', '            Some(_) if windows && false => Ok(()),', ENGINE_LIB_LIFECYCLE),
- ('crates/store-io-engine/src/io.rs', '            store: self,\n            r: Some(r),\n        }\n    }\n\n    /// Reserves', '            store: self,\n            r: Some(r).filter(|_| false),\n        }\n    }\n\n    /// Reserves', SUBMITTER_TEST),
+ ('crates/store-io-engine/src/io.rs', '            store: self,\n            r: Some(r),\n        }\n    }\n\n    /// A lane for an append', '            store: self,\n            r: Some(r).filter(|_| false),\n        }\n    }\n\n    /// A lane for an append', SUBMITTER_TEST),
  # E2b/E3 C8: the open reads a pair whose B follows A in one read, every
  # other pair slot by slot, a short read never judged, a failed read of
  # both read again slot by slot, each header matched to its own entry
@@ -1247,6 +1249,16 @@ M = [
  (BLOCK, ' || name.starts_with("nullb")', '', LINUX_PROBE),
  (WIN_NVME, '    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)', '    ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)', WIN_LIB),
  (WIN_NVME, '    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)) == Some(disk_bytes)', '    disk_bytes != 0 && ns.nsze.checked_mul(u64::from(ns.lba_bytes)).is_some()', WIN_LIB),
+ # No user code and no wait for room runs with a shared lane held: a
+ # scan's visitor (the lane put back first; a bisection's items held back),
+ # an append waiting for room in its window.
+ (SCAN_SRC, '                lane = None;\n            }\n            // Deliver everything that has arrived, in order.', '            }\n            // Deliver everything that has arrived, in order.', SCAN_TEST),
+ (SCAN_SRC, '        let _held = self.held.get_or_insert_with(Vec::new);', '        let _held = self.held.as_ref();', SCAN_TEST),
+ (SCAN_SRC, '                                        drop(l);\n                                        out.release();', '                                        out.release();\n                                        drop(l);', SCAN_TEST),
+ ('crates/store-io-engine/src/exec.rs', '        self._notify.is_some()', '        false', SCAN_TEST),
+ (SCAN_SRC, '        self.scan_region(r, from, to, true, |item| {', '        self.scan_region(r, from, to, false, |item| {', SCAN_TEST),
+ (SCAN_SRC, '                if lane.is_none() {\n                    match take() {', '                if false {\n                    match take() {', SCAN_TEST),
+ ('crates/store-io-engine/src/io.rs', '                    drop(lane);\n                    if !f.wait_completed(seen + 1', '                    if !f.wait_completed(seen + 1', SUBMITTER_TEST),
 ]
 
 def kill_stuck_tests():

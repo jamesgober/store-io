@@ -12,6 +12,8 @@
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use store_io_core::error::{Error, NotWrittenCause};
 use store_io_engine::{CONTAINER, ScanItem, ScanSummary, Store, StoreOptions};
@@ -280,4 +282,141 @@ fn test_a_large_read_across_a_bad_range_is_a_media_error() {
             ..
         })
     ));
+}
+
+/// Runs `f` on a thread of its own: a deadlock fails the test (after 20 s)
+/// instead of hanging it.
+fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = mpsc::channel();
+    let t = std::thread::spawn(move || {
+        let _sent = tx.send(f());
+    });
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(v) => v,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the scan's visitor deadlocked calling the store")
+        }
+        // The scenario panicked: its own message.
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            std::panic::resume_unwind(t.join().unwrap_err())
+        }
+    }
+}
+
+/// One shared lane: the fewest a store has, so a scan holding it while its
+/// visitor runs would leave the visitor's own calls nothing to wait for.
+/// (Buffers enough for two scans in flight and the visitor's calls.)
+fn one_lane() -> StoreOptions {
+    StoreOptions {
+        queues: 1,
+        buffers_per_class: 32,
+        ..opts()
+    }
+}
+
+/// A visitor may call the store, even with one shared lane: on a scan of
+/// one read (the caller's shared lane, put back before delivering) and on
+/// a scan nested in another's visitor (the parallel lane taken, so the
+/// inner scan runs on the shared lane in batches). Each item reads another
+/// region and provisions one; every byte still arrives once, in order,
+/// the inner scan's batches each taking a lane again.
+#[test]
+fn test_a_visitor_may_call_the_store_on_one_lane() {
+    within(|| {
+        let p = SimPlatform::new(SimConfig::volatile(40));
+        let s = Store::create(p, Path::new(DIR), one_lane()).unwrap();
+        // Twelve chunks: more than one batch of the pipeline (8 reads).
+        let wal = s.provision_append_region("wal", 12 * CHUNK as u64).unwrap();
+        let data = record(11, 12 * CHUNK);
+        wal.append_durable(&data).unwrap();
+        let small = s.provision_append_region("small", CHUNK as u64).unwrap();
+        let one = record(12, CHUNK);
+        small.append_durable(&one).unwrap();
+        let mut made = 0u32;
+        let mut call_the_store = || {
+            let mut back = [0u8; 4096];
+            assert_eq!(wal.read(0, &mut back).unwrap(), back.len());
+            assert!(back[..] == data[..back.len()]);
+            s.provision_page_region(&format!("p{made}"), 64 << 10)
+                .unwrap();
+            made += 1;
+        };
+        // One read.
+        let (got, bad, _) = collect(
+            |v| {
+                small
+                    .scan(0, |item| {
+                        call_the_store();
+                        v(item)
+                    })
+                    .unwrap()
+            },
+            0,
+        );
+        assert!(bad.is_empty());
+        assert!(got == one);
+        // Nested: the outer scan holds the only parallel lane.
+        let mut inner = None;
+        wal.scan(0, |_| {
+            if inner.is_none() {
+                inner = Some(collect(
+                    |v| {
+                        wal.scan(0, |item| {
+                            call_the_store();
+                            v(item)
+                        })
+                        .unwrap()
+                    },
+                    0,
+                ));
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+        let (got, bad, sum) = inner.unwrap();
+        assert!(bad.is_empty());
+        assert_eq!(sum.end, wal.len());
+        assert!(got == data, "the inner scan's bytes differ");
+        assert!(made >= 13, "{made} items");
+    });
+}
+
+/// A bisection on a shared lane holds its items back until the lane is put
+/// back: the visitor, calling the store, still gets the exact unreadable
+/// block, in order, with the bytes around it.
+#[test]
+fn test_a_bisection_on_one_lane_delivers_after_putting_the_lane_back() {
+    within(|| {
+        let p = SimPlatform::new(SimConfig::volatile(41));
+        let s = Store::create(p.clone(), Path::new(DIR), one_lane()).unwrap();
+        let small = s.provision_append_region("small", CHUNK as u64).unwrap();
+        let data = record(13, CHUNK);
+        small.append_durable(&data).unwrap();
+        let bs = small.block_size();
+        let base = media_offset(&p, &data[..64]);
+        let bad1 = (3 * bs, 4 * bs);
+        p.with_world(|w| {
+            let file = w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap();
+            *w.faults_mut() = FaultPlan {
+                bad_ranges: vec![(file, base + bad1.0, base + bad1.1)],
+                ..FaultPlan::default()
+            };
+        });
+        let (got, bad, sum) = collect(
+            |v| {
+                small
+                    .scan(0, |item| {
+                        let mut back = [0u8; 4096];
+                        assert_eq!(small.read(bad1.1, &mut back).unwrap(), back.len());
+                        v(item)
+                    })
+                    .unwrap()
+            },
+            0,
+        );
+        assert_eq!(bad, vec![bad1]);
+        assert_eq!(sum.unreadable, bad1.1 - bad1.0);
+        assert!(got[..bad1.0 as usize] == data[..bad1.0 as usize]);
+        assert!(got[bad1.1 as usize..] == data[bad1.1 as usize..]);
+    });
 }

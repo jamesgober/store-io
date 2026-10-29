@@ -234,6 +234,14 @@ impl<Q> Drop for Notify<'_, Q> {
     }
 }
 
+impl<Q: Queue> LaneGuard<'_, Q> {
+    /// A shared lane, which other callers wait for (a parallel lane is
+    /// waited for by no one).
+    pub(crate) fn is_shared(&self) -> bool {
+        self._notify.is_some()
+    }
+}
+
 impl<Q: Queue> Deref for LaneGuard<'_, Q> {
     type Target = Lane<Q>;
 

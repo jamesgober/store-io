@@ -256,8 +256,7 @@ where
         let s = self.region.store();
         let state = self.region.state();
         let block = s.block() as usize;
-        let mut lane = s.lane(state, Op::Write)?;
-        let reserved = s.reserve_append(f, self.bytes, c)?;
+        let (mut lane, reserved) = s.lane_and_reservation(state, f, self.bytes, c)?;
         let r = reserved.range();
         if let Some(last) = self.chunks.last_mut() {
             let l = last.len();

@@ -353,6 +353,13 @@ impl AppendFrontier {
         self.wake.notify_all();
     }
 
+    /// Threads waiting in [`Self::wait_completed`] (or
+    /// [`Self::reserve_wait`]).
+    #[must_use]
+    pub fn waiting(&self) -> u64 {
+        self.waiters.load(Ordering::SeqCst)
+    }
+
     /// Contiguously completed bytes.
     #[must_use]
     pub fn completed(&self) -> u64 {

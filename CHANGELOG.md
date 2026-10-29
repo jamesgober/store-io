@@ -845,6 +845,23 @@
 - Tests: **mutants 638 and 641 had lost their killing tests** when the
   direct single-chunk write (P4b) moved 4 KiB writes off the pump; the
   inline tests now also refuse and cut short a write of three pieces.
+- Engine: **a scan's visitor that called the store could deadlock**
+  (found 2026-10-19). The visitor ran while the scan held a shared queue,
+  which every other call may wait for: with `queues: 1` any call from the
+  visitor waited on itself, and a provisioning or release holding the
+  metadata lock waited for a queue that scans held. The visitor now never
+  runs while the scan holds a shared queue: on one, the scan collects its
+  reads in flight and puts the queue back before delivering, and a
+  bisection's items are held back until it has; on a parallel lane, which
+  no one waits for, reads are delivered as they arrive. A visitor may now
+  read, write and provision (not recycle or release the region it scans).
+- Engine: **an append waiting for room in its window held a shared queue**
+  while it waited. When the appends ahead were a `Submitter`'s, which
+  complete only when its owner reaps them, an owner that first needed a
+  queue (any read, write or provisioning; one queue is enough) waited for
+  the append, which waited for the owner; every metadata change then
+  waited too. `AppendRegion::append` and `AppendBatch::write` now put the
+  queue back while they wait and take one again after.
 - Tests: **mutants 558 and 559 had lost their only killing test** when
   D-132 rerouted cut-short entries. A new test makes an entry fail the
   entry checks for a fault of its own; both are killed again.

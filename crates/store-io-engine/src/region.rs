@@ -7,7 +7,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use store_io_core::error::{Error, FirstCause, Named, NotWrittenCause, Op};
+use store_io_core::error::{Error, FirstCause, Named, NotWrittenCause};
 use store_io_core::id::Generation;
 use store_io_format::meta::RegionKind;
 use store_io_platform::Platform;
@@ -214,6 +214,14 @@ impl<P: Platform> AppendRegion<P>
 where
     P::Queue: Send,
 {
+    /// Threads waiting on the region's completed prefix (an append waiting
+    /// for room in the window, a sync waiting for its appends). For tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn waiting_on_appends(&self) -> u64 {
+        self.state.frontier.as_ref().map_or(0, |f| f.waiting())
+    }
+
     fn frontier(&self) -> Result<&crate::frontier::AppendFrontier, Error> {
         self.state
             .frontier
@@ -325,8 +333,7 @@ where
         // Everything that can fail without touching the device happens first:
         // the first piece is staged before any space is reserved.
         let mut stream = s.stage(data, c)?;
-        let mut lane = s.lane(&self.state, Op::Write)?;
-        let reserved = s.reserve_append(f, data.len() as u64, c)?;
+        let (mut lane, reserved) = s.lane_and_reservation(&self.state, f, data.len() as u64, c)?;
         let r = reserved.range();
         stream.at(r.start);
         // Until the pump returns the guard poisons on any exit (a panic
@@ -439,11 +446,12 @@ where
     /// [`ScanItem::Unreadable`], and skipped.
     /// Scans work on read-only and poisoned stores.
     ///
-    /// `visit` runs while the scan holds one of the store's queues. A call
-    /// from `visit` into the same store takes another queue, and waits for
-    /// one when all are busy: if every queue is held by such a scan (one scan
-    /// is enough with `StoreOptions::queues` = 1) it waits forever. Collect
-    /// what you need and act on the store after the scan returns.
+    /// `visit` may call the store (read, write, provision): it never runs
+    /// while the scan holds a queue another call waits for (on a shared
+    /// queue the scan puts it back before delivering). This region's
+    /// `recycle` and `release` wait for the scan itself to end, so they
+    /// must not be called from `visit`; nor may an append wait there for
+    /// room that only the same thread's [`crate::Submitter`] can free.
     ///
     /// # Errors
     ///
@@ -788,11 +796,12 @@ where
     /// [`ScanItem::Unreadable`], and skipped.
     /// Scans work on read-only and poisoned stores.
     ///
-    /// `visit` runs while the scan holds one of the store's queues. A call
-    /// from `visit` into the same store takes another queue, and waits for
-    /// one when all are busy: if every queue is held by such a scan (one scan
-    /// is enough with `StoreOptions::queues` = 1) it waits forever. Collect
-    /// what you need and act on the store after the scan returns.
+    /// `visit` may call the store (read, write, provision): it never runs
+    /// while the scan holds a queue another call waits for (on a shared
+    /// queue the scan puts it back before delivering). This region's
+    /// `recycle` and `release` wait for the scan itself to end, so they
+    /// must not be called from `visit`; nor may an append wait there for
+    /// room that only the same thread's [`crate::Submitter`] can free.
     ///
     /// # Errors
     ///

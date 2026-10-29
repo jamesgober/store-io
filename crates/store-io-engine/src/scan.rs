@@ -5,6 +5,16 @@
 //! It keeps several large reads in flight (direct I/O, never the page cache)
 //! and delivers them strictly in order.
 //!
+//! A caller's visitor never runs while the scan holds a shared lane, which
+//! every other call on the store may wait for: a visitor that calls the
+//! store would wait on itself (one lane), or on a thread waiting for that
+//! lane under the metadata lock. On a parallel lane (D-096), which no one
+//! waits for, reads are delivered as they arrive; on a shared lane, the
+//! scan collects every read in flight and puts the lane back before it
+//! delivers them, and a bisection's items are held back until it has. The
+//! store's own visitors (a read's pipeline and its bad-sector search),
+//! which never call the store, are delivered as reads arrive on any lane.
+//!
 //! A scan never stops at bad data. A read the device cannot complete is
 //! bisected down to single sectors (the device's logical block where the
 //! probe knows it and direct I/O allows reads that small; else the store
@@ -20,7 +30,7 @@ use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
 use store_io_core::observe::Counter;
 use store_io_platform::{IoBuf, IoOp, Platform, Queue, RawResult};
 
-use crate::exec::{Lane, Ran, run};
+use crate::exec::{Lane, LaneGuard, Ran, run};
 use crate::io::{ctx_range, not_written};
 use crate::store::{LiveRegion, Store};
 
@@ -65,9 +75,33 @@ struct Emitter<F> {
     visit: F,
     bad: Option<(u64, u64)>,
     sum: ScanSummary,
+    /// Items held back (copied) while a shared lane is held, replayed in
+    /// order by [`Self::release`].
+    held: Option<Vec<Held>>,
+}
+
+/// An item held back by [`Emitter::hold`].
+enum Held {
+    Data(u64, Vec<u8>),
+    Unreadable(u64, u64),
 }
 
 impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
+    /// Holds back every item until [`Self::release`].
+    fn hold(&mut self) {
+        let _held = self.held.get_or_insert_with(Vec::new);
+    }
+
+    /// Delivers the items held back, in order.
+    fn release(&mut self) {
+        for item in self.held.take().unwrap_or_default() {
+            match item {
+                Held::Data(offset, bytes) => self.data(offset, &bytes),
+                Held::Unreadable(start, end) => self.unreadable(start, end),
+            }
+        }
+    }
+
     fn flush_bad(&mut self) {
         if let Some((start, end)) = self.bad.take() {
             if (self.visit)(ScanItem::Unreadable { start, end }).is_break() {
@@ -77,6 +111,10 @@ impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
     }
 
     fn data(&mut self, offset: u64, bytes: &[u8]) {
+        if let Some(held) = &mut self.held {
+            held.push(Held::Data(offset, bytes.to_vec()));
+            return;
+        }
         if self.sum.stopped {
             return;
         }
@@ -91,6 +129,10 @@ impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
     }
 
     fn unreadable(&mut self, start: u64, end: u64) {
+        if let Some(held) = &mut self.held {
+            held.push(Held::Unreadable(start, end));
+            return;
+        }
         if self.sum.stopped || start >= end {
             return;
         }
@@ -146,7 +188,7 @@ where
         F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
     {
         let obs = &self.inner.observer;
-        self.scan_region(r, from, to, |item| {
+        self.scan_region(r, from, to, true, |item| {
             if matches!(item, ScanItem::Unreadable { .. }) {
                 obs.add(Counter::MediaErrors, 1);
             }
@@ -154,11 +196,15 @@ where
         })
     }
 
+    /// Scans `r` from `from` to `to` (clamped to the data area). `calls_store`:
+    /// the visitor may call the store (a caller's), so it never runs while a
+    /// shared lane is held (the module's docs).
     pub(crate) fn scan_region<F>(
         &self,
         r: &LiveRegion,
         from: u64,
         to: u64,
+        calls_store: bool,
         visit: F,
     ) -> Result<ScanSummary, Error>
     where
@@ -176,6 +222,7 @@ where
         let mut out = Emitter {
             visit,
             bad: None,
+            held: None,
             sum: ScanSummary {
                 end: from,
                 ..ScanSummary::default()
@@ -197,19 +244,42 @@ where
         // buffer in one run, or a pipeline of one, is a single read: the
         // caller's lane.
         let several = to - from > chunk as u64 || r.map.run_end(from) < to;
-        let mut lane = if several && depth > 1 {
-            self.par_lane(r, Op::Read)?
-        } else {
-            self.lane(r, Op::Read)?
+        let take = || {
+            if several && depth > 1 {
+                self.par_lane(r, Op::Read)
+            } else {
+                self.lane(r, Op::Read)
+            }
         };
+        let first = take()?;
+        // For a visitor that may call the store, on a shared lane every read
+        // in flight is collected and the lane put back before anything is
+        // delivered (the module's docs); each batch takes a lane again, a
+        // parallel one if it can.
+        let mut deferred = calls_store && first.is_shared();
+        let mut lane: Option<LaneGuard<'_, P::Queue>> = Some(first);
         let file = &self.inner.file;
         let (mut submitted, mut delivered) = (0u64, 0u64);
         let mut next = from;
         let mut in_flight = 0usize;
         let mut failure: Option<Error> = None;
         loop {
+            let progress = (submitted, delivered);
             // Keep the pipeline full.
-            while failure.is_none() && !out.sum.stopped && next < to {
+            while failure.is_none() && !out.sum.stopped && next < to && !free.is_empty() {
+                if lane.is_none() {
+                    match take() {
+                        Ok(l) => {
+                            deferred = calls_store && l.is_shared();
+                            lane = Some(l);
+                        }
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                let Some(lane) = &mut lane else { break };
                 let Some(mut buf) = free.pop() else { break };
                 // Never across a run's end (one device operation each).
                 let len = (to - next).min(chunk as u64).min(r.map.run_left(next)) as usize;
@@ -242,6 +312,15 @@ where
                         }
                     }
                 }
+            }
+            if deferred {
+                if let Some(l) = &mut lane {
+                    if let Err(e) = collect(l, &mut ring, depth, &mut in_flight) {
+                        // As below: the reads in flight keep their buffers.
+                        return Err(read_error(e, c));
+                    }
+                }
+                lane = None;
             }
             // Deliver everything that has arrived, in order.
             while delivered < submitted {
@@ -292,18 +371,46 @@ where
                             // Bisect on an idle queue: first collect every
                             // read still in flight (they are delivered later,
                             // in order), then split the failed range.
-                            if let Err(e) = collect(&mut lane, &mut ring, depth, &mut in_flight) {
-                                return Err(read_error(e, c));
+                            if let Some(l) = &mut lane {
+                                if let Err(e) = collect(l, &mut ring, depth, &mut in_flight) {
+                                    return Err(read_error(e, c));
+                                }
                             }
                             match buf.take() {
-                                Some(b) => {
-                                    match self
-                                        .bisect(&mut lane, r, start, len as u64, b, &mut out, c)
-                                    {
+                                // On a lane kept (a parallel one, or any for the
+                                // store's own visitors), delivering as it goes.
+                                Some(b) if !deferred => {
+                                    let bisected = match &mut lane {
+                                        Some(l) => {
+                                            self.bisect(l, r, start, len as u64, b, &mut out, c)
+                                        }
+                                        None => Err(not_written(NotWrittenCause::Interrupted, c)),
+                                    };
+                                    match bisected {
                                         Ok(b) => buf = Some(b),
                                         Err(e) => failure = Some(e),
                                     }
                                 }
+                                // On a shared lane taken again, holding its
+                                // items back until the lane is put back.
+                                Some(b) => match self.lane(r, Op::Read) {
+                                    Ok(mut l) => {
+                                        out.hold();
+                                        let bisected = self
+                                            .bisect(&mut l, r, start, len as u64, b, &mut out, c);
+                                        drop(l);
+                                        out.release();
+                                        match bisected {
+                                            Ok(b) => buf = Some(b),
+                                            // The visitor stopped inside the
+                                            // held items: what failed after
+                                            // was never asked for.
+                                            Err(_) if out.sum.stopped => {}
+                                            Err(e) => failure = Some(e),
+                                        }
+                                    }
+                                    Err(e) => failure = Some(e),
+                                },
                                 // No buffer to bisect with (withheld by a
                                 // backend that lost track of its kernel,
                                 // platform contract 1): stop, never drop the range.
@@ -322,8 +429,17 @@ where
             if in_flight == 0 && (next >= to || out.sum.stopped || failure.is_some()) {
                 break;
             }
+            // Nothing in flight and nothing done this round: nothing ever
+            // will be (a backstop: the scan fails, never spins).
+            if in_flight == 0 && (submitted, delivered) == progress {
+                return Err(not_written(NotWrittenCause::Interrupted, c));
+            }
             if in_flight > 0 {
-                if let Err(e) = collect_one(&mut lane, &mut ring, depth, &mut in_flight) {
+                // Only a lane kept (not deferred) has reads in flight here.
+                let Some(l) = &mut lane else {
+                    return Err(not_written(NotWrittenCause::Interrupted, c));
+                };
+                if let Err(e) = collect_one(l, &mut ring, depth, &mut in_flight) {
                     // The reads in flight still own their buffers; the queue
                     // keeps them. Nothing else is safe.
                     return Err(read_error(e, c));

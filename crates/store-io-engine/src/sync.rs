@@ -6,3 +6,9 @@ pub(crate) use loom::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(not(loom))]
 pub(crate) use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[cfg(loom)]
+pub(crate) use loom::thread::yield_now;
+
+#[cfg(not(loom))]
+pub(crate) use std::thread::yield_now;

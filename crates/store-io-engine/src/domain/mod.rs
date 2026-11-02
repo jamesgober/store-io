@@ -67,6 +67,21 @@
 //! `exclusive_main` wakes the designate and the shared sleepers (no bucket
 //! sleeper waits for a slot: each waits for `done` or for the designate).
 //!
+//! A barrier that must wait first gives its processor up, at most
+//! `YIELDS` times for each `done` it waits for, reading `done` without
+//! the lock, and sleeps only if that was not enough. Where a flush is
+//! cheap, the sleep and the wake are the dearest part of a shared flush; and
+//! with more writers than processors the thread a waiter waits for is
+//! often queued behind it, so spinning keeps it out where yielding lets it
+//! run, without an interrupt to another processor. Measured over null_blk
+//! on CI (D-139): eight writers made 1.56-1.71x the durable writes they
+//! made sleeping, as many as eight writers each flushing its own, at 0.36
+//! sleeps a write against 1.3. A flush that outlasts the yields gains
+//! nothing, so `Patience` stops yielding after `MISSES` waits in a row
+//! that ran out, and tries again after `SKIPS` more. Yielding changes
+//! only how a barrier waits: it holds nothing, and then re-takes the lock
+//! and decides as it would have.
+//!
 //! A sleeper reads its word under the lock when it registers, and a waker
 //! bumps it under the lock when it deregisters: so a waker's bump always
 //! follows the registration it ends, a sleeper registered later reads the
@@ -92,7 +107,7 @@ use std::sync::{Mutex, MutexGuard};
 use store_io_buf::{CachePadded, WaitWord};
 use store_io_core::error::{Error, ErrorContext, FirstCause, Op, OsError};
 
-use crate::sync::{AtomicU64, Ordering};
+use crate::sync::{AtomicU64, Ordering, yield_now};
 
 /// The most flushes a domain runs at once.
 pub const MAX_FLUSH_SLOTS: usize = 4;
@@ -101,6 +116,67 @@ pub const MAX_FLUSH_SLOTS: usize = 4;
 /// earlier one) beyond which no new flush is issued: the successes kept
 /// above `done` fit a 64-bit mask.
 const WINDOW: u64 = 32;
+
+/// How many times a waiting barrier yields, for one goal, before it sleeps.
+#[cfg(not(loom))]
+const YIELDS: u32 = 32;
+#[cfg(loom)]
+const YIELDS: u32 = 1;
+
+/// Waits in a row that ran out of yields, after which waits stop yielding.
+const MISSES: u32 = 8;
+
+/// Waits that do not yield, after [`MISSES`] missed.
+const SKIPS: u32 = 256;
+
+/// Whether waiting barriers yield: learned from what yielding achieved, so
+/// a device whose flushes outlast the yields pays for one try in
+/// [`SKIPS`]. A hint, read and written without order: a race loses a count,
+/// and only ever changes whether a barrier yields before it sleeps. Plain
+/// atomics, not modelled under loom for the same reason.
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct Patience {
+    /// Waits in a row that ran out of yields.
+    missed: core::sync::atomic::AtomicU32,
+    /// Waits left that do not yield.
+    skip: core::sync::atomic::AtomicU32,
+}
+
+impl Patience {
+    /// Whether this wait should yield.
+    fn try_yield(&self) -> bool {
+        use core::sync::atomic::Ordering::Relaxed;
+        let skip = self.skip.load(Relaxed);
+        if skip == 0 {
+            return true;
+        }
+        self.skip.store(skip - 1, Relaxed);
+        false
+    }
+
+    /// The yields were enough. No write when there is nothing to forget:
+    /// every waiter passes here, and the line must not bounce between them.
+    fn reached(&self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        if self.missed.load(Relaxed) != 0 {
+            self.missed.store(0, Relaxed);
+        }
+    }
+
+    /// The yields ran out. The next try after the skips is the only one: a
+    /// miss then skips again at once.
+    fn ran_out(&self) {
+        use core::sync::atomic::Ordering::Relaxed;
+        let missed = self.missed.load(Relaxed) + 1;
+        if missed >= MISSES {
+            self.missed.store(MISSES - 1, Relaxed);
+            self.skip.store(SKIPS, Relaxed);
+        } else {
+            self.missed.store(missed, Relaxed);
+        }
+    }
+}
 
 /// Counters a domain exposes for observability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -229,6 +305,7 @@ pub struct Domain {
     counters: Counters,
     poison: OnceLock<FirstCause>,
     slots: u32,
+    patience: Patience,
     state: Mutex<Slots>,
     /// One per wait bucket, each on its own cache line.
     bucket_words: Box<[CachePadded<WaitWord>]>,
@@ -263,6 +340,7 @@ impl Domain {
             },
             poison: OnceLock::new(),
             slots: slots.clamp(1, MAX_FLUSH_SLOTS) as u32,
+            patience: Patience::default(),
             state: Mutex::new(Slots {
                 busy: 0,
                 ahead: 0,
@@ -388,6 +466,8 @@ impl Domain {
         mut flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
         let mut led_flush = false;
+        // The highest `done` this call has yielded for: one goal, one try.
+        let mut yielded_to = 0;
         loop {
             // A woken barrier comes back here and, covered, returns without
             // the lock.
@@ -419,6 +499,15 @@ impl Domain {
                 free &= !1;
             }
             if issued >= need || free == 0 || issued - done >= WINDOW {
+                // Covered: until `need` is done. Needing the next flush:
+                // until the one before it is, and it may lead.
+                let goal = need.min(issued);
+                if goal > yielded_to && self.patience.try_yield() {
+                    yielded_to = goal;
+                    drop(st);
+                    self.yield_to(goal);
+                    continue;
+                }
                 // A barrier that would lead but may use fewer slots than
                 // the domain has must not take the designate's wake.
                 let narrow = need > issued && usable < self.slots;
@@ -477,6 +566,23 @@ impl Domain {
                     ctx: ErrorContext::default(),
                 });
             }
+        }
+    }
+
+    /// Yields until `done` reaches `goal` or the domain is poisoned, at
+    /// most [`YIELDS`] times, and notes whether that was enough.
+    fn yield_to(&self, goal: u64) {
+        let reached = || self.done.load(Ordering::SeqCst) >= goal || self.poison.get().is_some();
+        for _ in 0..YIELDS {
+            if reached() {
+                break;
+            }
+            yield_now();
+        }
+        if reached() {
+            self.patience.reached();
+        } else {
+            self.patience.ran_out();
         }
     }
 
@@ -736,12 +842,31 @@ mod loom_tests {
 
     use store_io_core::error::OsErrorSource;
 
+    /// Runs a model on a domain of `slots`, with waiting barriers yielding
+    /// and again with them going straight to sleep: loom runs a thread that
+    /// yields only once nothing else can run, so yielding alone would hide
+    /// the schedules that reach a sleep.
+    fn model(slots: usize, f: impl Fn(Arc<Domain>) + Send + Sync + 'static) {
+        let f = std::sync::Arc::new(f);
+        for sleep in [false, true] {
+            let f = std::sync::Arc::clone(&f);
+            loom::model(move || {
+                let d = Domain::with_slots(slots);
+                if sleep {
+                    d.patience
+                        .skip
+                        .store(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+                }
+                f(Arc::new(d));
+            });
+        }
+    }
+
     /// Two barriers race; each must observe a flush issued after its ticket,
     /// and a failing flush must poison the other.
     #[test]
     fn loom_two_barriers_share_or_issue_and_poison_propagates() {
-        loom::model(|| {
-            let d = Arc::new(Domain::new());
+        model(1, |d| {
             let flushes = Arc::new(loom::sync::atomic::AtomicUsize::new(0));
             let spawn = |fail: bool| {
                 let (d, flushes) = (d.clone(), flushes.clone());
@@ -777,8 +902,7 @@ mod loom_tests {
     /// satisfied by one or more flushes.
     #[test]
     fn loom_every_barrier_of_one_need_is_woken() {
-        loom::model(|| {
-            let d = Arc::new(Domain::new());
+        model(1, |d| {
             let need = d.ticket();
             let spawn = || {
                 let d = d.clone();
@@ -799,8 +923,7 @@ mod loom_tests {
     /// returns satisfied with nobody left registered.
     #[test]
     fn loom_barriers_needing_the_next_flush_are_led_and_woken() {
-        loom::model(|| {
-            let d = Arc::new(Domain::new());
+        model(1, |d| {
             let spawn = || {
                 let d = d.clone();
                 loom::thread::spawn(move || {
@@ -824,8 +947,7 @@ mod loom_tests {
     /// everyone returns.
     #[test]
     fn loom_a_full_flush_and_the_designate() {
-        loom::model(|| {
-            let d = Arc::new(Domain::new());
+        model(1, |d| {
             let spawn = || {
                 let d = d.clone();
                 loom::thread::spawn(move || {
@@ -850,8 +972,7 @@ mod loom_tests {
     /// the designate's place, and all return.
     #[test]
     fn loom_narrow_and_wide_barriers_on_two_slots() {
-        loom::model(|| {
-            let d = Arc::new(Domain::with_slots(2));
+        model(2, |d| {
             let main = {
                 let d = d.clone();
                 loom::thread::spawn(move || {
@@ -882,8 +1003,7 @@ mod loom_tests {
     /// before the poison or fails, and nobody is left registered.
     #[test]
     fn loom_outside_poison_wakes_the_designate_and_the_bucket() {
-        loom::model(|| {
-            let d = Arc::new(Domain::new());
+        model(1, |d| {
             let spawn = || {
                 let d = d.clone();
                 loom::thread::spawn(move || {
@@ -913,8 +1033,7 @@ mod loom_tests {
     /// flush 1 and `done` stopped there.
     #[test]
     fn loom_two_slots_never_satisfy_past_a_failure() {
-        loom::model(|| {
-            let d = Arc::new(Domain::with_slots(2));
+        model(2, |d| {
             let spawn = |fail: bool| {
                 let d = d.clone();
                 loom::thread::spawn(move || {
@@ -952,8 +1071,7 @@ mod loom_tests {
     /// leader never shares slot 0 with the main one.
     #[test]
     fn loom_a_main_barrier_and_a_data_barrier() {
-        loom::model(|| {
-            let d = Arc::new(Domain::with_slots(2));
+        model(2, |d| {
             let in_main = Arc::new(loom::sync::atomic::AtomicBool::new(false));
             let main = {
                 let (d, in_main) = (d.clone(), in_main.clone());
@@ -992,8 +1110,7 @@ mod loom_tests {
     /// had its flush recorded before the poison, and nobody is left waiting.
     #[test]
     fn loom_outside_poison_races_a_leader() {
-        loom::model(|| {
-            let d = Arc::new(Domain::with_slots(2));
+        model(2, |d| {
             let leader = {
                 let d = d.clone();
                 loom::thread::spawn(move || {

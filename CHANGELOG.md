@@ -576,25 +576,25 @@
 
 ### Changed
 
-- Harness: **G15 says when a machine cannot judge flush sharing**
-  (D-138). G15 now also times one cross-thread wake on the machine, once
-  per round, and reports it beside one writer's durable write time. A
-  shared flush saves each follower a flush and costs it a sleep and a
-  wake, so where one writer's whole durable write takes less than one
-  wake, sharing is not expected to lift eight writers to 1.5x one. G15 is
-  then NOT RESOLVABLE instead of FAIL, provided flushes are still shared
-  (under 0.9 per op) and eight writers are no slower than one. Found when
-  G15 failed on a CI runner and passed on its re-run: the verdict
-  followed the runner's CPU (Xeon 8370C and 8573C runners over null_blk,
-  a durable write in 7-8 µs against a 9-13 µs wake, eight writers at
-  1.2-1.3x one; EPYC runners, 12-15 µs against 7-9 µs, at 1.8-2.1x).
-  Measured on CI beside it, and not changed: eight sharing writers make
-  0.62-0.64x the durable writes of eight writers each flushing its own
-  on every runner CPU, and neither leading a flush of one's own on a free
-  flush slot nor running flushes side by side closed that gap (the cost
-  is the follower's sleep and wake). PLATFORMS.md lists it among Linux's
-  known limitations, and dev/TODO.md lists the bare-metal measurement
-  still to do; `harness/examples/g15probe.rs` is the probe.
+- Engine: **durable writes 1.4-1.8x faster with four or more writers
+  where a flush is cheap** (D-139). A barrier that must wait now gives
+  its processor up, up to 32 times, before it sleeps. Over null_blk on
+  CI's virtual machines, against the previous build on the same runner:
+  eight writers 1.56-1.71x, level with or above eight writers each
+  flushing their own write; four writers 1.62-1.76x; sixty-four
+  1.41-1.50x; 0.36 sleeps a write against 1.3. One writer is unchanged.
+  Two writers now each flush (1.00 flushes a write, was 0.69) and go
+  1.08-1.22x faster. A device whose flushes outlast the yields gains
+  nothing and pays nothing measurable: waits that keep running out stop
+  yielding and try again once every few hundred (a local NVMe drive, and
+  CI's Windows and macOS runners: unchanged within noise). The yield
+  changes how a barrier waits, never when it is satisfied: a barrier
+  still returns only on `done >= need`, and `done` still advances, under
+  the lock, over an unbroken run of successes. Found chasing a G15 that
+  passed or failed with the runner's CPU. The harness's concurrent and
+  lone regions are larger: at the new speed a point filled its region at
+  or just after the opening of its window.
+  `harness/examples/g15probe.rs` is the probe.
 
 - Engine: **`copy_store` about 2-3x faster** (D-137). A copied append or
   page region's data is now its provisioning's fill: the source's bytes

@@ -165,7 +165,7 @@ fn store_append(ctx: &Ctx) -> Point {
     let p = Point::new(System::StoreIo, "AppendRegion::append_durable")
         .param("bytes", Json::Num(KIB4 as f64));
     with_store(ctx, "w1-append", p, |store, p| {
-        let bytes = region_bytes(ctx, KIB4 as u64, 25_000.0, 2 << 30);
+        let bytes = region_bytes(ctx, KIB4 as u64, 200_000.0, 2 << 30);
         let wal = provision_append(store, "w1", bytes, p)?;
         let mut buf = vec![0u8; KIB4];
         let mut recs = Vec::with_capacity(1 << 15);
@@ -438,7 +438,7 @@ fn store_split(ctx: &Ctx) -> Point {
     )
     .param("bytes", Json::Num(KIB4 as f64));
     with_store(ctx, "w1-split", p, |store, p| {
-        let bytes = region_bytes(ctx, KIB4 as u64, 25_000.0, 2 << 30);
+        let bytes = region_bytes(ctx, KIB4 as u64, 200_000.0, 2 << 30);
         let wal = provision_append(store, "w1s", bytes, p)?;
         let mut buf = vec![0u8; KIB4];
         let mut recs = Vec::with_capacity(1 << 15);

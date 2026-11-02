@@ -297,3 +297,96 @@ fn test_poison_wakes_barriers_asleep_in_a_bucket() {
     let _sent = go.send(());
     assert!(leader.recv_timeout(LONG).is_ok());
 }
+
+/// Yielding is learned: `MISSES` waits in a row that ran out stop it, the
+/// next `SKIPS` waits do not yield, one then tries, and a miss on that try
+/// stops it again at once.
+#[test]
+fn test_waits_stop_yielding_after_misses_and_try_again_once() {
+    let p = Patience::default();
+    for _ in 0..MISSES {
+        assert!(p.try_yield(), "stopped before its misses");
+        p.ran_out();
+    }
+    for _ in 0..SKIPS {
+        assert!(!p.try_yield(), "yielded during the skips");
+    }
+    assert!(p.try_yield(), "no try after the skips");
+    p.ran_out();
+    assert!(!p.try_yield(), "a miss on the try did not stop it again");
+}
+
+/// Yields that were enough forget the misses: only misses in a row stop
+/// yielding.
+#[test]
+fn test_a_wait_that_reached_its_goal_forgets_the_misses() {
+    let p = Patience::default();
+    for _ in 0..MISSES - 1 {
+        p.ran_out();
+    }
+    p.reached();
+    for _ in 0..MISSES - 1 {
+        p.ran_out();
+    }
+    assert!(p.try_yield(), "misses that were not in a row stopped it");
+}
+
+fn missed(d: &Domain) -> u32 {
+    d.patience
+        .missed
+        .load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Yields for a flush that does not finish count as a miss; a goal already
+/// reached forgets it, and a poisoned domain is no miss (nothing to wait
+/// for).
+#[test]
+fn test_yields_that_run_out_are_counted() {
+    let d = Domain::new();
+    d.yield_to(1);
+    assert_eq!(missed(&d), 1, "ran out, and not counted");
+    d.yield_to(0);
+    assert_eq!(missed(&d), 0, "reached, and not forgotten");
+    d.poison(FirstCause {
+        op: None,
+        raw: None,
+    });
+    d.yield_to(1);
+    assert_eq!(missed(&d), 0, "poison counted as a miss");
+}
+
+/// A barrier needing the next flush yields for the flush before it (done
+/// here), not for its own, which only it may lead: no miss, and it then
+/// sleeps as the designate until a slot is free.
+#[test]
+fn test_a_barrier_needing_the_next_flush_yields_for_the_one_before_it() {
+    let d = Arc::new(Domain::new());
+    assert!(d.barrier(d.ticket(), |_, _| Ok(())).is_ok());
+    let need = d.ticket();
+    assert!(d.hold_leadership());
+    let r = barrier(&d, need);
+    until_waiting(&d, 1);
+    assert_eq!(missed(&d), 0, "yielded for a flush only it could lead");
+    d.drop_leadership();
+    assert_eq!(r.recv_timeout(LONG), Ok(true));
+}
+
+/// While waits skip yielding, a waiting barrier goes straight to sleep, and
+/// that wait is counted off.
+#[test]
+fn test_a_wait_in_the_skips_sleeps_without_yielding() {
+    let d = Arc::new(Domain::new());
+    for _ in 0..MISSES {
+        d.patience.ran_out();
+    }
+    let need = d.ticket();
+    let (go, leader) = held_leader(&d, need);
+    until_issued(&d, 1);
+    let r = barrier(&d, need);
+    until_waiting(&d, 1);
+    let left = d.patience.skip.load(core::sync::atomic::Ordering::Relaxed);
+    assert_eq!(left, SKIPS - 1, "yielded in the skips");
+    let _sent = go.send(());
+    assert_eq!(r.recv_timeout(LONG), Ok(true));
+    assert_eq!(leader.recv_timeout(LONG), Ok(true));
+}

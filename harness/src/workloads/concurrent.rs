@@ -247,9 +247,10 @@ pub fn store_point_in(ctx: &Ctx, n: usize, opts: &StoreOptions, regions: usize) 
             "flushes_run",
             Some(f64::from(store.report().flushes_in_flight)),
         );
-        // Sized for the shared region's rate as before; several regions
-        // let a fast device go well past it, so they get room for more.
-        let rate = if regions == 1 { 40_000.0 } else { 120_000.0 };
+        // Past the fastest measured (442,000 a second, a region per
+        // writer), so the cap decides: a point fills its region only
+        // during its window, ends early and says so.
+        let rate = 400_000.0;
         let total = region_bytes(ctx, KIB4 as u64, rate, 2 << 30);
         let bytes = (total / regions as u64).div_ceil(1 << 20).max(16) * (1 << 20);
         let mut wals = Vec::with_capacity(regions);

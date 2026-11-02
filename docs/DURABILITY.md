@@ -168,17 +168,19 @@ Source: [`crates/store-io-engine/src/store.rs`](../crates/store-io-engine/src/st
 
 Each open store has one **flush domain**, shared by every region of that store. It decides when a barrier needs a new device flush and lets concurrent barriers share one, with no timer, no window and no waiting for company.
 
-The domain keeps two counters: `issued`, the number of flushes started, and `done`, the highest `k` such that flushes `1..=k` all succeeded. At most one flush runs at a time.
+The domain keeps two counters: `issued`, the number of flushes started, and `done`, the highest `k` such that flushes `1..=k` all succeeded. By default at most one flush runs at a time (`StoreOptions::flushes_in_flight` allows up to four; `done` still advances only over an unbroken run of successes, so a barrier is never satisfied past a flush that is unfinished or failed).
 
 **The join rule.** A barrier must cover a set of writes that have all completed. After the last of them completed, it reads `e = issued` and needs `done >= e + 1`. Flush `e + 1` is started only after `issued` becomes `e + 1`, which happened after that read, so it was started after every covered write had completed. A device flush makes durable every write that completed before the flush was submitted, so flush `e + 1`, or any later one, covers the barrier's writes.
 
 **Leader-inline flushing.** A barrier whose need is not met, and that finds no flush running, becomes the leader: it increments `issued` before issuing the flush, runs the flush on its own thread, publishes `done`, and wakes the others. A barrier that arrives while a flush runs waits for it; if that flush started too early to cover it, it loops and may lead the next one. A lone writer therefore pays exactly one flush, and concurrent writers share flushes.
 
+**How a barrier waits.** It first gives its processor up, up to 32 times, reading `done`, and sleeps only if that was not enough; waits that keep running out stop yielding, so a device whose flushes outlast the yields sees one try in a few hundred. This changes only how a barrier waits, never when it is satisfied: a barrier still returns only on `done >= need`, and `done` still advances, under the lock, over an unbroken run of successes.
+
 `Store::domain_stats()` reports `flushes` (flushes issued), `led` (barriers that issued their flush) and `joined` (barriers satisfied by a flush another barrier issued, or already satisfied). `already_durable` counts the receipts an append region's `sync_through` returned without any barrier because an earlier barrier already covered the ticket; such a receipt reports the real durable frontier, never just the ticket's end. Metadata writes on a flush-required store (region headers, slot commits, region-table updates) use the same domain and are counted too.
 
 **Append regions** also keep a durable prefix. A barrier first waits until every append up to its ticket has completed, takes the contiguous completed prefix, then runs the domain barrier, and only after the flush succeeds publishes that prefix as durable. `durable_through()` never passes a write that has not completed, and an append whose reserved range is abandoned unwritten (an error or a panic between reserving and writing) poisons the domain, so no later append can be acknowledged past the hole.
 
-Source: [`crates/store-io-engine/src/domain.rs`](../crates/store-io-engine/src/domain.rs), [`crates/store-io-engine/src/frontier.rs`](../crates/store-io-engine/src/frontier.rs), [`crates/store-io-engine/src/region.rs`](../crates/store-io-engine/src/region.rs) (`sync_through`), [`crates/store-io-engine/src/io.rs`](../crates/store-io-engine/src/io.rs) (`Reserved`)
+Source: [`crates/store-io-engine/src/domain/mod.rs`](../crates/store-io-engine/src/domain/mod.rs), [`crates/store-io-engine/src/frontier.rs`](../crates/store-io-engine/src/frontier.rs), [`crates/store-io-engine/src/region.rs`](../crates/store-io-engine/src/region.rs) (`sync_through`), [`crates/store-io-engine/src/io.rs`](../crates/store-io-engine/src/io.rs) (`Reserved`)
 
 ---
 
@@ -240,7 +242,7 @@ A poisoned store never recovers. Drop it, reopen, and recover with a scan: the w
 
 Failures *before* submission are different: `NotWritten` means the media is provably untouched, and `NoSpace` comes only from reservation and provisioning. Neither poisons the data paths.
 
-Source: [`crates/store-io-engine/src/domain.rs`](../crates/store-io-engine/src/domain.rs), [`crates/store-io-engine/src/io.rs`](../crates/store-io-engine/src/io.rs) (`unknown`, `Reserved`), [`crates/store-io-engine/src/store.rs`](../crates/store-io-engine/src/store.rs) (`poison`, `durable_slot`, `flip_table`, `provision`), [`crates/store-io-engine/src/directory.rs`](../crates/store-io-engine/src/directory.rs)
+Source: [`crates/store-io-engine/src/domain/mod.rs`](../crates/store-io-engine/src/domain/mod.rs), [`crates/store-io-engine/src/io.rs`](../crates/store-io-engine/src/io.rs) (`unknown`, `Reserved`), [`crates/store-io-engine/src/store.rs`](../crates/store-io-engine/src/store.rs) (`poison`, `durable_slot`, `flip_table`, `provision`), [`crates/store-io-engine/src/directory.rs`](../crates/store-io-engine/src/directory.rs)
 
 ---
 
@@ -336,7 +338,7 @@ These are on the [roadmap](../dev/ROADMAP.md) and the [later list](../dev/TODO.m
 - **Power-cut certification** (1.x, after the 1.0 API and format freeze): a rig that cuts the test machine's power while a second machine logs acknowledgements (a whole-machine cut leaves the drive the power supply's hold-up time, often 10-20 ms, which can hide a drive that acknowledges flushes it has not done; cutting the drive's own power is the stronger test, and is the follow-up); at least 500 cycles per device class and 3,000 per certified model and firmware, with the rig logs published with the release. Until then, no store-io receipt has been checked against a real power cut.
 - **Fuzz campaigns** (1.0).
 
-Source: [`crates/store-io-sim/`](../crates/store-io-sim/), [`crates/store-io-engine/tests/`](../crates/store-io-engine/tests/), [`crates/store-io-format/src/slot.rs`](../crates/store-io-format/src/slot.rs) (tests), [`crates/store-io-engine/src/domain.rs`](../crates/store-io-engine/src/domain.rs), [`crates/store-io-engine/src/frontier.rs`](../crates/store-io-engine/src/frontier.rs), [`crates/store-io-engine/src/gate.rs`](../crates/store-io-engine/src/gate.rs), [`crates/store-io-buf/src/queue.rs`](../crates/store-io-buf/src/queue.rs), [`crates/store-io-buf/src/stack.rs`](../crates/store-io-buf/src/stack.rs), [`crates/store-io-engine/src/receipt.rs`](../crates/store-io-engine/src/receipt.rs) (compile-fail tests), [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`tests/crash.rs`](../tests/crash.rs), [`dev/tools/mutate.py`](../dev/tools/mutate.py), [`.github/workflows/mutation.yml`](../.github/workflows/mutation.yml), [`dev/ROADMAP.md`](../dev/ROADMAP.md), [`dev/TODO.md`](../dev/TODO.md)
+Source: [`crates/store-io-sim/`](../crates/store-io-sim/), [`crates/store-io-engine/tests/`](../crates/store-io-engine/tests/), [`crates/store-io-format/src/slot.rs`](../crates/store-io-format/src/slot.rs) (tests), [`crates/store-io-engine/src/domain/mod.rs`](../crates/store-io-engine/src/domain/mod.rs), [`crates/store-io-engine/src/frontier.rs`](../crates/store-io-engine/src/frontier.rs), [`crates/store-io-engine/src/gate.rs`](../crates/store-io-engine/src/gate.rs), [`crates/store-io-buf/src/queue.rs`](../crates/store-io-buf/src/queue.rs), [`crates/store-io-buf/src/stack.rs`](../crates/store-io-buf/src/stack.rs), [`crates/store-io-engine/src/receipt.rs`](../crates/store-io-engine/src/receipt.rs) (compile-fail tests), [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), [`tests/crash.rs`](../tests/crash.rs), [`dev/tools/mutate.py`](../dev/tools/mutate.py), [`.github/workflows/mutation.yml`](../.github/workflows/mutation.yml), [`dev/ROADMAP.md`](../dev/ROADMAP.md), [`dev/TODO.md`](../dev/TODO.md)
 
 ---
 

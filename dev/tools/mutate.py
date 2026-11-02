@@ -1300,6 +1300,20 @@ M = [
  ("crates/store-io-engine/src/provision2.rs", "                self.write_range(pl.offset, head, 2 * block, 0, data)?;", "                self.write_range(pl.offset, head, 0, 0, data)?;", COPYT),
  ("crates/store-io-engine/src/provision2.rs", "                if filled > head {", "                if filled > head && false {", COPYT),
  ("crates/store-io-engine/src/provision2.rs", "                        &fill_key,\n                        pl.data_size,\n", "                        &fill_key,\n                        0,\n", COPYT),
+ # D-139: a waiting barrier yields, once per goal, before it sleeps; the
+ # goal of one needing the next flush is the flush before it; yields that
+ # keep running out stop, and try again once after the skips
+ ('crates/store-io-engine/src/domain/mod.rs', '        if missed >= MISSES {', '        if missed > MISSES {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            self.missed.store(MISSES - 1, Relaxed);', '            self.missed.store(0, Relaxed);', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if skip == 0 {', '        if skip == 0 || true {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        self.skip.store(skip - 1, Relaxed);\n', '        self.skip.store(skip, Relaxed);\n', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        if self.missed.load(Relaxed) != 0 {', '        if self.missed.load(Relaxed) != 0 && false {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            self.patience.ran_out();\n', '            // ran out\n', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            self.patience.reached();\n', '            // reached\n', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        let reached = || self.done.load(Ordering::SeqCst) >= goal || self.poison.get().is_some();', '        let reached = || self.done.load(Ordering::SeqCst) >= goal;', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                let goal = need.min(issued);', '                let goal = need;', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                if goal > yielded_to && self.patience.try_yield() {', '                if goal > yielded_to {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                    yielded_to = goal;\n', '                    yielded_to = 0;\n', DOMAIN),
 ]
 
 def kill_stuck_tests():

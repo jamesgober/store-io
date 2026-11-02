@@ -13,12 +13,11 @@
 //! Any panic aborts the process, so a writer that fails before the others
 //! start can never leave them waiting.
 //!
-//! D-138 (2026-10) ran it on CI runners over null_blk, under `perf`
-//! (`sched:sched_switch` and CPU samples, as root): eight store-io writers
-//! made 0.62-0.64x the durable writes a second of eight raw writers on
-//! every runner CPU, their sleeps 69% in the
-//! barrier's wait and 20% in the flush; its `wake` mode times the hand-off
-//! G15's wake control (`gates_g15::wake_us`) times.
+//! D-138 and D-139 ran it on CI runners over null_blk, under `perf`
+//! (`sched:sched_switch` and CPU samples, as root): before D-139 eight
+//! store-io writers made 0.62-0.64x the durable writes a second of eight
+//! raw writers on every runner CPU, their sleeps 69% in the barrier's wait
+//! and 20% in the flush.
 
 #![allow(
     clippy::unwrap_used,

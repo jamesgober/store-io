@@ -629,7 +629,16 @@
   (a broken pipeline must not pass on the 1-deep run). On a runner where
   fio's synchronous loop beat its QD8
   run (10,277 against 8,784 MB/s) G6 failed although store-io's QD8 run
-  matched fio's (97%): it had no 1-deep run to compare.
+  matched fio's (97%): it had no 1-deep run to compare. fio's synchronous
+  run now alternates with store-io's in three rounds, as its QD8 run
+  already did (D-140); it ran twice, a minute or more before them. The
+  gate has not moved. One Xeon 6975P-C runner failed the old way, 1-deep
+  8,289 MB/s against 9,315 (89%); seven gate runs on Xeon 6 runners since
+  pass, 0.93-1.02x of fio's synchronous write. That does not say the 89%
+  was noise: on the 6975P-C that write stays ahead (0.93x and 0.99x).
+  The range of three runs tends to be wider than that of two, so a
+  result just under the gate is likelier to read NOT RESOLVABLE than it
+  was.
 - Engine: **the flush domain's statistics `led`, `peak_in_flight` and
   `out_of_order` are counted under the slot lock** a leader holds anyway,
   not as atomics on a cache line of their own: per durable write, two

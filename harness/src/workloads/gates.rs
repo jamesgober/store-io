@@ -228,7 +228,7 @@ pub fn run(ctx: &Ctx) -> Section {
     );
     sec.method = vec![
         "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS), and `gates_g1` and `gates_g2` (G1 and G2, alternated rounds).".to_owned(),
-        "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (W1 run twice for the raw primitive; each fio control a gate uses run twice); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
+        "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (W1 run twice for the raw primitive; each fio control a gate uses run two or three times); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
         "G1 and G2 are measured in 20 alternated rounds (`gates_g1`, `gates_g2`, G2 at p50 and p99): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate.".to_owned(),
         "The latency gates (+2 µs, +5 µs) are far below the spread of a virtual disk's flush (milliseconds): on such a disk they are expected to be NOT RESOLVABLE; certified results need bare metal (dev/TODO.md).".to_owned(),
     ];
@@ -261,9 +261,6 @@ pub fn run(ctx: &Ctx) -> Section {
     let durable = [sync, "--rw=write", "--bs=4k", "--fdatasync=1"];
     let fio_d1 = job(&durable, "write");
     let fio_d2 = job(&durable, "write");
-    let seq_write = [sync, "--rw=write", "--bs=1m", "--end_fsync=1"];
-    let fio_sw = job(&seq_write, "write");
-    let fio_sw2 = job(&seq_write, "write");
     let fio_sr1 = job(&[sync, "--rw=read", "--bs=1m"], "read");
     let cpu_args = [
         aio,
@@ -305,21 +302,22 @@ pub fn run(ctx: &Ctx) -> Section {
         g5.push(gates_extra::read_qd128(ctx));
     }
     // G6: the Submitter's sequential writer, 8 deep and 1 deep, alternates
-    // with fio's QD8 sequential write on this file, three times each.
-    let (mut g6, mut g6q1, mut f6) = (Vec::new(), Vec::new(), Vec::new());
+    // with fio's QD8 and synchronous sequential writes on this file, three
+    // times each.
+    let seq_write = [sync, "--rw=write", "--bs=1m", "--end_fsync=1"];
+    let (mut g6, mut g6q1, mut f6, mut f6s) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for _ in 0..3 {
         f6.push(job(
             &[aio, "--rw=write", "--bs=1m", "--iodepth=8", "--end_fsync=1"],
             "write",
         ));
+        f6s.push(job(&seq_write, "write"));
         g6.push(gates_seq::seq_write(ctx, 8));
         g6q1.push(gates_seq::seq_write(ctx, 1));
     }
     let fio_runs = [
         ("fio durable (1)", &fio_d1),
         ("fio durable (2)", &fio_d2),
-        ("fio sequential write (1)", &fio_sw),
-        ("fio sequential write (2)", &fio_sw2),
         ("fio sequential read QD1", &fio_sr1),
         ("fio durable QD1", &fio_dq[0]),
         ("fio durable QD4", &fio_dq[1]),
@@ -335,6 +333,12 @@ pub fn run(ctx: &Ctx) -> Section {
         if let Err(e) = r {
             sec.anomalies
                 .push(format!("fio sequential write QD8 ({}): {e}", i + 1));
+        }
+    }
+    for (i, r) in f6s.iter().enumerate() {
+        if let Err(e) = r {
+            sec.anomalies
+                .push(format!("fio sequential write ({}): {e}", i + 1));
         }
     }
     for (what, r) in fio_runs {
@@ -527,23 +531,22 @@ pub fn run(ctx: &Ctx) -> Section {
     });
     // G6: sequential write, at least 90% of fio's best: the Submitter's
     // zero-copy writer (8 deep and 1 deep, its better median) and fio's QD8
-    // write alternated (medians), fio's synchronous write (two runs) as its
-    // other configuration: each side's best configuration. The simple API's
-    // `append(&[u8])` copies the caller's bytes first (W5, reported).
+    // and synchronous writes, all alternated (medians): each side's best
+    // configuration. The simple API's `append(&[u8])` copies the caller's
+    // bytes first (W5, reported).
     let ours: Vec<f64> = g6.iter().filter_map(|p| val(p, "mb_per_s")).collect();
     let ours1: Vec<f64> = g6q1.iter().filter_map(|p| val(p, "mb_per_s")).collect();
     let q8w: Vec<f64> = f6
         .iter()
         .filter_map(|r| ok(r).map(|s| s.bytes_per_s / 1e6))
         .collect();
-    let (sa, sb) = (
-        ok(&fio_sw).map(|s| s.bytes_per_s / 1e6),
-        ok(&fio_sw2).map(|s| s.bytes_per_s / 1e6),
-    );
-    let whole =
-        ours.len() == 3 && ours1.len() == 3 && q8w.len() == 3 && sa.is_some() && sb.is_some();
+    let syncw: Vec<f64> = f6s
+        .iter()
+        .filter_map(|r| ok(r).map(|s| s.bytes_per_s / 1e6))
+        .collect();
+    let whole = ours.len() == 3 && ours1.len() == 3 && q8w.len() == 3 && syncw.len() == 3;
     let sw = med(&ours).zip(med(&ours1)).map(|(a, b)| a.max(b));
-    let (q8m, psm) = (med(&q8w), mean(sa, sb));
+    let (q8m, psm) = (med(&q8w), med(&syncw));
     let best = q8m.zip(psm).map(|(a, b)| a.max(b));
     let range = |v: &[f64], m: Option<f64>| {
         let (lo, hi) = v
@@ -554,7 +557,7 @@ pub fn run(ctx: &Ctx) -> Section {
     let wspread = if q8m >= psm {
         range(&q8w, q8m)
     } else {
-        psm.map_or(0.0, |m| spread(sa, sb) / m)
+        range(&syncw, psm)
     };
     let simple = get(
         find(&w5, System::StoreIo, "append(1 MiB)", None),
@@ -564,9 +567,8 @@ pub fn run(ctx: &Ctx) -> Section {
         id: "G6",
         gate: "Sequential write (1 MiB) at least 90% of fio's best (store-io: Submitter appends from pool buffers, no copy, 8 deep and 1 deep, its better), and 8 deep at least 90% of fio's QD8 (medians of 3 alternated runs)",
         measured: format!(
-            "store-io QD8 {ours:.0?}, QD1 {ours1:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio {} {} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
+            "store-io QD8 {ours:.0?}, QD1 {ours1:.0?} MB/s, fio QD8 {q8w:.0?} MB/s, fio {} {syncw:.0?} MB/s (baseline spread {:.0}%); simple append(1 MiB), which copies, {} MB/s",
             fio::sync_engine(),
-            f(psm, 0),
             wspread * 100.0,
             f(simple, 0)
         ),

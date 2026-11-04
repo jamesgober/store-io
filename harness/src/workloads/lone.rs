@@ -203,7 +203,7 @@ fn store_append(ctx: &Ctx) -> Point {
     })
 }
 
-fn store_page(ctx: &Ctx) -> Point {
+pub(super) fn store_page(ctx: &Ctx) -> Point {
     let p = Point::new(System::StoreIo, "PageRegion::write_durable")
         .param("bytes", Json::Num(KIB4 as f64))
         .param("region_bytes", Json::Num(SPAN as f64));

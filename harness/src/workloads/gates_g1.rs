@@ -10,6 +10,8 @@
 //! round (each side first in half of them); G1 is judged on the worse of the
 //! median per-round difference of the two p50s and the difference of the
 //! pooled p50s, with the rounds' spread of differences as its uncertainty.
+//! G3's comparison with raw is judged on the same rounds, as the ratio of
+//! the two sides' mean latencies (store-io's rate over raw's).
 
 use std::time::{Duration, Instant};
 
@@ -61,7 +63,10 @@ fn p50_us(d: &mut [Duration]) -> f64 {
 /// (the [`BOUND`]th smallest and largest differences: an interval holding
 /// the true median about 96% of the time) and `pooled_diff_us`
 /// (the p50 of every store-io sample minus that of every raw sample). The
-/// per-round differences are returned too.
+/// per-round differences are returned too. For G3: `rate_ratio` (the
+/// median over rounds of raw's mean latency over store-io's, so store-io's
+/// rate over raw's), `rate_ratio_lo` / `rate_ratio_hi` (its interval, as
+/// above) and `pooled_rate_ratio` (the same over every sample).
 ///
 /// Integrity: every write carries its index's payload; afterwards a sample
 /// of each side's pages reads back as its latest write, byte for byte.
@@ -131,6 +136,8 @@ fn alternated_into(ctx: &Ctx, rounds: &mut Vec<f64>) -> Point {
         let _ = store_burst(Instant::now() + warm, false)?;
         let _ = raw_burst(Instant::now() + warm, false)?;
         let (mut s, mut r, mut diff) = (Vec::new(), Vec::new(), Vec::new());
+        let mut ratio = Vec::new();
+        let mean = |d: &[Duration]| d.iter().sum::<Duration>().as_secs_f64() / d.len() as f64;
         let (mut all_s, mut all_r) = (Vec::new(), Vec::new());
         for round in 0..ROUNDS {
             let (mut a, mut b) = if round % 2 == 0 {
@@ -144,6 +151,7 @@ fn alternated_into(ctx: &Ctx, rounds: &mut Vec<f64>) -> Point {
             s.push(ps);
             r.push(pr);
             diff.push(ps - pr);
+            ratio.push(mean(&b) / mean(&a));
             all_s.extend_from_slice(&a);
             all_r.extend_from_slice(&b);
         }
@@ -167,9 +175,21 @@ fn alternated_into(ctx: &Ctx, rounds: &mut Vec<f64>) -> Point {
                 .and_then(|i| diff.get(i))
                 .copied(),
         );
+        p.metric("pooled_rate_ratio", Some(mean(&all_r) / mean(&all_s)));
         p.metric(
             "pooled_diff_us",
             Some(p50_us(&mut all_s) - p50_us(&mut all_r)),
+        );
+        p.metric("rate_ratio", Some(median(&mut ratio)));
+        // `median` sorted `ratio`.
+        p.metric("rate_ratio_lo", ratio.get(BOUND - 1).copied());
+        p.metric(
+            "rate_ratio_hi",
+            ratio
+                .len()
+                .checked_sub(BOUND)
+                .and_then(|i| ratio.get(i))
+                .copied(),
         );
         // Read-back: store-io's pages, then the raw file's slots.
         let mut back = vec![0u8; KIB4];

@@ -2,13 +2,14 @@
 //! (D-066: Linux gates are relative, against the raw primitive and fio on
 //! the same box, kernel, file system and flags, and labelled Unverified).
 //!
-//! It runs the workloads the gates need (W1 twice, so the raw baseline's own
-//! run-to-run spread is known, W2 to W5), fio controls, and the measurements
-//! no workload makes (`gates_extra`), then judges each row:
+//! It runs the workloads the gates need (W1 to W5), fio controls,
+//! and the measurements no workload makes (`gates_extra`, and the
+//! alternated rounds of `gates_g1` and `gates_g2`), then judges each row:
 //!
 //! - PASS: within the gate.
 //! - NOT RESOLVABLE: outside the gate by less than the baseline's own spread
-//!   on this machine; neither a pass nor a failure can be claimed.
+//!   on this machine (for alternated rounds, by less than the median's
+//!   interval); neither a pass nor a failure can be claimed.
 //! - FAIL: outside the gate by more than that.
 //! - REPORTED: a row the table asks to report, not to gate.
 //! - ELSEWHERE: measured by another check (cited).
@@ -122,14 +123,12 @@ fn worse(a: Verdict, b: Verdict) -> Verdict {
     if rank(b) > rank(a) { b } else { a }
 }
 
-/// The mean of two runs; `None` unless both ran (a verdict never rests on
-/// one run when the method asks for two).
-fn mean(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    a.zip(b).map(|(a, b)| (a + b) / 2.0)
-}
-
-fn spread(a: Option<f64>, b: Option<f64>) -> f64 {
-    a.zip(b).map_or(0.0, |(a, b)| (a - b).abs())
+/// The range of `v` relative to `m` (0 when `m` is not positive).
+fn range(v: &[f64], m: Option<f64>) -> f64 {
+    let (lo, hi) = v
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+    m.filter(|m| *m > 0.0).map_or(0.0, |m| (hi - lo) / m)
 }
 
 /// Counts comparisons at least 20% better than fsys, at the device floor
@@ -227,15 +226,13 @@ pub fn run(ctx: &Ctx) -> Section {
         "Performance gates (a device whose flushes reach it; relative, under an override per D-066)",
     );
     sec.method = vec![
-        "Workloads: W1 (lone) twice, W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS), and `gates_g1` and `gates_g2` (G1 and G2, alternated rounds).".to_owned(),
-        "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (W1 run twice for the raw primitive; each fio control a gate uses run two or three times); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
-        "G1 and G2 are measured in 20 alternated rounds (`gates_g1`, `gates_g2`, G2 at p50 and p99): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate.".to_owned(),
+        "Workloads: W1 (lone), W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS), and `gates_g1` and `gates_g2` (G1, G2 and G3 against raw, alternated rounds).".to_owned(),
+        "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (each fio control a gate uses run three times); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
+        "G1 and G2 are measured in 20 alternated rounds (`gates_g1`, `gates_g2`, G2 at p50 and p99): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate. G3 against raw is judged the same way on G1's rounds, on the ratio of the two sides' mean latencies.".to_owned(),
         "The latency gates (+2 µs, +5 µs) are far below the spread of a virtual disk's flush (milliseconds): on such a disk they are expected to be NOT RESOLVABLE; certified results need bare metal (dev/TODO.md).".to_owned(),
     ];
     // Each inner workload idles first, as the top-level ones do.
     let l1 = lone::run(ctx);
-    ctx.settle("gates: lone (second run)");
-    let l2 = lone::run(ctx);
     ctx.settle("gates: concurrent");
     let w2 = concurrent::run(ctx);
     ctx.settle("gates: caller-batch");
@@ -258,9 +255,14 @@ pub fn run(ctx: &Ctx) -> Section {
     // fio's synchronous engine here (`fio::sync_engine`).
     let sync = format!("--ioengine={}", fio::sync_engine());
     let sync = sync.as_str();
+    // G3: store-io's QD1 durable page write (W1's point) alternates with
+    // fio's synchronous write + fdatasync, three times each.
     let durable = [sync, "--rw=write", "--bs=4k", "--fdatasync=1"];
-    let fio_d1 = job(&durable, "write");
-    let fio_d2 = job(&durable, "write");
+    let (mut g3s, mut f3) = (Vec::new(), Vec::new());
+    for _ in 0..3 {
+        f3.push(job(&durable, "write"));
+        g3s.push(lone::store_page(ctx));
+    }
     let fio_sr1 = job(&[sync, "--rw=read", "--bs=1m"], "read");
     let cpu_args = [
         aio,
@@ -315,9 +317,12 @@ pub fn run(ctx: &Ctx) -> Section {
         g6.push(gates_seq::seq_write(ctx, 8));
         g6q1.push(gates_seq::seq_write(ctx, 1));
     }
+    for (i, r) in f3.iter().enumerate() {
+        if let Err(e) = r {
+            sec.anomalies.push(format!("fio durable ({}): {e}", i + 1));
+        }
+    }
     let fio_runs = [
-        ("fio durable (1)", &fio_d1),
-        ("fio durable (2)", &fio_d2),
         ("fio sequential read QD1", &fio_sr1),
         ("fio durable QD1", &fio_dq[0]),
         ("fio durable QD4", &fio_dq[1]),
@@ -451,32 +456,51 @@ pub fn run(ctx: &Ctx) -> Section {
         });
     }
     // G3: QD1 durable writes/s, at least 90% of fio's synchronous write +
-    // fdatasync and at least 90% of the raw primitive, each within its own
-    // spread; the worse verdict stands (on Windows fio's fdatasync is a full
-    // FlushFileBuffers and its engine hands every I/O to a completion
-    // thread: a weaker baseline than store-io's own call).
-    let (fa, fb) = (ok(&fio_d1).map(|s| s.iops), ok(&fio_d2).map(|s| s.iops));
-    let (ra, rb) = (get(raw(&l1), "ops_per_s"), get(raw(&l2), "ops_per_s"));
-    let rel = |a: Option<f64>, b: Option<f64>| mean(a, b).map_or(0.0, |m| spread(a, b) / m);
-    let store_rate = mean(get(page(&l1), "ops_per_s"), get(page(&l2), "ops_per_s"));
-    let against_fio = at_least(store_rate, mean(fa, fb), 0.9, rel(fa, fb));
-    let against_raw = at_least(store_rate, mean(ra, rb), 0.9, rel(ra, rb));
+    // fdatasync (three alternated runs each, medians, within fio's range),
+    // and at least 90% of the raw primitive in G1's alternated rounds (the
+    // ratio of the two sides' mean latencies, store-io's rate over raw's),
+    // judged as G1 is: the worse of the median per-round ratio and the
+    // pooled one, the interval deciding between NOT RESOLVABLE and FAIL.
+    // W1's rates are reported only: two windows measured one after the
+    // other judge the drift between them as well as store-io (one noisy
+    // runner failed G3 at 0.878x of raw that way while G1 on it read 0.34
+    // us over a 4.4 us raw p50). The worse verdict stands (on Windows fio's
+    // fdatasync is a full FlushFileBuffers and its engine hands every I/O
+    // to a completion thread: a weaker baseline than store-io's own call).
+    let ours3: Vec<f64> = g3s.iter().filter_map(|p| val(p, "ops_per_s")).collect();
+    let fio3: Vec<f64> = f3.iter().filter_map(|r| ok(r).map(|s| s.iops)).collect();
+    let (s3m, f3m) = (med(&ours3), med(&fio3));
+    let against_fio = at_least(s3m, f3m, 0.9, range(&fio3, f3m));
+    let (w1_store, w1_raw) = (get(page(&l1), "ops_per_s"), get(raw(&l1), "ops_per_s"));
+    let (q, qlo, qhi, qp) = (
+        fin("rate_ratio"),
+        fin("rate_ratio_lo"),
+        fin("rate_ratio_hi"),
+        fin("pooled_rate_ratio"),
+    );
+    let against_raw = match (q.zip(qp).map(|(m, p)| m.min(p)), qlo, qhi) {
+        (Some(w), Some(_), Some(_)) if w >= 0.9 => Verdict::Pass,
+        (Some(_), Some(_), Some(hi)) if hi >= 0.9 => Verdict::NotResolvable,
+        _ => Verdict::Fail,
+    };
     rows.push(Row {
         id: "G3",
-        gate: "QD1 durable writes/s at least 90% of fio (synchronous write + fdatasync) and at least 90% of the raw primitive",
+        gate: "QD1 durable writes/s at least 90% of fio (synchronous write + fdatasync) and at least 90% of the raw primitive (against raw: the rate ratio in G1's 20 alternated rounds, judged as G1)",
         measured: format!(
-            "store-io {} /s, fio ({}) {} /s (spread {:.0}%), raw {} /s (spread {:.0}%)",
-            f(store_rate, 0),
+            "store-io {ours3:.0?} /s, fio ({}) {fio3:.0?} /s (medians of 3 alternated runs, fio's spread {:.0}%); store-io / raw in G1's rounds {} (interval {} to {}), pooled {}; W1 (reported): store-io {} /s, raw {} /s",
             fio::sync_engine(),
-            f(mean(fa, fb), 0),
-            rel(fa, fb) * 100.0,
-            f(mean(ra, rb), 0),
-            rel(ra, rb) * 100.0
+            range(&fio3, f3m) * 100.0,
+            f(q, 3),
+            f(qlo, 3),
+            f(qhi, 3),
+            f(qp, 3),
+            f(w1_store, 0),
+            f(w1_raw, 0)
         ),
-        verdict: if [fa, fb, ra, rb].iter().any(Option::is_none) {
-            Verdict::Fail
-        } else {
+        verdict: if ours3.len() == 3 && fio3.len() == 3 {
             worse(against_fio, against_raw)
+        } else {
+            Verdict::Fail
         },
     });
     // G4: durable random writes at QD 1, 4, 16: reported.
@@ -548,12 +572,6 @@ pub fn run(ctx: &Ctx) -> Section {
     let sw = med(&ours).zip(med(&ours1)).map(|(a, b)| a.max(b));
     let (q8m, psm) = (med(&q8w), med(&syncw));
     let best = q8m.zip(psm).map(|(a, b)| a.max(b));
-    let range = |v: &[f64], m: Option<f64>| {
-        let (lo, hi) = v
-            .iter()
-            .fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
-        m.filter(|m| *m > 0.0).map_or(0.0, |m| (hi - lo) / m)
-    };
     let wspread = if q8m >= psm {
         range(&q8w, q8m)
     } else {
@@ -871,13 +889,14 @@ pub fn run(ctx: &Ctx) -> Section {
     }
     let mut pts = vec![g1, g2, g7, g8w, g8b, g10];
     pts.extend(g3d);
+    pts.extend(g3s);
     pts.extend(g5);
     pts.extend(g6);
     pts.extend(g6q1);
     pts.extend(g4);
     pts.extend(g15.points);
     sec.points = pts;
-    for s in [&l1, &l2, &w2, &w3, &w4, &w5] {
+    for s in [&l1, &w2, &w3, &w4, &w5] {
         sec.anomalies.extend(s.anomalies.iter().cloned());
     }
     sec.anomalies.extend(anomalies);

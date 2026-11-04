@@ -639,6 +639,19 @@
   The range of three runs tends to be wider than that of two, so a
   result just under the gate is likelier to read NOT RESOLVABLE than it
   was.
+- Harness: **G3 compares alternated runs** (D-141). Against raw it is
+  judged on G1's 20 alternated rounds, as the ratio of the two sides'
+  mean latencies (W1's rate is the same statistic, so nothing store-io's
+  caller pays left the measurement), with G1's rule: PASS when the worse
+  of the median and the pooled ratio reaches 90%, NOT RESOLVABLE when
+  the median's interval does. Against fio, three runs of W1's page write
+  now alternate with fio's three. Both used to compare windows minutes
+  apart, and a noisy Xeon 6973P-C runner failed at 0.878x of raw while
+  G1, alternated on it, measured 93%. W1 runs once in a gates run (its
+  second run fed only that comparison). On ten runners since: against
+  raw EPYC 0.94-0.96x, Xeon 8370C 0.92x, and Xeon 6975P-C 0.902x and
+  0.904x (intervals 0.901-0.906): there the margin is real and thin,
+  0.39 µs over a 3.5 µs raw write; against fio 0.94-1.01x.
 - Engine: **the flush domain's statistics `led`, `peak_in_flight` and
   `out_of_order` are counted under the slot lock** a leader holds anyway,
   not as atomics on a cache line of their own: per durable write, two

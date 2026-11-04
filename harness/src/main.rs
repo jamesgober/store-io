@@ -91,12 +91,12 @@ const WORKLOADS: [Workload; 7] = [
     Workload {
         command: Command::Gates,
         run: workloads::gates::run,
-        // W1 twice, W2-W5, G13's reruns (Windows: W2 and W3 twice more),
-        // G15's 21 points, the gate-only measurements and fio.
+        // W1-W5, G13's reruns (Windows: W2 and W3 twice more), G15's 21
+        // points, the gate-only measurements and fio.
         points: 400,
-        // Before its second W1, W2-W5 and the fio controls (6), and before
-        // each of G13's reruns (at most 4, on Windows).
-        settles: 10,
+        // Before W2-W5 and the fio controls (5), and before each of G13's
+        // reruns (at most 4, on Windows).
+        settles: 9,
     },
 ];
 

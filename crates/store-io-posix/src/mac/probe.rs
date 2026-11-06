@@ -317,12 +317,16 @@ mod tests {
 
     #[test]
     fn test_only_one_physical_store_seen_whole_is_a_complete_identity() {
+        // A built-in drive as `internal_of` requires one: fixed media, on
+        // this machine's own built-in interconnect.
         let d = sys::Device {
             internal: Some(true),
-            protocol: Some("PCI-Express".to_owned()),
+            protocol: Some(internal_protocols()[0].to_owned()),
             path: Some("IODeviceTree:/arm-io/ans".to_owned()),
             tunnelled: Some(false),
             single: Some(true),
+            removable: Some(false),
+            ejectable: Some(false),
             ..sys::Device::default()
         };
         let id = identity(Some(&d), false, Some(false));

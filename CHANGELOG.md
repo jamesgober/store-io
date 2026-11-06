@@ -13,6 +13,63 @@
 
 ### Added
 
+- Probe: **device identity** (`DeviceFacts::identity`, PLANNING R5.2; the
+  first step of v0.6's multi-device layer). Every physical device a
+  store's bytes may live on, each with the identifiers it reports: Linux
+  every whole disk under the file system (each leaf of a dm, md or LVM
+  stack; a loop device's backing file followed to its own device), with
+  the namespace's `wwid` and the controller's serial and subsystem NQN
+  from sysfs; Windows every disk of the volume with its descriptor serial
+  and, for NVMe, the controller's serial and NQN from Identify Controller;
+  macOS the physical device's IOKit registry path.
+  `DeviceIdentity::distinct` errs one way only: both identities must be
+  complete, and any shared node or name makes them one device (two
+  namespaces of one controller share its serial; two paths to one LUN
+  share its WWID). An identity is complete only for disks the probe sees
+  whole, on bare metal: a local NVMe disk with its controller named, a
+  USB disk with its bridge named (the LUNs of one enclosure are one
+  device), a SATA disk, on ext4 with its journal inside, XFS with no log
+  or realtime device elsewhere, or a raw device, and no member hidden
+  from the walk (bcache's cache device) (Linux); a volume whose disks
+  are all NVMe with the controller named or SATA, found from the file's
+  own handle, on a machine whose SMBIOS positively describes physical
+  hardware and whose CPUID shows no hypervisor or Hyper-V with this
+  machine as its root partition (Windows); a built-in device by the probe's own built-in
+  test (macOS). Anything else (a virtual machine's disks, a SCSI or SAS
+  disk that may be a RAID's logical drive, an unknown bus, memory
+  devices, cloud volumes such as EBS, loop devices, pools, remote
+  targets, network, anonymous-device and other file systems) is
+  incomplete, never distinct. Read without privilege and without a
+  flush. Residual, documented: a RAID controller presenting its volumes
+  as plain SATA or USB disks is not recognised; a Windows guest running
+  its own Hyper-V (VBS, the Hyper-V role, WSL2) under a hypervisor other
+  than Hyper-V (VMware, KVM, Xen, VirtualBox, ...) reads as Hyper-V's
+  root partition by CPUID, and if its SMBIOS also reads as physical it
+  is not recognised either; Windows on Arm has SMBIOS as its only guest
+  signal.
+  **Breaking for implementers and literal constructors:**
+  `Platform` gains three required methods (`device_identity`,
+  `file_identity`, `path_identity`), implemented on every backend and the
+  simulator; `DeviceFacts` gains a public field.
+- Engine: **a writable open checks that the path still names the file it
+  locked** (PLANNING R5.7). A container renamed over the path between the
+  open and the lock (the copy-and-swap of v0.6) would otherwise leave the
+  writer owning a file no path names, acknowledging writes no later open
+  can see. On a mismatch the open is retried once onto the file the path
+  names now, then refused `Locked`. A reader keeps the file it opened.
+  Windows file ids fall back to the 64-bit file index on file systems
+  without 128-bit ids (FAT, exFAT, some network servers), so a missing
+  128-bit id does not refuse a store there; an id of 0 or -1 (which some
+  servers report for every file) identifies nothing, and a writable open there fails (`Io`), as does any
+  other error reading the identity. The conformance suite gains "file
+  identity follows the file, and one directory is one device", and the
+  probe fuzz targets fuzz the identity parsers. The simulator's
+  `FaultPlan::rename_before_lock` makes the race; two tests and 46
+  mutation entries (identity rules on Linux, Windows and macOS, the open
+  check) cover it. The Windows probe's other disk facts (write cache,
+  FUA, NVMe) now also come from the file's own volume, not the
+  directory's path text, which a junction could point elsewhere.
+
 - Tests: **fencing after a killed owner on Windows** (`store-io-win`'s
   `tests/kill.rs`, run once in CI). A child process holds the ownership
   lock with 512 MiB of unbuffered writes in flight (odd rounds issue them

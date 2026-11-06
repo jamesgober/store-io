@@ -173,6 +173,7 @@ pub(crate) struct DeviceDesc {
     pub vendor: Option<String>,
     pub product: Option<String>,
     pub revision: Option<String>,
+    pub serial: Option<String>,
 }
 
 pub(crate) fn parse_device_descriptor(buf: &[u8]) -> Option<DeviceDesc> {
@@ -189,6 +190,7 @@ pub(crate) fn parse_device_descriptor(buf: &[u8]) -> Option<DeviceDesc> {
         vendor: string_at(12),
         product: string_at(16),
         revision: string_at(20),
+        serial: string_at(24),
     })
 }
 
@@ -208,6 +210,27 @@ pub(crate) fn parse_disk_size(buf: &[u8]) -> Option<u64> {
 /// `STORAGE_DEVICE_NUMBER`: the disk number.
 pub(crate) fn parse_device_number(buf: &[u8]) -> Option<u32> {
     Reader::new(buf).u32(4)
+}
+
+/// `VOLUME_DISK_EXTENTS`: every extent's disk number, in order, without
+/// repeats, and whether the buffer held every extent the count names (24
+/// bytes each from offset 8). `None` for no extent.
+pub(crate) fn parse_all_disk_extents(buf: &[u8]) -> Option<(Vec<u32>, bool)> {
+    let r = Reader::new(buf);
+    let count = r.u32(0)? as usize;
+    if count == 0 {
+        return None;
+    }
+    let mut disks = Vec::new();
+    for i in 0..count {
+        let Some(d) = r.u32(8 + i * 24) else {
+            return Some((disks, false));
+        };
+        if !disks.contains(&d) {
+            disks.push(d);
+        }
+    }
+    Some((disks, true))
 }
 
 /// `VOLUME_DISK_EXTENTS`: `(extent count, first extent's disk)`.
@@ -240,6 +263,87 @@ pub(crate) fn layer_from_code(code: i32) -> Option<StackLayer> {
     (code == BUS_SPACES).then_some(StackLayer::Pool)
 }
 
+/// Whether a raw SMBIOS table (`GetSystemFirmwareTable('RSMB')`: an 8-byte
+/// header, then the structures) positively describes physical hardware: a
+/// System Information (type 1) structure that gives both a manufacturer
+/// and a product name, neither naming a virtual machine, and no BIOS Information (type 0) structure with
+/// the "describes a virtual machine" bit (characteristics extension byte
+/// 2, bit 4). A table without a type-1 structure, or malformed, describes
+/// nothing: not physical.
+pub(crate) fn smbios_says_physical(raw: &[u8]) -> bool {
+    const GUESTS: [&str; 19] = [
+        "vmware",
+        "virtualbox",
+        "innotek",
+        "qemu",
+        "kvm",
+        "bochs",
+        "xen",
+        "parallels",
+        "bhyve",
+        "red hat",
+        "nutanix",
+        "amazon ec2",
+        "google compute engine",
+        "digitalocean",
+        "hetzner",
+        "alibaba",
+        "openstack",
+        "firecracker",
+        "virtual machine",
+    ];
+    let Some(table) = raw.get(8..) else {
+        return false;
+    };
+    let (mut system, mut guest) = (false, false);
+    let mut at = 0usize;
+    while let (Some(&kind), Some(&len)) = (table.get(at), table.get(at + 1)) {
+        let len = usize::from(len);
+        if len < 4 {
+            return false;
+        }
+        let Some(formatted) = table.get(at..at + len) else {
+            return false;
+        };
+        // The strings follow the formatted area, each NUL-terminated, the
+        // set ending with an extra NUL.
+        let strings_at = at + len;
+        let mut end = strings_at;
+        while table.get(end..end + 2).is_some_and(|w| w != [0, 0]) {
+            end += 1;
+        }
+        if table.get(end..end + 2).is_none() {
+            return false;
+        }
+        match kind {
+            0 if formatted.get(0x13).is_some_and(|b| b & 0x10 != 0) => guest = true,
+            1 => {
+                let strings: Vec<&[u8]> = table[strings_at..end].split(|&b| b == 0).collect();
+                let text = |index: Option<&u8>| {
+                    index
+                        .and_then(|&i| usize::from(i).checked_sub(1))
+                        .and_then(|i| strings.get(i))
+                        .map(|s| String::from_utf8_lossy(s).to_ascii_lowercase())
+                        .unwrap_or_default()
+                };
+                let (maker, product) = (text(formatted.get(4)), text(formatted.get(5)));
+                let name = format!("{maker} {product}");
+                // A structure that names nothing describes nothing.
+                if !maker.trim().is_empty() && !product.trim().is_empty() {
+                    system = true;
+                }
+                if GUESTS.iter().any(|g| name.contains(g)) {
+                    guest = true;
+                }
+            }
+            127 => break,
+            _ => {}
+        }
+        at = end + 2;
+    }
+    system && !guest
+}
+
 /// A hypervisor inferred from the disk's bus and model string. Windows runs
 /// under Hyper-V as the root partition whenever virtualization-based
 /// security is on, so a CPUID hypervisor bit would misreport most physical
@@ -251,6 +355,13 @@ pub(crate) fn hypervisor_from(bus: Bus, model: Option<&str>) -> Option<Hyperviso
     }
     if m.contains("vmware") {
         return Some(Hypervisor::Vmware);
+    }
+    if m.contains("vbox")
+        || m.contains("virtualbox")
+        || m.contains("parallels")
+        || m.contains("bhyve")
+    {
+        return Some(Hypervisor::Other);
     }
     if m.contains("qemu") || m.contains("virtio") {
         return Some(Hypervisor::Kvm);
@@ -367,6 +478,25 @@ mod tests {
         assert_eq!(parse_disk_extents(&ext), Some((2, 5)));
         assert_eq!(parse_disk_extents(&le(&[0, 0, 5, 0])), None);
         assert_eq!(parse_disk_extents(&le(&[1])), None);
+        // Two extents, disks 5 and 3; one disk twice; a count the buffer
+        // cannot hold.
+        let extent = |disk: u32| {
+            let mut e = le(&[disk, 0]);
+            e.extend_from_slice(&[0u8; 16]);
+            e
+        };
+        let mut two = le(&[2, 0]);
+        two.extend(extent(5));
+        two.extend(extent(3));
+        assert_eq!(parse_all_disk_extents(&two), Some((vec![5, 3], true)));
+        let mut same = le(&[2, 0]);
+        same.extend(extent(5));
+        same.extend(extent(5));
+        assert_eq!(parse_all_disk_extents(&same), Some((vec![5], true)));
+        let mut short = le(&[3, 0]);
+        short.extend(extent(5));
+        assert_eq!(parse_all_disk_extents(&short), Some((vec![5], false)));
+        assert_eq!(parse_all_disk_extents(&le(&[0, 0])), None);
         let mut geo = vec![0u8; 24];
         geo.extend_from_slice(&4_000_787_030_016u64.to_le_bytes());
         assert_eq!(parse_disk_size(&geo), Some(4_000_787_030_016));
@@ -382,6 +512,12 @@ mod tests {
         b.extend_from_slice(b"NVMe\0\0\0\0T-FORCE\0EIFM70.3\0  ");
         let d = parse_device_descriptor(&b).unwrap_or_default();
         assert_eq!(d.bus, 17);
+        assert_eq!(d.serial, None);
+        let mut with_serial = le(&[1, 80, 0, 36, 44, 52, 63, 17, 20]);
+        with_serial.extend_from_slice(b"NVMe\0\0\0\0T-FORCE\0EIFM70.3\0  ");
+        with_serial.extend_from_slice(b"S4EW_0001.\0\0\0\0\0\0");
+        let d = parse_device_descriptor(&with_serial).unwrap_or_default();
+        assert_eq!(d.serial.as_deref(), Some("S4EW_0001."));
         assert_eq!(d.vendor.as_deref(), Some("NVMe"));
         assert_eq!(d.product.as_deref(), Some("T-FORCE"));
         assert_eq!(d.revision.as_deref(), Some("EIFM70.3"));
@@ -393,6 +529,79 @@ mod tests {
         let d = parse_device_descriptor(&bad).unwrap_or_default();
         assert_eq!((d.vendor, d.product, d.revision), (None, None, None));
         assert_eq!(parse_device_descriptor(&[0u8; 31]), None);
+    }
+
+    /// An SMBIOS table with one type-1 structure naming `maker` and
+    /// `product`, then the end marker.
+    fn smbios(maker: &str, product: &str) -> Vec<u8> {
+        let mut t = vec![0u8; 8];
+        // Type 1, length 8: handle, then string indexes 1 (manufacturer)
+        // and 2 (product), padded to the length.
+        t.extend_from_slice(&[1, 8, 0, 0, 1, 2, 0, 0]);
+        t.extend_from_slice(maker.as_bytes());
+        t.push(0);
+        t.extend_from_slice(product.as_bytes());
+        t.push(0);
+        t.push(0);
+        t.extend_from_slice(&[127, 4, 0, 0, 0, 0]);
+        t
+    }
+
+    #[test]
+    fn test_smbios_says_physical_only_for_named_physical_hardware() {
+        for (maker, product) in [
+            ("innotek GmbH", "VirtualBox"),
+            ("Microsoft Corporation", "Virtual Machine"),
+            ("QEMU", "Standard PC (Q35 + ICH9, 2009)"),
+            (
+                "Parallels Software International Inc.",
+                "Parallels Virtual Platform",
+            ),
+            ("Red Hat", "KVM"),
+            ("Nutanix", "AHV"),
+        ] {
+            assert!(!smbios_says_physical(&smbios(maker, product)), "{maker}");
+        }
+        assert!(smbios_says_physical(&smbios(
+            "Micro-Star International Co., Ltd.",
+            "MS-7E12"
+        )));
+        assert!(smbios_says_physical(&smbios(
+            "Microsoft Corporation",
+            "Surface Laptop 7"
+        )));
+        // A type-0 structure with the "virtual machine" bit, whatever the
+        // names say.
+        let mut flagged = vec![0u8; 8];
+        let mut bios = vec![0u8; 0x14];
+        bios[1] = 0x14;
+        bios[0x13] = 0x10;
+        flagged.extend_from_slice(&bios);
+        flagged.extend_from_slice(&[0, 0]);
+        flagged.extend_from_slice(&smbios("Micro-Star International Co., Ltd.", "MS-7E12")[8..]);
+        assert!(!smbios_says_physical(&flagged));
+        // Malformed or empty tables, or none with a type-1 structure,
+        // describe nothing: never physical, and never a panic.
+        assert!(!smbios_says_physical(&[]));
+        assert!(!smbios_says_physical(&[0u8; 8]));
+        assert!(!smbios_says_physical(&[0, 0, 0, 0, 0, 0, 0, 0, 1, 2]));
+        let mut cut = smbios("Micro-Star International Co., Ltd.", "MS-7E12");
+        cut.truncate(14);
+        assert!(!smbios_says_physical(&cut));
+        let mut only_bios = vec![0u8; 8];
+        only_bios.extend_from_slice(&[0, 4, 0, 0, 0, 0, 127, 4, 0, 0, 0, 0]);
+        assert!(!smbios_says_physical(&only_bios));
+        // A type-1 structure without its maker or its product.
+        assert!(!smbios_says_physical(&smbios("", "MS-7E12")));
+        assert!(!smbios_says_physical(&smbios(" ", "MS-7E12")));
+        // Firmware without a maker string gives index 0.
+        let mut no_maker = smbios("Micro-Star International Co., Ltd.", "MS-7E12");
+        no_maker[8 + 4] = 0;
+        assert!(!smbios_says_physical(&no_maker));
+        assert!(!smbios_says_physical(&smbios(
+            "Micro-Star International Co., Ltd.",
+            " "
+        )));
     }
 
     #[test]

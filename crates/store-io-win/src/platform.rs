@@ -4,7 +4,8 @@ use std::path::Path;
 
 use store_io_core::evidence::Evidence;
 use store_io_platform::{
-    FileMode, FileName, Platform, QueueConfig, RangeState, RawResult, ReleaseHow,
+    DeviceIdentity, FileIdentity, FileMode, FileName, Platform, QueueConfig, RangeState, RawResult,
+    ReleaseHow,
 };
 
 use crate::alloc;
@@ -167,6 +168,26 @@ impl Platform for WinPlatform {
 
     fn probe(&self, dir: &WinDir, file: &WinFile) -> RawResult<Evidence> {
         probe::probe(dir, file)
+    }
+
+    fn device_identity(&self, dir: &WinDir, file: &WinFile) -> DeviceIdentity {
+        probe::device_identity(dir, file)
+    }
+
+    fn file_identity(&self, file: &WinFile) -> RawResult<FileIdentity> {
+        let (volume, id) = sys::file_id(file.handle())?;
+        Ok(FileIdentity {
+            volume,
+            file: u128::from_le_bytes(id),
+        })
+    }
+
+    fn path_identity(&self, dir: &WinDir, name: &FileName) -> RawResult<FileIdentity> {
+        let (volume, id) = dir.child_id(name)?;
+        Ok(FileIdentity {
+            volume,
+            file: u128::from_le_bytes(id),
+        })
     }
 
     fn queue(&self, cfg: QueueConfig) -> RawResult<WinQueue> {

@@ -107,6 +107,20 @@ impl WinDir {
         self.path.join(name.as_str())
     }
 
+    /// The volume serial and file id of the file `name` names now, read
+    /// through a handle with attribute access only, every share mode, and
+    /// no reparse point followed (the container is a plain file).
+    pub(crate) fn child_id(&self, name: &FileName) -> RawResult<(u64, [u8; 16])> {
+        let h = sys::create_file(
+            &self.child(name),
+            FILE_READ_ATTRIBUTES,
+            sys::SHARE_ALL,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        )?;
+        sys::file_id(&h)
+    }
+
     pub(crate) fn create_file(&self, name: &FileName) -> RawResult<WinFile> {
         WinFile::open(&self.child(name), FileMode::ReadWrite, true)
     }

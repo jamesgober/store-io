@@ -399,6 +399,59 @@ fn test_a_lock_failure_that_is_not_a_holder_is_io_not_locked() {
     drop(reopen(&p));
 }
 
+/// PLANNING R5.7: a writable open checks, after locking, that the path
+/// still names the file it locked. A swap that renames the container away
+/// between the open and the lock leaves the open owning a file no path
+/// names; the open must not go on with it (it would acknowledge writes no
+/// later open can see).
+#[test]
+fn test_an_open_whose_container_is_renamed_away_before_its_lock_does_not_own_it() {
+    let p = SimPlatform::new(SimConfig::volatile(15));
+    drop(create(&p));
+    p.with_world(|w| {
+        w.faults_mut().rename_before_lock = Some((
+            std::path::PathBuf::from(DIR),
+            "store.sio".to_owned(),
+            "moved.sio".to_owned(),
+        ));
+    });
+    assert!(matches!(
+        Store::open(p.clone(), Path::new(DIR), opts()),
+        Err(Error::NotFound { .. })
+    ));
+}
+
+/// As above, with another container renamed over the path: the retried
+/// open owns the store the path names now, never the one swapped out.
+#[test]
+fn test_an_open_whose_container_is_swapped_before_its_lock_opens_the_new_one() {
+    use store_io_platform::{FileMode, FileName, Platform};
+    let p = SimPlatform::new(SimConfig::volatile(16));
+    let first = create(&p);
+    let swapped_in = first.volume();
+    drop(first);
+    // Keep the first store's container under another name, then make a
+    // second store at the path.
+    let dir = p.open_dir(Path::new(DIR), false).unwrap();
+    let name = FileName::new("store.sio").unwrap();
+    let keep = FileName::new("keep.sio").unwrap();
+    let f = p.open_file(&dir, &name, FileMode::ReadWrite).unwrap();
+    p.rename_replace(&dir, &name, &keep, &f).unwrap();
+    let second = create(&p);
+    let swapped_out = second.volume();
+    drop(second);
+    assert_ne!(swapped_in, swapped_out);
+    p.with_world(|w| {
+        w.faults_mut().rename_before_lock = Some((
+            std::path::PathBuf::from(DIR),
+            "keep.sio".to_owned(),
+            "store.sio".to_owned(),
+        ));
+    });
+    let s = reopen(&p);
+    assert_eq!(s.volume(), swapped_in);
+}
+
 /// D-092: a read-only open needs no write rights, so it works on read-only
 /// media; readers share the store, and readers and the writer exclude each
 /// other. Before 0.4 a read-only open opened the container read-write to

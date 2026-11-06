@@ -526,6 +526,26 @@ fn test_cachestat_sees_a_buffered_read_and_direct_writes_leave_none() {
     assert!(s.cached_pages.is_some_and(|n| n > 0), "{s:?}");
 }
 
+/// PLANNING R5.2: two files in one directory are never on distinct
+/// devices; the identity call agrees with the probe; file identities tell
+/// two files apart and match a file's path.
+#[test]
+fn test_two_files_in_one_directory_share_a_device_and_differ_as_files() {
+    let (_t, p, dir, file, _pool, _q) = setup();
+    let other = p.create_file(&dir, &name("other.sio")).unwrap();
+    let ia = p.device_identity(&dir, &file);
+    let ib = p.device_identity(&dir, &other);
+    assert!(!ia.distinct(&ib), "{ia:?} {ib:?}");
+    assert_eq!(ia, p.probe(&dir, &file).unwrap().device.identity);
+    if ia.complete {
+        assert!(!ia.devices.is_empty());
+    }
+    let fa = p.file_identity(&other).unwrap();
+    assert_eq!(fa, p.path_identity(&dir, &name("other.sio")).unwrap());
+    assert_ne!(fa, p.file_identity(&file).unwrap());
+    assert!(p.path_identity(&dir, &name("none.sio")).is_err());
+}
+
 #[test]
 fn test_probe_on_ext4_reports_filesystem_alignment_stack_and_device() {
     let (t, p, dir, file, _pool, _q) = setup();

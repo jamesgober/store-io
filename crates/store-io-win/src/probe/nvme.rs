@@ -11,6 +11,11 @@ use crate::bytes::Reader;
 /// Identify Controller fields store-io uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct IdentifyController {
+    /// Serial number (bytes 4..24): the controller's, shared by every
+    /// namespace on it.
+    pub serial: Option<String>,
+    /// NVM Subsystem NVMe Qualified Name (bytes 768..1024).
+    pub subnqn: Option<String>,
     /// Model number (bytes 24..64).
     pub model: Option<String>,
     /// Firmware revision (bytes 64..72).
@@ -30,6 +35,8 @@ pub(crate) struct IdentifyController {
 pub(crate) fn parse_identify_controller(buf: &[u8]) -> Option<IdentifyController> {
     let r = Reader::new(buf);
     Some(IdentifyController {
+        serial: r.ascii(4, 20),
+        subnqn: r.ascii(768, 256),
         model: r.ascii(24, 40),
         firmware: r.ascii(64, 8),
         multi_controller: r.u8(76)? & 0b10 != 0,

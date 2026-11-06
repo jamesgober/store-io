@@ -88,21 +88,24 @@ write("probe_linux", "uevent", bytes([2]) + b"MAJOR=259\nMINOR=0\nDEVNAME=nvme0n
 write("probe_linux", "sysfs-values", bytes([5]) + b"1024\n")
 write("probe_linux", "dm", bytes([6]) + b"luks-root\nCRYPT-LUKS2-0123-root")
 write("probe_linux", "md", bytes([7]) + b"raid5\nresync\n0")
-# Selector 46: parser 46 % 12 = 10, both device-presence flags (46 // 12 = 3).
-write("probe_linux", "virt", bytes([46]) + b"QEMU\nStandard PC\n\n6.6.87.2-microsoft-standard-WSL2\nflags : fpu hypervisor")
-# A Linux NVMe Identify Namespace page (selector 11, unpadded): 2 formats,
+# Selector 49: parser 49 % 13 = 10, both device-presence flags (49 // 13 = 3).
+write("probe_linux", "virt", bytes([49]) + b"QEMU\nStandard PC\n\n6.6.87.2-microsoft-standard-WSL2\nflags : fpu hypervisor")
+# Device identity (selector 11): a `dev` file, a USB disk's sysfs path, a
+# device name with jbd2's entries, XFS super options, a serial.
+write("probe_linux", "identity", bytes([11]) + b"8:16\n/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sdb\nsda1\nsda1-8,nvme0n1p2-8\nrw,attr2,logdev=/dev/sdc1\neui.0025385a11b2c3d4")
+# A Linux NVMe Identify Namespace page (selector 12, unpadded): 2 formats,
 # format 1 in use with 4 KiB blocks.
 ns = bytearray(4096)
 ns[25] = 1      # nlbaf (0-based count)
 ns[26] = 1      # flbas: format 1
 ns[128 + 4 * 0 + 2] = 9
 ns[128 + 4 * 1 + 2] = 12
-write("probe_linux", "nvme-id-ns", bytes([11]) + bytes(ns))
+write("probe_linux", "nvme-id-ns", bytes([12]) + bytes(ns))
 ctrl = bytearray(4096)
 ctrl[24:24 + 12] = b"Example SSD "
 ctrl[64:72] = b"FW1.0   "
 ctrl[525] = 1
-write("probe_linux", "nvme-id-ctrl", bytes([11]) + bytes(ctrl))
+write("probe_linux", "nvme-id-ctrl", bytes([12]) + bytes(ctrl))
 # probe_windows: first byte selects the parser; bit 7 pads to a 4 KiB page.
 wns = bytearray(4096)
 wns[24] = 0x18   # nsfeat: NSABP and NPWG fields valid
@@ -111,6 +114,9 @@ wns[26] = 1      # flbas: format 1
 wns[128 + 4 * 0 + 2] = 9
 wns[128 + 4 * 1 + 2] = 12
 write("probe_windows", "nvme-id-ns", bytes([1]) + bytes(wns))
+# An SMBIOS table (selector 4, unpadded): the 8-byte header, a type-1
+# structure naming its maker and product, then the end structure.
+write("probe_windows", "smbios", bytes([4]) + bytes(8) + bytes([1, 8, 0, 0, 1, 2, 0, 0]) + b"Micro-Star International Co., Ltd.\0MS-7E12\0\0" + bytes([127, 4, 0, 0, 0, 0]))
 write("probe_windows", "nvme-id-ctrl", bytes([0]) + bytes(ctrl))
 # STORAGE_DEVICE_DESCRIPTOR: vendor/product/revision offsets at 12/16/20,
 # bus type at 28, strings after the fixed part.

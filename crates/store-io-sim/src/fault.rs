@@ -92,4 +92,9 @@ pub struct FaultPlan {
     /// with this raw code (for example 37, ENOLCK: a file system that cannot
     /// lock) and locks nothing.
     pub fail_lock: Option<(u64, i32)>,
+    /// The next `Platform::lock_exclusive` or `lock_shared` first renames
+    /// the file `from` over `to` in the directory of this path, then the
+    /// fault is cleared: a swap landing between an open and its lock
+    /// (PLANNING R5.7).
+    pub rename_before_lock: Option<(std::path::PathBuf, String, String)>,
 }

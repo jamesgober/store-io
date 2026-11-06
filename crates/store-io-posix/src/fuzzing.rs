@@ -3,7 +3,8 @@
 //!
 //! Every byte the probe parses comes from the kernel or the device and is
 //! treated as hostile: sysfs and procfs text, `mountinfo` lines, `uevent`
-//! files, NVMe Identify and SMART pages. [`run`] feeds one input to one
+//! files, NVMe Identify and SMART pages, and the names and links device
+//! identity reads. [`run`] feeds one input to one
 //! parser, chosen by the first byte, and checks the parser's promises
 //! beyond "never panics".
 
@@ -14,7 +15,9 @@ use crate::probe::block::{
 use crate::probe::fs::{
     basename, find_mount, mount_facts, parse_mountinfo_line, uevent_devname, unescape,
 };
+use crate::probe::identity::{jbd2_internal, parse_dev, usb_bridge, xfs_uses_other_devices};
 use crate::probe::virt::{VirtInputs, classify, cpuinfo_has_hypervisor, kernel_version};
+use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode, normalize_name};
 
 /// Splits `s` into up to `N` fields on `'\n'`; missing fields are empty.
 fn fields<const N: usize>(s: &str) -> [&str; N] {
@@ -37,7 +40,7 @@ pub fn run(data: &[u8]) {
     };
     let text = String::from_utf8_lossy(rest);
     let t = text.as_ref();
-    match which % 12 {
+    match which % 13 {
         0 => {
             if let Some(e) = parse_mountinfo_line(t) {
                 assert_eq!(parse_mountinfo_line(t), Some(e), "not deterministic");
@@ -115,7 +118,7 @@ pub fn run(data: &[u8]) {
         10 => {
             let [vendor, product, hv, release, cpuinfo] = fields::<5>(t);
             // Device-presence flags come from the selector, not the text.
-            let flags = which / 12;
+            let flags = which / 13;
             let _ = classify(&VirtInputs {
                 sys_vendor: opt(vendor),
                 product_name: opt(product),
@@ -125,6 +128,84 @@ pub fn run(data: &[u8]) {
                 vmbus_devices: flags & 1 == 1,
                 virtio_devices: flags & 2 == 2,
             });
+        }
+        11 => {
+            // Device identity: a `dev` file, a device's sysfs path, a
+            // device name with jbd2's entries, XFS super options, a name.
+            let [dev, path, devname, entries, options, raw] = fields::<6>(t);
+            if let Some((major, minor)) = parse_dev(dev) {
+                assert_eq!(
+                    parse_dev(&format!("{major}:{minor}")),
+                    Some((major, minor)),
+                    "major:minor does not round-trip"
+                );
+            }
+            if let Some(b) = usb_bridge(path) {
+                assert!(
+                    b.starts_with("usb-bridge:") && b.contains("/usb"),
+                    "not a USB path: {b}"
+                );
+                // Everything after the bridge's SCSI host is the LUN's own.
+                assert_eq!(
+                    usb_bridge(&format!("{path}/x")),
+                    Some(b),
+                    "a deeper path named another bridge"
+                );
+            }
+            let entries: Vec<String> = entries.split(',').map(str::to_owned).collect();
+            if !devname.is_empty() && !devname.contains(',') {
+                // An internal journal's entry makes it internal; without
+                // any entry for the device, it is not.
+                let mut with = entries.clone();
+                with.push(format!("{devname}-1"));
+                assert!(jbd2_internal(&with, devname), "an internal entry missed");
+                let without: Vec<String> = entries
+                    .iter()
+                    .filter(|e| !e.starts_with(devname))
+                    .cloned()
+                    .collect();
+                assert!(!jbd2_internal(&without, devname), "no entry, yet internal");
+                // Another device's entry, or a bare or inode-less one, is
+                // never this device's internal journal.
+                // (`sda10-8` is not `sda1`'s: what follows the name must be
+                // `-` and digits only, and a second `-` never is.)
+                let x: String = options.chars().take(4).collect();
+                if !x.is_empty() {
+                    assert!(
+                        !jbd2_internal(&[format!("{devname}{x}-8")], devname),
+                        "another device's journal read as internal"
+                    );
+                }
+                assert!(
+                    !jbd2_internal(&[devname.to_owned()], devname),
+                    "a bare name"
+                );
+                assert!(
+                    !jbd2_internal(&[format!("{devname}-")], devname),
+                    "no inode"
+                );
+            }
+            let _ = xfs_uses_other_devices(options);
+            if let Some(n) = normalize_name(raw) {
+                assert!(!n.is_empty() && n.len() <= 256, "name length {}", n.len());
+                assert!(
+                    n.bytes()
+                        .all(|b| (b.is_ascii_graphic() && !b.is_ascii_uppercase()) || b == b' '),
+                    "an unnormalized byte in {n:?}"
+                );
+                assert_eq!(n.trim(), n, "untrimmed");
+                assert!(!n.contains("  "), "a run of spaces");
+                // A shared name always makes two devices one.
+                let one = |minor| {
+                    let mut d = DeviceId::node(DeviceNode::Linux { major: 8, minor });
+                    d.add_name(raw);
+                    DeviceIdentity {
+                        devices: vec![d],
+                        complete: true,
+                    }
+                };
+                assert!(!one(0).distinct(&one(16)), "a shared name read as distinct");
+            }
         }
         _ => {
             // NVMe pages are binary: pad short inputs so the parsers see a

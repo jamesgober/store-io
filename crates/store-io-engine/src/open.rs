@@ -13,7 +13,7 @@ use store_io_format::meta::{
     RegionKind, RegionMeta, RegionState, TableEntry, VolumeMeta, decode_table,
 };
 use store_io_format::pair::Winner;
-use store_io_platform::{FileMode, IoOp, Platform, Queue, QueueConfig};
+use store_io_platform::{FileMode, FileName, IoOp, Platform, Queue, QueueConfig};
 
 use crate::domain::Domain;
 use crate::exec::{Lane, QueueSet, Ran, run};
@@ -80,23 +80,7 @@ where
         } else {
             FileMode::ReadWrite
         };
-        let file = platform
-            .open_file(&dir, &name, mode)
-            .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
-        let lock = if read_only {
-            platform.lock_shared(&file)
-        } else {
-            platform.lock_exclusive(&file)
-        }
-        .map_err(|raw| {
-            // Another owner holds it; anything else (a file system that
-            // cannot lock) is a plain failure, not "locked".
-            if store_io_core::errno::is_lock_held(raw) {
-                Error::Locked
-            } else {
-                io(Op::Lock, raw)
-            }
-        })?;
+        let (file, lock) = locked_container(&platform, &dir, &name, mode, read_only)?;
         // A writable open's probe may flush (the macOS flush check): its
         // failure leaves a dead owner's writes unknown, as the drain's below
         // does. A reader's probe never flushes.
@@ -420,6 +404,57 @@ where
             }),
         }
     }
+}
+
+/// Opens the container `name` in `dir` and takes its ownership lock (shared
+/// for a reader, exclusive for a writer).
+///
+/// A writer then checks that the path still names the file it locked: a
+/// swap (`swap_into`, PLANNING R5.7) renames another container over the path,
+/// and a writer that opened the old file just before the rename would
+/// otherwise own a file no path names, and acknowledge writes no later open
+/// can see. On a mismatch the open is retried once, onto the file the path
+/// names now; a second mismatch is `Locked` (the path is being swapped
+/// again). A reader of the old file keeps reading what it opened, as every
+/// reader of a swapped store does.
+fn locked_container<P: Platform>(
+    platform: &P,
+    dir: &P::Dir,
+    name: &FileName,
+    mode: FileMode,
+    read_only: bool,
+) -> Result<(P::File, P::Lock), Error> {
+    for _ in 0..2 {
+        let file = platform
+            .open_file(dir, name, mode)
+            .map_err(|e| not_found_or(Op::Open, e, Named::Store))?;
+        let lock = if read_only {
+            platform.lock_shared(&file)
+        } else {
+            platform.lock_exclusive(&file)
+        }
+        .map_err(|raw| {
+            // Another owner holds it; anything else (a file system that
+            // cannot lock) is a plain failure, not "locked".
+            if store_io_core::errno::is_lock_held(raw) {
+                Error::Locked
+            } else {
+                io(Op::Lock, raw)
+            }
+        })?;
+        if read_only {
+            return Ok((file, lock));
+        }
+        let locked = platform.file_identity(&file).map_err(|e| io(Op::Open, e))?;
+        // The path naming nothing now is a swap mid-rename as well.
+        match platform.path_identity(dir, name) {
+            Ok(now) if now == locked => return Ok((file, lock)),
+            Ok(_) => {}
+            Err(e) if store_io_core::errno::is_not_found(e) => {}
+            Err(e) => return Err(io(Op::Open, e)),
+        }
+    }
+    Err(Error::Locked)
 }
 
 /// Handles for flush slots 1.. (D-124): the container itself reopened

@@ -47,8 +47,15 @@ pub(crate) struct StackWalk {
     pub layers: Vec<StackLayer>,
     /// The first leaf disk reached (members of a mirror share one report).
     pub leaf: Option<PathBuf>,
+    /// Every leaf reached, in walk order (the device identity lists them
+    /// all, PLANNING R5.2).
+    pub leaves: Vec<PathBuf>,
     /// A node could not be classified with confidence.
     pub uncertain: bool,
+    /// A node has members the walk cannot see as slaves: a bcache device
+    /// lists only its backing device, never its cache device, which in
+    /// writeback mode holds acknowledged writes alone.
+    pub hidden_members: bool,
 }
 
 /// Walks `/sys/dev/block/<major>:<minor>` down to the leaf devices.
@@ -108,6 +115,9 @@ fn visit(w: &mut StackWalk, node: PathBuf, depth: usize, visited: &mut usize) {
     } else if node.join("loop").is_dir() {
         push(w, StackLayer::Loop);
     }
+    if node.join("bcache").is_dir() {
+        w.hidden_members = true;
+    }
     if let Some(mode) = read_sysfs(&node.join("bcache/cache_mode")) {
         if mode.contains("[writeback]") {
             push(w, StackLayer::WriteBackCache);
@@ -116,14 +126,23 @@ fn visit(w: &mut StackWalk, node: PathBuf, depth: usize, visited: &mut usize) {
 
     let mut slaves: Vec<PathBuf> = match fs::read_dir(node.join("slaves")) {
         Ok(rd) => rd
-            .take(MAX_SLAVES)
+            .take(MAX_SLAVES + 1)
             .filter_map(Result::ok)
             .map(|e| e.path())
             .collect(),
         Err(_) => Vec::new(),
     };
+    // More members than the walk follows: the leaves it reports are not all
+    // of them.
+    if slaves.len() > MAX_SLAVES {
+        w.uncertain = true;
+        slaves.truncate(MAX_SLAVES);
+    }
     slaves.sort();
     if slaves.is_empty() {
+        if !w.leaves.contains(&node) {
+            w.leaves.push(node.clone());
+        }
         if w.leaf.is_none() {
             w.leaf = Some(node);
         }

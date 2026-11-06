@@ -14,6 +14,7 @@ pub(crate) mod volume;
 
 use store_io_core::class::Missing;
 use store_io_core::evidence::{Bus, Evidence, FsKind, OsCacheMode, PlatformKind, Privilege, Tri};
+use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode, normalize_name};
 use store_io_platform::RawResult;
 use windows_sys::Win32::Storage::FileSystem::{
     FileStorageInfo, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
@@ -91,7 +92,12 @@ pub(crate) fn probe(dir: &WinDir, file: &WinFile) -> RawResult<Evidence> {
         None => ev.missing.insert(Missing::DioAlignment),
     }
 
-    let mount_root = sys::volume_mount_root(dir.path()).ok();
+    // The file's own volume (from its handle, whatever junctions the path
+    // went through), the directory path's only when the handle cannot name
+    // one (a network file).
+    let mount_root = sys::volume_guid_root(file.handle())
+        .ok()
+        .or_else(|| sys::volume_mount_root(dir.path()).ok());
     if let Some(root) = &mount_root {
         match volume::drive_class(sys::drive_type(root)) {
             volume::DriveClass::Network => ev.fs.kind = FsKind::Network,
@@ -100,6 +106,13 @@ pub(crate) fn probe(dir: &WinDir, file: &WinFile) -> RawResult<Evidence> {
         }
     }
 
+    ev.device.identity = if ev.fs.kind == FsKind::Network {
+        DeviceIdentity::unknown()
+    } else {
+        mount_root
+            .as_deref()
+            .map_or_else(DeviceIdentity::unknown, |root| identity(root, file))
+    };
     let disk = mount_root.as_deref().and_then(disk_number);
     let drive = disk.and_then(|n| sys::open_device(&storage::physical_drive_name(n), 0).ok());
     match drive {
@@ -140,6 +153,259 @@ fn disk_number(root: &[u16]) -> Option<u32> {
     let mut ext = [0u8; 8 + 24 * 8];
     let n = sys::ioctl(&vol, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &[], &mut ext).ok()?;
     storage::parse_disk_extents(&ext[..n.min(ext.len())]).map(|(_count, first)| first)
+}
+
+/// The physical devices `file` lives on (the probe's identity part alone:
+/// volume and storage-property queries and NVMe Identify Controller; never
+/// the write-cache query, which sends a flush). Network volumes and cloud
+/// placeholders are unknown, as in the probe.
+pub(crate) fn device_identity(dir: &WinDir, file: &WinFile) -> DeviceIdentity {
+    let network = sys::volume_info(file.handle())
+        .is_ok_and(|(fs, _)| volume::fs_kind(&fs) == FsKind::Network)
+        || sys::attribute_tag(file.handle())
+            .is_ok_and(|(attrs, _)| volume::attribute_facts(attrs).cloud_placeholder);
+    if network {
+        return DeviceIdentity::unknown();
+    }
+    let Ok(root) = sys::volume_mount_root(dir.path()) else {
+        return DeviceIdentity::unknown();
+    };
+    if volume::drive_class(sys::drive_type(&root)) == volume::DriveClass::Network {
+        return DeviceIdentity::unknown();
+    }
+    identity(&root, file)
+}
+
+/// Most extents a volume's identity reads (a spanned or striped volume
+/// lists one per member disk and range).
+const MAX_EXTENTS: usize = 64;
+
+/// Every physical disk under a mount root, each with its serial (PLANNING
+/// R5.2). Incomplete when a disk cannot be opened or queried, or is one the
+/// probe cannot see whole ([`identity_of`] lists them), or the machine is a
+/// guest.
+pub(crate) fn identity(_root: &[u16], file: &WinFile) -> DeviceIdentity {
+    // The volume comes from the file's own handle (`\\?\Volume{GUID}\`),
+    // never from the directory's path text, which does not resolve a
+    // junction or directory link on the way (review: a junction to another
+    // drive named the wrong disk; volume serials can repeat on clones).
+    let Ok(volume) = sys::volume_guid_root(file.handle()) else {
+        return DeviceIdentity::unknown();
+    };
+    let root = volume.as_slice();
+    let (disks, all) = match volume_disks(root) {
+        Some(found) => found,
+        // The extents could not be listed: the device number names one
+        // disk, but not that it is the only one.
+        None => match disk_number(root) {
+            Some(d) => (vec![d], false),
+            None => return DeviceIdentity::unknown(),
+        },
+    };
+    let found: Vec<Disk> = disks
+        .into_iter()
+        .map(|number| {
+            let drive = sys::open_device(&storage::physical_drive_name(number), 0).ok();
+            let desc = drive.as_ref().and_then(|d| {
+                query(d, StorageDeviceProperty, 1024)
+                    .and_then(|b| storage::parse_device_descriptor(&b))
+            });
+            let nvme_bus = desc
+                .as_ref()
+                .is_some_and(|d| storage::bus_from_code(d.bus) == Bus::Nvme);
+            let controller = drive.as_ref().filter(|_| nvme_bus).and_then(|d| {
+                nvme(
+                    d,
+                    NvmeQuery::Identify {
+                        cns: storage::NVME_CNS_CONTROLLER,
+                        nsid: 0,
+                    },
+                    4096,
+                )
+                .and_then(|(data, _)| nvme::parse_identify_controller(&data))
+            });
+            Disk {
+                number,
+                desc,
+                controller,
+            }
+        })
+        .collect();
+    identity_of(&found, all, smbios_guest() || cpuid_guest())
+}
+
+/// Whether CPUID says this machine is a guest: a hypervisor is present
+/// (leaf 1, ECX bit 31) and this machine is not the root partition of
+/// Hyper-V running on hardware. Windows with virtualization-based security
+/// runs as the root of its own Hyper-V on physical machines; the root is
+/// told apart by the vendor `Microsoft Hv` (leaf 0x4000_0000), the `Hv#1`
+/// interface (leaf 0x4000_0001), the `CpuManagement` privilege without
+/// `Isolation` (leaf 0x4000_0003 EBX bits 12 and 22, bits 44 and 54 of the
+/// privilege mask: Linux's test for the root partition, which ignores a
+/// root claim made to an isolated, confidential guest) and no Hyper-V
+/// below it (leaf 0x4000_0004 EAX bit 12, set only when this Hyper-V is
+/// nested in a Hyper-V partition).
+/// **Not caught by CPUID**: a guest running its own Hyper-V (VBS, the
+/// Hyper-V role, WSL2) under another hypervisor (VMware, KVM, Xen,
+/// VirtualBox) sees itself as a root with no Hyper-V parent; there SMBIOS
+/// is the only signal. A second signal beside SMBIOS, never a replacement.
+/// Not read on other architectures (Arm guests have SMBIOS only).
+fn cpuid_guest() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        #[cfg(target_arch = "x86")]
+        use core::arch::x86::__cpuid;
+        #[cfg(target_arch = "x86_64")]
+        use core::arch::x86_64::__cpuid;
+        // SAFETY: CPUID exists on every processor this target runs on and
+        // never faults. A leaf beyond the hypervisor's maximum returns
+        // unrelated data, never an error: the rule checks the maximum
+        // before it trusts leaves 0x4000_0001 to 0x4000_0004.
+        #[allow(unused_unsafe)]
+        let c = unsafe {
+            let hv = __cpuid(0x4000_0000);
+            let mut vendor = [0u8; 12];
+            vendor[..4].copy_from_slice(&hv.ebx.to_le_bytes());
+            vendor[4..8].copy_from_slice(&hv.ecx.to_le_bytes());
+            vendor[8..].copy_from_slice(&hv.edx.to_le_bytes());
+            HvCpuid {
+                leaf1_ecx: __cpuid(1).ecx,
+                vendor,
+                max_leaf: hv.eax,
+                interface: __cpuid(0x4000_0001).eax,
+                privileges_hi: __cpuid(0x4000_0003).ebx,
+                recommendations: __cpuid(0x4000_0004).eax,
+            }
+        };
+        cpuid_says_guest(&c)
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+/// The CPUID registers [`cpuid_guest`] reads.
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+struct HvCpuid {
+    leaf1_ecx: u32,
+    vendor: [u8; 12],
+    max_leaf: u32,
+    interface: u32,
+    privileges_hi: u32,
+    recommendations: u32,
+}
+
+/// `Hv#1`, Hyper-V's interface signature (leaf 0x4000_0001 EAX).
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+const HV_INTERFACE: u32 = 0x3123_7648;
+
+/// [`cpuid_guest`]'s rule on the raw registers.
+#[cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+fn cpuid_says_guest(c: &HvCpuid) -> bool {
+    let present = c.leaf1_ecx & (1 << 31) != 0;
+    let root = &c.vendor == b"Microsoft Hv"
+        && c.max_leaf >= 0x4000_0004
+        && c.interface == HV_INTERFACE
+        && c.privileges_hi & (1 << 12) != 0
+        && c.privileges_hi & (1 << 22) == 0
+        && c.recommendations & (1 << 12) == 0;
+    present && !root
+}
+
+/// Whether the machine's SMBIOS system information names a virtual machine
+/// (read unprivileged; unlike the CPUID hypervisor bit, which Windows sets
+/// on physical machines running virtualization-based security, SMBIOS
+/// describes the hardware the OS was booted on).
+fn smbios_guest() -> bool {
+    // Only a table that positively describes physical hardware counts as
+    // bare metal: an unreadable or malformed one is a guest.
+    !sys::smbios_raw().is_some_and(|raw| storage::smbios_says_physical(&raw))
+}
+
+/// What the identity reads of one disk.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Disk {
+    /// The `PhysicalDrive` number.
+    pub number: u32,
+    /// `STORAGE_DEVICE_DESCRIPTOR`, if it could be read.
+    pub desc: Option<storage::DeviceDesc>,
+    /// NVMe Identify Controller, for an NVMe disk, if it could be read.
+    pub controller: Option<nvme::IdentifyController>,
+}
+
+/// The identity of a volume's disks (`all`: every disk was listed).
+/// Complete only when every disk is one the probe can see whole: an NVMe
+/// disk with its controller's serial or subsystem name (the descriptor's
+/// serial of an NVMe disk is the namespace's EUI-64: two namespaces of one
+/// controller differ there), or a SATA disk; never a USB disk (its bridge
+/// is not read), a virtual disk (a hypervisor's, whatever bus it
+/// reports), a remote target, or a SCSI,
+/// SAS or unknown bus, which may be a hardware RAID's logical drive
+/// (`BusTypeRAID` maps to SCSI) or a Storage Spaces disk (its bus type maps
+/// to unknown).
+pub(crate) fn identity_of(disks: &[Disk], all: bool, guest: bool) -> DeviceIdentity {
+    let mut id = DeviceIdentity {
+        devices: Vec::new(),
+        complete: all,
+    };
+    for disk in disks {
+        let Some(desc) = &disk.desc else {
+            id.complete = false;
+            continue;
+        };
+        let bus = storage::bus_from_code(desc.bus);
+        let mut d = DeviceId::node(DeviceNode::Windows { disk: disk.number });
+        if let Some(s) = &desc.serial {
+            d.add_name(s);
+        }
+        let mut controller_named = false;
+        if let Some(c) = &disk.controller {
+            for n in [&c.serial, &c.subnqn].into_iter().flatten() {
+                // Named even when the name repeats the descriptor's serial.
+                controller_named |= normalize_name(n).is_some();
+                d.add_name(n);
+            }
+        }
+        // A USB disk is not seen whole here: its bridge is not read, so the
+        // LUNs of one enclosure would look distinct (R5.2).
+        let seen_whole = match bus {
+            Bus::Nvme => controller_named,
+            Bus::Sata => true,
+            _ => false,
+        };
+        let hosted = guest || storage::hypervisor_from(bus, desc.product.as_deref()).is_some();
+        if !seen_whole || hosted {
+            id.complete = false;
+        }
+        id.devices.push(d);
+    }
+    if id.devices.is_empty() {
+        id.complete = false;
+    }
+    id
+}
+
+/// Every disk of a mount root's volume, and whether all were listed.
+fn volume_disks(root: &[u16]) -> Option<(Vec<u32>, bool)> {
+    let name = sys::volume_device_name(root).ok()?;
+    let vol = sys::open_device(&name, 0).ok()?;
+    let mut ext = vec![0u8; 8 + 24 * MAX_EXTENTS];
+    match sys::ioctl(&vol, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &[], &mut ext) {
+        Ok(n) => storage::parse_all_disk_extents(&ext[..n.min(ext.len())]),
+        // More extents than the buffer holds: the first ones only, and
+        // the identity incomplete.
+        Err(_) => storage::parse_all_disk_extents(&ext).map(|(d, _)| (d, false)),
+    }
 }
 
 /// The disk's length in bytes (`IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`, which
@@ -394,5 +660,206 @@ fn probe_nvme(drive: &Handle, ev: &mut Evidence) {
 
     if identify_ok && smart_ok {
         ev.privilege = Privilege::Full;
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// The rule on bare metal.
+    fn id(disks: &[Disk], all: bool) -> DeviceIdentity {
+        identity_of(disks, all, false)
+    }
+
+    fn disk(number: u32, bus: i32, serial: &str, ctrl: Option<(&str, &str)>) -> Disk {
+        Disk {
+            number,
+            desc: Some(storage::DeviceDesc {
+                bus,
+                product: Some("SSD 990".to_owned()),
+                serial: Some(serial.to_owned()),
+                ..storage::DeviceDesc::default()
+            }),
+            controller: ctrl.map(|(sn, nqn)| nvme::IdentifyController {
+                serial: Some(sn.to_owned()),
+                subnqn: Some(nqn.to_owned()),
+                ..nvme::IdentifyController::default()
+            }),
+        }
+    }
+
+    const NVME: i32 = 17;
+    const SATA: i32 = 11;
+    const SAS: i32 = 10;
+    const VIRTUAL: i32 = 14;
+
+    #[test]
+    fn test_two_namespaces_of_one_controller_are_one_device() {
+        // The descriptor's serial is each namespace's EUI-64; the controller
+        // serial is shared.
+        let a = id(
+            &[disk(
+                0,
+                NVME,
+                "0025_3858_0000_0001.",
+                Some(("S6B0NG0R1", "nqn.x")),
+            )],
+            true,
+        );
+        let b = id(
+            &[disk(
+                1,
+                NVME,
+                "0025_3858_0000_0002.",
+                Some(("S6B0NG0R1", "nqn.x")),
+            )],
+            true,
+        );
+        assert!(a.complete && b.complete);
+        assert!(!a.distinct(&b));
+        let c = id(
+            &[disk(
+                2,
+                NVME,
+                "6479_A7A5_0A50_05F4.",
+                Some(("TPBF2209", "nqn.y")),
+            )],
+            true,
+        );
+        assert!(a.distinct(&c));
+    }
+
+    #[test]
+    fn test_any_disk_of_a_guest_machine_is_incomplete() {
+        // A guest's SATA disk with a model no list knows (VirtualBox,
+        // Parallels): SMBIOS says guest.
+        let d = [disk(0, SATA, "VB1234-5678", None)];
+        assert!(identity_of(&d, true, false).complete);
+        assert!(!identity_of(&d, true, true).complete);
+    }
+
+    #[test]
+    fn test_cpuid_names_a_guest_unless_it_is_hyper_v_s_root_on_hardware() {
+        // The dev box: physical, VBS on (read 2026-11-06).
+        let root = || HvCpuid {
+            leaf1_ecx: 1 << 31,
+            vendor: *b"Microsoft Hv",
+            max_leaf: 0x4000_000c,
+            interface: HV_INTERFACE,
+            privileges_hi: 0x002b_b9ff,
+            recommendations: 0x0094_0d1c,
+        };
+        assert!(!cpuid_says_guest(&root()), "the root partition");
+        // Bare metal without VBS: no hypervisor bit (the hypervisor leaves
+        // then hold whatever the processor returns past its maximum: zeros
+        // on AMD; here arbitrary values, which the present bit overrides).
+        let none = HvCpuid {
+            leaf1_ecx: 0,
+            vendor: [0x5a; 12],
+            max_leaf: 0x0bb8,
+            interface: 0x0e10,
+            privileges_hi: 0x0064,
+            recommendations: 0,
+        };
+        assert!(!cpuid_says_guest(&none), "no hypervisor");
+        // The maximum leaf the rule needs, exactly.
+        let at_max = HvCpuid {
+            max_leaf: 0x4000_0004,
+            ..root()
+        };
+        assert!(!cpuid_says_guest(&at_max), "a root at the minimum leaf");
+        let cases = [
+            (
+                HvCpuid {
+                    privileges_hi: 0x002b_a9ff,
+                    ..root()
+                },
+                "a Hyper-V guest",
+            ),
+            (
+                HvCpuid {
+                    recommendations: 0x0094_0d1c | (1 << 12),
+                    ..root()
+                },
+                "a root nested in a guest",
+            ),
+            (
+                HvCpuid {
+                    privileges_hi: 0x002b_b9ff | (1 << 22),
+                    ..root()
+                },
+                "an isolated guest told it is a root",
+            ),
+            (
+                HvCpuid {
+                    vendor: *b"KVMKVMKVMKVM",
+                    ..root()
+                },
+                "another hypervisor",
+            ),
+            (
+                HvCpuid {
+                    max_leaf: 0x4000_0001,
+                    ..root()
+                },
+                "leaves past the maximum",
+            ),
+            (
+                HvCpuid {
+                    interface: 0,
+                    ..root()
+                },
+                "not the Hyper-V interface",
+            ),
+        ];
+        for (c, what) in cases {
+            assert!(cpuid_says_guest(&c), "{what}");
+        }
+    }
+
+    #[test]
+    fn test_an_nvme_controller_with_only_meaningless_names_is_not_named() {
+        let d = disk(0, NVME, "0025_3858_0000_0001.", Some(("    ", "")));
+        assert!(!id(&[d], true).complete);
+    }
+
+    #[test]
+    fn test_an_nvme_disk_named_by_its_controller_alone_is_complete() {
+        // stornvme puts the controller serial in the descriptor when the
+        // namespace has no EUI-64 or NGUID: the controller's name is then
+        // a duplicate, and still names the controller.
+        let d = disk(0, NVME, "S6B0NG0R1", Some(("S6B0NG0R1", "")));
+        assert!(id(&[d], true).complete);
+    }
+
+    #[test]
+    fn test_an_nvme_disk_without_its_controller_named_is_incomplete() {
+        assert!(!id(&[disk(0, NVME, "0025_3858_0000_0001.", None)], true).complete);
+    }
+
+    #[test]
+    fn test_only_disks_seen_whole_make_a_complete_identity() {
+        assert!(id(&[disk(0, SATA, "WD-123", None)], true).complete);
+        assert!(
+            !id(&[disk(0, SATA, "WD-123", None)], false).complete,
+            "not every disk listed"
+        );
+        // SAS, a hypervisor's disk, a USB disk (7, its bridge unread), a RAID
+        // logical drive (8), Storage Spaces (16), unknown.
+        for bus in [SAS, VIRTUAL, 7, 8, 16, 0] {
+            assert!(!id(&[disk(0, bus, "X1", None)], true).complete, "bus {bus}");
+        }
+        let mut hyperv = disk(0, SATA, "X1", None);
+        if let Some(d) = hyperv.desc.as_mut() {
+            d.product = Some("Msft Virtual Disk".to_owned());
+        }
+        assert!(!identity_of(&[hyperv], true, false).complete);
+        let unread = Disk {
+            number: 3,
+            ..Disk::default()
+        };
+        assert!(!id(&[disk(0, SATA, "WD-1", None), unread], true).complete);
+        assert!(!identity_of(&[], true, false).complete);
     }
 }

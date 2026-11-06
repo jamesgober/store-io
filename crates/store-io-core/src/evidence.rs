@@ -116,6 +116,8 @@ pub struct DeviceFacts {
     pub numa_node: Option<u16>,
     /// The namespace is shared by several controllers (NVMe CMIC).
     pub multi_controller: bool,
+    /// The physical devices the bytes may live on (PLANNING R5.2).
+    pub identity: crate::identity::DeviceIdentity,
 }
 
 /// NVMe atomic-write fields exactly as the specification defines them.

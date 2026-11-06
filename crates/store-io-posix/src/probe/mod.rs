@@ -8,6 +8,7 @@
 
 pub(crate) mod block;
 pub(crate) mod fs;
+pub(crate) mod identity;
 pub(crate) mod virt;
 
 use std::path::Path;
@@ -72,12 +73,77 @@ pub(crate) fn probe(dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
     }
 
     stack_and_device(dev, &mut ev);
+    ev.device.identity = identity::of(
+        dev,
+        identity::Context {
+            hosted: ev.hypervisor.is_some(),
+            single_device: single_device_fs(fd, dev, bdev),
+        },
+    );
 
     let len = u64::try_from(st.st_size).unwrap_or(0).max(1);
     if sys::cachestat(fd, 0, len).is_err() {
         ev.missing.insert(Missing::PageCache);
     }
     Ok(ev)
+}
+
+/// The physical devices `file` lives on (the probe's identity part alone:
+/// `fstat`, `fstatfs`, sysfs and `mountinfo` reads, no flush).
+pub(crate) fn device_identity(file: &PosixFile) -> store_io_core::identity::DeviceIdentity {
+    let Ok(st) = sys::fstat(file.raw()) else {
+        return store_io_core::identity::DeviceIdentity::unknown();
+    };
+    let sx = sys::statx(file.raw(), sys::STATX_PROBE_MASK).ok();
+    let bdev = file.is_block_device();
+    let dev = device_number(&st, sx.as_ref(), bdev);
+    let release = sys::kernel_release();
+    identity::of(
+        dev,
+        identity::Context {
+            hosted: virt::detect(release.as_deref()).is_some(),
+            single_device: single_device_fs(file.raw(), dev, bdev),
+        },
+    )
+}
+
+/// Whether the file's data lives only on the device `dev` names: a raw
+/// block device, ext4 with its journal inside (`/proc/fs/jbd2`: ext4's
+/// mount options never show an external journal), or XFS with no log or
+/// realtime device elsewhere (its mount's super options). Any other file
+/// system may keep data on other devices (or none), so the identity is
+/// incomplete there.
+fn single_device_fs(fd: std::os::fd::RawFd, dev: (u32, u32), bdev: bool) -> bool {
+    if bdev {
+        return true;
+    }
+    let Some(magic) = sys::fstatfs(fd)
+        .ok()
+        .map(|s| (s.f_type as u64) & 0xFFFF_FFFF)
+    else {
+        return false;
+    };
+    let options = || {
+        block::read_bounded(Path::new("/proc/self/mountinfo"), MOUNTINFO_MAX)
+            .and_then(|text| fs::find_mount(&text, None, Some(dev), None))
+            .map(|e| e.super_options)
+    };
+    let ext4_internal = || {
+        let devname = block::read_sysfs(
+            &Path::new(&format!("/sys/dev/block/{}:{}", dev.0, dev.1)).join("uevent"),
+        )
+        .and_then(|u| fs::uevent_devname(&u));
+        let entries: Vec<String> = std::fs::read_dir("/proc/fs/jbd2")
+            .map(|rd| {
+                rd.take(4096)
+                    .filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        devname.is_some_and(|n| identity::jbd2_internal(&entries, &n))
+    };
+    identity::fs_counts(fs::fs_kind(magic, None), options, ext4_internal)
 }
 
 /// The device the file lives on: for a block device its own number, else

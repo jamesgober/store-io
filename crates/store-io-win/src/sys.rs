@@ -20,20 +20,21 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, TRUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateDirectoryW, CreateFileW, DeleteFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO,
-    FILE_INFO_BY_HANDLE_CLASS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileAttributeTagInfo, FileIdInfo, FlushFileBuffers, GetDriveTypeW,
-    GetFileInformationByHandleEx, GetFileSizeEx, GetVolumeInformationByHandleW,
-    GetVolumeNameForVolumeMountPointW, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
-    LockFileEx, OPEN_EXISTING, ReOpenFile, ReadFile, SetFileCompletionNotificationModes,
-    SetFileInformationByHandle, UnlockFileEx, WriteFile,
+    BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, CreateFileW, DeleteFileW,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileAttributeTagInfo, FileIdInfo, FlushFileBuffers,
+    GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, GetFileSizeEx,
+    GetFinalPathNameByHandleW, GetVolumeInformationByHandleW, GetVolumeNameForVolumeMountPointW,
+    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, ReOpenFile,
+    ReadFile, SetFileCompletionNotificationModes, SetFileInformationByHandle, UnlockFileEx,
+    VOLUME_NAME_GUID, WriteFile,
 };
 use windows_sys::Win32::System::IO::{
     CancelIoEx, CreateIoCompletionPort, DeviceIoControl, GetOverlappedResult,
     GetQueuedCompletionStatusEx, IO_STATUS_BLOCK, OVERLAPPED, OVERLAPPED_ENTRY,
     PostQueuedCompletionStatus,
 };
-use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+use windows_sys::Win32::System::SystemInformation::{GetSystemFirmwareTable, OSVERSIONINFOW};
 use windows_sys::Win32::System::SystemServices::FLUSH_FLAGS_FILE_DATA_SYNC_ONLY;
 use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE};
 use windows_sys::Win32::System::WindowsProgramming::{
@@ -244,10 +245,118 @@ pub fn file_id(h: &Handle) -> RawResult<(u64, [u8; 16])> {
         )
     };
     if ok != FALSE {
-        Ok((info.VolumeSerialNumber, info.FileId.Identifier))
+        if id_identifies(&info.FileId.Identifier) {
+            return Ok((info.VolumeSerialNumber, info.FileId.Identifier));
+        }
+        // A file system without 128-bit ids answers with its 64-bit id
+        // zero-extended (MS-FSCC); a zero or invalid one there: try the
+        // 64-bit index below, which says the same or better.
     } else {
-        Err(last_error())
+        let e = last_error();
+        if !is_unsupported(e) {
+            return Err(e);
+        }
     }
+    // A file system without 128-bit ids (FAT, exFAT, some network servers):
+    // the 64-bit file index. On FAT it may change when the file is renamed
+    // to a longer name, which open's check reads as a different file (a
+    // retry, then `Locked`: the safe way). A server that reports index 0
+    // for every file identifies nothing: unsupported, never equal.
+    let mut b = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `b` is a correctly sized, writable BY_HANDLE_FILE_INFORMATION;
+    // it holds only integers.
+    if unsafe { GetFileInformationByHandle(h.raw(), &mut b) } == FALSE {
+        return Err(last_error());
+    }
+    let index = (u64::from(b.nFileIndexHigh) << 32) | u64::from(b.nFileIndexLow);
+    let mut id = [0u8; 16];
+    id[..8].copy_from_slice(&index.to_le_bytes());
+    if !id_identifies(&id) {
+        return Err(win32(windows_sys::Win32::Foundation::ERROR_NOT_SUPPORTED));
+    }
+    Ok((u64::from(b.dwVolumeSerialNumber), id))
+}
+
+/// Whether a file id names one file: not zero (a server reporting 0 for
+/// every file) and not `FILE_INVALID_FILE_ID` (-1, as 128 bits or as 64
+/// bits zero-extended). An id that names nothing would make every file
+/// equal, and open's identity check a no-op.
+fn id_identifies(id: &[u8; 16]) -> bool {
+    let low_invalid = id[..8] == [0xff; 8] && (id[8..] == [0; 8] || id[8..] == [0xff; 8]);
+    *id != [0; 16] && !low_invalid
+}
+
+/// The `\\?\Volume{GUID}\` root of the volume an open handle is on, as
+/// UTF-16, NUL-terminated (`GetFinalPathNameByHandleW` with
+/// `VOLUME_NAME_GUID`): the volume of the file itself, whatever junctions
+/// or links the path that opened it went through.
+///
+/// # Errors
+///
+/// The Win32 error, or `ERROR_INVALID_DATA` if the answer is not a volume
+/// GUID path.
+pub fn volume_guid_root(h: &Handle) -> RawResult<Vec<u16>> {
+    let mut buf = vec![0u16; 1024];
+    let mut n = 0usize;
+    // Twice at most: the first answer too long for the buffer says the
+    // length it needs (long paths).
+    for _ in 0..2 {
+        // SAFETY: `buf` is writable for its whole length, which is passed;
+        // the call writes at most that many characters and returns the
+        // count, or the length needed when the buffer is too small.
+        n = unsafe {
+            GetFinalPathNameByHandleW(
+                h.raw(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                VOLUME_NAME_GUID,
+            )
+        } as usize;
+        if n == 0 {
+            return Err(last_error());
+        }
+        if n < buf.len() {
+            break;
+        }
+        if n > 1 << 16 {
+            break;
+        }
+        buf = vec![0u16; n + 1];
+    }
+    if n >= buf.len() {
+        return Err(win32(
+            windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER,
+        ));
+    }
+    let text = String::from_utf16_lossy(&buf[..n]);
+    let Some(close) = text
+        .find("}\\")
+        .filter(|_| text.starts_with("\\\\?\\Volume{"))
+    else {
+        return Err(win32(windows_sys::Win32::Foundation::ERROR_INVALID_DATA));
+    };
+    let mut root: Vec<u16> = text[..close + 2].encode_utf16().collect();
+    root.push(0);
+    Ok(root)
+}
+
+/// The raw SMBIOS table (`GetSystemFirmwareTable('RSMB', 0)`), unprivileged,
+/// or `None`.
+pub fn smbios_raw() -> Option<Vec<u8>> {
+    const RSMB: u32 = u32::from_be_bytes(*b"RSMB");
+    // SAFETY: a null buffer of size 0 asks for the size needed.
+    let need = unsafe { GetSystemFirmwareTable(RSMB, 0, ptr::null_mut(), 0) };
+    if need == 0 || need > 1 << 20 {
+        return None;
+    }
+    let mut buf = vec![0u8; need as usize];
+    // SAFETY: `buf` is writable for `need` bytes, which is passed.
+    let got = unsafe { GetSystemFirmwareTable(RSMB, 0, buf.as_mut_ptr(), need) };
+    if got == 0 || got > need {
+        return None;
+    }
+    buf.truncate(got as usize);
+    Some(buf)
 }
 
 /// `GetFileInformationByHandleEx` into a raw byte buffer; returns the buffer
@@ -930,6 +1039,22 @@ pub fn is_unsupported(e: OsError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_a_file_id_of_zero_or_minus_one_identifies_nothing() {
+        use super::id_identifies;
+        assert!(!id_identifies(&[0; 16]));
+        assert!(!id_identifies(&[0xff; 16]));
+        let mut minus_one_64 = [0u8; 16];
+        minus_one_64[..8].copy_from_slice(&[0xff; 8]);
+        assert!(!id_identifies(&minus_one_64));
+        let mut real = [0u8; 16];
+        real[..8].copy_from_slice(&0x0001_0000_0000_0005u64.to_le_bytes());
+        assert!(id_identifies(&real));
+        let mut high_only = [0u8; 16];
+        high_only[15] = 1;
+        assert!(id_identifies(&high_only));
+    }
+
     use super::*;
 
     #[test]

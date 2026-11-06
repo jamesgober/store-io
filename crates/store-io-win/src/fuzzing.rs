@@ -3,7 +3,7 @@
 //!
 //! Every byte the probe parses comes from a driver or the device and is
 //! treated as hostile: storage property descriptors, protocol-specific
-//! (NVMe) answers, volume and extent structures. [`run`] feeds one input to
+//! (NVMe) answers, volume and extent structures, the SMBIOS table. [`run`] feeds one input to
 //! one parser, chosen by the first byte, and checks the parser's promises
 //! beyond "never panics".
 
@@ -12,9 +12,9 @@ use crate::probe::nvme::{
     parse_health_critical_warning, parse_identify_controller, parse_identify_namespace,
 };
 use crate::probe::storage::{
-    bus_from_code, hypervisor_from, parse_access_alignment, parse_adapter, parse_device_descriptor,
-    parse_device_number, parse_disk_extents, parse_numa, parse_write_cache, protocol_data,
-    protocol_dword0,
+    bus_from_code, hypervisor_from, parse_access_alignment, parse_adapter, parse_all_disk_extents,
+    parse_device_descriptor, parse_device_number, parse_disk_extents, parse_numa,
+    parse_write_cache, protocol_data, protocol_dword0, smbios_says_physical,
 };
 use crate::probe::volume::{fs_kind, parse_storage_info};
 
@@ -37,7 +37,10 @@ pub fn run(data: &[u8]) {
     match which % 8 {
         0 => {
             if let Some(c) = parse_identify_controller(b) {
-                for s in [&c.model, &c.firmware].into_iter().flatten() {
+                for s in [&c.model, &c.firmware, &c.serial, &c.subnqn]
+                    .into_iter()
+                    .flatten()
+                {
                     assert!(printable(s), "unprintable identify string {s:?}");
                 }
             }
@@ -71,7 +74,10 @@ pub fn run(data: &[u8]) {
         }
         3 => {
             if let Some(d) = parse_device_descriptor(b) {
-                for s in [&d.vendor, &d.product, &d.revision].into_iter().flatten() {
+                for s in [&d.vendor, &d.product, &d.revision, &d.serial]
+                    .into_iter()
+                    .flatten()
+                {
                     assert!(printable(s), "unprintable descriptor string {s:?}");
                 }
                 let bus = bus_from_code(d.bus);
@@ -85,6 +91,9 @@ pub fn run(data: &[u8]) {
             let _ = parse_numa(b);
             let _ = parse_device_number(b);
             let _ = parse_storage_info(b);
+            // A table that says physical must say so the same way twice.
+            let physical = smbios_says_physical(rest);
+            assert_eq!(smbios_says_physical(rest), physical, "not deterministic");
         }
         5 => {
             if let Some((count, disk)) = parse_disk_extents(b) {
@@ -95,6 +104,22 @@ pub fn run(data: &[u8]) {
                     "extents misread"
                 );
                 assert!(count > 0, "zero extents accepted as an answer");
+            }
+            if let Some((disks, all)) = parse_all_disk_extents(b) {
+                let r = Reader::new(b);
+                let count = r.u32(0).map_or(0, |c| c as usize);
+                assert!(!disks.is_empty() || !all, "every extent read and no disk");
+                assert!(disks.len() <= count, "more disks than extents");
+                let mut seen = disks.clone();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), disks.len(), "a disk listed twice");
+                if all {
+                    assert!(
+                        b.len() >= 8 + (count - 1) * 24 + 4,
+                        "all read past the buffer"
+                    );
+                }
             }
         }
         6 => {

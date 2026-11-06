@@ -13,6 +13,7 @@ use std::os::fd::RawFd;
 use store_io_core::class::Missing;
 use store_io_core::error::OsError;
 use store_io_core::evidence::{Bus, Evidence, FsKind, Hypervisor, PlatformKind, StackLayer, Tri};
+use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 use store_io_platform::RawResult;
 
 use crate::dir::PosixDir;
@@ -52,6 +53,7 @@ pub(crate) fn probe(dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
     ev.fs.kind = fs_kind(&volume);
     let device = bsd_name(&volume.from).and_then(|name| sys::device(&name));
     apply_device(&mut ev, device.as_ref(), volume.removable);
+    ev.device.identity = identity(device.as_ref(), volume.removable, sys::under_hypervisor());
     ev.fs.cow = match ev.fs.kind {
         // Copy-on-write metadata, clones and snapshots: an overwrite may
         // allocate.
@@ -81,6 +83,50 @@ pub(crate) fn probe(dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
         ev.hypervisor = Some(Hypervisor::Other);
     }
     Ok(ev)
+}
+
+/// The physical devices `file` lives on (the probe's identity part alone:
+/// `fstatfs`, DiskArbitration and IOKit reads, no flush).
+pub(crate) fn device_identity(file: &PosixFile) -> DeviceIdentity {
+    let Ok(volume) = sys::volume(file.raw()) else {
+        return DeviceIdentity::unknown();
+    };
+    let device = bsd_name(&volume.from).and_then(|name| sys::device(&name));
+    identity(device.as_ref(), volume.removable, sys::under_hypervisor())
+}
+
+/// The physical device a volume lives on (PLANNING R5.2), named by its
+/// IOKit registry path: complete only for the machine's built-in device,
+/// one physical store seen whole (no container of several stores, no disk
+/// image, no virtual machine's disk, every fact read). No serial is read,
+/// so two namespaces of one external controller would have two paths and
+/// nothing to join them: external devices are incomplete.
+fn identity(
+    device: Option<&sys::Device>,
+    removable_mount: bool,
+    under_hypervisor: Option<bool>,
+) -> DeviceIdentity {
+    let Some(d) = device else {
+        return DeviceIdentity::unknown();
+    };
+    let Some(path) = d.path.as_deref().filter(|p| !p.is_empty()) else {
+        return DeviceIdentity::unknown();
+    };
+    // The probe's own test of a built-in device: an enclosure's bridge may
+    // report itself internal, and `internal_of` rejects tunnelled links,
+    // bridges in the path, removable media, virtual disks and buses outside
+    // the built-in ones (review: the raw flag alone let a RAID enclosure's
+    // two LUNs through).
+    let complete = d.single == Some(true)
+        && internal_of(device, removable_mount) == Tri::Yes
+        && !is_disk_image(d)
+        && under_hypervisor == Some(false);
+    DeviceIdentity {
+        devices: vec![DeviceId::node(DeviceNode::Mac {
+            device_path: path.to_owned(),
+        })],
+        complete,
+    }
 }
 
 /// One `F_FULLFSYNC` of `fd`: `None` accepted, the error if refused as
@@ -267,6 +313,59 @@ mod tests {
         assert_eq!(kind("smbfs", false), FsKind::Network);
         assert_eq!(kind("nfs", false), FsKind::Network);
         assert_eq!(kind("udf", true), FsKind::Other);
+    }
+
+    #[test]
+    fn test_only_one_physical_store_seen_whole_is_a_complete_identity() {
+        let d = sys::Device {
+            internal: Some(true),
+            protocol: Some("PCI-Express".to_owned()),
+            path: Some("IODeviceTree:/arm-io/ans".to_owned()),
+            tunnelled: Some(false),
+            single: Some(true),
+            ..sys::Device::default()
+        };
+        let id = identity(Some(&d), false, Some(false));
+        assert!(id.complete);
+        assert_eq!(id.devices.len(), 1);
+        // Two volumes on one device name it alike: never distinct.
+        assert!(!id.distinct(&identity(Some(&d), false, Some(false))));
+        assert!(
+            !identity(Some(&d), false, Some(true)).complete,
+            "a virtual machine's disk"
+        );
+        assert!(!identity(Some(&d), false, None).complete);
+        let external = sys::Device {
+            internal: Some(false),
+            ..d.clone()
+        };
+        assert!(!identity(Some(&external), false, Some(false)).complete);
+        assert!(
+            !identity(Some(&d), true, Some(false)).complete,
+            "a removable mount"
+        );
+        let bridged = sys::Device {
+            tunnelled: Some(true),
+            ..d.clone()
+        };
+        assert!(!identity(Some(&bridged), false, Some(false)).complete);
+        let several = sys::Device {
+            single: Some(false),
+            ..d.clone()
+        };
+        assert!(!identity(Some(&several), false, Some(false)).complete);
+        let image = sys::Device {
+            protocol: Some("Disk Image".to_owned()),
+            ..d.clone()
+        };
+        assert!(!identity(Some(&image), false, Some(false)).complete);
+        let unnamed = sys::Device { path: None, ..d };
+        assert!(
+            identity(Some(&unnamed), false, Some(false))
+                .devices
+                .is_empty()
+        );
+        assert!(!identity(None, false, Some(false)).complete);
     }
 
     #[test]

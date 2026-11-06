@@ -767,6 +767,9 @@ impl World {
 
     pub(crate) fn lock(&mut self, file: FileId, shared: bool) -> Result<(), OsError> {
         self.lock_calls += 1;
+        if let Some((dir, from, to)) = self.cfg.faults.rename_before_lock.take() {
+            self.rename(&dir, &from, &to)?;
+        }
         if let Some((at, code)) = self.cfg.faults.fail_lock {
             if at == self.lock_calls {
                 return Err(OsError {

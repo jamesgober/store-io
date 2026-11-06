@@ -337,6 +337,30 @@ fn test_read_only_handle_cannot_write_or_flush_but_reads() {
     assert_eq!(q.in_flight(), 0);
 }
 
+/// PLANNING R5.2: two files in one directory are never on distinct
+/// devices; the identity call agrees with the probe; file identities tell
+/// two files apart and match a file's path.
+#[test]
+fn test_two_files_in_one_directory_share_a_device_and_differ_as_files() {
+    let fx = fixture("identity");
+    let a = fx.p.create_file(&fx.dir, &name("a.sio")).unwrap();
+    let b = fx.p.create_file(&fx.dir, &name("b.sio")).unwrap();
+    let ia = fx.p.device_identity(&fx.dir, &a);
+    let ib = fx.p.device_identity(&fx.dir, &b);
+    assert!(!ia.distinct(&ib), "{ia:?} {ib:?}");
+    // The disk is listed even where the identity is incomplete (a virtual
+    // machine's disk): an empty list would mean the volume was not found.
+    assert!(!ia.devices.is_empty(), "{ia:?}");
+    assert_eq!(ia, fx.p.probe(&fx.dir, &a).unwrap().device.identity);
+    if ia.complete {
+        assert!(!ia.devices.is_empty());
+    }
+    let fa = fx.p.file_identity(&a).unwrap();
+    assert_eq!(fa, fx.p.path_identity(&fx.dir, &name("a.sio")).unwrap());
+    assert_ne!(fa, fx.p.file_identity(&b).unwrap());
+    assert!(fx.p.path_identity(&fx.dir, &name("none.sio")).is_err());
+}
+
 #[test]
 fn test_probe_reports_windows_evidence() {
     let fx = fixture("probe");

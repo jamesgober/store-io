@@ -1,0 +1,6 @@
+8:16
+/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sdb
+sda1
+sda1-8,nvme0n1p2-8
+rw,attr2,logdev=/dev/sdc1
+eui.0025385a11b2c3d4

@@ -9,8 +9,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use store_io_platform::{
-    Evidence, FileMode, FileName, IoInterface, IoPath, Platform, QueueConfig, RangeState,
-    RawResult, ReleaseHow,
+    DeviceIdentity, Evidence, FileIdentity, FileMode, FileName, IoInterface, IoPath, Platform,
+    QueueConfig, RangeState, RawResult, ReleaseHow,
 };
 
 use crate::alloc;
@@ -223,6 +223,22 @@ impl Platform for PosixPlatform {
 
     fn probe(&self, dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
         probe::probe(dir, file)
+    }
+
+    fn device_identity(&self, _dir: &PosixDir, file: &PosixFile) -> DeviceIdentity {
+        probe::device_identity(file)
+    }
+
+    fn file_identity(&self, file: &PosixFile) -> RawResult<FileIdentity> {
+        Ok(crate::posix::identity_of(&crate::posix::fstat(file.raw())?))
+    }
+
+    fn path_identity(&self, dir: &PosixDir, name: &FileName) -> RawResult<FileIdentity> {
+        let c = crate::dir::name_cstring(name)?;
+        Ok(crate::posix::identity_of(&crate::posix::stat_in(
+            dir.raw(),
+            &c,
+        )?))
     }
 
     fn queue(&self, cfg: QueueConfig) -> RawResult<PosixQueue> {

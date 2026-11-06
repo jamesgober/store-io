@@ -237,6 +237,10 @@ where
                 "the ownership lock admits one holder at a time",
                 ownership_lock,
             ),
+            (
+                "file identity follows the file, and one directory is one device",
+                file_identity,
+            ),
             ("the monotonic clock never goes back", monotonic_clock),
             (
                 "readers share the lock on read-only handles and exclude the owner",
@@ -700,6 +704,50 @@ fn rename_noreplace<P: Platform>(c: &Ctx<'_, P>) -> Check {
         Ok(_) => Err("the renamed name still exists".into()),
         Err(e) => {
             check!(is_not_found(e), "old name: {e}");
+            Ok(())
+        }
+    }
+}
+
+fn file_identity<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    let dir = c.dir()?;
+    let a = c.file(&dir, "a", BLOCK as u64)?;
+    let b = c.file(&dir, "b", BLOCK as u64)?;
+    let ia = ok(c.p.file_identity(&a), "file_identity a")?;
+    let ib = ok(c.p.file_identity(&b), "file_identity b")?;
+    check!(
+        ok(c.p.path_identity(&dir, &name("a")?), "path_identity a")? == ia,
+        "an open file's identity differs from its name's"
+    );
+    check!(ia != ib, "two files share an identity");
+    check!(
+        ia.volume == ib.volume,
+        "two files in one directory on different volumes"
+    );
+    check!(
+        !c.p.device_identity(&dir, &a)
+            .distinct(&c.p.device_identity(&dir, &b)),
+        "two files in one directory are distinct devices"
+    );
+    // A rename over `b`: its name now names `a`'s file.
+    ok(
+        c.p.rename_replace(&dir, &name("a")?, &name("b")?, &a),
+        "rename_replace",
+    )?;
+    ok(c.p.sync_dir(&dir), "sync_dir")?;
+    let now_b = ok(c.p.path_identity(&dir, &name("b")?), "path_identity b")?;
+    check!(
+        now_b == ia && now_b != ib,
+        "after a rename the name does not name the renamed file"
+    );
+    check!(
+        ok(c.p.file_identity(&a), "file_identity a after rename")? == ia,
+        "a file's identity changed with its name"
+    );
+    match c.p.path_identity(&dir, &name("a")?) {
+        Ok(_) => Err("a renamed-away name still has an identity".into()),
+        Err(e) => {
+            check!(is_not_found(e), "renamed-away name: {e}");
             Ok(())
         }
     }

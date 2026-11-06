@@ -86,6 +86,39 @@ pub(crate) fn fstat(fd: RawFd) -> RawResult<libc::stat> {
     Ok(unsafe { st.assume_init() })
 }
 
+/// `fstatat(2)` of `name` in the directory `dirfd`, not following a final
+/// link (a container is opened `O_NOFOLLOW`).
+pub(crate) fn stat_in(dirfd: RawFd, name: &CStr) -> RawResult<libc::stat> {
+    let mut st = MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstatat(2): `dirfd` is an open directory, `name` is
+    // NUL-terminated and outlives the call; a complete `struct stat` is
+    // written through the pointer on success and nothing on failure; the
+    // buffer is assumed initialised only after a 0 return.
+    let r = unsafe {
+        libc::fstatat(
+            dirfd,
+            name.as_ptr(),
+            st.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    check(r)?;
+    // SAFETY: fstatat returned 0, so every field was written by the kernel.
+    Ok(unsafe { st.assume_init() })
+}
+
+/// A file's identity from its `stat`: device and inode.
+pub(crate) fn identity_of(st: &libc::stat) -> store_io_platform::FileIdentity {
+    // `st_ino` is unsigned everywhere; `st_dev` is signed on macOS (`i32`).
+    // Both sides of every comparison take the same casts, so equal files
+    // compare equal and different ones differ.
+    #[allow(clippy::cast_sign_loss, clippy::unnecessary_cast)]
+    store_io_platform::FileIdentity {
+        volume: st.st_dev as u64,
+        file: u128::from(st.st_ino as u64),
+    }
+}
+
 /// `lstat(2)` (`fstatat` with `AT_SYMLINK_NOFOLLOW`) of a path.
 pub(crate) fn lstat(path: &CStr) -> RawResult<libc::stat> {
     let mut st = MaybeUninit::<libc::stat>::uninit();

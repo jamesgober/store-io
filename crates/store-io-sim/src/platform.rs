@@ -19,8 +19,8 @@ use store_io_core::evidence::{
     Bus, DeviceFacts, Evidence, FsFacts, FsKind, OsCacheMode, PlatformKind, Privilege, Tri,
 };
 use store_io_platform::{
-    Completion, CompletionBuf, FileMode, FileName, IoBuf, IoOp, Platform, Queue, QueueConfig,
-    RangeState, RawResult, Rejected, ReleaseHow, Wake,
+    Completion, CompletionBuf, DeviceIdentity, FileIdentity, FileMode, FileName, IoBuf, IoOp,
+    Platform, Queue, QueueConfig, RangeState, RawResult, Rejected, ReleaseHow, Wake,
 };
 
 use crate::world::{DeviceKind, EBADF, EINVAL, EIO, FileId, SimConfig, World};
@@ -607,6 +607,32 @@ impl Platform for SimPlatform {
         let mut w = lock(&self.world);
         file.check(&w, true)?;
         w.flush_all(file.id)
+    }
+
+    fn device_identity(&self, _dir: &SimDir, _file: &SimFile) -> DeviceIdentity {
+        let w = lock(&self.world);
+        w.config()
+            .evidence
+            .as_ref()
+            .map_or_else(DeviceIdentity::unknown, |ev| ev.device.identity.clone())
+    }
+
+    fn file_identity(&self, file: &SimFile) -> RawResult<FileIdentity> {
+        let w = lock(&self.world);
+        file.check(&w, false)?;
+        Ok(FileIdentity {
+            volume: 0,
+            file: u128::from(file.id),
+        })
+    }
+
+    fn path_identity(&self, dir: &SimDir, name: &FileName) -> RawResult<FileIdentity> {
+        let w = lock(&self.world);
+        let id = w.lookup(&dir.path, name.as_str())?;
+        Ok(FileIdentity {
+            volume: 0,
+            file: u128::from(id),
+        })
     }
 
     fn probe(&self, _dir: &SimDir, file: &SimFile) -> RawResult<Evidence> {

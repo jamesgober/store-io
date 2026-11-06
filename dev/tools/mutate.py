@@ -171,6 +171,14 @@ AUD_PROV = ["-p", "store-io-engine", "--test", "format2_provision", "--test", "f
 P4B = ["-p", "store-io-engine", "--test", "inline", "--test", "format2_extents",
        "--test", "store", "--test", "durable"]
 INLINE_ENV = {"STORE_IO_SIM_INLINE": "1"}
+# PLANNING R5.2 and R5.7 (v0.6 V1): device distinctness, open's identity check.
+IDENT = ["-p", "store-io-core", "--lib", "identity::"]
+STORE_T = ["-p", "store-io-engine", "--test", "store"]
+LINUX_ID = ["-p", "store-io-posix", "--lib", "probe::identity::"]
+WIN_ID = ["-p", "store-io-win", "--lib", "probe::identity_tests"]
+WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
+WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
+MAC_ID = ["-p", "store-io-posix", "--lib", "probe::tests::test_only_one_physical_store"]
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -1314,6 +1322,52 @@ M = [
  ('crates/store-io-engine/src/domain/mod.rs', '                let goal = need.min(issued);', '                let goal = need;', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '                if goal > yielded_to && self.patience.try_yield() {', '                if goal > yielded_to {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '                    yielded_to = goal;\n', '                    yielded_to = 0;\n', DOMAIN),
+ ('crates/store-io-core/src/identity.rs', '        if !self.complete || !other.complete || self.devices.is_empty() || other.devices.is_empty()', '        if (!self.complete && false) || !other.complete || self.devices.is_empty() || other.devices.is_empty()', IDENT),
+ ('crates/store-io-core/src/identity.rs', '        if !self.complete || !other.complete || self.devices.is_empty() || other.devices.is_empty()', '        if !self.complete || (!other.complete && false) || self.devices.is_empty() || other.devices.is_empty()', IDENT),
+ ('crates/store-io-core/src/identity.rs', '        if !self.complete || !other.complete || self.devices.is_empty() || other.devices.is_empty()', '        if !self.complete || !other.complete || (self.devices.is_empty() && false) || (other.devices.is_empty() && false)', IDENT),
+ ('crates/store-io-core/src/identity.rs', '        self.node == other.node || self.names.iter().any(|n| other.names.contains(n))', '        (self.node == other.node && false) || self.names.iter().any(|n| other.names.contains(n))', IDENT),
+ ('crates/store-io-core/src/identity.rs', '        self.node == other.node || self.names.iter().any(|n| other.names.contains(n))', '        self.node == other.node', IDENT),
+ ('crates/store-io-core/src/identity.rs', '            if !rest.is_empty()\n                && scheme.len() <= 4', '            if scheme.len() <= 4', IDENT),
+ ('crates/store-io-core/src/identity.rs', 'if out.len() + usize::from(space) >= NAME_MAX {', 'if out.len() >= NAME_MAX {', IDENT),
+ ('crates/store-io-engine/src/open.rs', '            Ok(now) if now == locked => return Ok((file, lock)),', '            Ok(now) if now == locked || true => return Ok((file, lock)),', STORE_T),
+ ('crates/store-io-engine/src/open.rs', '            Err(e) if store_io_core::errno::is_not_found(e) => {}', '            Err(e) if store_io_core::errno::is_not_found(e) => return Ok((file, lock)),', STORE_T),
+ ('crates/store-io-engine/src/open.rs', '        if read_only {\n            return Ok((file, lock));\n        }\n        let locked', '        if true {\n            return Ok((file, lock));\n        }\n        let locked', STORE_T),
+ ('crates/store-io-win/src/probe/mod.rs', '            Bus::Nvme => controller_named,', '            Bus::Nvme => controller_named || true,', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', 'controller_named |= normalize_name(n).is_some();', 'controller_named |= normalize_name(n).is_some() && false;', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '    present && !root\n', '    present && !(root && false)\n', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        && c.max_leaf >= 0x4000_0004\n', '        && (c.max_leaf >= 0x4000_0004 || true)\n', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        && c.interface == HV_INTERFACE\n', '        && (c.interface == HV_INTERFACE || true)\n', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        && c.privileges_hi & (1 << 12) != 0\n', '        && (c.privileges_hi & (1 << 12) != 0 || true)\n', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        && c.privileges_hi & (1 << 22) == 0\n', '        && (c.privileges_hi & (1 << 22) == 0 || true)\n', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        && c.max_leaf >= 0x4000_0004\n', '        && c.max_leaf > 0x4000_0004\n', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '    let present = c.leaf1_ecx & (1 << 31) != 0;', '    let present = c.leaf1_ecx & (1 << 31) != 0 || true;', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '    let root = &c.vendor == b"Microsoft Hv"\n', '    let root = (&c.vendor == b"Microsoft Hv" || true)\n', WIN_ID),
+ ('crates/store-io-win/src/sys.rs', '    *id != [0; 16] && !low_invalid', '    !low_invalid', WIN_SYS),
+ ('crates/store-io-win/src/sys.rs', '    *id != [0; 16] && !low_invalid', '    *id != [0; 16] && !(low_invalid && false)', WIN_SYS),
+ ('crates/store-io-win/src/probe/mod.rs', '        && c.recommendations & (1 << 12) == 0;', '        && (c.recommendations & (1 << 12) == 0 || true);', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', 'controller_named |= normalize_name(n).is_some();', 'controller_named |= normalize_name(n).is_some() || true;', WIN_ID),
+ ('crates/store-io-win/src/probe/storage.rs', 'if !maker.trim().is_empty() && !product.trim().is_empty() {', 'if !maker.trim().is_empty() || !product.trim().is_empty() {', WIN_SMBIOS),
+ ('crates/store-io-win/src/probe/mod.rs', '            Bus::Sata => true,\n            _ => false,', '            Bus::Sata => true,\n            _ => true,', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '            Bus::Sata => true,\n            _ => false,', '            Bus::Sata | Bus::Usb => true,\n            _ => false,', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        if !seen_whole || hosted {', '        if !seen_whole || (hosted && false) {', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        complete: all,', '        complete: all || true,', WIN_ID),
+ ('crates/store-io-posix/src/mac/probe.rs', '        && internal_of(device, removable_mount) == Tri::Yes\n', '        && (internal_of(device, removable_mount) == Tri::Yes || true)\n', MAC_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '        let hosted = guest || storage::hypervisor_from(bus, desc.product.as_deref()).is_some();', '        let hosted = (guest && false) || storage::hypervisor_from(bus, desc.product.as_deref()).is_some();', WIN_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        Bus::Nvme | Bus::Usb => !hosted && named,', '        Bus::Nvme | Bus::Usb => !hosted && (named || true),', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        Bus::Nvme | Bus::Usb => !hosted && named,', '        Bus::Nvme | Bus::Usb => named,', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        Bus::Sata => !hosted,', '        Bus::Sata => true,', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        Bus::Sata => !hosted,\n        _ => false,', '        Bus::Sata => !hosted,\n        _ => true,', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        m.contains("amazon elastic block store") || m.contains("nvme_card-pd")', '        m.contains("nvme_card-pd")', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '    let bridge = &device_path[..at];', '    let bridge = &device_path[..at.max(device_path.len())];', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '            .is_some_and(|ino| !ino.is_empty() && ino.bytes().all(|b| b.is_ascii_digit()))', '            .is_some_and(|ino| ino.bytes().all(|b| b.is_ascii_digit()))', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', "            .and_then(|r| r.strip_prefix('-'))", "            .map(|r| r.strip_prefix('-').unwrap_or(r))", LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        FsKind::Ext4 => ext4_internal(),', '        FsKind::Ext4 => ext4_internal() || true,', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        FsKind::Xfs => xfs_options().is_some_and(|o| !xfs_uses_other_devices(&o)),\n        _ => false,', '        FsKind::Xfs => xfs_options().is_some_and(|o| !xfs_uses_other_devices(&o)),\n        _ => true,', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        .any(|o| o.starts_with("logdev=") || o.starts_with("rtdev="))', '        .any(|o| o.starts_with("logdev="))', LINUX_ID),
+ ('crates/store-io-posix/src/probe/identity.rs', '        .any(|o| o.starts_with("logdev=") || o.starts_with("rtdev="))', '        .any(|o| o.starts_with("rtdev="))', LINUX_ID),
+ ('crates/store-io-win/src/probe/storage.rs', '            0 if formatted.get(0x13).is_some_and(|b| b & 0x10 != 0) => guest = true,', '            0 if formatted.get(0x13).is_some_and(|b| b & 0x10 != 0 && false) => guest = true,', WIN_SMBIOS),
+ ('crates/store-io-win/src/probe/storage.rs', '                if GUESTS.iter().any(|g| name.contains(g)) {\n                    guest = true;', '                if GUESTS.iter().any(|g| name.contains(g)) && false {\n                    guest = true;', WIN_SMBIOS),
+ ('crates/store-io-win/src/probe/storage.rs', '    system && !guest\n', '    (system || true) && !guest\n', WIN_SMBIOS),
 ]
 
 def kill_stuck_tests():

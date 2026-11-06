@@ -47,6 +47,7 @@ use std::path::Path;
 pub use store_io_buf::IoBuf;
 pub use store_io_core::error::OsError;
 pub use store_io_core::evidence::Evidence;
+pub use store_io_core::identity::DeviceIdentity;
 
 /// Result carrying a raw operating-system error.
 pub type RawResult<T> = Result<T, OsError>;
@@ -130,6 +131,18 @@ pub enum ReleaseHow {
     Deallocate,
     /// Trim in place: allocation kept, contents undefined.
     TrimInPlace,
+}
+
+/// What makes a file the file it is, whatever its name: equal for two
+/// handles, or a handle and a path, exactly when they name one file (POSIX
+/// device and inode; Windows volume serial and file id). Compared, never
+/// interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    /// The volume or device the file is on.
+    pub volume: u64,
+    /// The file on that volume.
+    pub file: u128,
 }
 
 /// Facts about a byte range of a file.
@@ -677,6 +690,27 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error if nothing could be learned at all; partial evidence is
     /// returned with `missing` set.
     fn probe(&self, dir: &Self::Dir, file: &Self::File) -> RawResult<Evidence>;
+
+    /// The physical devices `file` lives on: the identity part of
+    /// [`Self::probe`] alone, with no flush and no device query that could
+    /// send one. Never fails: what cannot be read makes the identity
+    /// incomplete.
+    fn device_identity(&self, dir: &Self::Dir, file: &Self::File) -> DeviceIdentity;
+
+    /// The identity of an open file.
+    ///
+    /// # Errors
+    ///
+    /// The raw error.
+    fn file_identity(&self, file: &Self::File) -> RawResult<FileIdentity>;
+
+    /// The identity of the file `name` in `dir` names now (following the
+    /// same links [`Self::open_file`] follows).
+    ///
+    /// # Errors
+    ///
+    /// The raw error (`name` names nothing: the platform's "not found").
+    fn path_identity(&self, dir: &Self::Dir, name: &FileName) -> RawResult<FileIdentity>;
 
     /// Creates a queue for the calling thread.
     ///

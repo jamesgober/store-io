@@ -1282,6 +1282,9 @@ M = [
  ('crates/store-io-engine/src/create.rs', '                    if store_io_core::errno::is_lock_held(raw) {', '                    if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "store"]),
  ('crates/store-io-engine/src/create.rs', '            if store_io_core::errno::is_lock_held(raw) {\n                exists()', '            if store_io_core::errno::is_lock_held(raw) || true {\n                exists()', ["-p", "store-io-engine", "--test", "store"]),
  ('crates/store-io-engine/src/copy.rs', '        if is_lock_held(raw) {', '        if is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "copy"]),
+ ('crates/store-io-engine/src/open.rs', '            platform.sync_dir(&dir).map_err(|e| {', '            Ok::<(), store_io_platform::OsError>(()).map_err(|e| {', COPYT),
+ ('crates/store-io-engine/src/open.rs', '            platform.sync_dir(&dir).map_err(|e| {', '            let _ = platform.sync_dir(&dir);\n            Ok::<(), store_io_platform::OsError>(()).map_err(|e| {', COPYT),
+ ('crates/store-io-engine/src/open.rs', '                if store_io_core::errno::is_unsupported(e) {\n                    Error::Unsupported {\n                        what: store_io_core::error::Capability::DirectoryFlush,', '                if store_io_core::errno::is_unsupported(e) && false {\n                    Error::Unsupported {\n                        what: store_io_core::error::Capability::DirectoryFlush,', COPYT),
  ('crates/store-io-engine/src/directory.rs', '            if store_io_core::errno::is_lock_held(raw) {', '            if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "directory_changes"]),
  # Format 1's read-only open: a header that names another region, or says
  # released, makes its region unavailable.

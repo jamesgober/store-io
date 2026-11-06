@@ -46,7 +46,10 @@ where
     /// [`Error::DurabilityUnknown`] when a dead owner's writes may not be
     /// durable: the drain's flush failed, or the probe did (on macOS its
     /// flush check is a flush; elsewhere it reads, and fails only on an I/O
-    /// error),
+    /// error), or the directory flush did (`op: SyncDir`; the container's
+    /// name may not be durable), [`Error::Unsupported`] (`DirectoryFlush`)
+    /// on a file system that cannot flush a directory, before anything is
+    /// written,
     /// [`Error::Io`] (`Io(Lock)` on a file system that cannot lock).
     pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
         Self::open_inner(platform, path, opts, false)
@@ -108,6 +111,25 @@ where
                     raw: Some(e),
                     ctx: ErrorContext::default(),
                 })?;
+            // The container's own name, before any write: a copy (and, from
+            // v0.6, an import or a swap) that renamed it into place and
+            // stopped before its directory flush leaves a name a power cut
+            // can take back, and with it every write this owner
+            // acknowledges. A directory that cannot be flushed cannot hold a
+            // writable store (as `Directory`'s changes refuse there).
+            platform.sync_dir(&dir).map_err(|e| {
+                if store_io_core::errno::is_unsupported(e) {
+                    Error::Unsupported {
+                        what: store_io_core::error::Capability::DirectoryFlush,
+                    }
+                } else {
+                    Error::DurabilityUnknown {
+                        op: Op::SyncDir,
+                        raw: Some(e),
+                        ctx: ErrorContext::default(),
+                    }
+                }
+            })?;
         }
         let policy = policy_of(&decision);
         let lanes = if read_only || !policy.flush {

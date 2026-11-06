@@ -587,6 +587,77 @@ fn test_a_power_failure_at_any_point_of_a_copy() {
     );
 }
 
+/// A copy stops after its rename, before its directory flush (the flush
+/// fails), and a writer opens the copy and commits: its open flushes the
+/// directory before its first write, so a power cut then keeps the store
+/// under its name and the commit with it (a power cut before the open could
+/// take the rename back, with nothing acknowledged in it).
+#[test]
+fn test_a_writer_after_an_unflushed_rename_keeps_what_it_commits() {
+    let p = SimPlatform::new(SimConfig::volatile(1031));
+    drop(source(&p, 1));
+    p.with_world(|w| w.faults_mut().fail_dir_sync = Some(w.dir_syncs() + 2));
+    let e = copy(&p, OTHER, DIR);
+    p.with_world(|w| w.faults_mut().fail_dir_sync = None);
+    assert!(matches!(e, Err(Error::DurabilityUnknown { .. })), "{e:?}");
+    let s = open(&p);
+    let slot = s.slot("manifest").unwrap();
+    slot.commit(b"after the rename").unwrap();
+    std::mem::forget((slot, s));
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    assert_eq!(files(&p, DIR), [CONTAINER], "the name kept");
+    let s = open(&p);
+    assert_eq!(
+        s.slot("manifest").unwrap().read().as_deref(),
+        Some(&b"after the rename"[..]),
+        "the commit kept"
+    );
+}
+
+/// The writer's own directory flush fails too: the open is refused before
+/// anything is written, and a power cut then takes the rename back with
+/// nothing acknowledged in it; the next copy runs. A directory that cannot
+/// flush at all refuses the writable open as unsupported.
+#[test]
+fn test_an_open_whose_directory_flush_fails_writes_nothing() {
+    let p = SimPlatform::new(SimConfig::volatile(1032));
+    drop(source(&p, 1));
+    p.with_world(|w| w.faults_mut().fail_dir_sync = Some(w.dir_syncs() + 2));
+    let e = copy(&p, OTHER, DIR);
+    assert!(matches!(e, Err(Error::DurabilityUnknown { .. })), "{e:?}");
+    p.with_world(|w| w.faults_mut().fail_dir_sync = Some(w.dir_syncs() + 1));
+    let writes = p.with_world(|w| w.writes());
+    let e = Store::open(p.clone(), Path::new(DIR), opts()).map(|_| ());
+    p.with_world(|w| w.faults_mut().fail_dir_sync = None);
+    assert!(
+        matches!(
+            e,
+            Err(Error::DurabilityUnknown {
+                op: Op::SyncDir,
+                ..
+            })
+        ),
+        "{e:?}"
+    );
+    assert_eq!(p.with_world(|w| w.writes()), writes, "nothing written");
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    assert_eq!(files(&p, DIR), [COPYING], "the rename taken back");
+    copy(&p, OTHER, DIR).unwrap();
+    assert_eq!(files(&p, DIR), [CONTAINER]);
+    p.with_world(|w| w.faults_mut().dir_sync_unsupported = true);
+    let e = Store::open(p.clone(), Path::new(DIR), opts()).map(|_| ());
+    p.with_world(|w| w.faults_mut().dir_sync_unsupported = false);
+    assert!(
+        matches!(
+            e,
+            Err(Error::Unsupported {
+                what: store_io_core::error::Capability::DirectoryFlush
+            })
+        ),
+        "{e:?}"
+    );
+}
+
 /// The clean close's flush fails (the close is best effort, silent): the
 /// copy's own barrier has already made every byte durable, so the renamed
 /// store holds the whole copy, opened as not closed cleanly.

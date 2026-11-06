@@ -51,6 +51,18 @@
   `Platform` gains three required methods (`device_identity`,
   `file_identity`, `path_identity`), implemented on every backend and the
   simulator; `DeviceFacts` gains a public field.
+- Engine: **a writable open flushes its directory before its first write.**
+  A copy that renamed its target into place and stopped before its own
+  directory flush (a crash, or the flush failing) left a name a power cut
+  could take back; a writer opening the copy meanwhile acknowledged writes
+  that would then vanish with the name (the next copy deleting the file as
+  a leftover). One directory flush per writable open (a full flush on
+  macOS, as the probe's own check already makes; elsewhere a directory
+  `fsync` or `FlushFileBuffers`); its failure is `DurabilityUnknown`, with
+  nothing written. **A writable open is now refused**
+  (`Unsupported { DirectoryFlush }`) on a file system that cannot flush a
+  directory, as directory-mode changes already were; read-only opens are
+  unaffected.
 - Engine: **a writable open checks that the path still names the file it
   locked** (PLANNING R5.7). A container renamed over the path between the
   open and the lock (the copy-and-swap of v0.6) would otherwise leave the

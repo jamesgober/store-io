@@ -21,6 +21,7 @@
 13. [Many operations from one thread: the Submitter](#13-many-operations-from-one-thread-the-submitter)
 14. [Stores made before 0.5](#14-stores-made-before-05)
 15. [A damaged region table: the three ways out](#15-a-damaged-region-table-the-three-ways-out)
+16. [Pointing at durable bytes: dependent writes](#16-pointing-at-durable-bytes-dependent-writes)
 
 ---
 
@@ -453,6 +454,24 @@ Every usable region is copied by its data size. A region of a stale page is copi
 
 Which way: a damaged header with nothing stale is (1); a page torn by a crash, where you accept losing its last commit, is (2), then (1) for what it leaves unavailable; anything with a lost page, or that (1) and (2) refuse, is (3). Keep the old store until you have checked the result.
 
+---
+
+## 16. Pointing at durable bytes: dependent writes
+
+A record that points at other bytes (an index entry naming a value, a commit record naming its pages) must never be durable before what it points at: after a crash it would name bytes that are not there. `append_after` and `write_after` take the receipts of what the write points at:
+
+```rust
+let (_at, value) = values.append_durable(b"the value")?; // a prefix receipt
+let t = index.append_after(&[value], b"key -> value")?;
+index.sync_through(&t)?;
+```
+
+A receipt exists only once its bytes are durable, so holding one is the guarantee. Two things are checked besides, before anything is reserved or written:
+
+- **A receipt of an append region must be a prefix receipt** (`is_prefix()`): the kind `sync_through` and `append_durable` return. A receipt for one append's range (a `Submitter` barrier's) says nothing of the bytes before it: `NotWritten(NotPrefix)`.
+- **Its region's generation must still be live.** A region recycled since is refused (`StaleGeneration`), one released `NotReady`. A receipt kept from an earlier open is refused until its region is resumed (`NotPositioned`), and once any open since resumed it with `resume_at` below the receipt's end (`StaleGeneration`: that open's appends overwrite from there). A slot's receipt is checked only for its slot being there.
+
+Each dependency's region is held against recycle and release from when the write holds its lane until its space is reserved (a page write: until it is issued), never during the I/O. A recycle after that may still overwrite the bytes before the pointer lands: recycling data a durable pointer still names is your reclaim decision, as every reclaim is. Receipts are matched to the earlier opens of this process: if the store was opened in between by something this process did not see (another process), or one of its closes was not clean, every receipt of an append region from before that open is refused (`StaleGeneration`), since that open may have appended over it. A container copied by another tool has the same volume id; a receipt of the original is, to the copy, another store's. A receipt of another store is checked only for being a prefix where it must be. A `Submitter` has the same calls, refusing with the buffer: `append_after(&region, &deps, buf, mode, tag)` and `write_after(&region, &deps, pos, buf, mode, tag)`.
 
 ---
 

@@ -193,6 +193,10 @@ pub enum NotWrittenCause {
     Frozen,
     /// The options contradict each other (a region's cap below its size).
     InvalidOptions,
+    /// A dependent write named a receipt of an append region that is not a
+    /// durable prefix (a receipt for one write's range): the bytes before
+    /// it may not be durable, so nothing may point past them yet.
+    NotPrefix,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -220,6 +224,7 @@ impl fmt::Display for NotWrittenCause {
             Self::ForeignBuffer => "the buffer is not from this store's pool",
             Self::Frozen => "allocation is frozen: a table page is stale or lost",
             Self::InvalidOptions => "the options contradict each other",
+            Self::NotPrefix => "a dependency on an append region is not a durable prefix",
         })
     }
 }

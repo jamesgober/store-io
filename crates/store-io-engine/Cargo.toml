@@ -29,9 +29,13 @@ store-io-platform = { path = "../store-io-platform", version = "0.4.1" }
 default = []
 # Per-stage timing and counters (`Store::observe`). Off: compiled out.
 observe = ["store-io-core/observe"]
+# Step points for the engine's own race tests (`test_hook`): unstable,
+# for tests only; enabled by the dev-dependency on itself below.
+sim-hooks = []
 
 [dev-dependencies]
 store-io-sim = { path = "../store-io-sim", version = "0.4.1" }
+store-io-engine = { path = ".", features = ["sim-hooks"] }
 
 # Model checker, compiled only with RUSTFLAGS="--cfg loom" (never in a
 # normal build) so dependent crates' loom runs model these atomics too.

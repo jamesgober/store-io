@@ -167,6 +167,9 @@ pub struct WriteTicket {
     pub(crate) need: u64,
     /// The open store that issued it.
     pub(crate) epoch: u64,
+    /// The write is to an append region (receipts built from the ticket
+    /// carry it on).
+    pub(crate) append: bool,
 }
 
 impl WriteTicket {
@@ -223,6 +226,10 @@ pub struct DurableReceipt {
     pub(crate) synced: bool,
     /// The open store that issued it.
     pub(crate) epoch: u64,
+    /// The covered bytes are an append region's, so a dependent write may
+    /// name the receipt only if it is a prefix (`NotPrefix`), whichever
+    /// store it comes from. Never visible to callers.
+    pub(crate) append: bool,
 }
 
 impl DurableReceipt {

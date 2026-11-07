@@ -49,7 +49,7 @@ Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are c
 | `store.report() -> &StoreReport` | The evidence, class decision, block size, table capacity, volume id, owner generation and unavailable regions; for format 2, `metadata` (`MetadataReport`): clean close, stale and lost pages, the volume record stale, the heal, the freeze, why read-only, retried reads, and `damaged_slots`, every candidate and damaged slot of the volume record and the pages (`DamagedSlot`: the pair, slot A or B, and `SlotDamage::Older`, `InFlight` or `Damage`). `Display` prints a readable report. |
 | `store.space() -> SpaceReport` | See [Space](#9-space). |
 | `store.reserve(bytes, tag)`, `set_cap(tag, cap)`, `extent_of(bytes)` | See [Space](#9-space). |
-| `store.observe() -> Snapshot` | Event counters (writes, bytes, reads, barriers, flushes, split writes, refused writes, media errors) and sampled latency histograms per stage (write, read, barrier, flush, slot commit, provisioning). Writes, reads and barriers are the data path (metadata writes are not counted); media errors are counted once per unreadable range reported. Recorded only with the `observe` feature, which is off by default and costs nothing when off; on, 18.5 ns per durable write on one thread and about 20.7 ns with every core busy [measured, harness `observe-cost`]. All zeros without it. The types are in `store_io::observe`. |
+| `store.observe() -> Snapshot` | Event counters (writes, bytes, reads, barriers, flushes, split writes, refused writes, media errors, dependency receipts of dependent writes) and sampled latency histograms per stage (write, read, barrier, flush, slot commit, provisioning). Writes, reads and barriers are the data path (metadata writes are not counted); media errors are counted once per unreadable range reported. Recorded only with the `observe` feature, which is off by default and costs nothing when off; on, 18.5 ns per durable write on one thread and about 20.7 ns with every core busy [measured, harness `observe-cost`]. All zeros without it. The types are in `store_io::observe`. |
 | `store.oldest_outstanding() -> Option<Outstanding>` | The oldest operation still in flight on the store's queues: its age and whether it is a device flush. For a watchdog the caller owns (store-io keeps no timer): poll it, and call `store.poison()` when the age passes your deadline. The age counts from the first call that saw the operation, and restarts when a queue's oldest operation completes, so it is a lower bound within one poll interval, and a long but progressing job (a large provisioning) never looks hung. Covered: the store's shared queues, its parallel queues and its flush lane. Not covered: whole-file flushes during provisioning, directory syncs, and `Directory`. The I/O path pays a busy mark per queue, on a cache line of its own (about 1-2 ns per operation and one plain store per completion); the call reads a coarse clock once. |
 | `store.submit_pool_threads() -> Option<usize>` | Worker threads in the submit pool that runs this store's multi-write page batches and large reads concurrently (Linux synchronous tier), once this store's first such call has started its parallel queues; `None` before that, if they could not be started, and on backends that need no pool. |
 | `store.poisoned() -> Option<FirstCause>` | The failure that poisoned the store, if any: every later write and barrier fails with `Poisoned`. A cheap check for a health probe. |
@@ -89,6 +89,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `append(&[u8]) -> Result<WriteTicket>` | Appends at least one byte, starting on a block boundary, zero-padded to the next. Returns once the write has completed; not yet durable. Any size: large data is written in pieces kept in flight together. |
 | `sync_through(&WriteTicket) -> Result<DurableReceipt>` | Makes everything appended up to and including the ticket durable. |
 | `append_durable(&[u8]) -> Result<(RegionPos, DurableReceipt)>` | `append` then `sync_through`. |
+| `append_after(&[DurableReceipt], &[u8]) -> Result<WriteTicket>` | `append` for a record that points at durable bytes, given their receipts; see [GUIDE section 16](GUIDE.md#16-pointing-at-durable-bytes-dependent-writes). Refused before anything is reserved: `NotPrefix` (a receipt of an append region that is not a prefix receipt), `StaleGeneration` (its region recycled since, or an earlier open's receipt once an open since resumed its region below the receipt's end), `NotReady` (released), `NotPositioned` (an earlier open's receipt, its region not yet resumed). |
 | `batch() -> AppendBatch` | A batch of appends; see [Batches](#4-batches). |
 | `read(offset, &mut [u8]) -> Result<usize>` | Reads raw bytes at a block-aligned offset (any length). Copies from store-io's own aligned buffers (direct I/O needs aligned memory, and a read whose wait fails stays in flight, so it never targets your memory); `scan` lends those buffers, and a `Submitter`'s `read_append` reads into one you take with `take_buf`: no copy. |
 | `scan(from, visit) -> Result<ScanSummary>` | Reads the region in order; see [Scans](#8-scans). |
@@ -111,6 +112,7 @@ Names are 1 to 24 bytes with no NUL. `Store` derefs to `engine::Store<NativePlat
 | `write(RegionPos, &[u8]) -> Result<WriteTicket>` | Writes whole blocks (any number). |
 | `sync_through(&WriteTicket) -> Result<DurableReceipt>` | Makes the ticket's write durable, with every other write to the store that completed before the call. |
 | `write_durable(RegionPos, &[u8]) -> Result<DurableReceipt>` | `write` then `sync_through`. |
+| `write_after(&[DurableReceipt], RegionPos, &[u8]) -> Result<WriteTicket>` | `write` for pages that point at durable bytes; checked as `append_after`. |
 | `batch() -> PageBatch` | A batch of page writes. |
 | `read(RegionPos, &mut [u8]) -> Result<usize>` | Reads any length at a position. Copies, as an append region's `read` does; `scan` and a `Submitter`'s `read_page` do not. |
 | `scan`, `recycle`, `release`, `generation`, `block_size`, `len`, `is_empty` | As for append regions. |
@@ -234,7 +236,7 @@ None of these can be constructed outside store-io.
 
 | Variant | Meaning |
 |---|---|
-| `NotWritten { cause: NotWrittenCause, ctx }` | Refused before reaching the device; media untouched. Causes include `Misaligned`, `OutOfBounds`, `ForeignPosition`, `StaleGeneration`, `PoolExhausted`, `NotReady`, `RegionFull`, `Empty`, `TooLarge`, `InvalidName`, `ReadOnly`, `QueueFull`, `NotPositioned`, `Overlap`. |
+| `NotWritten { cause: NotWrittenCause, ctx }` | Refused before reaching the device; media untouched. Causes include `Misaligned`, `OutOfBounds`, `ForeignPosition`, `StaleGeneration`, `PoolExhausted`, `NotReady`, `RegionFull`, `Empty`, `TooLarge`, `InvalidName`, `ReadOnly`, `QueueFull`, `NotPositioned`, `Overlap`, `NotPrefix`. |
 | `DurabilityUnknown { op, raw, ctx }` | Failed after submission; the domain is now poisoned. |
 | `Poisoned { first }` | An earlier failure poisoned the domain. |
 | `NoSpace { tag, ctx }` | A reservation or provisioning ran out of space or quota; nothing poisoned. |
@@ -259,7 +261,7 @@ None of these can be constructed outside store-io.
   - `Completion` (tag, buffer, outcome), `Completions`, `Done` (`Written`, `Read`, `Synced`, `Flushed`), `Written` (ticket and receipt), `Rejected` (error and buffer);
   - `IoBuf`, `Wake`, `Waker`.
 - Methods:
-  - Submission: `take_buf`, `max_buf`, `append`, `write`, `read_append`, `read_page`.
+  - Submission: `take_buf`, `max_buf`, `append`, `write`, `append_after`, `write_after` (dependent writes, checked as the blocking ones; refused with the buffer), `read_append`, `read_page`.
   - Barriers: `barrier(&ticket, tag)`, `barrier_all(tag)`.
   - Completions: `reap`, `wait(min)`, `in_flight`, `waker`.
 - `LinuxTier`, `IoPath` and `IoInterface` (`IoUring`, `Synchronous`, `Iocp`, `Simulator`, `Other`) describe the kernel interface a store uses; `store_io::io_uring_fallbacks()` (Linux) counts operations the io_uring tier finished with a blocking call.

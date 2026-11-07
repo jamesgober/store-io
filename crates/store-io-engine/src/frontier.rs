@@ -29,6 +29,7 @@ use loom::sync::{Condvar, Mutex};
 use std::sync::{Condvar, Mutex};
 
 use store_io_core::error::NotWrittenCause;
+use store_io_core::id::{Generation, RegionId, VolumeId};
 
 use crate::sync::{AtomicU64, Ordering};
 
@@ -77,6 +78,171 @@ fn pack(start_block: u64, end_block: u64) -> u64 {
 
 fn unpack(v: u64) -> (u64, u64) {
     (v >> 32, v & 0xFFFF_FFFF)
+}
+
+/// One generation of one append region of one volume.
+pub(crate) type ResumeKey = (VolumeId, RegionId, Generation);
+
+/// Where each open of this process resumed each append region generation:
+/// per key, `(open's epoch, resume_at result)`, kept with no entry another
+/// makes redundant (one with a later or equal open and a lower or equal
+/// offset): one per open that resumed lower than every later open did.
+/// Receipts live only in this process's memory and epochs only grow, so
+/// this sees every open a receipt can outlive here (another process's
+/// opens it cannot see: documented on `append_after`).
+static RESUMES: std::sync::Mutex<std::collections::BTreeMap<ResumeKey, Vec<(u64, u64)>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+fn resumes()
+-> std::sync::MutexGuard<'static, std::collections::BTreeMap<ResumeKey, Vec<(u64, u64)>>> {
+    RESUMES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A file as [`store_io_platform::FileIdentity`] names it, as an ordered key.
+type FileKey = (u64, u128);
+
+/// What this process knows of one container file's opens.
+struct Lineage {
+    /// The next `meta_seq` this process left on the file (its last clean
+    /// close's), if it knows it: `None` while an open is live, or after a
+    /// close that wrote no clean-close record.
+    expect: Option<u64>,
+    /// Receipts of opens before this epoch cannot be vouched for: an open
+    /// this process did not see (another process's) may have appended over
+    /// their bytes.
+    fence: u64,
+}
+
+/// Every writable open of this process: its epoch's file, and each file's
+/// lineage.
+struct Opens {
+    files: std::collections::BTreeMap<u64, (VolumeId, FileKey)>,
+    lineages: std::collections::BTreeMap<(VolumeId, FileKey), Lineage>,
+}
+
+static OPENS: std::sync::Mutex<Opens> = std::sync::Mutex::new(Opens {
+    files: std::collections::BTreeMap::new(),
+    lineages: std::collections::BTreeMap::new(),
+});
+
+fn opens() -> std::sync::MutexGuard<'static, Opens> {
+    OPENS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Records the writable open `epoch` of `volume` in `file`, which found the
+/// file's next `meta_seq` at `found` before writing anything (`None`: a new
+/// container). Every writable open writes the volume record, so a `found`
+/// other than what this process left there means an open it did not see:
+/// every receipt of an earlier open of the file is fenced off.
+pub(crate) fn note_open(
+    volume: VolumeId,
+    file: store_io_platform::FileIdentity,
+    epoch: u64,
+    found: Option<u64>,
+) {
+    if !crate::test_hook::seen() {
+        return;
+    }
+    let key = (volume, (file.volume, file.file));
+    let mut all = opens();
+    let _was = all.files.insert(epoch, key);
+    if all.files.len() > MAX_OPENS {
+        let _forgotten = all.files.pop_first();
+    }
+    let lineage = all.lineages.entry(key).or_insert(Lineage {
+        expect: None,
+        fence: epoch,
+    });
+    if found.is_none() || lineage.expect != found {
+        lineage.fence = epoch;
+    }
+    lineage.expect = None;
+}
+
+/// Records the close of the writable open `epoch`: `left` is the next
+/// `meta_seq` its clean close left on the file, `None` if it wrote none.
+pub(crate) fn note_close(epoch: u64, left: Option<u64>) {
+    if !crate::test_hook::seen() {
+        return;
+    }
+    let mut all = opens();
+    if let Some(key) = all.files.get(&epoch).copied() {
+        if let Some(lineage) = all.lineages.get_mut(&key) {
+            lineage.expect = left;
+        }
+    }
+}
+
+/// How a receipt of open `earlier` relates to the open store `now`, both
+/// of one volume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Earlier {
+    /// An earlier open of the same file; `vouched` unless an open this
+    /// process did not see came between (then its append regions' bytes
+    /// may have been appended over).
+    Same { vouched: bool },
+    /// Another file with the same volume id (a container copied by another
+    /// tool): not this store's receipt.
+    Other,
+    /// One of the two opens is not recorded (its file's identity could not
+    /// be read): nothing can be said.
+    Unknown,
+}
+
+/// See [`Earlier`].
+pub(crate) fn earlier_open(now: u64, earlier: u64) -> Earlier {
+    let all = opens();
+    match (all.files.get(&now), all.files.get(&earlier)) {
+        (Some(a), Some(b)) if a != b => Earlier::Other,
+        (Some(a), Some(_)) => Earlier::Same {
+            vouched: all.lineages.get(a).is_some_and(|l| earlier >= l.fence),
+        },
+        _ => Earlier::Unknown,
+    }
+}
+
+/// Records that the open `epoch` resumed `key` at `at` (every successful
+/// `resume_at`: an open's later ones only move forward, so its first is
+/// the one kept).
+pub(crate) fn record_resume(key: ResumeKey, epoch: u64, at: u64) {
+    if !crate::test_hook::seen() {
+        return;
+    }
+    let mut all = resumes();
+    let list = all.entry(key).or_default();
+    if list.iter().any(|&(e, b)| e >= epoch && b <= at) {
+        return;
+    }
+    list.retain(|&(e, b)| !(e <= epoch && b >= at));
+    list.push((epoch, at));
+    // Bounded: the two oldest entries become one, the later open with the
+    // lower offset. That answers yes wherever either did, and also for
+    // receipts of opens between them: only refusals are added.
+    if list.len() > MAX_RESUMES {
+        list.sort_unstable();
+        let (e2, b1) = (list[1].0, list[0].1.min(list[1].1));
+        list[1] = (e2, b1);
+        let _oldest = list.remove(0);
+    }
+}
+
+/// The most resume entries kept per region generation ([`record_resume`]).
+const MAX_RESUMES: usize = 64;
+
+/// The most writable opens remembered ([`note_open`]): past it the oldest
+/// is forgotten, and a receipt of a forgotten open is refused.
+const MAX_OPENS: usize = 1 << 16;
+
+/// Whether an open later than `epoch` resumed `key` below `through`: its
+/// appends may have overwritten bytes a receipt of open `epoch` covers.
+pub(crate) fn resumed_below(key: ResumeKey, epoch: u64, through: u64) -> bool {
+    resumes()
+        .get(&key)
+        .is_some_and(|list| list.iter().any(|&(e, b)| e > epoch && b < through))
 }
 
 /// The most ring slots a frontier allocates (8 MiB of slots): a window that
@@ -736,6 +902,90 @@ mod tests {
             assert!(fr.reserve(4096).is_ok());
         }
         assert_eq!(fr.reserve(4096), Err(NotWrittenCause::TooManyInFlight));
+    }
+
+    /// The opens registry: an earlier open of the same file is vouched for
+    /// while every open since found the file where this process left it;
+    /// an open that did not (or followed a close that left nothing known)
+    /// fences off every earlier one; another file of the volume is another
+    /// store; an unrecorded open is unknown. Epochs far above any real
+    /// store's, so the stores of other tests never meet these.
+    #[test]
+    fn test_the_opens_registry_vouches_only_for_an_unbroken_lineage() {
+        let v = VolumeId::from_bytes([9; 16]);
+        let f1 = store_io_platform::FileIdentity {
+            volume: 1,
+            file: 10,
+        };
+        let f2 = store_io_platform::FileIdentity {
+            volume: 1,
+            file: 11,
+        };
+        let e = 1u64 << 50;
+        note_open(v, f1, e, None);
+        note_close(e, Some(7));
+        note_open(v, f1, e + 1, Some(7));
+        assert_eq!(earlier_open(e + 1, e), Earlier::Same { vouched: true });
+        note_close(e + 1, Some(9));
+        note_open(v, f1, e + 2, Some(12));
+        assert_eq!(earlier_open(e + 2, e), Earlier::Same { vouched: false });
+        assert_eq!(earlier_open(e + 2, e + 1), Earlier::Same { vouched: false });
+        note_close(e + 2, Some(14));
+        note_open(v, f1, e + 3, Some(14));
+        assert_eq!(earlier_open(e + 3, e + 2), Earlier::Same { vouched: true });
+        assert_eq!(earlier_open(e + 3, e + 1), Earlier::Same { vouched: false });
+        note_close(e + 3, None);
+        note_open(v, f1, e + 4, Some(16));
+        assert_eq!(earlier_open(e + 4, e + 3), Earlier::Same { vouched: false });
+        note_open(v, f2, e + 5, Some(16));
+        assert_eq!(earlier_open(e + 5, e + 3), Earlier::Other);
+        assert_eq!(earlier_open(e + 6, e + 3), Earlier::Unknown);
+        assert_eq!(earlier_open(e + 4, e + 7), Earlier::Unknown);
+    }
+
+    /// The registry keeps what answers every query: a later open that
+    /// resumed lower; an open's own later, higher resume adds nothing.
+    #[test]
+    fn test_the_resume_registry_answers_for_every_later_open() {
+        let key = (
+            VolumeId::from_bytes([7; 16]),
+            RegionId::from_raw(3),
+            Generation::from_raw(1).unwrap(),
+        );
+        record_resume(key, 5, 8192);
+        record_resume(key, 5, 16384);
+        assert!(resumed_below(key, 4, 8193));
+        assert!(!resumed_below(key, 4, 8192), "at the base is not below it");
+        assert!(!resumed_below(key, 5, 1 << 20), "only later opens count");
+        record_resume(key, 6, 4096);
+        assert!(resumed_below(key, 5, 8192));
+        assert!(!resumed_below(key, 5, 4096));
+        record_resume(key, 7, 65536);
+        assert!(resumed_below(key, 4, 8192));
+        assert!(resumed_below(key, 6, 65537));
+        assert!(!resumed_below(key, 7, u64::MAX));
+        let other = (key.0, RegionId::from_raw(4), key.2);
+        assert!(!resumed_below(other, 0, u64::MAX));
+    }
+
+    /// Past the bound the two oldest entries merge into the later open at
+    /// the lower offset: every answer that was yes stays yes.
+    #[test]
+    fn test_the_resume_registry_is_bounded_and_only_adds_refusals() {
+        let key = (
+            VolumeId::from_bytes([8; 16]),
+            RegionId::from_raw(1),
+            Generation::from_raw(1).unwrap(),
+        );
+        for i in 0..MAX_RESUMES as u64 + 10 {
+            record_resume(key, 10 + i, 4096 * (i + 1));
+        }
+        assert_eq!(resumes().get(&key).map(Vec::len), Some(MAX_RESUMES));
+        for i in 0..MAX_RESUMES as u64 + 10 {
+            assert!(resumed_below(key, 9 + i, 4096 * (i + 1) + 1), "{i}");
+        }
+        // Merged: open 10's lower offset now speaks for opens up to 20.
+        assert!(resumed_below(key, 15, 4097));
     }
 
     #[test]

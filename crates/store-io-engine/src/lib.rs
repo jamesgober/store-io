@@ -20,6 +20,7 @@
 #![deny(warnings)]
 #![forbid(unsafe_code)]
 
+mod after;
 mod batch;
 pub mod completion;
 mod copy;
@@ -65,6 +66,11 @@ mod stats;
 mod store;
 mod submitter;
 mod sync;
+#[cfg(feature = "sim-hooks")]
+#[doc(hidden)]
+pub mod test_hook;
+#[cfg(not(feature = "sim-hooks"))]
+mod test_hook;
 mod v2;
 
 pub use batch::{AppendBatch, PageBatch};

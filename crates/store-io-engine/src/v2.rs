@@ -637,6 +637,8 @@ pub(crate) struct Opened {
     pub(crate) report: MetadataReport,
     pub(crate) regions: Vec<std::sync::Arc<LiveRegion>>,
     pub(crate) unavailable: Vec<UnavailableRegion>,
+    /// A writable open: the next `meta_seq` it found, before it wrote.
+    pub(crate) found_seq: Option<u64>,
 }
 
 /// Decodes a format-2 volume record: a longer record, or a `features` or
@@ -927,6 +929,7 @@ pub(crate) fn open_metadata<P: Platform>(
             report,
             regions: regions.live,
             unavailable: regions.unavailable,
+            found_seq: None,
         });
     }
     let og = vm
@@ -934,6 +937,7 @@ pub(crate) fn open_metadata<P: Platform>(
         .owner_generation
         .checked_add(1)
         .ok_or_else(corrupt)?;
+    let found_seq = Some(next_meta_seq_of(&meta)?);
     let domain = Domain::new();
     if let Some((pair, slot)) = to_heal {
         heal::<P>(
@@ -955,6 +959,7 @@ pub(crate) fn open_metadata<P: Platform>(
         report,
         regions: regions.live,
         unavailable: regions.unavailable,
+        found_seq,
     })
 }
 
@@ -1111,6 +1116,9 @@ impl<P: Platform> Drop for Inner<P> {
     /// metadata may be half-changed). Best effort: a failure leaves the
     /// next open to judge the store as not closed cleanly, which is safe.
     fn drop(&mut self) {
+        // With no clean close, this process records nothing: the open left
+        // its expectation unknown (`frontier::note_open`), so the next open
+        // fences off this one's receipts.
         if self.read_only
             || self.domain.poisoned().is_some()
             || self.meta.is_poisoned()
@@ -1135,5 +1143,10 @@ impl<P: Platform> Drop for Inner<P> {
             self.owner_generation,
             true,
         );
+        let left = match _closed {
+            Ok(()) => next_meta_seq_of(&meta).ok(),
+            Err(_) => None,
+        };
+        crate::frontier::note_close(self.epoch, left);
     }
 }

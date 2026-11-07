@@ -179,6 +179,15 @@ WIN_ID = ["-p", "store-io-win", "--lib", "probe::identity_tests"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
 MAC_ID = ["-p", "store-io-posix", "--lib", "probe::tests::test_only_one_physical_store"]
+# V2's dependent writes (group AFTER): the checks, the receipt's append bit,
+# the resume base; the race's order of lane, passes, reservation and issue.
+AFTER_SRC = "crates/store-io-engine/src/after.rs"
+IO_SRC = "crates/store-io-engine/src/io.rs"
+SUB_SRC = "crates/store-io-engine/src/submitter/mod.rs"
+MULTI_T = ["-p", "store-io-engine", "--test", "multi"]
+AFTER_RACE = ["-p", "store-io-engine", "--test", "after_race"]
+EXTENTS_T = ["-p", "store-io-engine", "--test", "format2_extents"]
+DEPS_OBS = ["-p", "store-io-engine", "--features", "observe", "--test", "observe"]
 
 M = [
  ("crates/store-io-engine/src/batch.rs", "                carried = l % block;", "                carried = l % block * 0;"),
@@ -1371,6 +1380,56 @@ M = [
  ('crates/store-io-win/src/probe/storage.rs', '            0 if formatted.get(0x13).is_some_and(|b| b & 0x10 != 0) => guest = true,', '            0 if formatted.get(0x13).is_some_and(|b| b & 0x10 != 0 && false) => guest = true,', WIN_SMBIOS),
  ('crates/store-io-win/src/probe/storage.rs', '                if GUESTS.iter().any(|g| name.contains(g)) {\n                    guest = true;', '                if GUESTS.iter().any(|g| name.contains(g)) && false {\n                    guest = true;', WIN_SMBIOS),
  ('crates/store-io-win/src/probe/storage.rs', '    system && !guest\n', '    (system || true) && !guest\n', WIN_SMBIOS),
+ # AFTER: a dependency on an append region must be a prefix receipt.
+ (AFTER_SRC, "        if d.append && !d.prefix {", "        if d.append && !d.prefix && false {", MULTI_T),
+ # AFTER: an earlier open's receipt is matched by its volume alone.
+ (AFTER_SRC, "            None => match reach.iter().position(|s| s.inner.volume == d.volume) {", "            None => match reach.iter().position(|s| s.inner.volume == d.volume && false) {", MULTI_T),
+ (AFTER_SRC, "                    Earlier::Other => None,", "                    Earlier::Other => Some(i),", MULTI_T),
+ (AFTER_SRC, "                    Earlier::Unknown => {\n                        return Err(not_written(NotWrittenCause::StaleGeneration, c));\n                    }", "                    Earlier::Unknown => None,", MULTI_T),
+ (AFTER_SRC, "            if !vouched {", "            if !vouched && false {", MULTI_T),
+ # AFTER: the lineage: an open this process did not see, or a close it did
+ # not finish cleanly, fences off earlier receipts.
+ ("crates/store-io-engine/src/frontier.rs", "    if found.is_none() || lineage.expect != found {", "    if found.is_none() || lineage.expect != found && false {", MULTI_T),
+ ("crates/store-io-engine/src/frontier.rs", "        (Some(a), Some(b)) if a != b => Earlier::Other,", "        (Some(a), Some(b)) if a != b && false => Earlier::Other,", FRONTIER),
+ ("crates/store-io-engine/src/frontier.rs", "is_some_and(|l| earlier >= l.fence)", "is_some_and(|l| earlier > l.fence)", FRONTIER),
+ ("crates/store-io-engine/src/frontier.rs", "    if list.iter().any(|&(e, b)| e >= epoch && b <= at) {", "    if list.iter().any(|&(e, b)| e <= epoch && b <= at) {", FRONTIER),
+ ("crates/store-io-engine/src/v2.rs", "            Ok(()) => next_meta_seq_of(&meta).ok(),", "            Ok(()) => next_meta_seq_of(&meta).ok().and(None),", MULTI_T),
+ ("crates/store-io-engine/src/open.rs", "                crate::frontier::note_open(volume, id, epoch, found_seq);", "                crate::frontier::note_open(volume, id, epoch, found_seq.map(|s| s + 1));", MULTI_T),
+ (AFTER_SRC, "        let Some(region) = region else {\n            return Err(not_written(NotWrittenCause::NotReady, c));\n        };", "        let Some(region) = region else {\n            continue;\n        };", MULTI_T),
+ (AFTER_SRC, "        if region.kind != RegionKind::Slot && region.generation != d.generation {", "        if region.kind != RegionKind::Slot && region.generation != d.generation && false {", MULTI_T),
+ (AFTER_SRC, "        if region.kind != RegionKind::Slot && region.generation != d.generation {", "        if (region.kind != RegionKind::Slot || true) && region.generation != d.generation {", MULTI_T),
+ (AFTER_SRC, "        if d.epoch != store.epoch && region.frontier.is_some() {", "        if d.epoch != store.epoch && region.frontier.is_some() && false {", MULTI_T),
+ (AFTER_SRC, "        if d.epoch != store.epoch && region.frontier.is_some() {", "        if d.epoch != store.epoch {", MULTI_T),
+ (AFTER_SRC, "            if !region.positioned.load(Ordering::Acquire) {", "            if !region.positioned.load(Ordering::Acquire) && false {", MULTI_T),
+ (AFTER_SRC, "            if frontier::resumed_below((d.volume, d.region, d.generation), d.epoch, d.through) {", "            if frontier::resumed_below((d.volume, d.region, d.generation), d.epoch, d.through) && false {", MULTI_T),
+ (AFTER_SRC, ".map_err(|why| retired_error(why, r)))", ".map_err(|_| retired_error(crate::gate::Retired::Recycled, r)))", AFTER_RACE),
+ # AFTER: no pass taken: a recycle drains under a reserving write.
+ (AFTER_SRC, "            .iter()\n            .map(|r| OwnedPass::enter(r)", "            .iter()\n            .filter(|_| false)\n            .map(|r| OwnedPass::enter(r)", AFTER_RACE),
+ (AFTER_SRC, "        .add(Counter::Dependencies, deps.len() as u64);", "        .add(Counter::Dependencies, deps.len() as u64 * 0);", DEPS_OBS),
+ # AFTER: the append bit set by the ticket and copied by `receipt_for`.
+ (IO_SRC, "            need: self.inner.domain.ticket(),\n            epoch: self.inner.epoch,\n            append: r.kind == RegionKind::Append,", "            need: self.inner.domain.ticket(),\n            epoch: self.inner.epoch,\n            append: r.kind != r.kind,", MULTI_T),
+ (IO_SRC, "            append: t.append,", "            append: false && t.append,", MULTI_T),
+ # AFTER: every resume of the process recorded; a later open below the end counts.
+ ("crates/store-io-engine/src/frontier.rs", ".is_some_and(|list| list.iter().any(|&(e, b)| e > epoch && b < through))", ".is_some_and(|list| list.iter().any(|&(e, b)| e >= epoch && b < through))", MULTI_T),
+ ("crates/store-io-engine/src/frontier.rs", ".is_some_and(|list| list.iter().any(|&(e, b)| e > epoch && b < through))", ".is_some_and(|list| list.iter().any(|&(e, b)| e > epoch && b <= through))", MULTI_T),
+ ("crates/store-io-engine/src/region.rs", "            inner.epoch,\n            at,\n        );", "            0,\n            at,\n        );", MULTI_T),
+ # AFTER: the order. Passes before the lane; through the reservation only
+ # (taken after it, a refusal leaves a reserved hole); dropped for the wait
+ # for room and before the issue, in every path.
+ (IO_SRC, "            let lane = self.lane(r, Op::Write)?;\n            let held = before_reserve()?;", "            let held = before_reserve()?;\n            let lane = self.lane(r, Op::Write)?;", AFTER_RACE),
+ Joint([
+     (IO_SRC, "            let held = before_reserve()?;\n", ""),
+     (IO_SRC, "                        held,\n                    ));", "                        before_reserve()?,\n                    ));"),
+     (IO_SRC, "                    drop(held);\n                    drop(lane);", "                    drop(lane);"),
+ ], AFTER_RACE),
+ (IO_SRC, "                    drop(held);\n                    drop(lane);", "                    drop(lane);", AFTER_RACE),
+ (IO_SRC, "            drop(before_issue()?);\n            return Ok(self.pump(", "            let _keep = before_issue()?;\n            return Ok(self.pump(", AFTER_RACE),
+ (IO_SRC, "        drop(before_issue()?);\n        let obs = &self.inner.observer;", "        let _keep = before_issue()?;\n        let obs = &self.inner.observer;", AFTER_RACE),
+ ("crates/store-io-engine/src/region.rs", "        on_reserved(before);", "        let _keep = (before, &on_reserved);", AFTER_RACE),
+ (SUB_SRC, "        on_reserved(passes);", "        let _keep = (passes, &on_reserved);", AFTER_RACE),
+ (SUB_SRC, "        drop(passes);\n        self.issue(req, tag, kind,", "        let _keep = passes;\n        self.issue(req, tag, kind,", AFTER_RACE),
+ # AFTER: a Submitter page write's hook before its buffer is cut to a run.
+ (SUB_SRC, "        let passes = admit!(before_issue(), buf);\n        let (offset, split) = first_piece(state, pos.offset, &mut buf);", "        let (offset, split) = first_piece(state, pos.offset, &mut buf);\n        let passes = admit!(before_issue(), buf);", EXTENTS_T),
 ]
 
 def kill_stuck_tests():

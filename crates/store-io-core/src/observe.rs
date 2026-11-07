@@ -69,10 +69,15 @@ pub enum Counter {
     /// (Poisoning is not counted here: the store holds its first cause,
     /// reported by `Store::poisoned` and by every later error.)
     MediaErrors,
+    /// Dependency receipts of dependent writes (`append_after`,
+    /// `write_after`): one per receipt of each such write that completed
+    /// (a blocking call returning its ticket) or was submitted (a
+    /// `Submitter`'s).
+    Dependencies,
 }
 
 /// Number of [`Counter`] values.
-pub const COUNTERS: usize = 9;
+pub const COUNTERS: usize = 10;
 
 /// One span in this many is timed, per block.
 pub const SAMPLE: u32 = 64;
@@ -146,7 +151,7 @@ pub fn bucket_upper_ns(b: usize) -> u64 {
 
 // The counts above must match the enums.
 const _: () = assert!(Stage::Provision as usize + 1 == STAGES);
-const _: () = assert!(Counter::MediaErrors as usize + 1 == COUNTERS);
+const _: () = assert!(Counter::Dependencies as usize + 1 == COUNTERS);
 
 /// A merged view of every block: exact counters and sampled latencies.
 #[derive(Debug, Clone, PartialEq, Eq)]

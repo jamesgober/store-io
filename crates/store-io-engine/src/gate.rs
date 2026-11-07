@@ -26,6 +26,7 @@ use loom::sync::{Condvar, Mutex};
 use std::sync::{Condvar, Mutex};
 
 use crate::sync::{AtomicU64, Ordering};
+use crate::test_hook::{self, Step};
 
 /// The region is live.
 const LIVE: u64 = 0;
@@ -181,6 +182,9 @@ impl Gate {
             .state
             .compare_exchange(LIVE, to, Ordering::AcqRel, Ordering::Acquire)
             .map_err(retired)?;
+        // Before the lock: a test parked here holds nothing a pass's drop
+        // needs.
+        test_hook::step(Step::RecycleDraining);
         let mut guard = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         while self.active.fetch_add(0, Ordering::AcqRel) != 0 {
             guard = self
@@ -188,6 +192,8 @@ impl Gate {
                 .wait(guard)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+        drop(guard);
+        test_hook::step(Step::RecycleDrained);
         Ok(())
     }
 

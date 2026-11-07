@@ -288,9 +288,26 @@ where
     pub fn append(
         &mut self,
         region: &AppendRegion<P>,
+        buf: IoBuf,
+        mode: WriteMode,
+        tag: u64,
+    ) -> Result<RegionPos, Rejected> {
+        self.append_with(region, buf, mode, tag, || Ok(()), |()| {})
+    }
+
+    /// [`Self::append`], running `before_reserve` after the append's own
+    /// checks and before its reservation, and handing what it returned to
+    /// `on_reserved` after the reservation and before the write is issued (a
+    /// dependent write's gate passes, `after.rs`). Its error, or a refused
+    /// reservation, is [`Rejected`] with the buffer and nothing reserved.
+    pub(crate) fn append_with<T>(
+        &mut self,
+        region: &AppendRegion<P>,
         mut buf: IoBuf,
         mode: WriteMode,
         tag: u64,
+        before_reserve: impl FnOnce() -> Result<T, Error>,
+        on_reserved: impl FnOnce(T),
     ) -> Result<RegionPos, Rejected> {
         let state = region.state();
         let c = ctx(state);
@@ -315,6 +332,7 @@ where
         if len.div_ceil(block) * block > buf.capacity() {
             return Err(rejected(not_written(NotWrittenCause::TooLarge, c), buf));
         }
+        let passes = admit!(before_reserve(), buf);
         let domain = &self.store.inner.domain;
         let reserved = f
             .reserve(len as u64)
@@ -340,6 +358,9 @@ where
         let (offset, split) = first_piece(state, r.start, &mut buf);
         let req = Req::Write { offset, buf };
         let durable = mode == WriteMode::Durable;
+        // Never held through the issue: on a queue that performs at once the
+        // write runs inside it (R5.3).
+        on_reserved(passes);
         let issued = self.issue(req, tag, Kind::Append(r), pass, durable, split);
         let _r = held.disarm();
         match issued {
@@ -367,21 +388,39 @@ where
         &mut self,
         region: &PageRegion<P>,
         pos: RegionPos,
+        buf: IoBuf,
+        mode: WriteMode,
+        tag: u64,
+    ) -> Result<(), Rejected> {
+        self.write_with(region, pos, buf, mode, tag, || Ok(()))
+    }
+
+    /// [`Self::write`], running `before_issue` after the write's own checks
+    /// and before its buffer is cut to the first run (so a refusal gives
+    /// back the whole buffer); what it returns is dropped before the write
+    /// is issued. Its error is [`Rejected`] with the buffer.
+    pub(crate) fn write_with<T>(
+        &mut self,
+        region: &PageRegion<P>,
+        pos: RegionPos,
         mut buf: IoBuf,
         mode: WriteMode,
         tag: u64,
+        before_issue: impl FnOnce() -> Result<T, Error>,
     ) -> Result<(), Rejected> {
         let state = region.state();
         let pass = admit!(self.admit(region.store(), state, &buf), buf);
         admit!(self.store.ready_for(state), buf);
         let end = admit!(region.check(&pos, buf.len()), buf);
         let c = ctx_range(state, pos.offset, end);
+        let passes = admit!(before_issue(), buf);
         let (offset, split) = first_piece(state, pos.offset, &mut buf);
         let req = Req::Write { offset, buf };
         let kind = Kind::Page {
             start: pos.offset,
             end,
         };
+        drop(passes);
         self.issue(req, tag, kind, pass, mode == WriteMode::Durable, split)
             .map_err(|(raw, buf)| Rejected {
                 error: Store::<P>::refused(raw, c),

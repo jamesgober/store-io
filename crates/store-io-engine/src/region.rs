@@ -336,6 +336,19 @@ where
     /// was reserved or written), `Poisoned`, or `DurabilityUnknown` (the
     /// domain is now poisoned).
     pub fn append(&self, data: &[u8]) -> Result<WriteTicket, Error> {
+        self.append_with(data, || Ok(()), |()| {})
+    }
+
+    /// [`Self::append`], running `before_reserve` once its lane is held and
+    /// before its reservation (again on each retry for room), and handing
+    /// what it returned to `on_reserved` once the space is reserved, before
+    /// the write is submitted (a dependent write's gate passes, `after.rs`).
+    pub(crate) fn append_with<T>(
+        &self,
+        data: &[u8],
+        before_reserve: impl FnMut() -> Result<T, Error>,
+        on_reserved: impl FnOnce(T),
+    ) -> Result<WriteTicket, Error> {
         let s = &self.store;
         let (f, _pass) = self.writable()?;
         let c = ctx(&self.state);
@@ -345,7 +358,9 @@ where
         // Everything that can fail without touching the device happens first:
         // the first piece is staged before any space is reserved.
         let mut stream = s.stage(data, c)?;
-        let (mut lane, reserved) = s.lane_and_reservation(&self.state, f, data.len() as u64, c)?;
+        let (mut lane, reserved, before) =
+            s.lane_and_reservation_with(&self.state, f, data.len() as u64, c, before_reserve)?;
+        on_reserved(before);
         let r = reserved.range();
         stream.at(r.start);
         // Until the pump returns the guard poisons on any exit (a panic
@@ -523,6 +538,14 @@ where
                 cause,
                 ctx: ctx(&self.state),
             })?;
+        // Before the region reads as positioned: a dependent write that sees
+        // it positioned sees this (`after.rs`).
+        let inner = &self.store.inner;
+        crate::frontier::record_resume(
+            (inner.volume, self.state.id, self.state.generation),
+            inner.epoch,
+            at,
+        );
         self.state
             .positioned
             .store(true, std::sync::atomic::Ordering::Release);
@@ -726,12 +749,24 @@ where
     /// exhausted), `Io` (refused by the platform before reaching the device;
     /// nothing is poisoned), `Poisoned`, or `DurabilityUnknown`.
     pub fn write(&self, pos: RegionPos, data: &[u8]) -> Result<WriteTicket, Error> {
+        self.write_with(pos, data, || Ok(()))
+    }
+
+    /// [`Self::write`], running `before_issue` once its lane is held and
+    /// dropping what it returned before the write is issued (a dependent
+    /// write's gate passes, `after.rs`).
+    pub(crate) fn write_with<T>(
+        &self,
+        pos: RegionPos,
+        data: &[u8],
+        before_issue: impl FnMut() -> Result<T, Error>,
+    ) -> Result<WriteTicket, Error> {
         let s = &self.store;
         let _pass = self.pass()?;
         s.ready_for(&self.state)?;
         let end = self.check(&pos, data.len())?;
         let c = ctx_range(&self.state, pos.offset, end);
-        let outcome = s.write_staged(&self.state, pos.offset, data, c)?;
+        let outcome = s.write_staged_with(&self.state, pos.offset, data, c, before_issue)?;
         let wrote = Wrote::Page {
             start: pos.offset,
             end,

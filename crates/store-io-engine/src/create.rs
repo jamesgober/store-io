@@ -91,6 +91,8 @@ where
                     false,
                     1,
                     opts,
+                    // A new container: no earlier open to vouch for.
+                    None,
                 ))
             }
             Err(e) => {

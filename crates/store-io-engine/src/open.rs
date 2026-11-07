@@ -213,6 +213,7 @@ where
                     opened.read_only,
                     opened.owner_generation,
                     opts,
+                    opened.found_seq,
                 ));
             }
         };
@@ -350,6 +351,8 @@ where
             read_only,
             owner_generation,
             opts,
+            // Format 1, read-only: nothing is recorded.
+            None,
         ))
     }
 
@@ -370,6 +373,7 @@ where
         read_only: bool,
         owner_generation: u64,
         opts: StoreOptions,
+        found_seq: Option<u64>,
     ) -> Self {
         let acct = match meta.v2.as_deref() {
             Some(v2) => Accounting::from_usage(&v2.usage),
@@ -395,6 +399,16 @@ where
         let block = layout.block() as usize;
         let ordinary = crate::store::io_max(&opts).max(pool.min_len());
         let chunk = (ordinary / block * block).max(block);
+        let epoch = EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Its receipts are known as this file's, and an open of the file
+        // this process did not see fences off earlier ones (`after.rs`). A
+        // file whose identity cannot be read is not recorded: its earlier
+        // opens' receipts are then refused, never wrongly accepted.
+        if !read_only {
+            if let Ok(id) = platform.file_identity(&file) {
+                crate::frontier::note_open(volume, id, epoch, found_seq);
+            }
+        }
         Self {
             inner: Arc::new(Inner {
                 domain: Domain::with_slots(1 + flush_files.len()),
@@ -418,7 +432,7 @@ where
                 ordinary,
                 chunk,
                 acct: Mutex::new(acct),
-                epoch: EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                epoch,
                 observer: Observer::new(),
                 seen: Mutex::new(crate::stats::Seen::default()),
                 submitters: Mutex::new(crate::stats::Submitters::default()),

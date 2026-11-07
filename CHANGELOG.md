@@ -13,6 +13,27 @@
 
 ### Added
 
+- Engine: **dependent writes** (PLANNING R5.3, API-09's `write_after`):
+  `AppendRegion::append_after(&deps, bytes)`,
+  `PageRegion::write_after(&deps, pos, bytes)`, and the `Submitter`'s
+  `append_after` and `write_after`. A write that points at durable bytes
+  names their receipts; holding them is the durability guarantee, and two
+  things are checked before anything is reserved: a receipt of an append
+  region must be a prefix receipt (`NotWritten(NotPrefix)`, whichever
+  store it is from: receipts now carry their region's kind), and a
+  receipt of the same store must name a live generation of its region
+  (`StaleGeneration` for one recycled since, `NotReady` for one released;
+  a receipt of an earlier open is refused until its region is resumed,
+  `NotPositioned`, once any open since resumed it below the receipt's
+  end, and after an open of the store this process did not see, such as
+  another process's). Each dependency's region is held against
+  recycle and release from when the write holds its lane (a `Submitter`'s:
+  once its own checks pass) until its space is reserved (a page write:
+  until its issue), never during the I/O, so no lock spans devices.
+  `NotWrittenCause::NotPrefix` is new, and so is
+  `observe::Counter::Dependencies`, counting the receipts of dependent
+  writes. **Breaking for exhaustive matches on `Counter`** (which is not
+  `non_exhaustive`): `COUNTERS` is 10.
 - Probe: **device identity** (`DeviceFacts::identity`, PLANNING R5.2; the
   first step of v0.6's multi-device layer). Every physical device a
   store's bytes may live on, each with the identifiers it reports: Linux

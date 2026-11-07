@@ -81,6 +81,39 @@ fn test_counters_are_exact_for_known_work() {
     assert_eq!(delta(&after, &before, Counter::MediaErrors), 1);
 }
 
+/// Dependent writes count their dependency receipts; a refused one counts
+/// none.
+#[cfg(feature = "observe")]
+#[test]
+fn test_dependencies_are_counted_per_receipt() {
+    let p = SimPlatform::new(SimConfig::volatile(92));
+    let s = Store::create(p, Path::new(DIR), opts()).unwrap();
+    let data = s.provision_append_region("data", 1 << 20).unwrap();
+    let pages = s.provision_page_region("pages", 1 << 20).unwrap();
+    let log = s.provision_append_region("log", 1 << 20).unwrap();
+    let (_at, d) = data.append_durable(b"d").unwrap();
+    let r = pages
+        .write_durable(pages.pos(0).unwrap(), &[1u8; BLOCK as usize])
+        .unwrap();
+    let before = s.observe();
+    log.append_after(&[d, r], b"two").unwrap();
+    pages
+        .write_after(&[d], pages.pos(BLOCK).unwrap(), &[2u8; BLOCK as usize])
+        .unwrap();
+    // A Submitter's counts at submission.
+    let mut sub = s
+        .submitter(store_io_engine::SubmitterConfig::default())
+        .unwrap();
+    let buf = sub.take_buf(BLOCK as usize).unwrap();
+    sub.append_after(&log, &[d, d], buf, store_io_engine::WriteMode::Plain, 1)
+        .unwrap();
+    let _done = sub.wait(1).unwrap().count();
+    let _next = data.recycle().unwrap();
+    assert!(log.append_after(&[d], b"refused").is_err());
+    let after = s.observe();
+    assert_eq!(delta(&after, &before, Counter::Dependencies), 5);
+}
+
 #[cfg(not(feature = "observe"))]
 #[test]
 fn test_nothing_is_recorded_without_the_feature() {

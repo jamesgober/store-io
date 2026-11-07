@@ -8,6 +8,7 @@ use store_io_core::error::{
     ByteRange, CorruptionKind, Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError,
 };
 use store_io_core::observe::{Counter, Stage};
+use store_io_format::meta::RegionKind;
 use store_io_platform::{IoBuf, IoOp, Platform, QueueConfig};
 
 use std::ops::ControlFlow;
@@ -146,6 +147,10 @@ impl<I: Iterator<Item = (u64, IoBuf)>> Source for Placed<I> {
 
     fn recycle(&mut self, _buf: IoBuf) {}
 }
+
+/// A lane, an append reservation made holding it, and what the caller's
+/// hook returned before the reservation ([`Store::lane_and_reservation_with`]).
+pub(crate) type Laned<'a, P, T> = (LaneGuard<'a, <P as Platform>::Queue>, Reserved<'a, P>, T);
 
 /// An append reservation that poisons the device domain unless it is handed
 /// on ([`Self::disarm`]) to the settle step ([`crate::settle`], which
@@ -375,12 +380,19 @@ where
     /// transfer or an error a failure, a refusal before submission
     /// `Refused`); on any other lane the same staged buffer goes to the
     /// pump. Anything larger or crossing a run takes the pump as before.
-    pub(crate) fn write_staged(
+    ///
+    /// `before_issue` runs once the lane is held (in either branch), and
+    /// what it returns is dropped before the write is issued or performed;
+    /// its error ends the call with nothing written. A dependent write's
+    /// gate passes are held so (`after.rs`); a plain write passes
+    /// `|| Ok(())`.
+    pub(crate) fn write_staged_with<T>(
         &self,
         r: &LiveRegion,
         offset: u64,
         data: &[u8],
         c: ErrorContext,
+        mut before_issue: impl FnMut() -> Result<T, Error>,
     ) -> Result<Pumped, Error> {
         let (block, chunk) = (self.block() as usize, self.chunk());
         let padded = data.len().div_ceil(block) * block;
@@ -388,6 +400,7 @@ where
             let mut stream = self.stage(data, c)?;
             stream.at(offset);
             let mut lane = self.lane(r, Op::Write)?;
+            drop(before_issue()?);
             return Ok(self.pump(&mut lane, &mut Mapped::new(&r.map, &mut stream)));
         }
         // As `stage` fills its first buffer, and in the same order: the
@@ -399,6 +412,7 @@ where
         // `padded <= chunk <= capacity`: the length always fits.
         let _fits = buf.set_len(padded);
         let mut lane = self.lane(r, Op::Write)?;
+        drop(before_issue()?);
         let obs = &self.inner.observer;
         let op = IoOp::Write {
             file: &self.inner.file,
@@ -523,6 +537,29 @@ where
         len: u64,
         c: ErrorContext,
     ) -> Result<(LaneGuard<'a, P::Queue>, Reserved<'a, P>), Error> {
+        self.lane_and_reservation_with(r, f, len, c, || Ok(()))
+            .map(|(lane, reserved, ())| (lane, reserved))
+    }
+
+    /// [`Self::lane_and_reservation`], running `before_reserve` each time a
+    /// lane is held, before the reservation; returns what it returned
+    /// (which the caller drops before performing the write). Its error ends
+    /// the call with nothing reserved. While appends ahead hold the window,
+    /// its value is dropped before the lane and the wait for room, and it
+    /// runs again on the retry. A dependent write's gate passes are held so
+    /// (`after.rs`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lane_and_reservation`], and `before_reserve`'s.
+    pub(crate) fn lane_and_reservation_with<'a, T>(
+        &'a self,
+        r: &LiveRegion,
+        f: &'a AppendFrontier,
+        len: u64,
+        c: ErrorContext,
+        mut before_reserve: impl FnMut() -> Result<T, Error>,
+    ) -> Result<Laned<'a, P, T>, Error> {
         let domain = &self.inner.domain;
         let refused = |cause| match domain.poisoned() {
             Some(first) => Error::Poisoned { first },
@@ -530,6 +567,7 @@ where
         };
         loop {
             let lane = self.lane(r, Op::Write)?;
+            let held = before_reserve()?;
             // Never reserve on a poisoned store (`reserve_wait`'s rule).
             if domain.poisoned().is_some() {
                 return Err(refused(NotWrittenCause::TooManyInFlight));
@@ -545,9 +583,11 @@ where
                             store: self,
                             r: Some(res),
                         },
+                        held,
                     ));
                 }
                 Err(NotWrittenCause::TooManyInFlight) => {
+                    drop(held);
                     drop(lane);
                     if !f.wait_completed(seen + 1, || domain.poisoned().is_some()) {
                         return Err(refused(NotWrittenCause::TooManyInFlight));
@@ -626,6 +666,7 @@ where
             end,
             need: self.inner.domain.ticket(),
             epoch: self.inner.epoch,
+            append: r.kind == RegionKind::Append,
         }
     }
 
@@ -656,6 +697,7 @@ where
             prefix,
             synced,
             epoch: self.inner.epoch,
+            append: r.kind == RegionKind::Append,
         }
     }
 
@@ -679,6 +721,7 @@ where
             // completion" mark, nor 0 (no barrier yet).
             synced: need != u64::MAX && need != 0,
             epoch: t.epoch,
+            append: t.append,
         }
     }
 

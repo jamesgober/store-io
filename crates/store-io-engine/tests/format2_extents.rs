@@ -395,6 +395,62 @@ fn test_a_refused_first_piece_gives_the_buffer_back_whole() {
     assert!(s.poisoned().is_none());
 }
 
+/// A Submitter dependent write across runs refused by its dependency (a
+/// region being recycled): refused before the buffer is cut to its first
+/// run, so it comes back whole; nothing is written or poisoned.
+#[test]
+fn test_a_refused_dependent_write_gives_the_buffer_back_whole() {
+    let p = crafted(515);
+    let s = reopen(&p);
+    let two = s.page_region("two").unwrap();
+    let adj = s.page_region("adj").unwrap();
+    let dep = adj
+        .write_durable(adj.pos(0).unwrap(), &[7u8; B as usize])
+        .unwrap();
+    // A recycle of `adj` retired and waiting for its drain: an unreaped
+    // read holds it. The dependency still matches its region (the same
+    // generation, still listed); only its pass is refused, in the write's
+    // hook, after the write's own checks.
+    let mut holder = s.submitter(SubmitterConfig::default()).unwrap();
+    let rbuf = holder.take_buf(B as usize).unwrap();
+    holder
+        .read_page(&adj, adj.pos(0).unwrap(), rbuf, 9)
+        .unwrap();
+    let recycler = {
+        let adj = adj.clone();
+        std::thread::spawn(move || adj.recycle().map(drop))
+    };
+    let mut out = [0u8; B as usize];
+    while adj.read(adj.pos(0).unwrap(), &mut out).is_ok() {
+        std::thread::yield_now();
+    }
+    let mut sub = s.submitter(SubmitterConfig::default()).unwrap();
+    let data: Vec<u8> = (0..4 * B).map(|i| (i % 211) as u8).collect();
+    let mut buf = sub.take_buf(data.len()).unwrap();
+    buf.as_mut_slice().copy_from_slice(&data);
+    let before = p.with_world(|w| w.write_submits());
+    let r = sub
+        .write_after(
+            &two,
+            &[dep],
+            two.pos(X - 2 * B).unwrap(),
+            buf,
+            WriteMode::Plain,
+            0,
+        )
+        .unwrap_err();
+    assert!(
+        is_cause(&r.error, NotWrittenCause::StaleGeneration),
+        "{:?}",
+        r.error
+    );
+    assert_eq!(r.buf.unwrap().as_slice(), &data[..]);
+    assert_eq!(p.with_world(|w| w.write_submits()), before);
+    let _read = holder.wait(1).unwrap().count();
+    assert!(recycler.join().unwrap().is_ok());
+    assert!(s.poisoned().is_none());
+}
+
 /// A Submitter dropped with an operation across runs in flight waits for
 /// its every piece.
 #[test]

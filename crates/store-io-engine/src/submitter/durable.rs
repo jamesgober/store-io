@@ -239,18 +239,25 @@ mod tests {
         let buf = sub.take_buf(100).unwrap();
         sub.append(&wal, buf, WriteMode::Durable, 1).unwrap();
         let w = sub.waker();
+        // Timed from before the waker starts: the wake comes no sooner than
+        // its sleep, however late this thread runs.
+        let start = Instant::now();
         let waker = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
             w.wake();
         });
-        let start = Instant::now();
-        assert_eq!(sub.wait(1).unwrap().count(), 0);
+        let first = sub.wait(1).map(|c| c.count());
+        let waited = start.elapsed();
+        let joined = waker.join();
+        // Released before judging, so a failure ends the test, never hangs
+        // it (the submitter's drop waits for the held flush).
+        s.inner.domain.drop_leadership();
+        assert!(joined.is_ok(), "the waker panicked");
+        assert_eq!(first.unwrap(), 0);
         assert!(
-            start.elapsed() >= Duration::from_millis(90),
+            waited >= Duration::from_millis(100),
             "returned before the wake"
         );
-        waker.join().unwrap();
-        s.inner.domain.drop_leadership();
         let c = sub.wait(1).unwrap().next().unwrap();
         let Ok(Done::Written(w)) = c.outcome else {
             panic!("{:?}", c.outcome)

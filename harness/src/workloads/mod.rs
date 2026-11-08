@@ -8,6 +8,7 @@ pub mod gates;
 pub mod gates_extra;
 pub mod gates_g1;
 pub mod gates_g15;
+pub mod gates_g18;
 pub mod gates_g2;
 pub mod gates_scan;
 pub mod gates_seq;
@@ -49,6 +50,9 @@ pub struct Ctx {
     pub pool: Pool,
     /// The fsys handle (built once).
     pub fsys: fsys::Handle,
+    /// A directory on each device of the multi-device gates (`--devices`;
+    /// empty: they are NOT RUN).
+    pub devices: Vec<PathBuf>,
     seq: AtomicU64,
 }
 
@@ -80,6 +84,7 @@ impl Ctx {
             opts,
             pool: Pool::new(),
             fsys,
+            devices: Vec::new(),
             seq: AtomicU64::new(0),
         }
     }

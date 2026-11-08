@@ -13,6 +13,13 @@
 
 ### Added
 
+- CI: the **multi-device** job (four `null_blk` devices, ext4, one store
+  each) runs the new `tests/multi_dev.rs` (set barriers, a pointer across
+  devices, ditto and concurrent callers on real devices) and the
+  harness's new `multi-gates` command, whose gate G18 checks a set
+  barrier over the devices against the slowest lone barrier plus one
+  thread wake, one flush per device per call, in parallel. In the `gates`
+  table G18 reads NOT RUN without `--devices`.
 - Engine: **`StoreSet`** (PLANNING R5.3, API-09's `barrier_set`): stores on
   several devices made durable together. `barrier` and `barrier_each`
   flush each store at most once per call, in parallel (the calling thread

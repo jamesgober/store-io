@@ -376,6 +376,70 @@ jobs:
           path: ${{ runner.temp }}/gates/
           if-no-files-found: ignore
 
+  # Stores on several devices (PLANNING R5.14): four null_blk devices, each
+  # memory-backed with a volatile write cache (so a flush is real) and about
+  # 20 us per I/O, ext4 on each with one store: the root crate's
+  # tests/multi_dev.rs (set barriers, a pointer across devices, ditto,
+  # concurrent callers) and the harness's multi-device gates (G18). Fails,
+  # never falls back, if the devices cannot be made.
+  multi-device:
+    name: Multi-device (four null_blk devices)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            harness
+      - name: Build the harness and the tests
+        run: |
+          cargo build --release --manifest-path harness/Cargo.toml
+          cargo test --release --test multi_dev --no-run
+      - name: Four devices
+        run: |
+          set -eux
+          NULLB="nr_devices=4 gb=2 bs=4096 memory_backed=1 cache_size=1024 queue_mode=2 irqmode=2 completion_nsec=20000"
+          # null_blk itself, from the kernel's extra modules if it is not
+          # built in: never another kind of device.
+          if ! sudo modprobe null_blk $NULLB; then
+            sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"
+            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            sudo modprobe null_blk $NULLB
+          fi
+          for i in 0 1 2 3; do
+            grep -qx "write back" /sys/block/nullb$i/queue/write_cache
+            sudo mkfs.ext4 -q -m 0 -b 4096 -E lazy_itable_init=0,lazy_journal_init=0 /dev/nullb$i
+            sudo mkdir -p /mnt/d$i
+            sudo mount /dev/nullb$i /mnt/d$i
+            sudo chown "$(id -u):$(id -g)" /mnt/d$i
+          done
+          uname -r
+          findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/d0 /mnt/d1 /mnt/d2 /mnt/d3
+      - name: The multi-device tests
+        env:
+          STORE_IO_MULTI_DEV: /mnt/d0,/mnt/d1,/mnt/d2,/mnt/d3
+          STORE_IO_EXPECT_MULTI_DEV: "1"
+        run: cargo test --release --test multi_dev
+      - name: G18
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/multi"
+          harness/target/release/store-io-harness multi-gates --secs 1 --settle 0 --tier uring \
+            --dir /mnt/d0 --devices /mnt/d0,/mnt/d1,/mnt/d2,/mnt/d3 --out "$RUNNER_TEMP/multi"
+          f=$(ls "$RUNNER_TEMP"/multi/*-multi-gates.md)
+          sed -n '/^| gate |/,/^$/p' "$f"
+          grep -q "every measurement completed and every integrity check passed" "$f"
+          if grep -E '^\| G[0-9a-z]+ \|.*\| FAIL \|$' "$f"; then exit 1; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multi-device-report
+          path: ${{ runner.temp }}/multi/
+          if-no-files-found: ignore
+
   # Fail-stop on a real kernel: the file system sits on a device-mapper
   # target that is switched, mid-run, to fail every I/O. No write may
   # succeed after the first failure, and every acknowledged record must

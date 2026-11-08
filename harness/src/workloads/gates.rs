@@ -15,8 +15,8 @@
 //! - ELSEWHERE: measured by another check (cited).
 
 use super::{
-    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_scan,
-    gates_seq, lone, page_batch, remove, sequential,
+    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_g18,
+    gates_scan, gates_seq, lone, page_batch, remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -32,16 +32,20 @@ pub(super) enum Verdict {
     Fail,
     Reported,
     Elsewhere,
+    /// The measurement needs what this run was not given (several
+    /// devices): neither a pass nor a failure.
+    NotRun,
 }
 
 impl Verdict {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
             Self::NotResolvable => "NOT RESOLVABLE",
             Self::Fail => "FAIL",
             Self::Reported => "REPORTED",
             Self::Elsewhere => "ELSEWHERE",
+            Self::NotRun => "NOT RUN",
         }
     }
 }
@@ -869,9 +873,12 @@ pub fn run(ctx: &Ctx) -> Section {
     rows.push(Row {
         id: "G12",
         gate: "Multi-device",
-        measured: "one device available".to_owned(),
+        measured: "G18 (with --devices) and the multi-device CI job".to_owned(),
         verdict: Verdict::Elsewhere,
     });
+    // G18: several devices (`--devices`), else NOT RUN.
+    let g18 = gates_g18::measure(ctx, &ctx.devices);
+    rows.push(g18.row);
 
     let mut t = Table::new("Gates:", &["gate", "requirement", "measured", "verdict"]);
     for r in &rows {
@@ -895,6 +902,7 @@ pub fn run(ctx: &Ctx) -> Section {
     pts.extend(g6q1);
     pts.extend(g4);
     pts.extend(g15.points);
+    pts.push(g18.point);
     sec.points = pts;
     for s in [&l1, &w2, &w3, &w4, &w5] {
         sec.anomalies.extend(s.anomalies.iter().cloned());

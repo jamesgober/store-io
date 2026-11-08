@@ -51,7 +51,7 @@ struct Workload {
     settles: usize,
 }
 
-const WORKLOADS: [Workload; 7] = [
+const WORKLOADS: [Workload; 8] = [
     Workload {
         command: Command::Lone,
         run: workloads::lone::run,
@@ -97,6 +97,13 @@ const WORKLOADS: [Workload; 7] = [
         // Before W2-W5 and the fio controls (5), and before each of G13's
         // reruns (at most 4, on Windows).
         settles: 9,
+    },
+    Workload {
+        command: Command::MultiGates,
+        run: workloads::gates_g18::run,
+        // G18's rounds, counted as points of the run's length.
+        points: 40,
+        settles: 0,
     },
 ];
 
@@ -179,13 +186,14 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
         .map_err(|e| format!("fsys::builder().build(): {e}"))?;
     let env = env::collect(base, &setup.fs_kind, args.commit.as_deref());
     let device = env::short_device_name(setup.device_model.as_deref());
-    let ctx = Ctx::new(
+    let mut ctx = Ctx::new(
         base.to_path_buf(),
         args.secs,
         args.settle,
         setup.opts.clone(),
         fsys,
     );
+    ctx.devices.clone_from(&args.devices);
     let header = Header {
         device: device.clone(),
         backend: sio::BACKEND.to_owned(),
@@ -251,9 +259,12 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
 
     let selected: Vec<&Workload> = WORKLOADS
         .iter()
-        // `gates` reruns the workloads itself: not part of `all`.
+        // `gates` reruns the workloads itself, and `multi-gates` needs
+        // devices: neither is part of `all`.
         .filter(|w| {
-            (args.command == Command::All && w.command != Command::Gates)
+            (args.command == Command::All
+                && w.command != Command::Gates
+                && w.command != Command::MultiGates)
                 || w.command == args.command
         })
         .collect();

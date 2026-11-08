@@ -17,7 +17,9 @@ COMMANDS:
     page-batch     W4  N random 4 KiB pages + one barrier
     sequential     W5  1 MiB sequential writes, 1/8 MiB sequential reads
     submitter      W6  N in flight from one thread, random 4 KiB, vs fio
-    gates          the performance gate table (W1-W5, fio controls, extras)
+    gates          the performance gate table (W1-W5, fio controls, extras;
+                   G18 too with --devices, else NOT RUN)
+    multi-gates    the gates that need several devices (G18), on --devices
     probe          create a store, print the device report and exit
     observe-cost   what the observer adds per durable write (build with
                    --features observe; without it, the compiled-out cost)
@@ -34,6 +36,8 @@ OPTIONS:
     --out <PATH>     report directory (default: the harness's results/ folder)
     --commit <SHA>   store-io commit to record (default: git rev-parse HEAD)
     --tier <T>       Linux I/O tier: auto (default), sync or uring
+    --devices <D,..> a directory on each of two or more devices, comma-separated
+                     (the multi-device gates: G18)
 ";
 
 /// A workload command.
@@ -55,6 +59,8 @@ pub enum Command {
     Submitter,
     /// The performance gates.
     Gates,
+    /// The gates that need several devices.
+    MultiGates,
     /// Device report only.
     Probe,
     /// The observer's cost per durable write.
@@ -76,6 +82,7 @@ impl Command {
             Self::Sequential => "sequential",
             Self::Submitter => "submitter",
             Self::Gates => "gates",
+            Self::MultiGates => "multi-gates",
             Self::Probe => "probe",
             Self::ObserveCost => "observe-cost",
             Self::Help => "help",
@@ -92,6 +99,7 @@ impl Command {
             Self::Sequential,
             Self::Submitter,
             Self::Gates,
+            Self::MultiGates,
             Self::Probe,
             Self::ObserveCost,
             Self::Help,
@@ -118,6 +126,8 @@ pub struct Args {
     pub commit: Option<String>,
     /// Linux I/O tier.
     pub tier: store_io_platform::LinuxTier,
+    /// A directory on each device of the multi-device gates.
+    pub devices: Vec<PathBuf>,
 }
 
 fn default_dir() -> PathBuf {
@@ -144,6 +154,7 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         out: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/results")),
         commit: None,
         tier: store_io_platform::LinuxTier::Auto,
+        devices: Vec::new(),
     };
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("`{flag}` needs a value"));
@@ -177,8 +188,22 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     _ => return Err(format!("bad --tier `{v}` (auto, sync or uring)")),
                 };
             }
+            "--devices" => {
+                let v = value()?;
+                a.devices = v
+                    .split(',')
+                    .filter(|d| !d.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+                if a.devices.len() < 2 {
+                    return Err(format!("bad --devices `{v}` (two or more directories)"));
+                }
+            }
             other => return Err(format!("unknown option `{other}`")),
         }
+    }
+    if a.command == Command::MultiGates && a.devices.is_empty() {
+        return Err("`multi-gates` needs --devices (two or more directories)".to_owned());
     }
     Ok(a)
 }
@@ -189,6 +214,17 @@ mod tests {
 
     fn args(v: &[&str]) -> Result<Args, String> {
         parse(v.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn test_parses_the_multi_device_gates_and_their_devices() {
+        let a = args(&["multi-gates", "--devices", "/d0,/d1,/d2,/d3"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(a.command, Command::MultiGates);
+        assert_eq!(a.devices.len(), 4);
+        assert!(args(&["multi-gates", "--devices", "/d0"]).is_err());
+        assert!(args(&["multi-gates"]).is_err());
+        assert!(args(&["gates"]).is_ok_and(|a| a.devices.is_empty()));
     }
 
     #[test]

@@ -52,6 +52,10 @@ mod optable;
 mod options;
 mod provision;
 mod provision2;
+// Device pacing; wired into the store and its I/O paths by V3c (until
+// then only its own tests use it).
+#[allow(dead_code)]
+mod qos;
 pub(crate) mod queue_core;
 pub mod receipt;
 mod region;

@@ -180,6 +180,8 @@ BUF_LIB = ["-p", "store-io-buf", "--lib"]
 POSIX_LINUX_T = ["-p", "store-io-posix", "--test", "linux"]
 WIN_NTFS_T = ["-p", "store-io-win", "--test", "ntfs"]
 ROOT_CONFORMANCE = ["-p", "store-io", "--test", "conformance"]
+QOS_SRC = "crates/store-io-engine/src/qos.rs"
+QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
 MAC_ID = ["-p", "store-io-posix", "--lib", "probe::tests::test_only_one_physical_store"]
@@ -1536,6 +1538,49 @@ M = [
  ("crates/store-io-buf/src/pool.rs", '                held + 1,\n                Ordering::Acquire,', '                held + 1,\n                Ordering::Relaxed,', LOOM_BUF, LOOM),
  ("crates/store-io-buf/src/pool.rs", '        let _was = self.held.fetch_sub(1, Ordering::Release);', '        let _was = self.held.fetch_sub(1, Ordering::Relaxed);', LOOM_BUF, LOOM),
  ("crates/store-io-posix/src/mac/platform.rs", '        ev.fs.device = self.file_identity(file).ok().map(|i| i.volume);', '        ev.fs.device = None;', ROOT_CONFORMANCE),
+ # QOS (V3b): admission's two conditions and its caps; a charge released on
+ # drop and its wake; a failed binding's end; poison read and woken; the
+ # unknown count and its seed; the stamp's stride; the group rule; scopes
+ # apart; a pruned member's commit kept.
+ (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)', '                    rec.is_some_and(|r| r.in_flight() <= 1)', QOS_T),
+ (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)', '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 2)', QOS_T),
+ (QOS_SRC, '                } else {\n                    mine < cap\n                };', '                } else {\n                    mine <= cap\n                };', QOS_T),
+ (QOS_SRC, '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));', '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now) && false);', QOS_T),
+ (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);', '        let _m = i.in_flight.fetch_sub(0, Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);\n        i.wake();', '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);\n        if false {\n            i.wake();\n        }', QOS_T),
+ (QOS_SRC, '        if !self.done {\n            self.issuer.end();\n        }', '        if !self.done && false {\n            self.issuer.end();\n        }', QOS_T),
+ (QOS_SRC, '            if self.poisoned() {\n                break Err(Ended::Poisoned);', '            if self.poisoned() && false {\n                break Err(Ended::Poisoned);', QOS_T),
+ (QOS_SRC, '            if let Some(i) = me.upgrade() {\n                i.wake();\n            }', '            if let Some(i) = me.upgrade().filter(|_| false) {\n                i.wake();\n            }', QOS_T),
+ (QOS_SRC, '        if self.waiters.fetch_add(0, Ordering::SeqCst) > 0 {', '        if self.waiters.fetch_add(0, Ordering::SeqCst) > 1 {', QOS_T),
+ (QOS_SRC, '                let _was = activity.any_commit.fetch_max(latest, Ordering::Relaxed);', '                let _was = activity.any_commit.fetch_max(latest * 0, Ordering::Relaxed);', QOS_T),
+ (QOS_SRC, '            let was = q.scope.unknown_members.fetch_sub(1, Ordering::Relaxed);', '            let was = q.scope.unknown_members.fetch_sub(0, Ordering::Relaxed);', QOS_T),
+ (QOS_SRC, '    if now >= at.saturating_add(COMMIT_STRIDE_NS) || at == 0 {', '    if now >= at || at == 0 {', QOS_T),
+ (QOS_SRC, '            pacing: self.pacing || other.pacing,', '            pacing: self.pacing && other.pacing,', QOS_T),
+ (QOS_SRC, '            commit_quiet_ns: self.commit_quiet_ns.max(other.commit_quiet_ns),', '            commit_quiet_ns: self.commit_quiet_ns.min(other.commit_quiet_ns),', QOS_T),
+ (QOS_SRC, '            background_unpaced: self.background_unpaced.min(other.background_unpaced),', '            background_unpaced: self.background_unpaced.max(other.background_unpaced),', QOS_T),
+ (QOS_SRC, '                    s.has_unknown()\n                        && (', '                    false\n                        && (', QOS_T),
+ (QOS_SRC, '                    s.holds.load(Ordering::Relaxed) > 0\n                        || recent(s.any_commit.load(Ordering::Relaxed), now, quiet)', '                    s.holds.load(Ordering::Relaxed) > 0', QOS_T),
+ (QOS_SRC, '.filter(|(_, e)| {\n                e.scope == scope && e.keys.iter().any(|k| keys.binary_search(k).is_ok())\n            })', '.filter(|(_, e)| e.keys.iter().any(|k| keys.binary_search(k).is_ok()))', QOS_T),
+ (QOS_SRC, '                    let _was = e\n                        .retired\n                        .fetch_max(c.last_commit.load(Ordering::Relaxed), Ordering::Relaxed);', '                    let _was = e\n                        .retired\n                        .fetch_max(c.last_commit.load(Ordering::Relaxed) * 0, Ordering::Relaxed);', QOS_T),
+ (QOS_SRC, '        let _t = self.qos.counters.in_flight.fetch_add(1, Ordering::SeqCst);', '        let _t = self.qos.counters.in_flight.fetch_add(0, Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '        if self.waiters.fetch_add(0, Ordering::SeqCst) > 0 {', '        if self.waiters.load(Ordering::Relaxed) > 0 {', LOOM_ENGINE, LOOM),
+ (QOS_SRC, '        let _w = self.waiters.fetch_add(1, Ordering::SeqCst);\n        let out = loop {', '        let _w = self.waiters.fetch_add(1, Ordering::Relaxed);\n        let out = loop {', LOOM_ENGINE, LOOM),
+ # QOS (V3b review): a charge leaves its member on release; a refusal undoes
+ # its tentative charge; an ended call is seen; an unknown commit stamped for
+ # the scope, and the scope's word only while unknown stores live; a watch's
+ # own wake; a memory store's hold paces nobody; the seed's own time; the
+ # last unknown close clears its commit.
+ (QOS_SRC, '        let _c = i.qos.counters.in_flight.fetch_sub(1, Ordering::Relaxed);', '        let _c = i.qos.counters.in_flight.fetch_sub(0, Ordering::Relaxed);', QOS_T),
+ (QOS_SRC, '                    let _u = self.qos.counters.in_flight.fetch_sub(1, Ordering::SeqCst);', '                    let _u = self.qos.counters.in_flight.fetch_sub(0, Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '            if self.ended.load(Ordering::SeqCst) {', '            if self.ended.load(Ordering::SeqCst) && false {', QOS_T),
+ (QOS_SRC, '                if self.kind == Kind::Unknown {\n                    stamp(&self.scope.unknown_commit, now);', '                if false {\n                    stamp(&self.scope.unknown_commit, now);', QOS_T),
+ (QOS_SRC, '                if self.scope.has_unknown() {\n                    stamp(&self.scope.any_commit, now);', '                if true {\n                    stamp(&self.scope.any_commit, now);', QOS_T),
+ (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', QOS_T),
+ (QOS_SRC, '        if self.kind != Kind::Unpaced {\n            let _h = self.counters.holds.fetch_add(1, Ordering::Relaxed);', '        if true {\n            let _h = self.counters.holds.fetch_add(1, Ordering::Relaxed);', QOS_T),
+ (QOS_SRC, '                let latest = g.latest_commit(scope).max(clock());', '                let latest = g.latest_commit(scope).max(0);', QOS_T),
+ (QOS_SRC, '            if was == 1 {', '            if was == 1 && false {', QOS_T),
+ (QOS_SRC, '                q.scope.any_commit.store(0, Ordering::Relaxed);', '                let _ = &q.scope.any_commit;', QOS_T),
+ (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', LOOM_ENGINE, LOOM),
 ]
 
 def kill_stuck_tests():

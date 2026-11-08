@@ -1579,7 +1579,7 @@ M = [
  (QOS_SRC, '                if self.scope.has_unknown() {\n                    stamp(&self.scope.any_commit, now);', '                if true {\n                    stamp(&self.scope.any_commit, now);', QOS_T),
  (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', QOS_T),
  (QOS_SRC, '        if self.kind != Kind::Unpaced {\n            let _h = self.counters.holds.fetch_add(1, Ordering::Relaxed);', '        if true {\n            let _h = self.counters.holds.fetch_add(1, Ordering::Relaxed);', QOS_T),
- (QOS_SRC, '                let latest = g.latest_commit(scope).max(now);', '                let latest = g.latest_commit(scope).max(0);', QOS_T),
+ (QOS_SRC, '                let latest = g.latest_commit(scope).max(now);', '                let latest = g.latest_commit(scope).max(now * 0);', QOS_T),
  (QOS_SRC, '            if was == 1 {', '            if was == 1 && false {', QOS_T),
  (QOS_SRC, '                q.scope.any_commit.store(0, Ordering::Relaxed);', '                let _ = &q.scope.any_commit;', QOS_T),
  (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', LOOM_ENGINE, LOOM),

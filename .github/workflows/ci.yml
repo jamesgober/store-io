@@ -433,6 +433,8 @@ jobs:
           sed -n '/^| gate |/,/^$/p' "$f"
           grep -q "every measurement completed and every integrity check passed" "$f"
           if grep -E '^\| G[0-9a-z]+ \|.*\| FAIL \|$' "$f"; then exit 1; fi
+          # G18 must have run: a NOT RUN or missing row fails the job.
+          grep -qE '^\| G18 \|.*\| (PASS|NOT RESOLVABLE) \|$' "$f"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

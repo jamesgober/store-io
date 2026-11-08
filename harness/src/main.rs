@@ -101,8 +101,10 @@ const WORKLOADS: [Workload; 8] = [
     Workload {
         command: Command::MultiGates,
         run: workloads::gates_g18::run,
-        // G18's rounds, counted as points of the run's length.
-        points: 40,
+        // G18's rounds, each of its four sides counted as a point: an upper
+        // bound for the hang watchdog (G18 takes a few seconds whatever
+        // `--secs`).
+        points: 80,
         settles: 0,
     },
 ];

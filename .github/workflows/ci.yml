@@ -417,7 +417,7 @@ jobs:
             sudo chown "$(id -u):$(id -g)" /mnt/d$i
           done
           uname -r
-          findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/d0 /mnt/d1 /mnt/d2 /mnt/d3
+          for i in 0 1 2 3; do findmnt -no SOURCE,FSTYPE,OPTIONS /mnt/d$i; done
       - name: The multi-device tests
         env:
           STORE_IO_MULTI_DEV: /mnt/d0,/mnt/d1,/mnt/d2,/mnt/d3

@@ -657,3 +657,42 @@ fn test_every_poisoning_wakes_the_poison_wakers() {
         assert_eq!(gone.wakes.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
+
+/// Only a commit-class barrier's entry marks the device's commits active
+/// (PLANNING R5.4): a background barrier, leading or joining, never does.
+#[test]
+fn test_only_a_commit_class_barrier_marks_activity() {
+    let r: &'static crate::qos::Registry = Box::leak(Box::new(crate::qos::Registry::new()));
+    let at = 1_000_000_000;
+    let qos = r.join(
+        0,
+        &crate::qos::Placement::Keyed {
+            identity: store_io_core::identity::DeviceIdentity {
+                devices: vec![store_io_core::identity::DeviceId::node(
+                    store_io_core::identity::DeviceNode::Sim { device: 1 },
+                )],
+                complete: true,
+            },
+            members: Vec::new(),
+            fs_device: None,
+        },
+        crate::qos::QosOptions::default(),
+        at,
+    );
+    let d = Domain::with_slots(1).with_activity(Arc::clone(&qos), Arc::new(move || at));
+    let need = d.ticket();
+    assert!(
+        d.barrier_classed(need, IoClass::Background, |_, _| Ok(()))
+            .is_ok()
+    );
+    assert!(
+        !qos.active(at),
+        "a background barrier marked commits active"
+    );
+    let need = d.ticket();
+    assert!(
+        d.barrier_classed(need, IoClass::Commit, |_, _| Ok(()))
+            .is_ok()
+    );
+    assert!(qos.active(at));
+}

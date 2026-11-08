@@ -21,8 +21,10 @@
   power-safe store every durable write, marks the device's commits active
   (one clock read and a compare; a store at most once a millisecond).
   `Store::commit_hold` keeps them active while it lives; `Store::qos`
-  reports the device's pacing (`QosReport`). Nothing is paced yet: the
-  background paths that pace come in later changes.
+  reports the device's pacing (`QosReport`). Only a commit-class barrier
+  marks activity (a flush thread's batch is commit-class if any request
+  in it is). Nothing is paced yet: the background paths that pace come in
+  later changes.
 - Options: `StoreOptions::background_io` (256 KiB), `background_unpaced`
   (8), `background_pacing` (on) and `commit_quiet` (5 s), checked at
   `create`, `open` and `open_readonly` (`NotWritten(InvalidOptions)`
@@ -1075,6 +1077,14 @@
   failed, instead of reporting that it cannot see io-wq threads.
 
 ### Fixed
+
+- Engine: **a blocking write split into pieces, and a region's
+  provisioning fill, stop at a poison** set by another operation
+  (fail-stop, FAIL-01): each checks the store before every piece, submits
+  none after the poison, waits for those in flight and returns `Poisoned`
+  (an append's reserved range settled as a hole; a write so stopped may
+  have some pieces on the media, none reported durable). Before, they
+  submitted their remaining pieces.
 
 - Engine: **a release whose commit was durable could still fail** (since
   0.3.0): when the queue for its Released header write could not be

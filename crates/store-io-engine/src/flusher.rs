@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
+use store_io_core::IoClass;
 
 use store_io_core::error::{Error, FirstCause, Op};
 use store_io_platform::{Platform, Queue, Wake};
@@ -209,6 +210,9 @@ where
 /// One request: a flush `>= need`, answered under `tag` into `answer`.
 struct Request {
     need: u64,
+    /// The requester's class (PLANNING R5.4): a batch is commit-class if any
+    /// of its requests is.
+    class: IoClass,
     tag: u64,
     answer: Arc<dyn Answer>,
     /// Its outcome, decided while the thread still holds the store and
@@ -272,13 +276,20 @@ where
     /// Asks for a flush `>= need`, answered into `answer` under `tag`.
     /// Returns false if the thread no longer takes requests (the caller then
     /// flushes on its own thread).
-    pub(crate) fn request(&self, need: u64, tag: u64, answer: Arc<dyn Answer>) -> bool {
+    pub(crate) fn request(
+        &self,
+        need: u64,
+        class: IoClass,
+        tag: u64,
+        answer: Arc<dyn Answer>,
+    ) -> bool {
         let mut st = lock(&self.shared.state);
         if st.stop {
             return false;
         }
         st.requests.push(Request {
             need,
+            class,
             tag,
             answer,
             outcome: None,
@@ -338,7 +349,12 @@ where
             return;
         };
         let held = Store { inner };
-        let outcome = held.barrier_to(need).map(|()| need);
+        let class = if guard.batch.iter().any(|r| r.class.is_commit()) {
+            IoClass::Commit
+        } else {
+            IoClass::Background
+        };
+        let outcome = held.barrier_to_classed(need, class).map(|()| need);
         guard.decide(&held, &outcome);
         // Let go of the store before anything is posted: once a submitter
         // sees its outcome it may drop the store's last other handle, and
@@ -520,6 +536,7 @@ mod tests {
             for (need, tag) in [(t1.need, 1), (t2.need, 2)] {
                 st.requests.push(Request {
                     need,
+                    class: store_io_core::IoClass::Commit,
                     tag,
                     answer: Arc::clone(&inbox) as Arc<dyn Answer>,
                     outcome: None,

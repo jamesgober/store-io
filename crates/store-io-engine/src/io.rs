@@ -2,6 +2,7 @@
 //! bytes into pooled aligned buffers, writes of any length, the reservation
 //! guard, barriers, tickets, receipts and reads.
 
+use store_io_core::IoClass;
 use store_io_core::align::align_up;
 use store_io_core::class::Missing;
 use store_io_core::error::{
@@ -454,6 +455,7 @@ where
                     self.inner.policy.dsync,
                     &mut Mapped::new(&r.map, &mut stream),
                     obs,
+                    &|| self.inner.domain.poisoned().is_some(),
                 );
                 if matches!(outcome, Pumped::Refused(_)) {
                     obs.add(Counter::Refused, 1);
@@ -477,7 +479,14 @@ where
         }
         let obs = &self.inner.observer;
         let _timed = obs.span(Stage::Write);
-        let outcome = pump(lane, &self.inner.file, self.inner.policy.dsync, src, obs);
+        let outcome = pump(
+            lane,
+            &self.inner.file,
+            self.inner.policy.dsync,
+            src,
+            obs,
+            &|| self.inner.domain.poisoned().is_some(),
+        );
         if matches!(outcome, Pumped::Refused(_)) {
             obs.add(Counter::Refused, 1);
         } else if src.is_split() {
@@ -638,14 +647,21 @@ where
 
     /// The domain barrier for a ticket taken earlier (after the writes it
     /// covers completed): a flush `>= need` (flush-required stores only).
+    /// Commit-class.
     pub(crate) fn barrier_to(&self, need: u64) -> Result<(), Error> {
+        self.barrier_to_classed(need, IoClass::Commit)
+    }
+
+    /// [`Self::barrier_to`] for a caller of `class`: only a commit-class
+    /// barrier marks the device's commits active.
+    pub(crate) fn barrier_to_classed(&self, need: u64, class: IoClass) -> Result<(), Error> {
         let obs = &self.inner.observer;
         obs.add(Counter::Barriers, 1);
         let _timed = obs.span(Stage::Barrier);
         let inner = &self.inner;
         inner
             .domain
-            .barrier(need, |slot, _k| {
+            .barrier_classed(need, class, |slot, _k| {
                 let _flush = obs.span(Stage::Flush);
                 obs.add(Counter::Flushes, 1);
                 // Each slot its own handle and lane (D-124); the domain

@@ -917,7 +917,12 @@ where
             let waker: Arc<dyn PoisonWaker> = Arc::clone(&self.answers) as Arc<dyn PoisonWaker>;
             let key = store.inner.domain.on_poison(waker);
             let tag = (self.seq << INDEX_BITS) | i as u64;
-            if f.request(need, tag, Arc::clone(&self.answers) as Arc<dyn Answer>) {
+            if f.request(
+                need,
+                store_io_core::IoClass::Commit,
+                tag,
+                Arc::clone(&self.answers) as Arc<dyn Answer>,
+            ) {
                 self.parts[i].handed = Some(key);
                 return;
             }

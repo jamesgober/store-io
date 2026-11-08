@@ -340,6 +340,13 @@ where
         let mut q = inner.queues.get(0);
         let mut at = 0u64;
         while at < extent {
+            // No fill piece goes to a poisoned store (fail-stop, FAIL-01): a
+            // fill another operation's poison stops returns it, the region
+            // never Ready (as any failed fill).
+            crate::test_hook::step(crate::test_hook::Step::FillPiece);
+            if let Some(first) = inner.domain.poisoned() {
+                return Err(Error::Poisoned { first });
+            }
             let len = chunk.min(extent - at);
             let mut buf = self.take(len as usize, ErrorContext::default())?;
             // The content from the first byte past the zeros, even inside a

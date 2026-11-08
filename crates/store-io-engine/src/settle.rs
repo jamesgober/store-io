@@ -79,7 +79,9 @@ where
 /// transferred in full. A page write the platform refused before anything
 /// was submitted touched nothing: `Io` (or `QueueFull`), not poisoned. An
 /// append refused at that point still leaves its reserved range as a hole,
-/// so it settles as a write that did not transfer.
+/// so it settles as a write that did not transfer. A pump a poison stopped
+/// is `Poisoned`: some of its pieces may be on the media (none is reported
+/// durable), an append's range settled as a hole first.
 pub(crate) fn settle_pumped<P: Platform>(
     store: &Store<P>,
     state: &LiveRegion,
@@ -92,6 +94,24 @@ where
     let mut no_prefix = None;
     match (outcome, wrote) {
         (Pumped::All, _) => settle_write(store, state, wrote, true, None, &mut no_prefix),
+        // Stopped by a poison: nothing more was written, and the store
+        // refuses everything from here. An append's reserved range is settled
+        // as a write that did not transfer (a hole, never a range a barrier
+        // waits on), and the caller is told the store is poisoned.
+        (Pumped::Poisoned, wrote) => {
+            let c = match &wrote {
+                Wrote::Page { start, end } => ctx_range(state, *start, *end),
+                Wrote::Append(r) => ctx_range(state, r.start, r.data_end),
+            };
+            if matches!(wrote, Wrote::Append(_)) {
+                let _hole = settle_write(store, state, wrote, false, None, &mut no_prefix);
+            }
+            match store.inner.domain.poisoned() {
+                Some(first) => Err(Error::Poisoned { first }),
+                // A poison is never cleared: unreachable, settled as failed.
+                None => Err(store.unknown(Op::Write, None, c)),
+            }
+        }
         (Pumped::Refused(raw), Wrote::Page { start, end }) => {
             Err(Store::<P>::refused(raw, ctx_range(state, start, end)))
         }

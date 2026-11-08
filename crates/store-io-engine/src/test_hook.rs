@@ -38,6 +38,12 @@ pub enum Step {
     /// its answers. It holds their lock: a poison waker's wake, which takes
     /// it, can only come once the call sleeps.
     AnswersWait,
+    /// The blocking pump at the top of its loop, before its poison check
+    /// and its next write piece (once per piece, and once more before it
+    /// finds its source done).
+    PumpPiece,
+    /// Provisioning's fill, before its poison check and its next piece.
+    FillPiece,
 }
 
 #[cfg(feature = "sim-hooks")]

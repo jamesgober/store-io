@@ -113,6 +113,7 @@ use loom::sync::{Mutex, MutexGuard};
 use std::sync::{Mutex, MutexGuard};
 
 use store_io_buf::{CachePadded, WaitWord};
+use store_io_core::IoClass;
 use store_io_core::error::{Error, ErrorContext, FirstCause, Op, OsError};
 
 use crate::sync::{AtomicU64, Ordering, yield_now};
@@ -583,7 +584,20 @@ impl Domain {
         need: u64,
         flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
-        self.barrier_in(need, self.slots, flush)
+        self.barrier_in(need, self.slots, IoClass::Commit, flush)
+    }
+
+    /// [`Self::barrier`] for a caller of `class` (PLANNING R5.4): the
+    /// protocol is the same for every class (a background barrier joins a
+    /// flush in flight or the designate's next, else leads); only a
+    /// commit-class barrier's entry marks the device's commits active.
+    pub(crate) fn barrier_classed(
+        &self,
+        need: u64,
+        class: IoClass,
+        flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
+    ) -> Result<(), Error> {
+        self.barrier_in(need, self.slots, class, flush)
     }
 
     /// As [`Self::barrier`], leading only on slot 0 (the caller's main
@@ -597,18 +611,22 @@ impl Domain {
         need: u64,
         mut flush: impl FnMut() -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
-        self.barrier_in(need, 1, |_slot, _k| flush())
+        self.barrier_in(need, 1, IoClass::Commit, |_slot, _k| flush())
     }
 
     fn barrier_in(
         &self,
         need: u64,
         usable: u32,
+        class: IoClass,
         mut flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
-        // Every barrier is commit-class until a later step gives them classes
-        // (V3c3): its entry marks commits active, whether it leads or joins.
-        self.note_commit();
+        // A commit-class barrier's entry marks commits active, whether it
+        // leads or joins (so a commit joining a background-led flush counts);
+        // a background one's never does.
+        if class.is_commit() {
+            self.note_commit();
+        }
         let mut led_flush = false;
         // The highest `done` this call has yielded for: one goal, one try.
         let mut yielded_to = 0;

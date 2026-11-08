@@ -614,10 +614,17 @@ pub(crate) enum Pumped {
     /// A write failed, transferred short, or was refused after others had
     /// been submitted; or waiting failed. Durability is unknown.
     Failed(Option<OsError>),
+    /// The store was poisoned (by any operation): once the pump observed it
+    /// (it checks before each piece), no piece was submitted (fail-stop,
+    /// FAIL-01); those in flight were waited for. Conservative: a poison
+    /// seen after the last piece but before the source said it was done also
+    /// ends here, the write then fully on the media but reported `Poisoned`.
+    Poisoned,
 }
 
 /// Submits every write `src` produces on one queue, keeping as many in
-/// flight as the queue accepts, and waits for all of them. On a queue that
+/// flight as the queue accepts, and waits for all of them; stops before any
+/// piece once `poisoned()` says the store is poisoned ([`Pumped::Poisoned`]). On a queue that
 /// performs operations at once (`Lane::perform`: the inline synchronous
 /// queue) each write is performed in turn, nothing in flight between them,
 /// and the first failure stops the call.
@@ -632,6 +639,7 @@ pub(crate) fn pump<Q: Queue>(
     dsync: bool,
     src: &mut impl Source,
     obs: &Observer,
+    poisoned: &dyn Fn() -> bool,
 ) -> Pumped {
     const TAG: u64 = 0x5111;
     // The caller's lane is already cleared (`Store::lane`).
@@ -640,8 +648,18 @@ pub(crate) fn pump<Q: Queue>(
     let mut failure: Option<Option<OsError>> = None;
     let mut held: Option<(u64, IoBuf)> = None;
     let mut producing = true;
+    let mut stopped = false;
     loop {
         while failure.is_none() && producing {
+            // No write piece goes to a poisoned store (fail-stop, FAIL-01): a
+            // long pump stops at a poison set by any other operation; what is
+            // in flight is waited for below.
+            crate::test_hook::step(crate::test_hook::Step::PumpPiece);
+            if poisoned() {
+                stopped = true;
+                producing = false;
+                break;
+            }
             let (offset, buf) = match held.take() {
                 Some(w) => w,
                 None => match src.next() {
@@ -740,6 +758,7 @@ pub(crate) fn pump<Q: Queue>(
         }
     }
     match failure {
+        None if stopped => Pumped::Poisoned,
         None => Pumped::All,
         Some(raw) => Pumped::Failed(raw),
     }

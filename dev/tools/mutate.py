@@ -183,6 +183,7 @@ ROOT_CONFORMANCE = ["-p", "store-io", "--test", "conformance"]
 QOS_SRC = "crates/store-io-engine/src/qos.rs"
 QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
 QOS_STORE_T = ["-p", "store-io-engine", "--test", "qos"]
+PUMP_POISON_T = ["-p", "store-io-engine", "--test", "pump_poison"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
 MAC_ID = ["-p", "store-io-posix", "--lib", "probe::tests::test_only_one_physical_store"]
@@ -331,7 +332,7 @@ M = [
  # completion succeeded; barriers check their tickets; drop waits for flushes
  ('crates/store-io-engine/src/optable.rs', '        if live.durable && flushes() {', '        if live.durable && flushes() && false {'),
  ('crates/store-io-engine/src/optable.rs', '                let need = w.ticket.need;', '                let need = 0 * w.ticket.need;'),
- ('crates/store-io-engine/src/flusher.rs', '        let outcome = held.barrier_to(need).map(|()| need);', '        let outcome = held.barrier_to(need).map(|()| need).or(Ok(need));'),
+ ('crates/store-io-engine/src/flusher.rs', '        let outcome = held.barrier_to_classed(need, class).map(|()| need);', '        let outcome = held.barrier_to_classed(need, class).map(|()| need).or(Ok(need));'),
  ('crates/store-io-engine/src/flusher.rs', '        let need = guard.batch.iter().map(|r| r.need).max().unwrap_or(0);', '        let need = guard.batch.iter().map(|r| r.need).min().unwrap_or(0);'),
  ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live, _)) if g != ticket.generation || !live => {', '            Some((g, live, _)) if (g != ticket.generation || !live) && false => {'),
  ('crates/store-io-engine/src/submitter/durable.rs', '        if ticket.epoch != inner.epoch || ticket.volume != inner.volume {', '        if (ticket.epoch != inner.epoch || ticket.volume != inner.volume) && false {'),
@@ -1582,10 +1583,10 @@ M = [
  (QOS_SRC, '            if was == 1 {', '            if was == 1 && false {', QOS_T),
  (QOS_SRC, '                q.scope.any_commit.store(0, Ordering::Relaxed);', '                let _ = &q.scope.any_commit;', QOS_T),
  (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', LOOM_ENGINE, LOOM),
- # QOS_STORE (V3c1): every barrier's entry and a power-safe store's dsync
+ # QOS_STORE (V3c1): a commit-class barrier's entry and a power-safe store's dsync
  # writes mark commits active; the pacing options checked; a memory file
  # system's store never paced; the join's group and clock reach the domain.
- ("crates/store-io-engine/src/domain/mod.rs", '        // (V3c3): its entry marks commits active, whether it leads or joins.\n        self.note_commit();', '        // (V3c3): its entry marks commits active, whether it leads or joins.\n        if false {\n            self.note_commit();\n        }', QOS_STORE_T),
+ ("crates/store-io-engine/src/domain/mod.rs", '        if class.is_commit() {\n            self.note_commit();\n        }', '        if class.is_commit() && false {\n            self.note_commit();\n        }', QOS_STORE_T),
  (IO_SRC, '        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }', '        drop(before_issue()?);\n        if self.inner.policy.dsync && false {\n            self.inner.domain.note_commit();\n        }', QOS_STORE_T, INLINE_ENV),
  (IO_SRC, '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync {', '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync && false {', QOS_STORE_T),
  (SUB_SRC, '                if inner.policy.dsync {\n                    inner.domain.note_commit();\n                }', '                if inner.policy.dsync && false {\n                    inner.domain.note_commit();\n                }', QOS_STORE_T),
@@ -1599,6 +1600,13 @@ M = [
  ("crates/store-io-engine/src/open.rs", '    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        crate::store::check_pacing(&opts)?;', '    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        let _ = crate::store::check_pacing(&opts);', QOS_STORE_T),
  ("crates/store-io-engine/src/create.rs", '    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        crate::store::check_pacing(&opts)?;', '    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        let _ = crate::store::check_pacing(&opts);', QOS_STORE_T),
  ("crates/store-io-engine/src/open.rs", '            platform.identity_scope(),\n            &crate::store::placement(&report.evidence),', '            0,\n            &crate::store::placement(&report.evidence),', QOS_STORE_T),
+ # QOS_CLASS (V3c2): only a commit-class barrier marks activity; the pump
+ # never submits a piece to a poisoned store, and reports the stop.
+ ("crates/store-io-engine/src/domain/mod.rs", '        if class.is_commit() {\n            self.note_commit();\n        }', '        if class.is_commit() || true {\n            self.note_commit();\n        }', DOMAIN_ALL),
+ (EXEC_SRC, '            if poisoned() {\n                stopped = true;', '            if poisoned() && false {\n                stopped = true;', PUMP_POISON_T),
+ (EXEC_SRC, '            if poisoned() {\n                stopped = true;', '            if poisoned() && false {\n                stopped = true;', PUMP_POISON_T, INLINE_ENV),
+ (EXEC_SRC, '        None if stopped => Pumped::Poisoned,', '        None if stopped && false => Pumped::Poisoned,', PUMP_POISON_T),
+ ("crates/store-io-engine/src/provision.rs", '            if let Some(first) = inner.domain.poisoned() {\n                return Err(Error::Poisoned { first });', '            if let Some(first) = inner.domain.poisoned().filter(|_| false) {\n                return Err(Error::Poisoned { first });', PUMP_POISON_T),
 ]
 
 def kill_stuck_tests():

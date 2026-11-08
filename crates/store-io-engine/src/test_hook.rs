@@ -34,6 +34,10 @@ pub enum Step {
     RecycleDraining,
     /// That wait returned: no pass is left, none will be admitted.
     RecycleDrained,
+    /// A set barrier, a handed-off store still unanswered, about to sleep on
+    /// its answers. It holds their lock: a poison waker's wake, which takes
+    /// it, can only come once the call sleeps.
+    AnswersWait,
 }
 
 #[cfg(feature = "sim-hooks")]

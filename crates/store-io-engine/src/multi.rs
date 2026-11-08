@@ -594,6 +594,7 @@ fn wait_settled(a: &Answers, settled: impl Fn(&AnswerState) -> bool) -> u64 {
     let mut sleeps = 0;
     while !settled(&st) {
         sleeps += 1;
+        crate::test_hook::step(crate::test_hook::Step::AnswersWait);
         st = a.ready.wait(st).unwrap_or_else(PoisonError::into_inner);
     }
     sleeps

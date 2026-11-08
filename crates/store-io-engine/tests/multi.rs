@@ -1062,9 +1062,28 @@ impl Park {
     }
 }
 
+/// The thread of the set barrier [`test_the_poison_of_a_handed_off_store_ends_the_call`]
+/// waits on, and whether it is asleep on its answers.
+static CALLER: std::sync::Mutex<(Option<std::thread::ThreadId>, bool)> =
+    std::sync::Mutex::new((None, false));
+static ASLEEP: std::sync::Condvar = std::sync::Condvar::new();
+
+/// The hook that tells that test its call is about to sleep (other tests'
+/// calls, on other threads, are ignored).
+fn note_asleep(s: store_io_engine::test_hook::Step) {
+    if matches!(s, store_io_engine::test_hook::Step::AnswersWait) {
+        let mut c = CALLER.lock().unwrap();
+        if c.0 == Some(std::thread::current().id()) {
+            c.1 = true;
+            ASLEEP.notify_all();
+        }
+    }
+}
+
 /// A store whose handed-off flush hangs: its poison (a caller's watchdog)
 /// ends the call, its tickets failing `Poisoned` and the other store's
-/// receipts standing.
+/// receipts standing. The poison comes once the call sleeps on its
+/// answers, so only the poison's wake can end it.
 #[test]
 fn test_the_poison_of_a_handed_off_store_ends_the_call() {
     let (pa, pb) = (
@@ -1085,13 +1104,31 @@ fn test_the_poison_of_a_handed_off_store_ends_the_call() {
     std::thread::scope(|scope| {
         let (done, call) = std::sync::mpsc::channel();
         let (set, ta, tb) = (&set, &ta, &tb);
-        scope.spawn(move || done.send(set.barrier_each(&[ta, tb]).unwrap()));
+        store_io_engine::test_hook::install(Some(note_asleep as fn(_)));
+        scope.spawn(move || {
+            CALLER.lock().unwrap().0 = Some(std::thread::current().id());
+            done.send(set.barrier_each(&[ta, tb]).unwrap())
+        });
         park.until_parked();
+        let asleep = {
+            let c = CALLER.lock().unwrap();
+            let (c, _timeout) = ASLEEP
+                .wait_timeout_while(c, std::time::Duration::from_secs(10), |c| !c.1)
+                .unwrap();
+            c.1
+        };
+        if !asleep {
+            // Released first, so the failure ends the test.
+            park.release();
+            store_io_engine::test_hook::install(None);
+            panic!("the call never slept on its answers");
+        }
         b.poison();
         let got = call.recv_timeout(std::time::Duration::from_secs(10));
         // Released before judging, so a failure ends the test, never hangs
         // it (the parked flush holds the call's scope).
         park.release();
+        store_io_engine::test_hook::install(None);
         let each = got.expect("the poison did not end the call");
         assert!(each[0].as_ref().unwrap().covers(ta));
         assert!(

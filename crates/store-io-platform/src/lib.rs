@@ -441,6 +441,10 @@ pub trait Queue {
     }
 }
 
+/// A shareable handle to a backend's fine monotonic clock
+/// ([`Platform::clock`]): nanoseconds, never decreasing.
+pub type Clock = std::sync::Arc<dyn Fn() -> u64 + Send + Sync>;
+
 /// A platform backend.
 pub trait Platform: Send + Sync + 'static {
     /// Open file handle (closed on drop).
@@ -545,6 +549,14 @@ pub trait Platform: Send + Sync + 'static {
     /// operating system offers one (Linux's vDSO, Windows's performance
     /// counter, macOS's uptime clock). Deterministic in the simulator.
     fn monotonic_ns(&self) -> u64;
+
+    /// The clock [`Self::monotonic_ns`] reads, as a handle the engine keeps
+    /// (PLANNING R5.4): the same values as `monotonic_ns`, from the same
+    /// origin. A store calls it at every barrier and, on a power-safe store,
+    /// every durable write, with engine locks held: so it must be cheap (a
+    /// user-space read where the system offers one), never block, never take
+    /// a lock the I/O path might hold, and never panic.
+    fn clock(&self) -> Clock;
 
     /// The scope device identities of this backend are unique in: two
     /// identities, file-system devices or volumes from backends of

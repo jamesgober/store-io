@@ -106,7 +106,7 @@
 pub use store_io_engine as engine;
 
 pub use store_io_core::class::{
-    CertId, DurabilityClass, Missing, MissingSet, Reason, ReasonSet, ReceiptLabel,
+    CertId, DurabilityClass, IoClass, Missing, MissingSet, Reason, ReasonSet, ReceiptLabel,
 };
 pub use store_io_core::decide::{ClassDecision, DurableOpen, Trust};
 pub use store_io_core::error::{
@@ -118,10 +118,10 @@ pub use store_io_core::id::{Generation, RegionId, VolumeId};
 /// The observer's types: `Store::observe()` returns an [`observe::Snapshot`].
 pub use store_io_core::observe;
 pub use store_io_engine::{
-    CONTAINER, COPY_LOCK, COPYING, CopyOptions, CopyReport, DomainStats, DurableReceipt,
-    MAX_SET_STORES, Outstanding, RegionKind, RegionOptions, RegionPos, Repair, ScanItem,
-    ScanSummary, SetStats, SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable,
-    UnavailableRegion, WriteTicket,
+    CONTAINER, COPY_LOCK, COPYING, CommitHold, CopyOptions, CopyReport, DomainStats,
+    DurableReceipt, MAX_SET_STORES, Outstanding, QosReport, RegionKind, RegionOptions, RegionPos,
+    Repair, ScanItem, ScanSummary, SetStats, SpaceReport, StoreOptions, StoreReport, TagSpace,
+    Unavailable, UnavailableRegion, WriteTicket,
 };
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 

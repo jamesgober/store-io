@@ -52,8 +52,9 @@ mod optable;
 mod options;
 mod provision;
 mod provision2;
-// Device pacing; wired into the store and its I/O paths by V3c (until
-// then only its own tests use it).
+// Device pacing: stores join and commits mark activity (V3c1); background
+// admission's users (the Submitter, scans, copies) land in later steps, so
+// some of it is used only by its own tests until then.
 #[allow(dead_code)]
 mod qos;
 pub(crate) mod queue_core;
@@ -86,6 +87,7 @@ pub use domain::DomainStats;
 pub use flusher::SubmitterWaker;
 pub use multi::{MAX_SET_STORES, SetStats, StoreSet};
 pub use options::RegionOptions;
+pub use qos::{CommitHold, QosReport};
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
 pub use scan::{ScanItem, ScanSummary};

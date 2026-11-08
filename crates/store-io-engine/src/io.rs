@@ -413,6 +413,9 @@ where
         let _fits = buf.set_len(padded);
         let mut lane = self.lane(r, Op::Write)?;
         drop(before_issue()?);
+        if self.inner.policy.dsync {
+            self.inner.domain.note_commit();
+        }
         let obs = &self.inner.observer;
         let op = IoOp::Write {
             file: &self.inner.file,
@@ -469,6 +472,9 @@ where
 
     /// Submits a staged write on `lane`.
     pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {
+        if self.inner.policy.dsync {
+            self.inner.domain.note_commit();
+        }
         let obs = &self.inner.observer;
         let _timed = obs.span(Stage::Write);
         let outcome = pump(lane, &self.inner.file, self.inner.policy.dsync, src, obs);

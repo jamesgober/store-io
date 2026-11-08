@@ -553,6 +553,11 @@ impl Platform for SimPlatform {
         lock(&self.world).clock_ns()
     }
 
+    fn clock(&self) -> store_io_platform::Clock {
+        let world = Arc::clone(&self.world);
+        Arc::new(move || lock(&world).clock_ns())
+    }
+
     fn identity_scope(&self) -> u64 {
         lock(&self.world).id()
     }

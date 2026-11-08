@@ -182,6 +182,7 @@ WIN_NTFS_T = ["-p", "store-io-win", "--test", "ntfs"]
 ROOT_CONFORMANCE = ["-p", "store-io", "--test", "conformance"]
 QOS_SRC = "crates/store-io-engine/src/qos.rs"
 QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
+QOS_STORE_T = ["-p", "store-io-engine", "--test", "qos"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
 MAC_ID = ["-p", "store-io-posix", "--lib", "probe::tests::test_only_one_physical_store"]
@@ -1446,7 +1447,7 @@ M = [
  ], AFTER_RACE),
  (IO_SRC, "                    drop(held);\n                    drop(lane);", "                    drop(lane);", AFTER_RACE),
  (IO_SRC, "            drop(before_issue()?);\n            return Ok(self.pump(", "            let _keep = before_issue()?;\n            return Ok(self.pump(", AFTER_RACE),
- (IO_SRC, "        drop(before_issue()?);\n        let obs = &self.inner.observer;", "        let _keep = before_issue()?;\n        let obs = &self.inner.observer;", AFTER_RACE),
+ (IO_SRC, "        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }\n        let obs = &self.inner.observer;", "        let _keep = before_issue()?;\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }\n        let obs = &self.inner.observer;", AFTER_RACE),
  ("crates/store-io-engine/src/region.rs", "        on_reserved(before);", "        let _keep = (before, &on_reserved);", AFTER_RACE),
  (SUB_SRC, "        on_reserved(passes);", "        let _keep = (passes, &on_reserved);", AFTER_RACE),
  (SUB_SRC, "        drop(passes);\n        self.issue(req, tag, kind,", "        let _keep = passes;\n        self.issue(req, tag, kind,", AFTER_RACE),
@@ -1577,10 +1578,27 @@ M = [
  (QOS_SRC, '                if self.scope.has_unknown() {\n                    stamp(&self.scope.any_commit, now);', '                if true {\n                    stamp(&self.scope.any_commit, now);', QOS_T),
  (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', QOS_T),
  (QOS_SRC, '        if self.kind != Kind::Unpaced {\n            let _h = self.counters.holds.fetch_add(1, Ordering::Relaxed);', '        if true {\n            let _h = self.counters.holds.fetch_add(1, Ordering::Relaxed);', QOS_T),
- (QOS_SRC, '                let latest = g.latest_commit(scope).max(clock());', '                let latest = g.latest_commit(scope).max(0);', QOS_T),
+ (QOS_SRC, '                let latest = g.latest_commit(scope).max(now);', '                let latest = g.latest_commit(scope).max(0);', QOS_T),
  (QOS_SRC, '            if was == 1 {', '            if was == 1 && false {', QOS_T),
  (QOS_SRC, '                q.scope.any_commit.store(0, Ordering::Relaxed);', '                let _ = &q.scope.any_commit;', QOS_T),
  (QOS_SRC, '        // source: wake now that it can.\n        self.wake();', '        // source: wake now that it can.\n        if false {\n            self.wake();\n        }', LOOM_ENGINE, LOOM),
+ # QOS_STORE (V3c1): every barrier's entry and a power-safe store's dsync
+ # writes mark commits active; the pacing options checked; a memory file
+ # system's store never paced; the join's group and clock reach the domain.
+ ("crates/store-io-engine/src/domain/mod.rs", '        // (V3c3): its entry marks commits active, whether it leads or joins.\n        self.note_commit();', '        // (V3c3): its entry marks commits active, whether it leads or joins.\n        if false {\n            self.note_commit();\n        }', QOS_STORE_T),
+ (IO_SRC, '        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }', '        drop(before_issue()?);\n        if self.inner.policy.dsync && false {\n            self.inner.domain.note_commit();\n        }', QOS_STORE_T, INLINE_ENV),
+ (IO_SRC, '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync {', '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync && false {', QOS_STORE_T),
+ (SUB_SRC, '                if inner.policy.dsync {\n                    inner.domain.note_commit();\n                }', '                if inner.policy.dsync && false {\n                    inner.domain.note_commit();\n                }', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '    let ok = io >= 4096\n        && io % 4096 == 0', '    let ok = io >= 4096\n        && (io % 4096 == 0 || true)', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        && io <= 256 << 10', '        && io <= 512 << 10', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        && (1..=64).contains(&opts.background_unpaced)', '        && (0..=65).contains(&opts.background_unpaced)', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        && opts.commit_quiet >= std::time::Duration::from_millis(1);', '        && opts.commit_quiet >= std::time::Duration::ZERO;', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '    if ev.fs.kind == store_io_core::evidence::FsKind::Tmpfs {', '    if ev.fs.kind == store_io_core::evidence::FsKind::Tmpfs && false {', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        pacing: opts.background_pacing,', '        pacing: true,', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        background_io: (piece / block * block).max(block),', '        background_io: piece.max(block * 0),', QOS_STORE_T),
+ ("crates/store-io-engine/src/open.rs", '    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        crate::store::check_pacing(&opts)?;', '    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        let _ = crate::store::check_pacing(&opts);', QOS_STORE_T),
+ ("crates/store-io-engine/src/create.rs", '    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        crate::store::check_pacing(&opts)?;', '    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        let _ = crate::store::check_pacing(&opts);', QOS_STORE_T),
+ ("crates/store-io-engine/src/open.rs", '            platform.identity_scope(),\n            &crate::store::placement(&report.evidence),', '            0,\n            &crate::store::placement(&report.evidence),', QOS_STORE_T),
 ]
 
 def kill_stuck_tests():

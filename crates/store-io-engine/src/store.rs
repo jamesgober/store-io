@@ -148,6 +148,27 @@ pub struct StoreOptions {
     /// from then on (an existing region keeps its size and cap). Checked
     /// when used, so options a later call would refuse never fail an open.
     pub region_defaults: Option<crate::RegionOptions>,
+    /// Device pacing (PLANNING R5.4): background work (scans, copies,
+    /// background `Submitter`s; paced as each lands in v0.6) is split into
+    /// pieces of this many bytes, whatever the device's state. A multiple of
+    /// 4096 from 4096 to 256 KiB (PERF-10's piece); default 256 KiB. The
+    /// store splits at the smaller of this and its largest I/O (`max_io`
+    /// rounded up to a power of two, at least 128 KiB), rounded down to
+    /// whole blocks, at least one; [`crate::QosReport::background_io`] says
+    /// what it uses.
+    pub background_io: u32,
+    /// Background pieces in flight per background call while the device's
+    /// commits are not active: 1 to 64; default 8. Stores of one device take
+    /// the smallest.
+    pub background_unpaced: u32,
+    /// Pace background work while the device's commits are active (default
+    /// `true`): one piece in flight per background call. Off for
+    /// measurements such as G19's negative control; stores of one device
+    /// pace together if any of them asks for it.
+    pub background_pacing: bool,
+    /// How long after a commit the device's commits count as active: at
+    /// least 1 ms; default 5 s. Stores of one device take the largest.
+    pub commit_quiet: std::time::Duration,
 }
 
 impl Default for StoreOptions {
@@ -171,7 +192,61 @@ impl Default for StoreOptions {
             region_capacity: 65_536,
             container_format: store_io_format::slot::FORMAT_2,
             region_defaults: None,
+            background_io: 256 << 10,
+            background_unpaced: 8,
+            background_pacing: true,
+            commit_quiet: std::time::Duration::from_secs(5),
         }
+    }
+}
+
+/// Checks the pacing options (PLANNING R5.4): `NotWritten(InvalidOptions)`
+/// for a `background_io` that is not a multiple of 4096 from 4096 to
+/// 256 KiB, a `background_unpaced` outside 1 to 64, or a `commit_quiet`
+/// under 1 ms.
+pub(crate) fn check_pacing(opts: &StoreOptions) -> Result<(), Error> {
+    let io = opts.background_io as usize;
+    let ok = io >= 4096
+        && io % 4096 == 0
+        && io <= 256 << 10
+        && (1..=64).contains(&opts.background_unpaced)
+        && opts.commit_quiet >= std::time::Duration::from_millis(1);
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::NotWritten {
+            cause: store_io_core::error::NotWrittenCause::InvalidOptions,
+            ctx: ErrorContext::default(),
+        })
+    }
+}
+
+/// The pacing options a store with blocks of `block` bytes joins its device
+/// group with: its piece never past its largest I/O, and whole blocks (at
+/// least one), so a piece is never a misaligned or partial-block I/O.
+pub(crate) fn qos_options(opts: &StoreOptions, block: u64) -> crate::qos::QosOptions {
+    let block = u32::try_from(block).unwrap_or(u32::MAX).max(1);
+    let piece = opts
+        .background_io
+        .min(u32::try_from(io_max(opts)).unwrap_or(u32::MAX));
+    crate::qos::QosOptions {
+        pacing: opts.background_pacing,
+        commit_quiet_ns: u64::try_from(opts.commit_quiet.as_nanos()).unwrap_or(u64::MAX),
+        background_io: (piece / block * block).max(block),
+        background_unpaced: opts.background_unpaced,
+    }
+}
+
+/// Where a store with `ev` joins pacing: a memory file system joins no
+/// group; anything else by its device's keys.
+pub(crate) fn placement(ev: &Evidence) -> crate::qos::Placement {
+    if ev.fs.kind == store_io_core::evidence::FsKind::Tmpfs {
+        return crate::qos::Placement::Memory;
+    }
+    crate::qos::Placement::Keyed {
+        identity: ev.device.identity.clone(),
+        members: ev.device.members.clone(),
+        fs_device: ev.fs.device,
     }
 }
 
@@ -317,6 +392,9 @@ pub(crate) struct Inner<P: Platform> {
     pub(crate) layout: Layout,
     pub(crate) policy: Policy,
     pub(crate) domain: Domain,
+    /// The store's device group (PLANNING R5.4); the domain stamps its
+    /// commit activity.
+    pub(crate) qos: Arc<crate::qos::Qos>,
     pub(crate) pool: BufPool,
     pub(crate) meta: Mutex<Meta>,
     pub(crate) regions: Mutex<Vec<Arc<LiveRegion>>>,
@@ -436,6 +514,25 @@ where
     #[must_use]
     pub fn report(&self) -> &StoreReport {
         &self.inner.report
+    }
+
+    /// Keeps this store's device group's commits active until the hold
+    /// drops (PLANNING R5.4), so background work on the device (scans,
+    /// copies, background `Submitter`s, of this store or another on the
+    /// device) stays paced at one piece in flight per call. For a layer
+    /// that commits rarely but needs every commit fast: it holds one while
+    /// its transactions are open and drops it when idle. The cost: while a
+    /// hold lives, background work runs at the paced rate.
+    pub fn commit_hold(&self) -> crate::CommitHold {
+        self.inner.qos.hold()
+    }
+
+    /// This store's device pacing now: whether pacing is on, whether the
+    /// device's commits are active, the budget, the background pieces in
+    /// flight in the device group.
+    #[must_use]
+    pub fn qos(&self) -> crate::QosReport {
+        self.inner.qos.report(self.inner.platform.monotonic_ns())
     }
 
     /// The kernel interface the store's I/O uses now, and why: as

@@ -31,8 +31,12 @@ where
     /// [`Error::Locked`] if another handle holds the new container's lock;
     /// [`Error::UnsafeDevice`] / [`Error::Unverified`] on refusal;
     /// [`Error::Io`] / [`Error::DurabilityUnknown`] on platform failures
-    /// (`Io(Lock)` on a file system that cannot lock).
+    /// (`Io(Lock)` on a file system that cannot lock);
+    /// `NotWritten(InvalidOptions)` for pacing options out of range
+    /// ([`StoreOptions::background_io`](crate::StoreOptions::background_io)
+    /// and the fields after it), before anything is created.
     pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
+        crate::store::check_pacing(&opts)?;
         Self::create_named(platform, path, opts, &container_name()?)
     }
 

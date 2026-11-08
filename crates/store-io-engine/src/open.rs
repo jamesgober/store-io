@@ -50,8 +50,11 @@ where
     /// name may not be durable), [`Error::Unsupported`] (`DirectoryFlush`)
     /// on a file system that cannot flush a directory, before anything is
     /// written,
-    /// [`Error::Io`] (`Io(Lock)` on a file system that cannot lock).
+    /// [`Error::Io`] (`Io(Lock)` on a file system that cannot lock),
+    /// `NotWritten(InvalidOptions)` for pacing options out of range
+    /// ([`StoreOptions::background_io`] and the fields after it).
     pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
+        crate::store::check_pacing(&opts)?;
         Self::open_inner(platform, path, opts, false)
     }
 
@@ -62,6 +65,7 @@ where
     ///
     /// As [`Store::open`], without the refusal errors.
     pub fn open_readonly(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
+        crate::store::check_pacing(&opts)?;
         Self::open_inner(platform, path, opts, true)
     }
 
@@ -409,9 +413,19 @@ where
                 crate::frontier::note_open(volume, id, epoch, found_seq);
             }
         }
+        // Every store, read-only included, joins its device's group (R5.4):
+        // never fails; what the evidence does not name is paced the safe way.
+        let qos = crate::qos::Registry::global().join(
+            platform.identity_scope(),
+            &crate::store::placement(&report.evidence),
+            crate::store::qos_options(&opts, layout.block()),
+            platform.monotonic_ns(),
+        );
         Self {
             inner: Arc::new(Inner {
-                domain: Domain::with_slots(1 + flush_files.len()),
+                domain: Domain::with_slots(1 + flush_files.len())
+                    .with_activity(Arc::clone(&qos), platform.clock()),
+                qos,
                 flush_files: flush_files.into_boxed_slice(),
                 platform,
                 _dir: dir,

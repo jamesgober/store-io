@@ -13,6 +13,25 @@
 
 ### Added
 
+- Engine: **device pacing joins every store** (PLANNING R5.4): each store,
+  read-only ones included, joins its device's group when it opens (by its
+  device's identity, btrfs's member disks or the file system's device;
+  a store whose device cannot be named is paced by every commit of its
+  process; a tmpfs store is never paced). Every barrier, and on a
+  power-safe store every durable write, marks the device's commits active
+  (one clock read and a compare; a store at most once a millisecond).
+  `Store::commit_hold` keeps them active while it lives; `Store::qos`
+  reports the device's pacing (`QosReport`). Nothing is paced yet: the
+  background paths that pace come in later changes.
+- Options: `StoreOptions::background_io` (256 KiB), `background_unpaced`
+  (8), `background_pacing` (on) and `commit_quiet` (5 s), checked at
+  `create`, `open` and `open_readonly` (`NotWritten(InvalidOptions)`
+  otherwise). Fields added to a public struct: literal constructors must
+  add them (`..StoreOptions::default()` keeps working).
+- Platform: **`Platform::clock`**, a shareable handle to the
+  `monotonic_ns` clock. **Breaking for outside implementers of
+  `Platform`**: a required method.
+- Facade: `IoClass`, `CommitHold` and `QosReport` re-exported.
 - Core: **`IoClass`** (`Commit`, `Read`, `Background`; PLANNING R5.4) and
   `NotWrittenCause::Paced`, the vocabulary of v0.6's device pacing (used
   from a later change). `FsFacts::device` (the device the file system

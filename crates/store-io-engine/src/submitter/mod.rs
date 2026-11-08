@@ -551,6 +551,9 @@ where
         let (op, write) = match req {
             Req::Write { offset, buf } => {
                 let bytes = buf.len() as u64;
+                if inner.policy.dsync {
+                    inner.domain.note_commit();
+                }
                 let op = IoOp::Write {
                     file,
                     offset,

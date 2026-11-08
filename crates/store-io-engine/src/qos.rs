@@ -35,6 +35,7 @@ use loom::sync::{Condvar, Mutex, RwLock};
 #[cfg(not(loom))]
 use std::sync::{Condvar, Mutex, RwLock};
 
+use store_io_buf::CachePadded;
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 
 use crate::sync::{AtomicBool, AtomicU64, Ordering};
@@ -43,12 +44,12 @@ use crate::sync::{AtomicBool, AtomicU64, Ordering};
 /// millisecond, so the line stays shared).
 const COMMIT_STRIDE_NS: u64 = 1_000_000;
 
-/// A store's platform's fine monotonic clock (`monotonic_ns`). Every member
-/// of a group compares its own clock with the others' stamps, so the clocks
-/// of one scope must share one time base: true of the operating system's
-/// clock for every real backend in a process, and of the simulator, whose
-/// worlds are scopes of their own, each with one clock.
-pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+// Time: every call that needs it is given `now`, its store's platform's
+// fine clock (`monotonic_ns`), read by the caller (the store holds the
+// platform; this module holds none). Members of a group compare their own
+// stamps with each other's, so the clocks of one scope share one time base:
+// the operating system's clock for every real backend in a process, and a
+// world's clock in the simulator, whose worlds are scopes of their own.
 
 /// A member's pacing options (`StoreOptions`'s, R5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,8 +151,9 @@ fn node_key(n: &DeviceNode) -> String {
 #[derive(Default)]
 pub(crate) struct Counters {
     /// The fine clock at the member's last commit-class barrier entry (0:
-    /// none yet).
-    last_commit: AtomicU64,
+    /// none yet). Read and compared at every commit: on a line of its own,
+    /// so background pieces and holds never bounce it.
+    last_commit: CachePadded<AtomicU64>,
     /// Live [`CommitHold`]s on the member.
     holds: AtomicU64,
     /// Background pieces charged to the member and not yet released.
@@ -222,7 +224,9 @@ fn read(cell: &Cell) -> Arc<Record> {
 pub(crate) struct ScopeActivity {
     /// Unknown stores open in the scope: changed under the registry's lock
     /// at each unknown store's join and close, never at a group's drop.
-    unknown_members: AtomicU64,
+    /// Read at every commit of the scope: on a line of its own, so holds
+    /// taken and dropped never bounce it.
+    unknown_members: CachePadded<AtomicU64>,
     /// The latest commit of any store of the scope, written while
     /// `unknown_members > 0` (seeded at 0 to 1).
     any_commit: AtomicU64,
@@ -278,8 +282,8 @@ impl Registry {
         }
     }
 
-    /// The process's registry.
-    #[cfg(not(loom))]
+    /// The process's registry. (Under loom it exists too, never reached:
+    /// the models make their own registries and open no store.)
     pub(crate) fn global() -> &'static Registry {
         static R: std::sync::OnceLock<Registry> = std::sync::OnceLock::new();
         R.get_or_init(Registry::new)
@@ -295,7 +299,7 @@ impl Registry {
         scope: u64,
         placement: &Placement,
         opts: QosOptions,
-        clock: Clock,
+        now: u64,
     ) -> Arc<Qos> {
         let mut g = self.groups.lock().unwrap_or_else(PoisonError::into_inner);
         let activity = g.scope(scope);
@@ -312,7 +316,6 @@ impl Registry {
                 scope: activity,
                 kind: Kind::Unpaced,
                 opts,
-                clock,
                 registry: self,
             });
         };
@@ -328,7 +331,7 @@ impl Registry {
                 // store counts commits active for `commit_quiet` from its
                 // join (background work over-paced at most that long: the
                 // safe direction), never reads a stale word as quiet.
-                let latest = g.latest_commit(scope).max(clock());
+                let latest = g.latest_commit(scope).max(now);
                 let _was = activity.any_commit.fetch_max(latest, Ordering::Relaxed);
             }
             let _was = activity.unknown_members.fetch_add(1, Ordering::Relaxed);
@@ -340,7 +343,6 @@ impl Registry {
             scope: activity,
             kind: if named { Kind::Named } else { Kind::Unknown },
             opts,
-            clock,
             registry: self,
         })
     }
@@ -549,7 +551,6 @@ pub(crate) struct Qos {
     scope: Arc<ScopeActivity>,
     kind: Kind,
     opts: QosOptions,
-    clock: Clock,
     registry: &'static Registry,
 }
 
@@ -560,20 +561,14 @@ impl Drop for Qos {
 }
 
 impl Qos {
-    /// The fine clock.
-    pub(crate) fn now(&self) -> u64 {
-        (self.clock)()
-    }
-
     /// A commit-class barrier's entry (leading or joining) or a commit-class
     /// `dsync` write on a power-safe store: marks the group's commits
     /// active. One clock read, a relaxed load and a compare; a store at most
     /// once a millisecond.
-    pub(crate) fn commit(&self) {
+    pub(crate) fn commit(&self, now: u64) {
         match self.kind {
             Kind::Unpaced => {}
             Kind::Named | Kind::Unknown => {
-                let now = self.now();
                 stamp(&self.counters.last_commit, now);
                 if self.kind == Kind::Unknown {
                     stamp(&self.scope.unknown_commit, now);
@@ -621,8 +616,7 @@ impl Qos {
     }
 
     /// Whether the group's commits are active now.
-    pub(crate) fn active(&self) -> bool {
-        let now = self.now();
+    pub(crate) fn active(&self, now: u64) -> bool {
         self.with_record(|r| r.is_some_and(|r| self.active_in(r, now)))
     }
 
@@ -650,41 +644,56 @@ impl Qos {
     }
 
     /// What `Store::qos` reports.
-    pub(crate) fn report(&self) -> QosReport {
+    pub(crate) fn report(&self, now: u64) -> QosReport {
         let rec = self.record();
         QosReport {
             paced: rec.as_ref().is_some_and(|r| r.opts.pacing),
-            active: self.active(),
+            active: self.active(now),
             budget: 1,
             in_flight: rec.as_ref().map_or(0, |r| r.in_flight()),
             members: rec.as_ref().map_or(1, |r| r.counters.len()),
             unknown: self.kind == Kind::Unknown,
+            background_io: self.opts.background_io,
         }
     }
 }
 
-/// What a store's pacing reports (`Store::qos`).
+/// What a store's device pacing reports ([`crate::Store::qos`], PLANNING
+/// R5.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct QosReport {
-    /// Pacing is on for the group.
-    pub(crate) paced: bool,
-    /// The group's commits are active now.
-    pub(crate) active: bool,
-    /// Background pieces in flight the group admits while commits are
-    /// active (the floor, 1; auto-tuning would move it).
-    pub(crate) budget: u64,
+#[non_exhaustive]
+pub struct QosReport {
+    /// Pacing is on for the store's device group.
+    pub paced: bool,
+    /// The group's commits are active now (a commit within `commit_quiet`,
+    /// or a live [`CommitHold`]).
+    pub active: bool,
+    /// Background pieces in flight the group admits beyond each background
+    /// call's own one while commits are active (the floor, 1).
+    pub budget: u64,
     /// Background pieces in flight in the group now.
-    pub(crate) in_flight: u64,
-    /// Stores in the group's record.
-    pub(crate) members: usize,
-    /// The store's device could not be named (paced by its scope).
-    pub(crate) unknown: bool,
+    pub in_flight: u64,
+    /// Stores in the group (closed ones pruned at the next join).
+    pub members: usize,
+    /// The store's device could not be named: it is paced by every commit
+    /// of its process instead of by its device's.
+    pub unknown: bool,
+    /// The piece this store's background I/O is split at, in bytes.
+    pub background_io: u32,
 }
 
-/// Keeps a store's group's commits active while it lives (R5.4: a layer
-/// that commits rarely but needs every commit fast).
-pub(crate) struct CommitHold {
+/// Keeps a store's device group's commits active while it lives
+/// ([`crate::Store::commit_hold`], PLANNING R5.4): background work on the
+/// device stays paced for as long as the hold lives.
+#[must_use = "a hold keeps commits active only while it lives"]
+pub struct CommitHold {
     qos: Arc<Qos>,
+}
+
+impl core::fmt::Debug for CommitHold {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CommitHold")
+    }
 }
 
 impl Drop for CommitHold {
@@ -790,8 +799,7 @@ impl Issuer {
     /// Activity is read here, at every admission, never cached: so an issuer
     /// registered during continuous commits is paced from its first piece
     /// (R5.4's "starts paced": it never reads a stale quiet).
-    pub(crate) fn admit(self: &Arc<Self>) -> Option<Charge> {
-        let now = self.qos.now();
+    pub(crate) fn admit(self: &Arc<Self>, now: u64) -> Option<Charge> {
         let admitted = self.qos.with_record(|rec| {
             let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));
             let cap = u64::from(
@@ -837,11 +845,11 @@ impl Issuer {
     /// Waits until a piece is admitted, the call ends with an error
     /// elsewhere, or one of its stores is poisoned. Only a thread holding
     /// none of the call's pieces waits (R5.4's progress rule).
-    pub(crate) fn wait_admit(self: &Arc<Self>) -> Result<Charge, Ended> {
+    pub(crate) fn wait_admit(self: &Arc<Self>, clock: &dyn Fn() -> u64) -> Result<Charge, Ended> {
         let mut g = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let _w = self.waiters.fetch_add(1, Ordering::SeqCst);
         let out = loop {
-            if let Some(c) = self.admit() {
+            if let Some(c) = self.admit(clock()) {
                 break Ok(c);
             }
             if self.ended.load(Ordering::SeqCst) {
@@ -947,6 +955,8 @@ mod tests {
 
     use super::*;
 
+    type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
     const MS: u64 = 1_000_000;
 
     /// A registry of its own (tests never share the process's) and a clock
@@ -982,7 +992,7 @@ mod tests {
     }
 
     fn join(r: &'static Registry, p: &Placement, c: &Clock) -> Arc<Qos> {
-        r.join(0, p, QosOptions::default(), Arc::clone(c))
+        r.join(0, p, QosOptions::default(), c())
     }
 
     fn named(n: u32, serial: &str) -> Placement {
@@ -1006,12 +1016,12 @@ mod tests {
             join(r, &on(1), &c),
             join(r, &on(2), &c),
         );
-        a.commit();
-        assert!(b.active(), "a commit on a paces b on the same device");
-        assert!(!x.active(), "another device is quiet");
+        a.commit(c());
+        assert!(b.active(c()), "a commit on a paces b on the same device");
+        assert!(!x.active(c()), "another device is quiet");
         let _was = t.fetch_add(5_000 * MS, Ordering::Relaxed);
-        assert!(!b.active(), "past commit_quiet");
-        assert_eq!(a.report().members, 2);
+        assert!(!b.active(c()), "past commit_quiet");
+        assert_eq!(a.report(c()).members, 2);
     }
 
     #[test]
@@ -1030,9 +1040,9 @@ mod tests {
             fs_device: None,
         };
         let s = join(r, &both, &c);
-        b.commit();
-        assert!(a.active() && s.active(), "one group after the merge");
-        assert_eq!(a.report().members, 3);
+        b.commit(c());
+        assert!(a.active(c()) && s.active(c()), "one group after the merge");
+        assert_eq!(a.report(c()).members, 3);
     }
 
     #[test]
@@ -1045,17 +1055,17 @@ mod tests {
             fs_device: Some(99),
         };
         let b = join(r, &sub, &c);
-        a.commit();
+        a.commit(c());
         assert!(
-            b.active() && !b.report().unknown,
+            b.active(c()) && !b.report(c()).unknown,
             "a member disk names the device"
         );
         let (x, y) = (
             join(r, &named(50, "serial-1"), &c),
             join(r, &named(51, "serial-1"), &c),
         );
-        x.commit();
-        assert!(y.active(), "a shared name is one device");
+        x.commit(c());
+        assert!(y.active(c()), "a shared name is one device");
     }
 
     #[test]
@@ -1063,36 +1073,36 @@ mod tests {
         let (r, t, c) = fixture();
         let n = join(r, &on(1), &c);
         let u = join(r, &unknown(Some(500)), &c);
-        assert!(u.report().unknown);
-        n.commit();
-        assert!(u.active(), "a named store's commit paces an unknown one");
+        assert!(u.report(c()).unknown);
+        n.commit(c());
+        assert!(u.active(c()), "a named store's commit paces an unknown one");
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
-        assert!(!u.active() && !n.active());
-        u.commit();
-        assert!(n.active(), "an unknown store's commit paces every group");
+        assert!(!u.active(c()) && !n.active(c()));
+        u.commit(c());
+        assert!(n.active(c()), "an unknown store's commit paces every group");
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
         let h = n.hold();
         assert!(
-            u.active(),
+            u.active(c()),
             "a hold anywhere in the scope paces unknown stores"
         );
         drop(h);
         let h = u.hold();
-        assert!(n.active(), "an unknown store's hold paces every group");
+        assert!(n.active(c()), "an unknown store's hold paces every group");
         drop(h);
-        assert!(!n.active() && !u.active());
+        assert!(!n.active(c()) && !u.active(c()));
         // Never merged: the named group still has one member.
-        assert_eq!(n.report().members, 1);
+        assert_eq!(n.report(c()).members, 1);
     }
 
     #[test]
     fn test_the_first_unknown_store_is_seeded_with_the_scope_last_commit() {
         let (r, _t, c) = fixture();
         let n = join(r, &on(1), &c);
-        n.commit();
+        n.commit(c());
         // No unknown member yet: the scope word was not written.
         let u = join(r, &unknown(Some(500)), &c);
-        assert!(u.active(), "seeded at 0 to 1, never read as quiet");
+        assert!(u.active(c()), "seeded at 0 to 1, never read as quiet");
     }
 
     #[test]
@@ -1100,11 +1110,11 @@ mod tests {
         let (r, t, c) = fixture();
         let u = join(r, &unknown(None), &c);
         assert!(
-            u.active(),
+            u.active(c()),
             "no commit anywhere yet: the seed is the join's time"
         );
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
-        assert!(!u.active());
+        assert!(!u.active(c()));
     }
 
     #[test]
@@ -1112,25 +1122,28 @@ mod tests {
         let (r, t, c) = fixture();
         let n = join(r, &on(1), &c);
         let u = join(r, &unknown(Some(500)), &c);
-        u.commit();
-        assert!(n.active());
+        u.commit(c());
+        assert!(n.active(c()));
         drop(u);
         assert_eq!(n.scope.unknown_members.load(Ordering::Relaxed), 0);
         assert_eq!(n.scope.any_commit.load(Ordering::Relaxed), 0);
-        assert!(!n.active(), "a closed unknown store paces nobody");
+        assert!(!n.active(c()), "a closed unknown store paces nobody");
         let u2 = join(r, &unknown(None), &c);
         assert!(
-            u2.active(),
+            u2.active(c()),
             "a first unknown store starts active (its seed)"
         );
-        assert!(!n.active(), "the closed unknown store's commit came back");
+        assert!(
+            !n.active(c()),
+            "the closed unknown store's commit came back"
+        );
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
         assert!(
-            !u2.active() && !n.active(),
+            !u2.active(c()) && !n.active(c()),
             "the old unknown commit is gone"
         );
-        n.commit();
-        assert!(u2.active(), "a later unknown store counts again");
+        n.commit(c());
+        assert!(u2.active(c()), "a later unknown store counts again");
     }
 
     #[test]
@@ -1138,11 +1151,11 @@ mod tests {
         let (r, t, c) = fixture();
         let (a, b) = (join(r, &on(1), &c), join(r, &on(1), &c));
         let h = a.hold();
-        assert!(a.active() && b.active());
+        assert!(a.active(c()) && b.active(c()));
         let _was = t.fetch_add(60_000 * MS, Ordering::Relaxed);
-        assert!(b.active(), "a hold needs no commit and never expires");
+        assert!(b.active(c()), "a hold needs no commit and never expires");
         drop(h);
-        assert!(!a.active() && !b.active());
+        assert!(!a.active(c()) && !b.active(c()));
     }
 
     #[test]
@@ -1162,17 +1175,17 @@ mod tests {
         let (r, _t, c) = fixture();
         let s = join(r, &on(1), &c);
         let i = Issuer::new(&s);
-        s.commit();
-        let a = i.admit().expect("admitted");
-        assert!(i.admit().is_none());
+        s.commit(c());
+        let a = i.admit(c()).expect("admitted");
+        assert!(i.admit(c()).is_none());
         assert_eq!(
-            s.report().in_flight,
+            s.report(c()).in_flight,
             1,
             "the refusal's tentative charge is undone"
         );
         drop(a);
         assert_eq!(
-            s.report().in_flight,
+            s.report(c()).in_flight,
             0,
             "a released charge leaves the member"
         );
@@ -1183,8 +1196,8 @@ mod tests {
         let (r, _t, c) = fixture();
         let s = join(r, &on(1), &c);
         let i = Issuer::new(&s);
-        s.commit();
-        let held = i.admit().expect("admitted");
+        s.commit(c());
+        let held = i.admit(c()).expect("admitted");
         let src = Arc::new(FakePoison {
             poisoned: AtomicBool::new(true),
             wake: Mutex::new(None),
@@ -1193,7 +1206,7 @@ mod tests {
         let i3 = Arc::clone(&i);
         let got = waited(
             &i,
-            move || i2.wait_admit().map(|_| ()),
+            move || i2.wait_admit(&|| 1_000_000_000).map(|_| ()),
             move || i3.watch(src as Arc<dyn PoisonSource>),
         );
         drop(held);
@@ -1204,7 +1217,7 @@ mod tests {
     fn test_an_unknown_store_s_commit_is_stamped_for_the_scope_only_while_unknown_stores_live() {
         let (r, t, c) = fixture();
         let n = join(r, &on(1), &c);
-        n.commit();
+        n.commit(c());
         assert_eq!(
             n.scope.any_commit.load(Ordering::Relaxed),
             0,
@@ -1212,14 +1225,14 @@ mod tests {
         );
         let u = join(r, &unknown(None), &c);
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
-        u.commit();
+        u.commit(c());
         assert_eq!(
             u.scope.unknown_commit.load(Ordering::Relaxed),
             c(),
             "an unknown commit is stamped"
         );
         let _was = t.fetch_add(2 * MS, Ordering::Relaxed);
-        n.commit();
+        n.commit(c());
         assert_eq!(
             n.scope.any_commit.load(Ordering::Relaxed),
             c(),
@@ -1231,16 +1244,16 @@ mod tests {
     fn test_scopes_never_share_groups_or_activity() {
         let (r, t, c) = fixture();
         let opts = QosOptions::default();
-        let a = r.join(1, &on(1), opts, Arc::clone(&c));
-        let b = r.join(2, &on(1), opts, Arc::clone(&c));
-        let ua = r.join(1, &unknown(None), opts, Arc::clone(&c));
-        let ub = r.join(2, &unknown(None), opts, Arc::clone(&c));
+        let a = r.join(1, &on(1), opts, c());
+        let b = r.join(2, &on(1), opts, c());
+        let ua = r.join(1, &unknown(None), opts, c());
+        let ub = r.join(2, &unknown(None), opts, c());
         // The first unknown store of each scope starts active (its seed).
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
-        a.commit();
-        ua.commit();
-        assert!(!b.active() && !ub.active());
-        assert!(a.active() && ua.active());
+        a.commit(c());
+        ua.commit(c());
+        assert!(!b.active(c()) && !ub.active(c()));
+        assert!(a.active(c()) && ua.active(c()));
     }
 
     #[test]
@@ -1248,11 +1261,11 @@ mod tests {
         let (r, _t, c) = fixture();
         let n = join(r, &on(1), &c);
         let m = join(r, &Placement::Memory, &c);
-        m.commit();
-        assert!(!n.active() && !m.active());
+        m.commit(c());
+        assert!(!n.active(c()) && !m.active(c()));
         let i = Issuer::new(&m);
-        let held: Vec<_> = (0..8).map(|_| i.admit().expect("admitted")).collect();
-        assert!(i.admit().is_none(), "the unpaced cap still bounds it");
+        let held: Vec<_> = (0..8).map(|_| i.admit(c()).expect("admitted")).collect();
+        assert!(i.admit(c()).is_none(), "the unpaced cap still bounds it");
         drop(held);
     }
 
@@ -1261,22 +1274,22 @@ mod tests {
         let (r, t, c) = fixture();
         let s = join(r, &on(1), &c);
         let i = Issuer::new(&s);
-        s.commit();
-        let one = i.admit().expect("admitted");
+        s.commit(c());
+        let one = i.admit(c()).expect("admitted");
         assert!(
-            i.admit().is_none(),
+            i.admit(c()).is_none(),
             "paced: one piece while commits are active"
         );
         drop(one);
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
-        let held: Vec<_> = (0..8).map(|_| i.admit().expect("admitted")).collect();
-        assert!(i.admit().is_none(), "unpaced: background_unpaced pieces");
+        let held: Vec<_> = (0..8).map(|_| i.admit(c()).expect("admitted")).collect();
+        assert!(i.admit(c()).is_none(), "unpaced: background_unpaced pieces");
         drop(held);
         // Registered during continuous commits: paced from its first piece.
         let late = Issuer::new(&s);
-        s.commit();
-        let a = late.admit().expect("admitted");
-        assert!(late.admit().is_none());
+        s.commit(c());
+        let a = late.admit(c()).expect("admitted");
+        assert!(late.admit(c()).is_none());
         drop(a);
     }
 
@@ -1286,8 +1299,8 @@ mod tests {
         let s = join(r, &on(1), &c);
         let i = Issuer::new(&s);
         // Commits never active: unpaced from the first piece.
-        let held: Vec<_> = (0..8).map(|_| i.admit().expect("admitted")).collect();
-        assert!(i.admit().is_none());
+        let held: Vec<_> = (0..8).map(|_| i.admit(c()).expect("admitted")).collect();
+        assert!(i.admit(c()).is_none());
         drop(held);
     }
 
@@ -1297,15 +1310,15 @@ mod tests {
         let s = join(r, &on(1), &c);
         let s2 = join(r, &on(1), &c);
         let (i, j) = (Issuer::new(&s), Issuer::new(&s2));
-        s.commit();
-        let a = i.admit().expect("admitted");
+        s.commit(c());
+        let a = i.admit(c()).expect("admitted");
         let b = j
-            .admit()
+            .admit(c())
             .expect("an issuer with none in flight is admitted");
-        assert!(i.admit().is_none() && j.admit().is_none());
-        assert_eq!(s.report().in_flight, 2);
+        assert!(i.admit(c()).is_none() && j.admit(c()).is_none());
+        assert_eq!(s.report(c()).in_flight, 2);
         drop((a, b));
-        assert_eq!(s.report().in_flight, 0);
+        assert_eq!(s.report(c()).in_flight, 0);
     }
 
     #[test]
@@ -1315,16 +1328,16 @@ mod tests {
             pacing: false,
             ..QosOptions::default()
         };
-        let s = r.join(0, &on(1), off, Arc::clone(&c));
-        let s2 = r.join(0, &on(1), off, Arc::clone(&c));
-        s.commit();
+        let s = r.join(0, &on(1), off, c());
+        let s2 = r.join(0, &on(1), off, c());
+        s.commit(c());
         let i = Issuer::new(&s2);
-        let held: Vec<_> = (0..8).map(|_| i.admit().expect("admitted")).collect();
+        let held: Vec<_> = (0..8).map(|_| i.admit(c()).expect("admitted")).collect();
         drop(held);
         // One member asking for pacing paces the group.
         let _p = join(r, &on(1), &c);
-        let a = i.admit().expect("admitted");
-        assert!(i.admit().is_none());
+        let a = i.admit(c()).expect("admitted");
+        assert!(i.admit(c()).is_none());
         drop(a);
     }
 
@@ -1336,15 +1349,18 @@ mod tests {
             background_unpaced: 2,
             ..QosOptions::default()
         };
-        let a = r.join(0, &on(1), long, Arc::clone(&c));
+        let a = r.join(0, &on(1), long, c());
         let b = join(r, &on(1), &c);
-        b.commit();
+        b.commit(c());
         let _was = t.fetch_add(10_000 * MS, Ordering::Relaxed);
-        assert!(a.active() && b.active(), "the largest quiet is the group's");
+        assert!(
+            a.active(c()) && b.active(c()),
+            "the largest quiet is the group's"
+        );
         let _was = t.fetch_add(60_000 * MS, Ordering::Relaxed);
         let i = Issuer::new(&b);
-        let held: Vec<_> = (0..2).map(|_| i.admit().expect("admitted")).collect();
-        assert!(i.admit().is_none(), "the smallest cap is the group's");
+        let held: Vec<_> = (0..2).map(|_| i.admit(c()).expect("admitted")).collect();
+        assert!(i.admit(c()).is_none(), "the smallest cap is the group's");
         drop(held);
     }
 
@@ -1353,27 +1369,27 @@ mod tests {
         let (r, t, c) = fixture();
         let a = join(r, &on(1), &c);
         let b = join(r, &on(1), &c);
-        a.commit();
+        a.commit(c());
         drop(a);
         // A join prunes the closed member; its commit is kept as retired.
         let x = join(r, &on(1), &c);
-        assert_eq!(b.report().members, 2);
-        assert!(x.active() && b.active());
+        assert_eq!(b.report(c()).members, 2);
+        assert!(x.active(c()) && b.active(c()));
         let _was = t.fetch_add(6_000 * MS, Ordering::Relaxed);
-        assert!(!b.active());
+        assert!(!b.active(c()));
     }
 
     #[test]
     fn test_commits_are_stamped_at_most_once_a_millisecond() {
         let (r, t, c) = fixture();
         let a = join(r, &on(1), &c);
-        a.commit();
+        a.commit(c());
         let first = a.counters.last_commit.load(Ordering::Relaxed);
         let _was = t.fetch_add(MS / 2, Ordering::Relaxed);
-        a.commit();
+        a.commit(c());
         assert_eq!(a.counters.last_commit.load(Ordering::Relaxed), first);
         let _was = t.fetch_add(MS, Ordering::Relaxed);
-        a.commit();
+        a.commit(c());
         assert!(a.counters.last_commit.load(Ordering::Relaxed) > first);
     }
 
@@ -1417,12 +1433,12 @@ mod tests {
         let (r, _t, c) = fixture();
         let s = join(r, &on(1), &c);
         let i = Issuer::new(&s);
-        s.commit();
-        let held = i.admit().expect("admitted");
+        s.commit(c());
+        let held = i.admit(c()).expect("admitted");
         let i2 = Arc::clone(&i);
         let got = waited(
             &i,
-            move || i2.wait_admit().map(|_| ()),
+            move || i2.wait_admit(&|| 1_000_000_000).map(|_| ()),
             || drop(Binding::new(&i)),
         );
         drop(held);
@@ -1457,10 +1473,14 @@ mod tests {
         let (r, _t, c) = fixture();
         let s = join(r, &on(1), &c);
         let i = Issuer::new(&s);
-        s.commit();
-        let held = i.admit().expect("admitted");
+        s.commit(c());
+        let held = i.admit(c()).expect("admitted");
         let i2 = Arc::clone(&i);
-        let got = waited(&i, move || i2.wait_admit().is_ok(), move || drop(held));
+        let got = waited(
+            &i,
+            move || i2.wait_admit(&|| 1_000_000_000).is_ok(),
+            move || drop(held),
+        );
         assert!(got, "the release did not admit the waiter");
     }
 
@@ -1489,13 +1509,13 @@ mod tests {
             wake: Mutex::new(None),
         });
         i.watch(Arc::clone(&src) as Arc<dyn PoisonSource>);
-        s.commit();
-        let held = i.admit().expect("admitted");
+        s.commit(c());
+        let held = i.admit(c()).expect("admitted");
         let i2 = Arc::clone(&i);
         let s2 = Arc::clone(&src);
         let got = waited(
             &i,
-            move || i2.wait_admit().map(|_| ()),
+            move || i2.wait_admit(&|| 1_000_000_000).map(|_| ()),
             move || {
                 s2.poisoned.store(true, Ordering::SeqCst);
                 let w = s2.wake.lock().unwrap().clone().unwrap();
@@ -1508,10 +1528,10 @@ mod tests {
         // its outcome awaited with a timeout).
         let j = Issuer::new(&s);
         j.watch(src as Arc<dyn PoisonSource>);
-        let h = j.admit().expect("admitted");
+        let h = j.admit(c()).expect("admitted");
         let j2 = Arc::clone(&j);
         let (tx, rx) = std::sync::mpsc::channel();
-        let _t = std::thread::spawn(move || tx.send(j2.wait_admit().map(|_| ())));
+        let _t = std::thread::spawn(move || tx.send(j2.wait_admit(&|| 1_000_000_000).map(|_| ())));
         let got = rx.recv_timeout(std::time::Duration::from_secs(10));
         drop(h);
         assert_eq!(
@@ -1527,6 +1547,11 @@ mod loom_tests {
 
     use super::*;
 
+    /// The models' time: constant (activity is set by a commit at it).
+    fn c() -> u64 {
+        1_000_000_000
+    }
+
     fn fixture() -> Arc<Qos> {
         let r: &'static Registry = Box::leak(Box::new(Registry::new()));
         let q = r.join(
@@ -1540,9 +1565,9 @@ mod loom_tests {
                 fs_device: None,
             },
             QosOptions::default(),
-            Arc::new(|| 1_000_000_000),
+            c(),
         );
-        q.commit();
+        q.commit(c());
         q
     }
 
@@ -1556,9 +1581,9 @@ mod loom_tests {
             let t = {
                 let i = Arc::clone(&i);
                 // The charge is returned, so it is held until both decided.
-                loom::thread::spawn(move || i.admit())
+                loom::thread::spawn(move || i.admit(c()))
             };
-            let mine = i.admit();
+            let mine = i.admit(c());
             let theirs = t.join().unwrap();
             assert_eq!(u8::from(mine.is_some()) + u8::from(theirs.is_some()), 1);
             assert_eq!(i.in_flight(), 1);
@@ -1574,10 +1599,10 @@ mod loom_tests {
         loom::model(|| {
             let q = fixture();
             let i = Issuer::new(&q);
-            let held = i.admit().expect("admitted");
+            let held = i.admit(c()).expect("admitted");
             let t = {
                 let i = Arc::clone(&i);
-                loom::thread::spawn(move || i.wait_admit().is_ok())
+                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000).is_ok())
             };
             drop(held);
             assert!(t.join().unwrap());
@@ -1601,11 +1626,10 @@ mod loom_tests {
     fn loom_a_merge_racing_a_charge_and_its_release() {
         loom::model(|| {
             let r: &'static Registry = Box::leak(Box::new(Registry::new()));
-            let clock: Clock = Arc::new(|| 1_000_000_000);
-            let a = r.join(0, &placed(1), QosOptions::default(), Arc::clone(&clock));
-            let _b = r.join(0, &placed(2), QosOptions::default(), Arc::clone(&clock));
+            let a = r.join(0, &placed(1), QosOptions::default(), c());
+            let _b = r.join(0, &placed(2), QosOptions::default(), c());
             let i = Issuer::new(&a);
-            let t = loom::thread::spawn(move || drop(i.admit()));
+            let t = loom::thread::spawn(move || drop(i.admit(c())));
             let both = Placement::Keyed {
                 identity: DeviceIdentity {
                     devices: vec![
@@ -1617,10 +1641,10 @@ mod loom_tests {
                 members: Vec::new(),
                 fs_device: None,
             };
-            let s = r.join(0, &both, QosOptions::default(), clock);
+            let s = r.join(0, &both, QosOptions::default(), c());
             t.join().unwrap();
-            assert_eq!(s.report().in_flight, 0);
-            assert_eq!(a.report().members, 3);
+            assert_eq!(s.report(c()).in_flight, 0);
+            assert_eq!(a.report(c()).members, 3);
         });
     }
 
@@ -1630,15 +1654,14 @@ mod loom_tests {
     fn loom_an_unknown_join_racing_the_last_unknown_close() {
         loom::model(|| {
             let r: &'static Registry = Box::leak(Box::new(Registry::new()));
-            let clock: Clock = Arc::new(|| 1_000_000_000);
             let unknown = Placement::Keyed {
                 identity: DeviceIdentity::unknown(),
                 members: Vec::new(),
                 fs_device: None,
             };
-            let u1 = r.join(0, &unknown, QosOptions::default(), Arc::clone(&clock));
+            let u1 = r.join(0, &unknown, QosOptions::default(), c());
             let t = loom::thread::spawn(move || drop(u1));
-            let u2 = r.join(0, &unknown, QosOptions::default(), clock);
+            let u2 = r.join(0, &unknown, QosOptions::default(), c());
             t.join().unwrap();
             assert_eq!(u2.scope.unknown_members.load(Ordering::Relaxed), 1);
         });
@@ -1665,10 +1688,10 @@ mod loom_tests {
         loom::model(|| {
             let q = fixture();
             let i = Issuer::new(&q);
-            let held = i.admit().unwrap();
+            let held = i.admit(c()).unwrap();
             let t = {
                 let i = Arc::clone(&i);
-                loom::thread::spawn(move || i.wait_admit().map(|_| ()))
+                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000).map(|_| ()))
             };
             let src = Arc::new(Poison {
                 set: AtomicBool::new(true),
@@ -1685,10 +1708,10 @@ mod loom_tests {
         loom::model(|| {
             let q = fixture();
             let i = Issuer::new(&q);
-            let held = i.admit().expect("admitted");
+            let held = i.admit(c()).expect("admitted");
             let t = {
                 let i = Arc::clone(&i);
-                loom::thread::spawn(move || i.wait_admit().map(|_| ()))
+                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000).map(|_| ()))
             };
             i.end();
             let got = t.join().unwrap();

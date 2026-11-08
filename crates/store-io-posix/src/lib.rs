@@ -506,6 +506,10 @@ mod platform {
             sys::monotonic_ns()
         }
 
+        fn clock(&self) -> store_io_platform::Clock {
+            Arc::new(sys::monotonic_ns)
+        }
+
         fn io_path(&self) -> IoPath {
             let fell_back = self.fell_back.load(Ordering::Acquire);
             let refused = self.refused.load(Ordering::Acquire);

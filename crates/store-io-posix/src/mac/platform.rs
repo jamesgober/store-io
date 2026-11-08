@@ -179,6 +179,10 @@ impl Platform for PosixPlatform {
         sys::monotonic_ns()
     }
 
+    fn clock(&self) -> store_io_platform::Clock {
+        Arc::new(sys::monotonic_ns)
+    }
+
     fn io_path(&self) -> IoPath {
         IoPath {
             interface: IoInterface::Synchronous,

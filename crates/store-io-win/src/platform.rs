@@ -118,6 +118,10 @@ impl Platform for WinPlatform {
         sys::monotonic_ns()
     }
 
+    fn clock(&self) -> store_io_platform::Clock {
+        std::sync::Arc::new(sys::monotonic_ns)
+    }
+
     fn io_path(&self) -> store_io_platform::IoPath {
         store_io_platform::IoPath {
             interface: store_io_platform::IoInterface::Iocp,

@@ -371,6 +371,22 @@ pub struct Domain {
     bucket_words: Box<[CachePadded<WaitWord>]>,
     designate_word: CachePadded<WaitWord>,
     shared_word: CachePadded<WaitWord>,
+    /// The store's device group and its platform's clock (PLANNING R5.4):
+    /// every barrier's entry, leading or joining, marks the group's commits
+    /// active. `None` for a domain no store owns (tests, models).
+    activity: Option<Activity>,
+}
+
+/// What a barrier's entry stamps.
+struct Activity {
+    qos: Arc<crate::qos::Qos>,
+    clock: store_io_platform::Clock,
+}
+
+impl core::fmt::Debug for Activity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Activity")
+    }
 }
 
 impl Default for Domain {
@@ -421,6 +437,28 @@ impl Domain {
                 .collect(),
             designate_word: CachePadded::new(WaitWord::new()),
             shared_word: CachePadded::new(WaitWord::new()),
+            activity: None,
+        }
+    }
+
+    /// The domain of a store in the device group `qos`, its barriers
+    /// stamping commit activity with `clock` (its platform's fine clock).
+    pub(crate) fn with_activity(
+        mut self,
+        qos: Arc<crate::qos::Qos>,
+        clock: store_io_platform::Clock,
+    ) -> Self {
+        self.activity = Some(Activity { qos, clock });
+        self
+    }
+
+    /// Marks the store's device group's commits active (a commit-class
+    /// barrier's entry, or a commit-class `dsync` write on a power-safe
+    /// store, where no barrier flushes): one clock read, a relaxed load and
+    /// a compare; a store at most once a millisecond (R5.4).
+    pub(crate) fn note_commit(&self) {
+        if let Some(a) = &self.activity {
+            a.qos.commit((a.clock)());
         }
     }
 
@@ -568,6 +606,9 @@ impl Domain {
         usable: u32,
         mut flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
+        // Every barrier is commit-class until a later step gives them classes
+        // (V3c3): its entry marks commits active, whether it leads or joins.
+        self.note_commit();
         let mut led_flush = false;
         // The highest `done` this call has yielded for: one goal, one try.
         let mut yielded_to = 0;

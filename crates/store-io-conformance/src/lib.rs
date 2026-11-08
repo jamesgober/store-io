@@ -778,6 +778,13 @@ fn monotonic_clock<P: Platform>(c: &Ctx<'_, P>) -> Check {
         check!(now >= last, "the fine clock went back: {last} then {now}");
         last = now;
     }
+    // The handle is the same clock.
+    let clock = c.p.clock();
+    let (a, h, b) = (c.p.monotonic_ns(), clock(), c.p.monotonic_ns());
+    check!(
+        a <= h && h <= b,
+        "the clock handle is not monotonic_ns's clock: {a}, {h}, {b}"
+    );
     // One origin across threads: a read on another thread after this one
     // (ordered by the spawn and the join) is never earlier.
     let before = c.p.monotonic_ns();

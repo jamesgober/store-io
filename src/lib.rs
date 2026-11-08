@@ -119,8 +119,9 @@ pub use store_io_core::id::{Generation, RegionId, VolumeId};
 pub use store_io_core::observe;
 pub use store_io_engine::{
     CONTAINER, COPY_LOCK, COPYING, CopyOptions, CopyReport, DomainStats, DurableReceipt,
-    Outstanding, RegionKind, RegionOptions, RegionPos, Repair, ScanItem, ScanSummary, SpaceReport,
-    StoreOptions, StoreReport, TagSpace, Unavailable, UnavailableRegion, WriteTicket,
+    MAX_SET_STORES, Outstanding, RegionKind, RegionOptions, RegionPos, Repair, ScanItem,
+    ScanSummary, SetStats, SpaceReport, StoreOptions, StoreReport, TagSpace, Unavailable,
+    UnavailableRegion, WriteTicket,
 };
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 
@@ -159,7 +160,7 @@ mod native;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use native::{
     AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, Reservation, Slot, Store,
-    Submitter, copy_store, probe,
+    StoreSet, Submitter, copy_store, probe,
 };
 
 /// What [`probe`] found out about a directory's device.

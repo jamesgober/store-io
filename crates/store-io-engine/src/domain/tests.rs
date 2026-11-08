@@ -598,3 +598,62 @@ fn test_a_waiting_full_flush_goes_before_new_leaders() {
         .clone();
     assert_eq!(order, ["full", "data"]);
 }
+
+/// Counts its wakes, checking each comes with the domain's slot lock free.
+struct CountWakes {
+    domain: std::sync::Weak<Domain>,
+    wakes: std::sync::atomic::AtomicUsize,
+}
+
+impl PoisonWaker for CountWakes {
+    fn poisoned(&self) {
+        if let Some(d) = self.domain.upgrade() {
+            assert!(d.state.try_lock().is_ok(), "woken under the slot lock");
+        }
+        let _n = self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Every way a domain is poisoned wakes its poison wakers, after the slot
+/// lock is released: an explicit poison, a failed flush, a panicking one.
+/// A waker forgotten is not woken.
+#[test]
+fn test_every_poisoning_wakes_the_poison_wakers() {
+    type Poisoning = fn(&Domain);
+    let ways: [Poisoning; 3] = [
+        |d| {
+            d.poison(FirstCause {
+                op: None,
+                raw: None,
+            });
+        },
+        |d| {
+            let r = d.barrier(d.ticket(), |_, _| Err(None));
+            assert!(matches!(r, Err(Error::DurabilityUnknown { .. })));
+        },
+        |d| {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _r = d.barrier(d.ticket(), |_, _| panic!("the flush panicked"));
+            }));
+            assert!(r.is_err());
+        },
+    ];
+    for poison in ways {
+        let d = Arc::new(Domain::new());
+        let w = Arc::new(CountWakes {
+            domain: Arc::downgrade(&d),
+            wakes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let gone = Arc::new(CountWakes {
+            domain: Arc::downgrade(&d),
+            wakes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let _key = d.on_poison(Arc::clone(&w) as Arc<dyn PoisonWaker>);
+        let forgotten = d.on_poison(Arc::clone(&gone) as Arc<dyn PoisonWaker>);
+        d.forget_poison_waker(forgotten);
+        poison(&d);
+        assert!(d.poisoned().is_some());
+        assert_eq!(w.wakes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(gone.wakes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}

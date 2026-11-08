@@ -96,8 +96,16 @@
 //! again, the leader gets the failure, and every waiting or later barrier gets
 //! [`Error::Poisoned`]. A barrier that was already satisfied before it
 //! observed the poison keeps its result. A flush is never retried.
+//!
+//! The poison is set in three places: [`Domain::poison`] and a leader's
+//! panic set it before taking the slot lock, a leader's failed flush under
+//! it; every leader reads it under the lock before issuing a flush, so none
+//! is issued once a poisoning has taken the lock. All three end in one function, which releases the lock,
+//! wakes the barriers asleep here, then wakes every registered
+//! `PoisonWaker` (a set barrier waiting for this domain's flush thread,
+//! `multi.rs`), copied under their own lock and woken after it is released.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(loom)]
 use loom::sync::{Mutex, MutexGuard};
@@ -136,7 +144,7 @@ const SKIPS: u32 = 256;
 /// atomics, not modelled under loom for the same reason.
 #[derive(Debug, Default)]
 #[repr(align(128))]
-struct Patience {
+pub(crate) struct Patience {
     /// Waits in a row that ran out of yields.
     missed: core::sync::atomic::AtomicU32,
     /// Waits left that do not yield.
@@ -175,6 +183,56 @@ impl Patience {
         } else {
             self.missed.store(missed, Relaxed);
         }
+    }
+
+    /// A wait about to sleep: if waits yield now, yields until `reached`,
+    /// at most [`YIELDS`] times, and notes whether that was enough. Returns
+    /// whether `reached` held (always false when waits skip yielding).
+    pub(crate) fn yield_until(&self, reached: impl Fn() -> bool) -> bool {
+        if !self.try_yield() {
+            return false;
+        }
+        self.yields(reached)
+    }
+
+    /// Yields until `reached`, at most [`YIELDS`] times, and notes whether
+    /// that was enough.
+    fn yields(&self, reached: impl Fn() -> bool) -> bool {
+        for _ in 0..YIELDS {
+            if reached() {
+                break;
+            }
+            yield_now();
+        }
+        let enough = reached();
+        if enough {
+            self.reached();
+        } else {
+            self.ran_out();
+        }
+        enough
+    }
+}
+
+/// Woken when a domain is poisoned: a set barrier waiting on this domain's
+/// flush thread (`multi.rs`), so a store's poison ends the wait.
+pub(crate) trait PoisonWaker: Send + Sync {
+    /// The domain was poisoned. Called with no lock of the domain held.
+    fn poisoned(&self);
+}
+
+/// The registered poison wakers ([`Domain::on_poison`]).
+#[derive(Default)]
+struct PoisonWakers {
+    next: u64,
+    list: Vec<(u64, Arc<dyn PoisonWaker>)>,
+}
+
+impl core::fmt::Debug for PoisonWakers {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PoisonWakers")
+            .field("registered", &self.list.len())
+            .finish()
     }
 }
 
@@ -307,6 +365,8 @@ pub struct Domain {
     slots: u32,
     patience: Patience,
     state: Mutex<Slots>,
+    /// Woken after the poison is set ([`Self::wake_poisoned`]).
+    poison_wakers: Mutex<PoisonWakers>,
     /// One per wait bucket, each on its own cache line.
     bucket_words: Box<[CachePadded<WaitWord>]>,
     designate_word: CachePadded<WaitWord>,
@@ -355,6 +415,7 @@ impl Domain {
                 peak: 0,
                 out_of_order: 0,
             }),
+            poison_wakers: Mutex::new(PoisonWakers::default()),
             bucket_words: (0..BUCKETS)
                 .map(|_| CachePadded::new(WaitWord::new()))
                 .collect(),
@@ -376,10 +437,52 @@ impl Domain {
     }
 
     /// Poisons the domain (explicitly by a caller's watchdog, or after a
-    /// failed write). Wakes every follower. Idempotent: the first cause wins.
+    /// failed write). Wakes every follower and every poison waker.
+    /// Idempotent: the first cause wins.
     pub fn poison(&self, cause: FirstCause) {
         let _first_cause_kept = self.poison.set(cause);
-        self.notify();
+        let mut st = self.lock();
+        let mut wakes = Wakes::new();
+        self.take_everyone(&mut st, &mut wakes);
+        self.wake_poisoned(st, wakes);
+    }
+
+    /// Registers `w`, woken when the domain is poisoned after this call (a
+    /// poison before it wakes nobody: the caller reads the poison after
+    /// registering, and so sees it). Returns the key that
+    /// unregisters it ([`Self::forget_poison_waker`]). Must not be called
+    /// holding a lock `w.poisoned` takes.
+    pub(crate) fn on_poison(&self, w: Arc<dyn PoisonWaker>) -> u64 {
+        let mut all = lock_wakers(&self.poison_wakers);
+        all.next += 1;
+        let key = all.next;
+        all.list.push((key, w));
+        key
+    }
+
+    /// Unregisters the poison waker `key` (see [`Self::on_poison`]).
+    pub(crate) fn forget_poison_waker(&self, key: u64) {
+        lock_wakers(&self.poison_wakers)
+            .list
+            .retain(|(k, _)| *k != key);
+    }
+
+    /// The end of every poisoning: with the poison set under `st`, releases
+    /// the slot lock, wakes the sleepers `wakes` holds, then every poison
+    /// waker, copied under their lock and woken after it is released (a
+    /// waker's own lock is never taken under a domain lock, and a waker
+    /// being unregistered never waits on a wake in progress).
+    fn wake_poisoned(&self, st: MutexGuard<'_, Slots>, wakes: Wakes) {
+        drop(st);
+        wakes.send(self);
+        let wakers: Vec<Arc<dyn PoisonWaker>> = lock_wakers(&self.poison_wakers)
+            .list
+            .iter()
+            .map(|(_, w)| Arc::clone(w))
+            .collect();
+        for w in wakers {
+            w.poisoned();
+        }
     }
 
     /// Observability counters: a consistent snapshot, read under the slot
@@ -550,15 +653,16 @@ impl Domain {
             let mut wakes = Wakes::new();
             if self.poison.get().is_some() {
                 self.take_everyone(&mut st, &mut wakes);
+                self.wake_poisoned(st, wakes);
             } else {
                 self.take_covered(&mut st, before, &mut wakes);
                 // A slot is free: the designate may lead on it, and the
                 // shared sleepers include those that wait for a slot.
                 self.take_designate(&mut st, &mut wakes);
                 self.take_shared(&mut st, &mut wakes);
+                drop(st);
+                wakes.send(self);
             }
-            drop(st);
-            wakes.send(self);
             if let Some(raw) = failed {
                 return Err(Error::DurabilityUnknown {
                     op: Op::FlushData,
@@ -573,17 +677,7 @@ impl Domain {
     /// most [`YIELDS`] times, and notes whether that was enough.
     fn yield_to(&self, goal: u64) {
         let reached = || self.done.load(Ordering::SeqCst) >= goal || self.poison.get().is_some();
-        for _ in 0..YIELDS {
-            if reached() {
-                break;
-            }
-            yield_now();
-        }
-        if reached() {
-            self.patience.reached();
-        } else {
-            self.patience.ran_out();
-        }
+        let _enough = self.patience.yields(reached);
     }
 
     /// Records flush `k`'s success and advances `done` over the unbroken
@@ -672,8 +766,7 @@ impl Domain {
         st.busy &= !(1 << slot);
         let mut wakes = Wakes::new();
         self.take_everyone(&mut st, &mut wakes);
-        drop(st);
-        wakes.send(self);
+        self.wake_poisoned(st, wakes);
     }
 
     /// Where a barrier for `need` that must wait sleeps (see the module
@@ -789,6 +882,7 @@ impl Domain {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(all(test, not(loom)))]
     fn notify(&self) {
         let mut st = self.lock();
         let mut wakes = Wakes::new();
@@ -796,6 +890,10 @@ impl Domain {
         drop(st);
         wakes.send(self);
     }
+}
+
+fn lock_wakers(m: &Mutex<PoisonWakers>) -> MutexGuard<'_, PoisonWakers> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Holds slot 0 for [`Domain::exclusive_main`]; gives it back on drop.

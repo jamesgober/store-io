@@ -8,7 +8,7 @@ use store_io_core::error::{Error, ErrorContext, NotWrittenCause};
 use store_io_platform::{Platform, Queue};
 
 use crate::completion::Rejected;
-use crate::flusher::{Flushed, Inbox};
+use crate::flusher::{Answer, Flushed, Inbox};
 use crate::io::not_written;
 use crate::optable::{Kind, Table};
 use crate::receipt::WriteTicket;
@@ -44,7 +44,7 @@ pub(super) fn ask<P: Platform>(
         Some(Err(Error::Poisoned { first }))
     } else if store
         .flusher()
-        .is_some_and(|f| f.request(need, qtag, inbox))
+        .is_some_and(|f| f.request(need, qtag, Arc::clone(inbox) as Arc<dyn Answer>))
     {
         table.asked += 1;
         None

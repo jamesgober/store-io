@@ -210,6 +210,30 @@ impl<P: Platform> Clone for AppendRegion<P> {
     }
 }
 
+/// The tail of every prefix sync (`sync_through`, a set barrier's append
+/// tickets, `settle::durable_receipt`): publishes `snapshot`, the completed
+/// prefix read **before** the flush's ticket `need` was taken (a prefix read
+/// after it may hold bytes the flush does not cover), as synced when a data
+/// flush backs it, else durable, and builds its prefix receipt.
+pub(crate) fn sync_tail<P: Platform>(
+    store: &Store<P>,
+    state: &LiveRegion,
+    snapshot: u64,
+    need: u64,
+    synced: bool,
+) -> DurableReceipt
+where
+    P::Queue: Send,
+{
+    if let Some(f) = state.frontier.as_ref() {
+        if synced {
+            f.publish_synced(snapshot);
+        } else {
+            f.publish_durable(snapshot);
+        }
+    }
+    store.receipt(state, 0, snapshot, need, true, synced)
+}
 impl<P: Platform> AppendRegion<P>
 where
     P::Queue: Send,
@@ -420,12 +444,7 @@ where
         // Snapshot the completed prefix BEFORE the barrier takes its ticket.
         let through = f.completed();
         let (need, synced) = s.barrier_for(&self.state)?;
-        if synced {
-            f.publish_synced(through);
-        } else {
-            f.publish_durable(through);
-        }
-        Ok(s.receipt(&self.state, 0, through, need, true, synced))
+        Ok(sync_tail(s, &self.state, through, need, synced))
     }
 
     /// Appends `data` and makes it durable before returning.

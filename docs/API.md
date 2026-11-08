@@ -21,6 +21,7 @@
 11. [Errors](#11-errors)
 12. [The engine and platforms](#12-the-engine-and-platforms)
 13. [The `store-io` tool](#13-the-store-io-tool)
+14. [Stores on several devices](#14-stores-on-several-devices)
 
 Every call blocks until its I/O is done. Handles (`Store`, regions, slots) are cheap to clone and safe to share between threads.
 
@@ -280,6 +281,24 @@ store-io copy [--override-refusal] [--accept-stale-pages] <old> <new>
                         (--accept-stale-pages: a damaged table copied as far as it
                         can be; exit status 3 when it lists what it could not vouch for)
 ```
+
+---
+
+## 14. Stores on several devices
+
+`StoreSet`: stores (one per device, opened as usual) made durable together, one flush per store, the flushes in parallel. No format change and no lock across stores: each keeps its own flush thread, poison and receipts. See [GUIDE section 17](GUIDE.md#17-durable-together-across-devices-storeset).
+
+| Item | Description |
+|---|---|
+| `StoreSet::new(stores) -> Result<StoreSet>` | Writable stores (the caller keeps its handles; stores on one device are allowed, and flushed separately). Refused: the same open store twice, or two stores with one volume id (a container copied by another tool), `NotWritten(Overlap)`; a read-only store `NotWritten(ReadOnly)`; more than `MAX_SET_STORES` (65,536) `NotWritten(InvalidOptions)`. |
+| `len()`, `is_empty()`, `iter()`, `set[i]` | The stores, in set order, as engine stores (`store_io::engine::Store<NativePlatform>`, what a `Store` derefs to). |
+| `barrier(&[&WriteTicket]) -> Result<Vec<DurableReceipt>>` | Every ticket made durable, each store flushed at most once (none for a power-safe store unless a region forces data sync, or where a finished flush already covers it), every store flushed even if one fails; the first failing ticket's error. |
+| `barrier_each(&[&WriteTicket]) -> Result<Vec<Result<DurableReceipt>>>` | One result per ticket, for a quorum: a store's failure is its own. The outer error only for a ticket of no store in the set (`NotWritten(ForeignPosition)`, nothing flushed); per ticket `NotReady` (released), `StaleGeneration` (recycled), `Poisoned`, `DurabilityUnknown` (a store whose flush failed on its flush thread may answer `Poisoned`, the failed flush as its first cause). |
+| `distinct(i, j) -> bool` | Whether stores `i` and `j` share no physical device, read afresh (false when either identity is incomplete). |
+| `append_after(&AppendRegion, &deps, bytes)`, `write_after(&PageRegion, &deps, pos, bytes)` | Dependent writes with dependencies on any store of the set checked as the region's own store's are; a region of a store outside the set `NotWritten(ForeignPosition)`. |
+| `stats() -> SetStats` | `barriers`; `stores` (stores waited on: each with a ticket that became ready, flushed or not); `sleeps` (waits for a flush thread's answer); `fallbacks` (stores flushed on the calling thread because no flush thread took them). |
+
+A `Submitter` has `append_after_in(&set, &region, &deps, buf, mode, tag)` and `write_after_in(&set, &region, &deps, pos, buf, mode, tag)`: refused with the buffer unless its own store is in the set.
 
 ---
 

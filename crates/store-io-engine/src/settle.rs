@@ -156,15 +156,7 @@ where
 {
     match (prefix, state) {
         (Some(through), Some(state)) => {
-            let synced = need != u64::MAX;
-            if let Some(f) = state.frontier.as_ref() {
-                if synced {
-                    f.publish_synced(through);
-                } else {
-                    f.publish_durable(through);
-                }
-            }
-            store.receipt(state, 0, through, need, true, synced)
+            crate::region::sync_tail(store, state, through, need, need != u64::MAX)
         }
         _ => store.receipt_for(t, need),
     }

@@ -57,6 +57,9 @@ impl SimPlatform {
 pub struct SimFile {
     id: FileId,
     epoch: u64,
+    /// This handle's serial (`World::next_open`): a handle open when its
+    /// device was lost fails every operation (`World::crash_device`).
+    opened: u64,
     writable: bool,
 }
 
@@ -70,6 +73,8 @@ impl SimFile {
     fn check(&self, w: &World, write: bool) -> RawResult<()> {
         if w.epoch() != self.epoch || (write && !self.writable) {
             Err(EBADF)
+        } else if w.handle_lost(self.id, self.opened) {
+            Err(EIO)
         } else {
             Ok(())
         }
@@ -80,6 +85,19 @@ impl SimFile {
 #[derive(Debug, Clone)]
 pub struct SimDir {
     path: PathBuf,
+    /// This handle's serial: a handle open when its directory's device was
+    /// lost fails every operation (`World::crash_device`).
+    opened: u64,
+}
+
+impl SimDir {
+    fn check(&self, w: &World) -> RawResult<()> {
+        if w.dir_lost(&self.path, self.opened) {
+            Err(EIO)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// A held simulated ownership lock.
@@ -103,6 +121,7 @@ enum Pending {
     Write {
         file: FileId,
         epoch: u64,
+        opened: u64,
         offset: u64,
         buf: IoBuf,
         dsync: bool,
@@ -110,12 +129,14 @@ enum Pending {
     Read {
         file: FileId,
         epoch: u64,
+        opened: u64,
         offset: u64,
         buf: IoBuf,
     },
     Flush {
         file: FileId,
         epoch: u64,
+        opened: u64,
         cover: u64,
     },
 }
@@ -189,6 +210,7 @@ impl SimQueue {
                 Pending::Write {
                     file: file.id,
                     epoch: file.epoch,
+                    opened: file.opened,
                     offset,
                     buf,
                     dsync,
@@ -204,6 +226,7 @@ impl SimQueue {
                 Pending::Read {
                     file: file.id,
                     epoch: file.epoch,
+                    opened: file.opened,
                     offset,
                     buf,
                 }
@@ -219,6 +242,7 @@ impl SimQueue {
                 Pending::Flush {
                     file: file.id,
                     epoch: file.epoch,
+                    opened: file.opened,
                     cover: w.flush_cover(),
                 }
             }
@@ -335,13 +359,14 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         Pending::Write {
             file,
             epoch,
+            opened,
             offset,
             buf,
             dsync,
         } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
-            } else if w.powered_off() {
+            } else if w.powered_off() || w.handle_lost(file, opened) {
                 Err(EIO)
             } else if !aligned(w, offset, &buf) {
                 Err(EINVAL)
@@ -357,12 +382,13 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
         Pending::Read {
             file,
             epoch,
+            opened,
             offset,
             mut buf,
         } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
-            } else if w.powered_off() {
+            } else if w.powered_off() || w.handle_lost(file, opened) {
                 Err(EIO)
             } else if !aligned(w, offset, &buf) {
                 w.count_misaligned_read();
@@ -376,10 +402,15 @@ fn complete(w: &mut World, tag: u64, p: Pending) -> Completion {
                 result,
             }
         }
-        Pending::Flush { file, epoch, cover } => {
+        Pending::Flush {
+            file,
+            epoch,
+            opened,
+            cover,
+        } => {
             let result = if epoch != w.epoch() {
                 Err(EBADF)
-            } else if w.powered_off() {
+            } else if w.powered_off() || w.handle_lost(file, opened) {
                 Err(EIO)
             } else {
                 w.complete_flush(file, cover)
@@ -418,25 +449,29 @@ impl Platform for SimPlatform {
         if create {
             step(&self.world)?;
         }
-        lock(&self.world).open_dir(path.to_path_buf(), create)?;
+        let mut w = lock(&self.world);
+        w.open_dir(path.to_path_buf(), create)?;
         Ok(SimDir {
             path: path.to_path_buf(),
+            opened: w.next_open(),
         })
     }
 
     fn create_file(&self, dir: &SimDir, name: &FileName) -> RawResult<SimFile> {
         step(&self.world)?;
         let mut w = lock(&self.world);
+        dir.check(&w)?;
         let id = w.create_file(&dir.path, name.as_str())?;
         Ok(SimFile {
             id,
             epoch: w.epoch(),
+            opened: w.next_open(),
             writable: true,
         })
     }
 
     fn open_file(&self, dir: &SimDir, name: &FileName, mode: FileMode) -> RawResult<SimFile> {
-        let w = lock(&self.world);
+        let mut w = lock(&self.world);
         if let Some((d, n, code)) = &w.faults().fail_open {
             if *d == dir.path && n == name.as_str() {
                 return Err(OsError {
@@ -445,6 +480,7 @@ impl Platform for SimPlatform {
                 });
             }
         }
+        dir.check(&w)?;
         let id = w.lookup(&dir.path, name.as_str())?;
         if mode == FileMode::ReadWrite && w.faults().read_only_media {
             return Err(crate::world::EROFS);
@@ -452,6 +488,7 @@ impl Platform for SimPlatform {
         Ok(SimFile {
             id,
             epoch: w.epoch(),
+            opened: w.next_open(),
             writable: mode == FileMode::ReadWrite,
         })
     }
@@ -464,7 +501,9 @@ impl Platform for SimPlatform {
         _file: &SimFile,
     ) -> RawResult<()> {
         step(&self.world)?;
-        lock(&self.world).rename(&dir.path, from.as_str(), to.as_str())
+        let mut w = lock(&self.world);
+        dir.check(&w)?;
+        w.rename(&dir.path, from.as_str(), to.as_str())
     }
 
     fn rename_noreplace(
@@ -475,17 +514,23 @@ impl Platform for SimPlatform {
         _file: &SimFile,
     ) -> RawResult<()> {
         step(&self.world)?;
-        lock(&self.world).rename_noreplace(&dir.path, from.as_str(), to.as_str())
+        let mut w = lock(&self.world);
+        dir.check(&w)?;
+        w.rename_noreplace(&dir.path, from.as_str(), to.as_str())
     }
 
     fn unlink(&self, dir: &SimDir, name: &FileName) -> RawResult<()> {
         step(&self.world)?;
-        lock(&self.world).unlink(&dir.path, name.as_str())
+        let mut w = lock(&self.world);
+        dir.check(&w)?;
+        w.unlink(&dir.path, name.as_str())
     }
 
     fn sync_dir(&self, dir: &SimDir) -> RawResult<()> {
         step(&self.world)?;
-        lock(&self.world).sync_dir(&dir.path)
+        let mut w = lock(&self.world);
+        dir.check(&w)?;
+        w.sync_dir(&dir.path)
     }
 
     fn lock_exclusive(&self, file: &SimFile) -> RawResult<SimLock> {
@@ -511,9 +556,11 @@ impl Platform for SimPlatform {
     }
 
     fn reopen(&self, file: &SimFile) -> Option<SimFile> {
+        // Another handle of the same open: lost with it.
         (file.writable && lock(&self.world).reopen()).then_some(SimFile {
             id: file.id,
             epoch: file.epoch,
+            opened: file.opened,
             writable: true,
         })
     }
@@ -609,28 +656,28 @@ impl Platform for SimPlatform {
         w.flush_all(file.id)
     }
 
-    fn device_identity(&self, _dir: &SimDir, _file: &SimFile) -> DeviceIdentity {
+    fn device_identity(&self, _dir: &SimDir, file: &SimFile) -> DeviceIdentity {
         let w = lock(&self.world);
-        w.config()
+        w.device_config(file.id)
             .evidence
-            .as_ref()
-            .map_or_else(DeviceIdentity::unknown, |ev| ev.device.identity.clone())
+            .map_or_else(DeviceIdentity::unknown, |ev| ev.device.identity)
     }
 
     fn file_identity(&self, file: &SimFile) -> RawResult<FileIdentity> {
         let w = lock(&self.world);
         file.check(&w, false)?;
         Ok(FileIdentity {
-            volume: 0,
+            volume: w.volume_of(file.id),
             file: u128::from(file.id),
         })
     }
 
     fn path_identity(&self, dir: &SimDir, name: &FileName) -> RawResult<FileIdentity> {
         let w = lock(&self.world);
+        dir.check(&w)?;
         let id = w.lookup(&dir.path, name.as_str())?;
         Ok(FileIdentity {
-            volume: 0,
+            volume: w.volume_of(id),
             file: u128::from(id),
         })
     }
@@ -644,10 +691,11 @@ impl Platform for SimPlatform {
                 source: OsErrorSource::Sim,
             });
         }
-        if let Some(ev) = &w.config().evidence {
-            return Ok(ev.clone());
+        let device = w.device_config(file.id);
+        if let Some(ev) = device.evidence {
+            return Ok(ev);
         }
-        let power_safe = w.config().device == DeviceKind::PowerSafe;
+        let power_safe = device.kind == DeviceKind::PowerSafe;
         let mut ev = Evidence::unknown(PlatformKind::Sim);
         ev.device = DeviceFacts {
             model: Some("store-io simulated device".to_owned()),

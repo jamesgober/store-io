@@ -13,6 +13,24 @@
 
 ### Added
 
+- Engine: **`StoreSet`** (PLANNING R5.3, API-09's `barrier_set`): stores on
+  several devices made durable together. `barrier` and `barrier_each`
+  flush each store at most once per call, in parallel (the calling thread
+  flushes one store, the others' flush threads the rest), answer each
+  ticket by its store's kind (no flush for a power-safe store unless a
+  region forces data sync), and keep a store's failure its own; a hung
+  handed-off store is released by its poison. `append_after` and
+  `write_after` on the set, and the `Submitter`'s `append_after_in` and
+  `write_after_in`, check dependencies on any store of the set.
+  `distinct(i, j)` reads two stores' device identities afresh. The facade
+  exports `StoreSet`, `SetStats` and `MAX_SET_STORES`.
+- Simulator: **devices** (`SimConfig::with_device`, `World::place`,
+  `set_device_evidence`), each with its own kind, evidence and volume
+  number; `World::crash_device(d, mode)` loses one device (its cached
+  writes meet the mode's fates; its file and directory handles fail). A
+  flush now makes only its own file's cached writes durable
+  (`SimConfig::share_flushes`: every file's on the same device), so a
+  store relying on another file's flush is caught.
 - Engine: **dependent writes** (PLANNING R5.3, API-09's `write_after`):
   `AppendRegion::append_after(&deps, bytes)`,
   `PageRegion::write_after(&deps, pos, bytes)`, and the `Submitter`'s

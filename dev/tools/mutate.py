@@ -185,6 +185,9 @@ AFTER_SRC = "crates/store-io-engine/src/after.rs"
 IO_SRC = "crates/store-io-engine/src/io.rs"
 SUB_SRC = "crates/store-io-engine/src/submitter/mod.rs"
 MULTI_T = ["-p", "store-io-engine", "--test", "multi"]
+MULTI_SRC = "crates/store-io-engine/src/multi.rs"
+DOMAIN_SRC = "crates/store-io-engine/src/domain/mod.rs"
+POISON_T = ["-p", "store-io-engine", "--lib", "domain::tests::test_every_poisoning"]
 AFTER_RACE = ["-p", "store-io-engine", "--test", "after_race"]
 EXTENTS_T = ["-p", "store-io-engine", "--test", "format2_extents"]
 DEPS_OBS = ["-p", "store-io-engine", "--features", "observe", "--test", "observe"]
@@ -345,9 +348,9 @@ M = [
  ('crates/store-io-engine/src/lifecycle.rs', '            force_sync: Arc::clone(&r.force_sync),', '            force_sync: Arc::new(std::sync::atomic::AtomicBool::new(false)),'),
  ('crates/store-io-engine/src/optable.rs', '                    receipt.synced = need != u64::MAX;', '                    receipt.synced = true;'),
  ('crates/store-io-engine/src/slot_handle.rs', '        let flushed = s.inner.policy.flush || self.state.forced();', '        let flushed = s.inner.policy.flush;'),
- ('crates/store-io-engine/src/region.rs', '        if synced {\n            f.publish_synced(through);', '        if synced && false {\n            f.publish_synced(through);'),
+ ('crates/store-io-engine/src/region.rs', '        if synced {\n            f.publish_synced(snapshot);', '        if synced && false {\n            f.publish_synced(snapshot);'),
  ('crates/store-io-engine/src/submitter/durable.rs', '                .any(|r| r.forced());', '                .any(|r| r.forced() && false);'),
- ('crates/store-io-engine/src/settle.rs', '                if synced {\n                    f.publish_synced(through);', '                if synced && false {\n                    f.publish_synced(through);'),
+ ('crates/store-io-engine/src/settle.rs', '            crate::region::sync_tail(store, state, through, need, need != u64::MAX)', '            crate::region::sync_tail(store, state, through, need, need != u64::MAX || true)'),
  # D-103 3a: the io_uring ring: allowlist, full ring, deferred completions, ring sizes,
  # the owner thread, the registered descriptor only on owned rings
  ('crates/store-io-posix/src/uring/ring.rs', '        let can_release = restrict(&fd, &supported)?;', '        let can_release = true || restrict(&fd, &supported)?;', POSIX),
@@ -1076,29 +1079,29 @@ M = [
  # E7 C1: each cached write's exact fate (kept whole, torn at whole
  # blocks and never past its end, lost, lost past the list); its length
  # in blocks; the step probe before each step that can change a crash
- (SIMW, '                    Some(Fate::Kept) => w.data.len(),', '                    Some(Fate::Kept) => 0,', MODEL),
- (SIMW, '                    Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),', '                    Some(Fate::Torn(_)) => w.data.len(),', MODEL),
- (SIMW, '                    Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),', '                    Some(Fate::Torn(n)) => (*n).min(w.data.len()),', MODEL),
- (SIMW, '                    Some(Fate::Lost) | None => 0,', '                    Some(Fate::Lost) | None => w.data.len(),', MODEL),
- (SIMW, '            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))', '            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb) & 1))', MODEL),
- (SIMW, '            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))', '            .map(|w| (w.file, 0, w.data.len().div_ceil(lb)))', MODEL),
+ (SIMW, '            Some(Fate::Kept) => w.data.len(),', '            Some(Fate::Kept) => 0,', MODEL),
+ (SIMW, '            Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),', '            Some(Fate::Torn(_)) => w.data.len(),', MODEL),
+ (SIMW, '            Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),', '            Some(Fate::Torn(n)) => (*n).min(w.data.len()),', MODEL),
+ (SIMW, '            Some(Fate::Lost) | None => 0,', '            Some(Fate::Lost) | None => w.data.len(),', MODEL),
+ (SIMW, '            .iter()\n            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))', '            .iter()\n            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb) & 1))', MODEL),
+ (SIMW, '            .iter()\n            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))', '            .iter()\n            .map(|w| (w.file, 0, w.data.len().div_ceil(lb)))', MODEL),
  (SIMW, '        for f in self.files.values_mut() {\n            f.durable_len = f.visible.len() as u64;\n        }\n        for d in self.dirs.values_mut() {\n            d.durable = d.entries.clone();\n        }', '        for d in self.dirs.values_mut() {\n            d.durable = d.entries.clone();\n        }', MODEL),
  (SIMW, '            f.durable_len = f.visible.len() as u64;\n        }\n        for d in self.dirs.values_mut() {\n            d.durable = d.entries.clone();\n        }', '            f.durable_len = f.visible.len() as u64;\n        }', MODEL),
  (SIMP, '        if let Err(raw) = step(&self.world) {', '        if let Err(raw) = step(&self.world).and(Ok(())).or(Ok::<(), OsError>(())) {', MODEL),
- (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        let id = w.create_file(', '        let mut w = lock(&self.world);\n        let id = w.create_file(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        let id = w.create_file(', '        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        let id = w.create_file(', MODEL),
  (SIMP, '        if create {\n            step(&self.world)?;\n        }', '        if create && false {\n            step(&self.world)?;\n        }', MODEL),
  (SIMP, '    if cut {\n        w.cut_power();\n    }', '    if cut && false {\n        w.cut_power();\n    }', MODEL),
  (SIMW, '        self.powered_off = true;', '        self.powered_off = false;', MODEL),
- (SIMP, '            } else if w.powered_off() {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', '            } else if w.powered_off() && false {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', MODEL),
- (SIMP, '            } else if w.powered_off() {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', '            } else if w.powered_off() && false {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', MODEL),
- (SIMW, '            mark(\n                &mut f.holes,\n                before.get(id).copied().unwrap_or(0),\n                f.durable_len,\n            );', '            let _ = before.get(id);', MODEL),
- (SIMW, '                unmark(&mut f.holes, s, e.min(f.durable_len));', '                let _ = (s, e);', MODEL),
- (SIMP, '            } else if w.powered_off() {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', '            } else if w.powered_off() && false {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', MODEL),
+ (SIMP, '            } else if w.powered_off() || w.handle_lost(file, opened) {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', '            } else if w.handle_lost(file, opened) {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', MODEL),
+ (SIMP, '            } else if w.powered_off() || w.handle_lost(file, opened) {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', '            } else if w.handle_lost(file, opened) {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', MODEL),
+ (SIMW, '    mark(\n        &mut f.holes,\n        before.get(&id).copied().unwrap_or(0),\n        f.durable_len,\n    );', '    let _ = before.get(&id);', MODEL),
+ (SIMW, '        unmark(&mut f.holes, s, e.min(f.durable_len));', '        let _ = (s, e);', MODEL),
+ (SIMP, '            } else if w.powered_off() || w.handle_lost(file, opened) {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', '            } else if w.handle_lost(file, opened) {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', MODEL),
  (SIMW, '        self.powered_off = false;\n        self.epoch += 1;', '        self.epoch += 1;', MODEL),
- (SIMP, '        step(&self.world)?;\n        lock(&self.world).rename(&dir.path', '        lock(&self.world).rename(&dir.path', MODEL),
- (SIMP, '        step(&self.world)?;\n        lock(&self.world).rename_noreplace(', '        lock(&self.world).rename_noreplace(', MODEL),
- (SIMP, '        step(&self.world)?;\n        lock(&self.world).unlink(', '        lock(&self.world).unlink(', MODEL),
- (SIMP, '        step(&self.world)?;\n        lock(&self.world).sync_dir(', '        lock(&self.world).sync_dir(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.rename(&dir.path', '        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.rename(&dir.path', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.rename_noreplace(', '        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.rename_noreplace(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.unlink(', '        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.unlink(', MODEL),
+ (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.sync_dir(', '        let mut w = lock(&self.world);\n        dir.check(&w)?;\n        w.sync_dir(', MODEL),
  (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate(file.id, len)', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.allocate(file.id, len)', MODEL),
  (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.set_len(', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        w.set_len(', MODEL),
  (SIMP, '        step(&self.world)?;\n        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        // A deallocation', '        let mut w = lock(&self.world);\n        file.check(&w, true)?;\n        // A deallocation', MODEL),
@@ -1108,6 +1111,18 @@ M = [
  (SIMW, '    pub fn kill(&mut self) {\n        self.locks.clear();\n        self.epoch += 1;', '    pub fn kill(&mut self) {\n        self.epoch += 1;', MODEL),
  (SIMW, '    pub fn kill(&mut self) {\n        self.locks.clear();\n        self.epoch += 1;', '    pub fn kill(&mut self) {\n        self.locks.clear();', MODEL),
  (SIMW, '    pub fn restore_power(&mut self) {\n        self.powered_off = false;', '    pub fn restore_power(&mut self) {\n        self.powered_off = true;', MODEL),
+ # SIM devices (V2b): a flush covers its own file; a lost device fails
+ # its handles; each device its kind, volume and placement.
+ (SIMW, '        w.seq <= cover\n            && (w.file == file\n                || (self.cfg.share_flushes && self.device_of(w.file) == self.device_of(file)))', '        w.seq <= cover\n            && (w.file == file\n                || true)', MODEL),
+ (SIMW, '        w.seq <= cover\n            && (w.file == file\n                || (self.cfg.share_flushes && self.device_of(w.file) == self.device_of(file)))', '        w.seq <= cover\n            && (w.file == file)', MODEL),
+ (SIMP, '        } else if w.handle_lost(self.id, self.opened) {\n            Err(EIO)\n        } else {', '        } else if w.handle_lost(self.id, self.opened) && false {\n            Err(EIO)\n        } else {', MODEL),
+ (SIMP, '            } else if w.powered_off() || w.handle_lost(file, opened) {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', '            } else if w.powered_off() || w.handle_lost(file, opened) && false {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                Err(EINVAL)', MODEL),
+ (SIMW, '        let durable_now = dsync || self.device_config(file).kind == DeviceKind::PowerSafe;', '        let durable_now = dsync || self.cfg.device == DeviceKind::PowerSafe;', MODEL),
+ (SIMW, '            .partition(|w| device(self, w.file) == d);', '            .partition(|w| device(self, w.file) == d || true);', MODEL),
+ (SIMW, '        self.lost_through[d] = self.opens;', '        self.lost_through[d] = 0;', MODEL),
+ (SIMW, '        (self.id << 16) | self.device_of(file) as u64', '        (self.id & 0) | self.device_of(file) as u64', MODEL),
+ (SIMW, '        dir.ancestors()\n            .find_map(', '        std::iter::once(dir)\n            .find_map(', MODEL),
+ (SIMP, '        w.device_config(file.id)\n            .evidence', '        w.device_config(file.id & 0)\n            .evidence', MODEL),
  # E7 C3: the open drains a dead owner's cached writes before reading a slot
  ('crates/store-io-engine/src/open.rs', '            platform\n                .flush_all(&file)\n                .map_err(|e| Error::DurabilityUnknown {', '            Ok::<(), OsError>(())\n                .map_err(|e| Error::DurabilityUnknown {', CRASH_OPEN),
  # E7 C4: every candidate and damage reported, by slot (spec §9)
@@ -1328,8 +1343,8 @@ M = [
  ('crates/store-io-engine/src/domain/mod.rs', '        if skip == 0 {', '        if skip == 0 || true {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        self.skip.store(skip - 1, Relaxed);\n', '        self.skip.store(skip, Relaxed);\n', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        if self.missed.load(Relaxed) != 0 {', '        if self.missed.load(Relaxed) != 0 && false {', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '            self.patience.ran_out();\n', '            // ran out\n', DOMAIN),
- ('crates/store-io-engine/src/domain/mod.rs', '            self.patience.reached();\n', '            // reached\n', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            self.ran_out();\n', '            if false {\n                self.ran_out();\n            }\n', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '            self.reached();\n', '            if false {\n                self.reached();\n            }\n', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '        let reached = || self.done.load(Ordering::SeqCst) >= goal || self.poison.get().is_some();', '        let reached = || self.done.load(Ordering::SeqCst) >= goal;', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '                let goal = need.min(issued);', '                let goal = need;', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '                if goal > yielded_to && self.patience.try_yield() {', '                if goal > yielded_to {', DOMAIN),
@@ -1430,6 +1445,55 @@ M = [
  (SUB_SRC, "        drop(passes);\n        self.issue(req, tag, kind,", "        let _keep = passes;\n        self.issue(req, tag, kind,", AFTER_RACE),
  # AFTER: a Submitter page write's hook before its buffer is cut to a run.
  (SUB_SRC, "        let passes = admit!(before_issue(), buf);\n        let (offset, split) = first_piece(state, pos.offset, &mut buf);", "        let (offset, split) = first_piece(state, pos.offset, &mut buf);\n        let passes = admit!(before_issue(), buf);", EXTENTS_T),
+ # MULTI (V2b): a set barrier matches each ticket to its store and region;
+ # no flush where none is needed; receipts by each ticket's kind; a failed
+ # store's tickets only what is published; set-wide dependent writes.
+ (MULTI_SRC, '                .position(|s| s.inner.volume == t.volume && s.inner.epoch == t.epoch);', '                .position(|s| s.inner.volume == t.volume);', MULTI_T),
+ (MULTI_SRC, '            return Ticket::Done(Err(not_written(NotWrittenCause::NotReady, c)));', '            return Ticket::Done(Err(not_written(NotWrittenCause::StaleGeneration, c)));', MULTI_T),
+ (MULTI_SRC, '        if region.generation != t.generation || region.gate.check().is_err() {', '        if region.gate.check().is_err() {', MULTI_T),
+ (MULTI_SRC, '        if durable >= t.end {\n            store.inner.domain.count_already_durable();', '        if durable >= t.end && false {\n            store.inner.domain.count_already_durable();', MULTI_T),
+ (MULTI_SRC, '                    appends = true;\n                    flush |= *synced;', '                    appends = true;\n                    flush |= *synced && false;', MULTI_T),
+ (MULTI_SRC, '                    need = need.max(t.need);\n                    flush |= *synced;', '                    need = need.max(t.need);\n                    flush |= *synced && false;', MULTI_T),
+ (MULTI_SRC, '        if !flush {', '        if !flush && false {', MULTI_T),
+ (MULTI_SRC, '                        let need = if synced { part.need } else { u64::MAX };\n                        Ok(store.receipt_for(t, need))', '                        let need = if synced || true { part.need } else { u64::MAX };\n                        Ok(store.receipt_for(t, need))', MULTI_T),
+ (MULTI_SRC, '                        Ok(sync_tail(store, &region, through, need, synced))', '                        Ok(sync_tail(store, &region, through, need, synced || true))', MULTI_T),
+ (MULTI_SRC, '    if store.inner.domain.join_if_done(t.need) {', '    if false && store.inner.domain.join_if_done(t.need) {', MULTI_T),
+ (MULTI_SRC, '        identity(&self.stores[i]).distinct(&identity(&self.stores[j]))', '        identity(&self.stores[i]).distinct(&identity(&self.stores[i.min(j)]))', MULTI_T),
+ (MULTI_SRC, '        self.member(region.store())?;\n        region.append_after_in(', '        region.append_after_in(', MULTI_T),
+ (MULTI_SRC, '        self.member(region.store())?;\n        region.write_after_in(', '        region.write_after_in(', MULTI_T),
+ (MULTI_SRC, '        region.append_after_in(deps, bytes, &self.stores)', '        region.append_after_in(deps, bytes, core::slice::from_ref(region.store()))', MULTI_T),
+ (MULTI_SRC, '        region.write_after_in(deps, pos, bytes, &self.stores)', '        region.write_after_in(deps, pos, bytes, core::slice::from_ref(region.store()))', MULTI_T),
+ (MULTI_SRC, '    ) -> Result<RegionPos, Rejected> {\n        if let Err(error) = set.member(&self.store) {', '    ) -> Result<RegionPos, Rejected> {\n        if let Err(error) = set.member(&self.store).or(Ok::<(), Error>(())) {', MULTI_T),
+ (MULTI_SRC, '    ) -> Result<(), Rejected> {\n        if let Err(error) = set.member(&self.store) {', '    ) -> Result<(), Rejected> {\n        if let Err(error) = set.member(&self.store).or(Ok::<(), Error>(())) {', MULTI_T),
+ (MULTI_SRC, '        self.append_after_with(region, deps, buf, mode, tag, &set.stores)', '        self.append_after_with(region, deps, buf, mode, tag, core::slice::from_ref(region.store()))', MULTI_T),
+ (MULTI_SRC, '        self.write_after_with(region, deps, pos, buf, mode, tag, &set.stores)', '        self.write_after_with(region, deps, pos, buf, mode, tag, core::slice::from_ref(region.store()))', MULTI_T),
+ # MULTI: answers of another call are dropped (loom); a handed-off store
+ # flushed by its own thread; a poison waker registered.
+ (MULTI_SRC, '        if st.seq != seq {\n            return;\n        }', '        if st.seq != seq && false {\n            return;\n        }', LOOM_ENGINE, LOOM),
+ (MULTI_SRC, '        if let Some(f) = store.flusher() {\n            let waker', '        if let Some(f) = store.flusher().filter(|_| false) {\n            let waker', MULTI_T),
+ (MULTI_SRC, '            let key = store.inner.domain.on_poison(waker);', '            let key = {\n                let k = store.inner.domain.on_poison(waker);\n                store.inner.domain.forget_poison_waker(k);\n                k\n            };', MULTI_T),
+ # DOMAIN (V2b): every poisoning wakes the poison wakers, after the slot
+ # lock is released; a forgotten one is not woken.
+ (DOMAIN_SRC, '        for w in wakers {\n            w.poisoned();\n        }', '        for w in wakers.iter().take(0) {\n            w.poisoned();\n        }', POISON_T),
+ (DOMAIN_SRC, '    fn wake_poisoned(&self, st: MutexGuard<\'_, Slots>, wakes: Wakes) {\n        drop(st);', '    fn wake_poisoned(&self, st: MutexGuard<\'_, Slots>, wakes: Wakes) {\n        let _held = st;', POISON_T),
+ (DOMAIN_SRC, '            .retain(|(k, _)| *k != key);', '            .retain(|(k, _)| *k != key || true);', POISON_T),
+ (DOMAIN_SRC, '        self.take_everyone(&mut st, &mut wakes);\n        self.wake_poisoned(st, wakes);\n    }\n\n    /// Registers', '        self.take_everyone(&mut st, &mut wakes);\n        drop(st);\n        wakes.send(self);\n    }\n\n    /// Registers', POISON_T),
+ (DOMAIN_SRC, '                self.take_everyone(&mut st, &mut wakes);\n                self.wake_poisoned(st, wakes);', '                self.take_everyone(&mut st, &mut wakes);\n                drop(st);\n                wakes.send(self);', POISON_T),
+ (DOMAIN_SRC, '        st.busy &= !(1 << slot);\n        let mut wakes = Wakes::new();\n        self.take_everyone(&mut st, &mut wakes);\n        self.wake_poisoned(st, wakes);', '        st.busy &= !(1 << slot);\n        let mut wakes = Wakes::new();\n        self.take_everyone(&mut st, &mut wakes);\n        drop(st);\n        wakes.send(self);', POISON_T),
+ # V2b review: sharing stays on its device; a lost device's reads,
+ # flushes, directories and crash fates; answers by store index; fallbacks.
+ (SIMW, '        w.seq <= cover\n            && (w.file == file\n                || (self.cfg.share_flushes && self.device_of(w.file) == self.device_of(file)))', '        w.seq <= cover\n            && (w.file == file\n                || (self.cfg.share_flushes && self.device_of(w.file) == self.device_of(w.file)))', MODEL),
+ (SIMP, '            } else if w.powered_off() || w.handle_lost(file, opened) {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', '            } else if w.powered_off() || w.handle_lost(file, opened) && false {\n                Err(EIO)\n            } else if !aligned(w, offset, &buf) {\n                w.count_misaligned_read();', MODEL),
+ (SIMP, '            } else if w.powered_off() || w.handle_lost(file, opened) {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', '            } else if w.powered_off() || w.handle_lost(file, opened) && false {\n                Err(EIO)\n            } else {\n                w.complete_flush(file, cover)', MODEL),
+ (SIMP, '        if w.dir_lost(&self.path, self.opened) {', '        if w.dir_lost(&self.path, self.opened) && false {', MODEL),
+ (SIMW, '        let device = d.device;', '        let device = d.device * 0;', MODEL),
+ (SIMW, '        let device = self.device_of_dir(&path);', '        let device = self.device_of_dir(&path) * 0;', MODEL),
+ (SIMW, '            let keep = kept(&mut self.rng, i, w, mode, lb);\n            if keep > 0 {\n                self.persist(w, keep);\n                reached.push((w.file, w.offset, w.offset + keep as u64));\n            }\n        }\n        for (id, f) in self.files.iter_mut().filter(', '            let keep = kept(&mut self.rng, i + 1, w, mode, lb);\n            if keep > 0 {\n                self.persist(w, keep);\n                reached.push((w.file, w.offset, w.offset + keep as u64));\n            }\n        }\n        for (id, f) in self.files.iter_mut().filter(', MODEL),
+ (SIMW, '        for dir in self.dirs.values_mut().filter(|dir| dir.device == d) {', '        for dir in self.dirs.values_mut().filter(|dir| dir.device == d && false) {', MODEL),
+ (MULTI_SRC, '            let tag = (self.seq << INDEX_BITS) | i as u64;', '            let tag = (self.seq << INDEX_BITS) | (i as u64 & 0);', MULTI_T),
+ (MULTI_SRC, '        if let Some(slot) = st.slots.get_mut(i) {', '        if let Some(slot) = st.slots.get_mut(i & 0) {', MULTI_T),
+ (MULTI_SRC, '        self.fallbacks += 1;', '        self.fallbacks += 0;', MULTI_T),
+ ('crates/store-io-engine/src/flusher.rs', '        if !crate::test_hook::flush_threads() {', '        if !crate::test_hook::flush_threads() && false {', MULTI_T),
 ]
 
 def kill_stuck_tests():

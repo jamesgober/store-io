@@ -97,7 +97,7 @@ fn dep_ctx(d: &DurableReceipt) -> ErrorContext {
 /// (an earlier open's receipt on an append region not yet resumed).
 pub(crate) fn check_deps<P: Platform>(
     deps: &[DurableReceipt],
-    reach: &[&Store<P>],
+    reach: &[Store<P>],
 ) -> Result<Checked, Error> {
     let mut matched = Vec::with_capacity(deps.len());
     for d in deps {
@@ -223,9 +223,9 @@ where
     /// its region (one recycled since is refused, and so is a receipt of an
     /// earlier open once an open since, this one included, resumed its
     /// region with [`Self::resume_at`] below the receipt's end: that open's
-    /// appends may overwrite the bytes). An open of the store by another
-    /// process in between is not seen: a receipt kept across one is the
-    /// caller's to retire.
+    /// appends may overwrite the bytes). An open of the store this process
+    /// did not see (another process's) refuses every receipt of an append
+    /// region from the opens before it (`StaleGeneration`).
     ///
     /// Each dependency's region on this store is held against recycle and
     /// release from when this append holds its lane until its space is
@@ -244,7 +244,18 @@ where
     /// `NotReady` (its region released) or `NotPositioned` (an earlier
     /// open's receipt on a region not yet resumed).
     pub fn append_after(&self, deps: &[DurableReceipt], data: &[u8]) -> Result<WriteTicket, Error> {
-        let checked = check_deps(deps, &[self.store()])?;
+        self.append_after_in(deps, data, core::slice::from_ref(self.store()))
+    }
+
+    /// [`Self::append_after`] with dependencies checked against the stores
+    /// `reach` (this region's included: a set barrier's stores).
+    pub(crate) fn append_after_in(
+        &self,
+        deps: &[DurableReceipt],
+        data: &[u8],
+        reach: &[Store<P>],
+    ) -> Result<WriteTicket, Error> {
+        let checked = check_deps(deps, reach)?;
         test_hook::step(Step::BeforeLane);
         let ticket = self.append_with(data, || checked.take_passes(), reserved)?;
         count(self.store(), deps);
@@ -273,7 +284,19 @@ where
         pos: RegionPos,
         data: &[u8],
     ) -> Result<WriteTicket, Error> {
-        let checked = check_deps(deps, &[self.store()])?;
+        self.write_after_in(deps, pos, data, core::slice::from_ref(self.store()))
+    }
+
+    /// [`Self::write_after`] with dependencies checked against the stores
+    /// `reach` (this region's included).
+    pub(crate) fn write_after_in(
+        &self,
+        deps: &[DurableReceipt],
+        pos: RegionPos,
+        data: &[u8],
+        reach: &[Store<P>],
+    ) -> Result<WriteTicket, Error> {
+        let checked = check_deps(deps, reach)?;
         test_hook::step(Step::BeforeLane);
         let ticket = self.write_with(pos, data, || checked.take_passes().map(to_issue))?;
         count(self.store(), deps);
@@ -304,7 +327,21 @@ where
         mode: WriteMode,
         tag: u64,
     ) -> Result<RegionPos, Rejected> {
-        let checked = match check_deps(deps, &[region.store()]) {
+        let reach = core::slice::from_ref(region.store());
+        self.append_after_with(region, deps, buf, mode, tag, reach)
+    }
+
+    /// [`Self::append_after`] with dependencies checked against `reach`.
+    pub(crate) fn append_after_with(
+        &mut self,
+        region: &AppendRegion<P>,
+        deps: &[DurableReceipt],
+        buf: IoBuf,
+        mode: WriteMode,
+        tag: u64,
+        reach: &[Store<P>],
+    ) -> Result<RegionPos, Rejected> {
+        let checked = match check_deps(deps, reach) {
             Ok(checked) => checked,
             Err(error) => {
                 return Err(Rejected {
@@ -337,7 +374,23 @@ where
         mode: WriteMode,
         tag: u64,
     ) -> Result<(), Rejected> {
-        let checked = match check_deps(deps, &[region.store()]) {
+        let reach = core::slice::from_ref(region.store());
+        self.write_after_with(region, deps, pos, buf, mode, tag, reach)
+    }
+
+    /// [`Self::write_after`] with dependencies checked against `reach`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn write_after_with(
+        &mut self,
+        region: &PageRegion<P>,
+        deps: &[DurableReceipt],
+        pos: RegionPos,
+        buf: IoBuf,
+        mode: WriteMode,
+        tag: u64,
+        reach: &[Store<P>],
+    ) -> Result<(), Rejected> {
+        let checked = match check_deps(deps, reach) {
             Ok(checked) => checked,
             Err(error) => {
                 return Err(Rejected {

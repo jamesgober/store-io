@@ -96,7 +96,7 @@ where
     /// Where the flush thread answers this submitter's flush requests.
     inbox: Arc<Inbox<<P::Queue as Queue>::Waker>>,
     id: u64,
-    store: Store<P>,
+    pub(crate) store: Store<P>,
     _thread: PhantomData<*const ()>,
 }
 

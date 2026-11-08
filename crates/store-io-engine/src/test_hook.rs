@@ -70,6 +70,41 @@ pub fn unseen<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
+#[cfg(feature = "sim-hooks")]
+std::thread_local! {
+    static NO_FLUSH_THREADS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` as if the OS refused every thread: a store's flush thread
+/// started on this thread meanwhile fails to start (its flushes then run on
+/// the thread asking for them).
+#[cfg(feature = "sim-hooks")]
+#[doc(hidden)]
+pub fn without_flush_threads<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NO_FLUSH_THREADS.with(|u| u.set(self.0));
+        }
+    }
+    let _restore = Restore(NO_FLUSH_THREADS.with(|u| u.replace(true)));
+    f()
+}
+
+/// Whether a flush thread may start on this thread (always, without the
+/// feature).
+#[inline]
+pub(crate) fn flush_threads() -> bool {
+    #[cfg(feature = "sim-hooks")]
+    {
+        !NO_FLUSH_THREADS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(feature = "sim-hooks"))]
+    {
+        true
+    }
+}
+
 /// Whether this thread's opens are recorded (always, without the
 /// feature).
 #[inline]

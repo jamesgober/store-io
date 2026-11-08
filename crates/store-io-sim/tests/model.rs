@@ -844,3 +844,242 @@ fn test_a_killed_process_leaves_its_cache_for_the_next_flush() {
     p.with_world(|w| w.crash(&CrashMode::LoseAll));
     assert_eq!(media(&p)[0], 4);
 }
+
+/// A file `name` in the directory `d` of `p`, allocated and durable.
+fn file_in(p: &SimPlatform, d: &str, name: &str) -> SimFile {
+    let dir = p.open_dir(Path::new(d), true).unwrap();
+    let f = p.create_file(&dir, &FileName::new(name).unwrap()).unwrap();
+    p.allocate(&f, 1 << 20).unwrap();
+    p.flush_all(&f).unwrap();
+    p.sync_dir(&dir).unwrap();
+    f
+}
+
+fn media_at(p: &SimPlatform, d: &str, name: &str) -> Vec<u8> {
+    p.with_world(|w| w.media_of(&PathBuf::from(d), name).map(<[u8]>::to_vec))
+        .unwrap()
+}
+
+/// A flush makes only its own file's cached writes durable: another file's
+/// survive a crash only through its own flush, or with `share_flushes`.
+#[test]
+fn test_a_flush_makes_only_its_own_files_writes_durable() {
+    for share in [false, true] {
+        let cfg = SimConfig {
+            share_flushes: share,
+            ..SimConfig::volatile(16)
+        };
+        let (p, _d, f, pool) = setup(cfg);
+        let g = file_in(&p, "/s", "g");
+        let mut q = p.queue(QueueConfig::default()).unwrap();
+        write(&mut q, &f, &pool, 0, 1, false);
+        write(&mut q, &g, &pool, 0, 2, false);
+        drain(&mut q);
+        q.submit(IoOp::FlushData { file: &f }, 9).unwrap();
+        drain(&mut q);
+        let mut crashed = p.with_world(|w| w.clone());
+        crashed.crash(&CrashMode::LoseAll);
+        assert_eq!(crashed.media_of(&dir(), "f").unwrap()[0], 1);
+        let g_kept = crashed.media_of(&dir(), "g").unwrap()[0];
+        assert_eq!(g_kept, if share { 2 } else { 0 }, "share {share}");
+        // A full flush of the other file is its own, too.
+        p.flush_all(&g).unwrap();
+        p.with_world(|w| w.crash(&CrashMode::LoseAll));
+        assert_eq!(media_at(&p, "/s", "g")[0], 2);
+    }
+}
+
+/// A placed directory's files live on its device, below it too, each
+/// device of its own kind and evidence; a volume number per device and
+/// world.
+#[test]
+fn test_files_live_on_their_directorys_device() {
+    let cfg = SimConfig::volatile(17).with_device(store_io_sim::DeviceKind::PowerSafe);
+    assert_eq!(cfg.devices(), 2);
+    let p = SimPlatform::new(cfg);
+    p.with_world(|w| w.place("/b", 1));
+    let a = file_in(&p, "/a", "f");
+    let b = file_in(&p, "/b/sub", "f");
+    p.with_world(|w| {
+        assert_eq!(w.device_of(a.id()), 0);
+        assert_eq!(w.device_of(b.id()), 1);
+    });
+    let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 65536, 16)).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &a, &pool, 0, 1, false);
+    write(&mut q, &b, &pool, 0, 2, false);
+    drain(&mut q);
+    // Device 1 is power-safe: its write is durable at completion.
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    assert_eq!(media_at(&p, "/a", "f")[0], 0);
+    assert_eq!(media_at(&p, "/b/sub", "f")[0], 2);
+    let (da, db) = (
+        p.open_dir(Path::new("/a"), false).unwrap(),
+        p.open_dir(Path::new("/b/sub"), false).unwrap(),
+    );
+    let name = FileName::new("f").unwrap();
+    let (a, b) = (
+        p.open_file(&da, &name, FileMode::ReadWrite).unwrap(),
+        p.open_file(&db, &name, FileMode::ReadWrite).unwrap(),
+    );
+    let (ea, eb) = (p.probe(&da, &a).unwrap(), p.probe(&db, &b).unwrap());
+    assert_ne!(ea.device.cache_present, eb.device.cache_present);
+    let (ia, ib) = (p.file_identity(&a).unwrap(), p.file_identity(&b).unwrap());
+    assert_ne!(ia.volume, ib.volume);
+    // Another world's device 0 is another volume.
+    let q = SimPlatform::new(SimConfig::volatile(17));
+    let other = file_in(&q, "/a", "f");
+    assert_ne!(q.file_identity(&other).unwrap().volume, ia.volume);
+    // Identities are incomplete until a test sets them, per device.
+    assert!(!p.device_identity(&db, &b).complete);
+    let mut ev = eb.clone();
+    ev.device.identity = store_io_core::identity::DeviceIdentity {
+        complete: true,
+        ..ev.device.identity
+    };
+    p.with_world(|w| w.set_device_evidence(1, Some(ev)));
+    assert!(p.device_identity(&db, &b).complete);
+    assert!(!p.device_identity(&da, &a).complete);
+}
+
+/// Losing one device loses its cached writes alone, and its live handles
+/// fail every later operation with EIO, a submitted one's completion
+/// included; a new open works, and the other device is untouched.
+#[test]
+fn test_a_lost_device_takes_only_its_own_writes_and_handles() {
+    let p = SimPlatform::new(
+        SimConfig::volatile(18).with_device(store_io_sim::DeviceKind::VolatileCache),
+    );
+    p.with_world(|w| w.place("/b", 1));
+    let a = file_in(&p, "/a", "f");
+    let b = file_in(&p, "/b", "f");
+    let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 65536, 16)).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &a, &pool, 0, 1, false);
+    write(&mut q, &b, &pool, 0, 2, false);
+    drain(&mut q);
+    write(&mut q, &b, &pool, 4096, 3, false);
+    q.submit(
+        IoOp::Read {
+            file: &b,
+            offset: 0,
+            buf: pool.take(4096).unwrap(),
+        },
+        11,
+    )
+    .unwrap();
+    q.submit(IoOp::FlushData { file: &b }, 12).unwrap();
+    p.with_world(|w| w.crash_device(1, &CrashMode::LoseAll));
+    let done = drain(&mut q);
+    assert_eq!(done.len(), 3);
+    for (tag, r) in &done {
+        assert_eq!(*r, Err(store_io_sim::world::EIO), "submitted op {tag}");
+    }
+    assert_eq!(p.flush_all(&b).err(), Some(store_io_sim::world::EIO));
+    // Device 0's handle and cache are untouched.
+    assert_eq!(p.with_world(|w| w.cached_writes()), 1);
+    p.flush_all(&a).unwrap();
+    assert_eq!(media_at(&p, "/a", "f")[0], 1);
+    // The lost device's write is gone; a new open sees its media.
+    let db = p.open_dir(Path::new("/b"), false).unwrap();
+    let b2 = p
+        .open_file(&db, &FileName::new("f").unwrap(), FileMode::ReadWrite)
+        .unwrap();
+    let mut out = pool.take(4096).unwrap();
+    out.as_mut_slice().fill(9);
+    q.submit(
+        IoOp::Read {
+            file: &b2,
+            offset: 0,
+            buf: out,
+        },
+        7,
+    )
+    .unwrap();
+    let mut got = CompletionBuf::with_capacity(4);
+    q.wait(1, &mut got).unwrap();
+    let c = got.drain().next().unwrap();
+    assert_eq!(c.result, Ok(4096));
+    assert_eq!(c.buf.unwrap().as_slice()[0], 0);
+    p.flush_all(&b2).unwrap();
+}
+
+/// Shared flushes are one device's: a flush persists every file's cached
+/// writes on its own device, never another device's.
+#[test]
+fn test_shared_flushes_stay_on_their_device() {
+    let cfg = SimConfig {
+        share_flushes: true,
+        ..SimConfig::volatile(19).with_device(store_io_sim::DeviceKind::VolatileCache)
+    };
+    let p = SimPlatform::new(cfg);
+    p.with_world(|w| w.place("/b", 1));
+    let a = file_in(&p, "/a", "f");
+    let a2 = file_in(&p, "/a", "g");
+    let b = file_in(&p, "/b", "f");
+    let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 65536, 16)).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &a, &pool, 0, 1, false);
+    write(&mut q, &a2, &pool, 0, 2, false);
+    write(&mut q, &b, &pool, 0, 3, false);
+    drain(&mut q);
+    q.submit(IoOp::FlushData { file: &a }, 9).unwrap();
+    drain(&mut q);
+    p.with_world(|w| w.crash(&CrashMode::LoseAll));
+    assert_eq!(media_at(&p, "/a", "f")[0], 1);
+    assert_eq!(media_at(&p, "/a", "g")[0], 2, "same device: shared");
+    assert_eq!(media_at(&p, "/b", "f")[0], 0, "another device's write");
+}
+
+/// A lost device's cached writes meet the crash mode's fates (its own,
+/// oldest first), and its directories' handles fail as its files' do; a
+/// directory keeps the device it was created on.
+#[test]
+fn test_a_lost_device_takes_a_crash_mode_and_its_directory_handles() {
+    let p = SimPlatform::new(
+        SimConfig::volatile(20).with_device(store_io_sim::DeviceKind::VolatileCache),
+    );
+    let a = file_in(&p, "/a", "f");
+    p.with_world(|w| w.place("/b", 1));
+    let b = file_in(&p, "/b", "f");
+    // Placed after it was made: /a stays on device 0.
+    p.with_world(|w| w.place("/a", 1));
+    p.with_world(|w| assert_eq!(w.device_of(a.id()), 0));
+    let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 65536, 16)).unwrap();
+    let mut q = p.queue(QueueConfig::default()).unwrap();
+    write(&mut q, &a, &pool, 0, 1, false);
+    write(&mut q, &b, &pool, 0, 2, false);
+    write(&mut q, &b, &pool, 4096, 3, false);
+    drain(&mut q);
+    assert_eq!(p.with_world(|w| w.cached_extents_of(1).len()), 2);
+    let db = p.open_dir(Path::new("/b"), false).unwrap();
+    let da = p.open_dir(Path::new("/a"), false).unwrap();
+    // Names not yet synced: device 1's are lost with it, device 0's stay.
+    p.create_file(&db, &FileName::new("x").unwrap()).unwrap();
+    p.create_file(&da, &FileName::new("y").unwrap()).unwrap();
+    p.with_world(|w| {
+        w.crash_device(
+            1,
+            &CrashMode::Exact(vec![store_io_sim::Fate::Lost, store_io_sim::Fate::Kept]),
+        );
+    });
+    let name = FileName::new("h").unwrap();
+    assert_eq!(p.sync_dir(&db).err(), Some(store_io_sim::world::EIO));
+    assert_eq!(
+        p.create_file(&db, &name).err(),
+        Some(store_io_sim::world::EIO)
+    );
+    p.sync_dir(&da).unwrap();
+    let db = p.open_dir(Path::new("/b"), false).unwrap();
+    p.sync_dir(&db).unwrap();
+    assert!(
+        p.open_file(&db, &FileName::new("x").unwrap(), FileMode::ReadWrite)
+            .is_err()
+    );
+    p.open_file(&da, &FileName::new("y").unwrap(), FileMode::ReadWrite)
+        .unwrap();
+    // Only device 1's second write was kept; device 0's is still cached.
+    let media = media_at(&p, "/b", "f");
+    assert_eq!((media[0], media[4096]), (0, 3));
+    assert_eq!(p.with_world(|w| w.cached_writes()), 1);
+}

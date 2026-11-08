@@ -22,6 +22,7 @@
 14. [Stores made before 0.5](#14-stores-made-before-05)
 15. [A damaged region table: the three ways out](#15-a-damaged-region-table-the-three-ways-out)
 16. [Pointing at durable bytes: dependent writes](#16-pointing-at-durable-bytes-dependent-writes)
+17. [Durable together across devices: StoreSet](#17-durable-together-across-devices-storeset)
 
 ---
 
@@ -472,6 +473,30 @@ A receipt exists only once its bytes are durable, so holding one is the guarante
 - **Its region's generation must still be live.** A region recycled since is refused (`StaleGeneration`), one released `NotReady`. A receipt kept from an earlier open is refused until its region is resumed (`NotPositioned`), and once any open since resumed it with `resume_at` below the receipt's end (`StaleGeneration`: that open's appends overwrite from there). A slot's receipt is checked only for its slot being there.
 
 Each dependency's region is held against recycle and release from when the write holds its lane until its space is reserved (a page write: until it is issued), never during the I/O. A recycle after that may still overwrite the bytes before the pointer lands: recycling data a durable pointer still names is your reclaim decision, as every reclaim is. Receipts are matched to the earlier opens of this process: if the store was opened in between by something this process did not see (another process), or one of its closes was not clean, every receipt of an append region from before that open is refused (`StaleGeneration`), since that open may have appended over it. A container copied by another tool has the same volume id; a receipt of the original is, to the copy, another store's. A receipt of another store is checked only for being a prefix where it must be. A `Submitter` has the same calls, refusing with the buffer: `append_after(&region, &deps, buf, mode, tag)` and `write_after(&region, &deps, pos, buf, mode, tag)`.
+
+---
+
+## 17. Durable together across devices: StoreSet
+
+A commit spread over several devices (data on one, its index on another, a log on a third) needs every part durable before it acknowledges, and each device flushed once, not one after the other. A `StoreSet` holds one store per device and makes tickets of any of them durable in one call:
+
+```rust
+let set = StoreSet::new([data_store.clone(), index_store.clone()])?;
+let t1 = data.append(value)?;
+let t2 = index.append(entry)?;
+let receipts = set.barrier(&[&t1, &t2])?; // one flush per store, in parallel
+```
+
+Each store is flushed at most once per call; the calling thread flushes one store itself and hands the others to their stores' flush threads, so the call takes about as long as the slowest device's flush. A power-safe store is not flushed unless a region of it forces data sync. A store's failure is its own: its flush failing poisons that store only, and `barrier_each` returns one result per ticket for a caller deciding a quorum; `barrier` returns the first failing ticket's error after flushing every store. A store whose flush hangs is released by its poison (`Store::poison`, from your watchdog), except the one the calling thread flushes itself: a flush system call cannot be interrupted. Concurrent calls on one set wait only on the stores' own flushes, which they share; each has its own answers.
+
+Dependent writes across devices go through the set, so a dependency on any of its stores is checked (prefix, live generation) and held as one of the region's own store's would be:
+
+```rust
+let (_at, value) = values.append_durable(b"the value")?;   // store A
+let t = set.append_after(&index, &[value], b"key -> value")?; // index on store B
+```
+
+`distinct(i, j)` tells whether two stores share no physical device, read afresh at each call (a volume moved online changes it); it is false whenever either device's identity is incomplete, as it is on most virtual and cloud disks. Like `sync_through`, a ticket behind the calling thread's own unreaped `Submitter` appends waits for completions only that thread can reap.
 
 ---
 

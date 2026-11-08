@@ -5,9 +5,9 @@
 //! One thread per store, started by the first request and parked untimed
 //! when idle (no wakeups). It takes every pending request, leads or joins one
 //! barrier covering them all through the domain's join rule (shared with the
-//! blocking layers' barriers), and posts each outcome to its submitter's
-//! [`Inbox`], waking that submitter once per batch, and only if it is
-//! blocked. It reaches the store through a weak reference, upgraded only
+//! blocking layers' barriers), and posts each outcome to its requester's
+//! [`Answer`] (a submitter's [`Inbox`], or a set barrier's answers), waking
+//! each requester once per batch (a submitter only if it is blocked). It reaches the store through a weak reference, upgraded only
 //! while it flushes and answers, so it never keeps the store alive; the
 //! store's drop stops and joins it.
 //!
@@ -27,6 +27,16 @@ use crate::store::{Inner, Store};
 /// The outcome of a flush request: the flush it waited for, or why none
 /// covers it.
 pub(crate) type Flushed = Result<u64, Error>;
+
+/// Where a flush request is answered: a submitter's [`Inbox`], or a set
+/// barrier's answers (`multi.rs`). The flush thread posts every outcome of
+/// a batch, then signals each requester once.
+pub(crate) trait Answer: Send + Sync {
+    /// Records `outcome` for the request tagged `tag`, waking no one.
+    fn post(&self, tag: u64, outcome: Flushed);
+    /// Wakes the requester once for everything posted since the last call.
+    fn signal(&self);
+}
 
 /// Where the submitter is blocked, if anywhere ([`Inbox::blocked`]).
 const NOWHERE: u8 = 0;
@@ -69,30 +79,6 @@ impl<W: Wake> Inbox<W> {
             due: AtomicBool::new(false),
             woken: AtomicBool::new(false),
             queue,
-        }
-    }
-
-    /// Posts an outcome without waking anyone (see [`Self::signal`]).
-    fn post(&self, qtag: u64, outcome: Flushed) {
-        lock(&self.posted).push_back((qtag, outcome));
-        let _was = self.count.fetch_add(1, Ordering::SeqCst);
-        self.due.store(true, Ordering::Relaxed);
-    }
-
-    /// Wakes the submitter once for everything posted since the last call,
-    /// and only where it is blocked (no wake left behind to cut a later
-    /// wait short).
-    fn signal(&self) {
-        if !self.due.swap(false, Ordering::Relaxed) {
-            return;
-        }
-        match self.blocked.load(Ordering::SeqCst) {
-            IN_QUEUE => self.queue.wake(),
-            ON_INBOX => {
-                let _sync = lock(&self.posted);
-                self.ready.notify_one();
-            }
-            _ => {}
         }
     }
 
@@ -153,6 +139,32 @@ impl<W: Wake> Inbox<W> {
     }
 }
 
+impl<W: Wake> Answer for Inbox<W> {
+    /// Posts an outcome without waking anyone (see [`Self::signal`]).
+    fn post(&self, qtag: u64, outcome: Flushed) {
+        lock(&self.posted).push_back((qtag, outcome));
+        let _was = self.count.fetch_add(1, Ordering::SeqCst);
+        self.due.store(true, Ordering::Relaxed);
+    }
+
+    /// Wakes the submitter once for everything posted since the last call,
+    /// and only where it is blocked (no wake left behind to cut a later
+    /// wait short).
+    fn signal(&self) {
+        if !self.due.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        match self.blocked.load(Ordering::SeqCst) {
+            IN_QUEUE => self.queue.wake(),
+            ON_INBOX => {
+                let _sync = lock(&self.posted);
+                self.ready.notify_one();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Ends a [`crate::Submitter`]'s current or next `wait` from another thread
 /// (D-083), whether it waits for I/O or for a flush.
 pub struct SubmitterWaker<W>(Arc<Inbox<W>>);
@@ -194,26 +206,26 @@ where
     }
 }
 
-/// One submitter's request: a flush `>= need`, answered into `inbox`.
-struct Request<W> {
+/// One request: a flush `>= need`, answered under `tag` into `answer`.
+struct Request {
     need: u64,
-    qtag: u64,
-    inbox: Arc<Inbox<W>>,
+    tag: u64,
+    answer: Arc<dyn Answer>,
     /// Its outcome, decided while the thread still holds the store and
     /// posted after it let go of it.
     outcome: Option<Flushed>,
 }
 
-struct State<W> {
-    requests: Vec<Request<W>>,
+struct State {
+    requests: Vec<Request>,
     /// The store is gone, or the thread stopped: no request is accepted.
     stop: bool,
     /// The thread is parked waiting for requests (notify only then).
     idle: bool,
 }
 
-struct Shared<W> {
-    state: Mutex<State<W>>,
+struct Shared {
+    state: Mutex<State>,
     wake: Condvar,
 }
 
@@ -222,8 +234,9 @@ pub(crate) type WakerOf<P> = <<P as Platform>::Queue as Queue>::Waker;
 
 /// A store's flush thread.
 pub(crate) struct Flusher<P: Platform> {
-    shared: Arc<Shared<WakerOf<P>>>,
+    shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    _platform: core::marker::PhantomData<fn() -> P>,
 }
 
 impl<P: Platform> Flusher<P>
@@ -233,6 +246,9 @@ where
     /// Starts the thread; `None` if the OS refused it (the caller then
     /// flushes on its own thread).
     pub(crate) fn start(store: Weak<Inner<P>>) -> Option<Self> {
+        if !crate::test_hook::flush_threads() {
+            return None;
+        }
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 requests: Vec::new(),
@@ -249,21 +265,22 @@ where
         Some(Self {
             shared,
             thread: Some(thread),
+            _platform: core::marker::PhantomData,
         })
     }
 
-    /// Asks for a flush `>= need`, answered into `inbox` under `qtag`.
+    /// Asks for a flush `>= need`, answered into `answer` under `tag`.
     /// Returns false if the thread no longer takes requests (the caller then
     /// flushes on its own thread).
-    pub(crate) fn request(&self, need: u64, qtag: u64, inbox: &Arc<Inbox<WakerOf<P>>>) -> bool {
+    pub(crate) fn request(&self, need: u64, tag: u64, answer: Arc<dyn Answer>) -> bool {
         let mut st = lock(&self.shared.state);
         if st.stop {
             return false;
         }
         st.requests.push(Request {
             need,
-            qtag,
-            inbox: Arc::clone(inbox),
+            tag,
+            answer,
             outcome: None,
         });
         let idle = st.idle;
@@ -289,12 +306,12 @@ impl<P: Platform> Drop for Flusher<P> {
     }
 }
 
-fn run<P: Platform>(store: &Weak<Inner<P>>, shared: &Shared<WakerOf<P>>)
+fn run<P: Platform>(store: &Weak<Inner<P>>, shared: &Shared)
 where
     P::Queue: Send,
 {
-    let mut batch: Vec<Request<WakerOf<P>>> = Vec::new();
-    let mut sent: Vec<Request<WakerOf<P>>> = Vec::new();
+    let mut batch: Vec<Request> = Vec::new();
+    let mut sent: Vec<Request> = Vec::new();
     loop {
         {
             let mut st = lock(&shared.state);
@@ -341,10 +358,10 @@ where
     P::Queue: Send,
 {
     store: &'a Weak<Inner<P>>,
-    shared: &'a Shared<WakerOf<P>>,
-    batch: &'a mut Vec<Request<WakerOf<P>>>,
+    shared: &'a Shared,
+    batch: &'a mut Vec<Request>,
     /// Requests already posted to (each is posted exactly once).
-    sent: &'a mut Vec<Request<WakerOf<P>>>,
+    sent: &'a mut Vec<Request>,
     answered: bool,
 }
 
@@ -374,12 +391,12 @@ where
                     raw: None,
                 },
             }));
-            r.inbox.post(r.qtag, outcome);
+            r.answer.post(r.tag, outcome);
             self.sent.push(r);
         }
-        // One wake per submitter for the whole batch.
+        // One wake per requester for the whole batch.
         for r in self.sent.drain(..) {
-            r.inbox.signal();
+            r.answer.signal();
         }
         self.answered = true;
     }
@@ -408,11 +425,11 @@ where
             std::mem::take(&mut st.requests)
         };
         for r in self.batch.drain(..).chain(late) {
-            r.inbox.post(r.qtag, Err(Error::Poisoned { first }));
-            r.inbox.signal();
+            r.answer.post(r.tag, Err(Error::Poisoned { first }));
+            r.answer.signal();
         }
         for r in self.sent.drain(..) {
-            r.inbox.signal();
+            r.answer.signal();
         }
     }
 }
@@ -431,7 +448,7 @@ mod tests {
 
     use store_io_platform::Wake;
 
-    use super::{Inbox, Request, lock};
+    use super::{Answer, Inbox, Request, lock};
     use crate::{Store, StoreOptions};
 
     /// A queue waker that counts its wakes.
@@ -500,11 +517,11 @@ mod tests {
         let f = s.flusher().unwrap();
         {
             let mut st = lock(&f.shared.state);
-            for (need, qtag) in [(t1.need, 1), (t2.need, 2)] {
+            for (need, tag) in [(t1.need, 1), (t2.need, 2)] {
                 st.requests.push(Request {
                     need,
-                    qtag,
-                    inbox: Arc::clone(&inbox),
+                    tag,
+                    answer: Arc::clone(&inbox) as Arc<dyn Answer>,
                     outcome: None,
                 });
             }

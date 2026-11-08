@@ -1,16 +1,28 @@
-//! The simulated world: one device with a volatile write cache, the files and
-//! directories on it, and the rules for what survives a crash.
+//! The simulated world: its devices (one by default), each power-safe or
+//! with a volatile write cache, the files and directories on them, and the
+//! rules for what survives a crash.
 //!
 //! # Model
+//!
+//! - A directory's files live on its device ([`World::place`]; device 0
+//!   unless placed), each device with its own kind and durability evidence
+//!   ([`SimConfig::with_device`]).
 //!
 //! - Every file has **visible** bytes (what reads return now) and **media**
 //!   bytes (what survives a crash), plus a visible and a durable length.
 //! - A completed write updates the visible bytes. On a power-safe device, or
 //!   with `dsync` (FUA), it updates the media at completion. Otherwise it sits
 //!   in the device's volatile cache, tagged with a completion sequence number.
-//! - A flush persists exactly the cached writes that completed **before the
-//!   flush was submitted** (the NVMe Flush scope), and makes the flushed
-//!   file's length durable. A full flush also persists every cached write.
+//! - A flush persists exactly the flushed file's cached writes that
+//!   completed **before the flush was submitted** (the NVMe Flush scope),
+//!   and makes the file's length durable. A full flush persists every cached
+//!   write of the file. A flush never makes another file's writes durable
+//!   (a store must flush each of its files itself, MDEV-03), unless
+//!   [`SimConfig::share_flushes`] models one device cache flushed for all.
+//! - Losing one device ([`World::crash_device`]) is a crash of that device
+//!   alone: its cached writes meet the crash mode's fates, and every handle
+//!   open on its files and directories fails each later operation with
+//!   `EIO`.
 //! - Directory entries (create, rename, unlink) are visible at once and
 //!   durable only after a directory sync. Created directories are durable at
 //!   once (the platform contract syncs the parent).
@@ -81,12 +93,22 @@ pub enum DeviceKind {
     VolatileCache,
 }
 
+/// One simulated device past the first ([`SimConfig::with_device`]).
+#[derive(Debug, Clone)]
+pub struct DeviceConfig {
+    /// Its kind.
+    pub kind: DeviceKind,
+    /// Evidence its files' probes return (defaults derived from `kind`); its
+    /// identity is the one `device_identity` reports (incomplete if none).
+    pub evidence: Option<Evidence>,
+}
+
 /// Simulator configuration.
 #[derive(Debug, Clone)]
 pub struct SimConfig {
     /// Seed for every random choice.
     pub seed: u64,
-    /// Device kind.
+    /// Device 0's kind.
     pub device: DeviceKind,
     /// Logical block size (tear granularity), bytes.
     pub logical_block: u32,
@@ -94,8 +116,16 @@ pub struct SimConfig {
     pub reorder: bool,
     /// Faults to inject.
     pub faults: FaultPlan,
-    /// Evidence returned by `probe` (defaults derived from `device`).
+    /// Evidence returned by `probe` for device 0's files (defaults derived
+    /// from `device`).
     pub evidence: Option<Evidence>,
+    /// Devices past the first: device `d` is `more_devices[d - 1]`.
+    pub more_devices: Vec<DeviceConfig>,
+    /// A flush persists the cached writes of every file on its file's
+    /// device, as one device cache flushed for all of them, instead of only
+    /// its own file's (off by default, so a store relying on another file's
+    /// flush is caught). Never another device's.
+    pub share_flushes: bool,
     /// Model NTFS's valid data length: each file's valid data ends where
     /// its furthest write ended (a crash or a shrink cuts it back); the
     /// bytes a real file system would zero before a write starting past it
@@ -139,6 +169,8 @@ impl SimConfig {
             reorder: false,
             faults: FaultPlan::default(),
             evidence: None,
+            more_devices: Vec::new(),
+            share_flushes: false,
             valid_data_model: false,
             runaway_writes: 500_000,
             inline: inline_default(),
@@ -153,7 +185,44 @@ impl SimConfig {
             ..Self::volatile(seed)
         }
     }
+
+    /// The configuration with one more device, of `kind` (its number is the
+    /// devices before it: see [`World::place`]).
+    #[must_use]
+    pub fn with_device(mut self, kind: DeviceKind) -> Self {
+        self.more_devices.push(DeviceConfig {
+            kind,
+            evidence: None,
+        });
+        self
+    }
+
+    /// The number of devices.
+    #[must_use]
+    pub fn devices(&self) -> usize {
+        1 + self.more_devices.len()
+    }
+
+    /// Device `d`'s configuration (device 0's from `device` and
+    /// `evidence`).
+    ///
+    /// # Panics
+    ///
+    /// If there is no device `d`.
+    #[must_use]
+    pub fn device(&self, d: usize) -> DeviceConfig {
+        match d {
+            0 => DeviceConfig {
+                kind: self.device,
+                evidence: self.evidence.clone(),
+            },
+            d => self.more_devices[d - 1].clone(),
+        }
+    }
 }
+
+/// Numbers each world, so the volumes of separate worlds never coincide.
+static WORLDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// The most bytes a simulated world holds in a volatile cache at once (see
 /// `SimConfig::runaway_writes`).
@@ -175,6 +244,8 @@ struct FileState {
     /// Where the furthest write ended (NTFS's valid data length, see
     /// `SimConfig::valid_data_model`).
     valid_data: u64,
+    /// The device it lives on: its directory's when it was created.
+    device: usize,
 }
 
 /// Adds `[s, e)` to `ranges` (sorted, apart), merging what it touches.
@@ -220,6 +291,9 @@ fn unmark(ranges: &mut Vec<(u64, u64)>, s: u64, e: u64) {
 struct DirState {
     entries: BTreeMap<String, FileId>,
     durable: BTreeMap<String, FileId>,
+    /// The device it was created on ([`World::place`]): its files are
+    /// created there.
+    device: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +400,15 @@ impl core::fmt::Debug for StepProbe {
 #[derive(Debug, Clone)]
 pub struct World {
     cfg: SimConfig,
+    /// This world's number ([`WORLDS`]).
+    id: u64,
+    /// Each placed directory's device ([`World::place`]).
+    placement: BTreeMap<PathBuf, usize>,
+    /// Handles opened so far: each handle's serial.
+    opens: u64,
+    /// Per device: handles with serials up to this one were open when it
+    /// was lost ([`World::crash_device`]) and fail every operation.
+    lost_through: Vec<u64>,
     rng: Rng,
     files: BTreeMap<FileId, FileState>,
     next_file: FileId,
@@ -370,6 +453,10 @@ impl World {
     pub fn new(cfg: SimConfig) -> Self {
         Self {
             rng: Rng::new(cfg.seed),
+            id: WORLDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            placement: BTreeMap::new(),
+            opens: 0,
+            lost_through: vec![0; cfg.devices()],
             cfg,
             files: BTreeMap::new(),
             next_file: 1,
@@ -419,6 +506,79 @@ impl World {
     /// returns from now on (a store created after it sees a new device).
     pub fn set_evidence(&mut self, ev: Option<Evidence>) {
         self.cfg.evidence = ev;
+    }
+
+    /// Sets (or clears) the evidence device `d`'s files' probes return from
+    /// now on (device 0: as [`Self::set_evidence`]).
+    ///
+    /// # Panics
+    ///
+    /// If there is no device `d`.
+    pub fn set_device_evidence(&mut self, d: usize, ev: Option<Evidence>) {
+        match d {
+            0 => self.cfg.evidence = ev,
+            d => self.cfg.more_devices[d - 1].evidence = ev,
+        }
+    }
+
+    /// Puts `dir` and every directory below it (unless placed itself) on
+    /// device `d`: each directory created from now on lives on the device
+    /// its nearest placed ancestor names, and its files with it. A
+    /// directory, and a file, stays on the device it was created on.
+    ///
+    /// # Panics
+    ///
+    /// If there is no device `d`.
+    pub fn place(&mut self, dir: impl Into<PathBuf>, d: usize) {
+        assert!(d < self.cfg.devices(), "no device {d}");
+        let _was = self.placement.insert(dir.into(), d);
+    }
+
+    /// The device a directory created at `dir` now would live on.
+    fn device_of_dir(&self, dir: &std::path::Path) -> usize {
+        dir.ancestors()
+            .find_map(|a| self.placement.get(a).copied())
+            .unwrap_or(0)
+    }
+
+    /// The device `file` lives on.
+    #[must_use]
+    pub fn device_of(&self, file: FileId) -> usize {
+        self.files.get(&file).map_or(0, |f| f.device)
+    }
+
+    /// The configuration of the device `file` lives on.
+    pub(crate) fn device_config(&self, file: FileId) -> DeviceConfig {
+        self.cfg.device(self.device_of(file))
+    }
+
+    /// The volume number of the device `file` lives on, qualified by the
+    /// world (`FileIdentity::volume`).
+    pub(crate) fn volume_of(&self, file: FileId) -> u64 {
+        (self.id << 16) | self.device_of(file) as u64
+    }
+
+    /// A serial for a handle being opened.
+    pub(crate) fn next_open(&mut self) -> u64 {
+        self.opens += 1;
+        self.opens
+    }
+
+    /// Whether the handle `opened` of the directory `dir` was open when its
+    /// device was lost.
+    pub(crate) fn dir_lost(&self, dir: &PathBuf, opened: u64) -> bool {
+        let device = self.dirs.get(dir).map_or(0, |d| d.device);
+        self.lost_through
+            .get(device)
+            .is_some_and(|&through| opened <= through)
+    }
+
+    /// Whether the handle `opened` of `file` was open when its device was
+    /// lost.
+    pub(crate) fn handle_lost(&self, file: FileId, opened: u64) -> bool {
+        self.lost_through
+            .get(self.device_of(file))
+            .is_some_and(|&through| opened <= through)
     }
 
     /// Mutable fault plan (to arm faults mid-run).
@@ -677,7 +837,14 @@ impl World {
         if self.cfg.faults.read_only_media {
             return Err(EROFS);
         }
-        let _created = self.dirs.insert(path, DirState::default());
+        let device = self.device_of_dir(&path);
+        let _created = self.dirs.insert(
+            path,
+            DirState {
+                device,
+                ..DirState::default()
+            },
+        );
         Ok(())
     }
 
@@ -692,7 +859,14 @@ impl World {
         let id = self.next_file;
         self.next_file = self.next_file.checked_add(1).ok_or(EINVAL)?;
         let _new_entry = d.entries.insert(name.to_owned(), id);
-        let _new_file = self.files.insert(id, FileState::default());
+        let device = d.device;
+        let _new_file = self.files.insert(
+            id,
+            FileState {
+                device,
+                ..FileState::default()
+            },
+        );
         Ok(id)
     }
 
@@ -953,13 +1127,13 @@ impl World {
     pub(crate) fn flush_all(&mut self, file: FileId) -> Result<(), OsError> {
         self.flushes_completed += 1;
         if self.flush_fault() {
-            self.fail_flush(u64::MAX);
+            self.fail_flush(u64::MAX, file);
             return Err(EIO);
         }
         if self.cfg.faults.lying_flush {
             return Ok(());
         }
-        self.persist_through(u64::MAX);
+        self.persist_through(u64::MAX, file);
         let f = self.files.get_mut(&file).ok_or(EBADF)?;
         f.durable_len = f.visible.len() as u64;
         f.media.resize(f.visible.len(), 0);
@@ -1035,7 +1209,7 @@ impl World {
             len = (len / 2) / lb * lb;
         }
         let data = &data[..len];
-        let durable_now = dsync || self.cfg.device == DeviceKind::PowerSafe;
+        let durable_now = dsync || self.device_config(file).kind == DeviceKind::PowerSafe;
         let f = self.files.get_mut(&file).ok_or(EBADF)?;
         let end = usize::try_from(target)
             .ok()
@@ -1149,7 +1323,7 @@ impl World {
     pub(crate) fn complete_flush(&mut self, file: FileId, cover: u64) -> Result<usize, OsError> {
         self.flushes_completed += 1;
         if self.flush_fault() {
-            self.fail_flush(cover);
+            self.fail_flush(cover, file);
             self.trace.push(TraceEvent::Flush {
                 file,
                 err: EIO.code,
@@ -1157,7 +1331,7 @@ impl World {
             return Err(EIO);
         }
         if !self.cfg.faults.lying_flush {
-            self.persist_through(cover);
+            self.persist_through(cover, file);
             if let Some(f) = self.files.get_mut(&file) {
                 f.durable_len = f.visible.len() as u64;
                 f.media.resize(f.visible.len(), 0);
@@ -1176,13 +1350,25 @@ impl World {
         }
     }
 
-    /// A failed flush: with `Drop`, the covered cached writes vanish and their
-    /// visible bytes revert to media (the device lost them).
-    fn fail_flush(&mut self, cover: u64) {
+    /// Whether a flush of `file` covering `cover` covers the cached write
+    /// `w`: one of its own file's, completed before the flush was submitted
+    /// (every file's with [`SimConfig::share_flushes`]).
+    fn covers(&self, w: &CachedWrite, cover: u64, file: FileId) -> bool {
+        w.seq <= cover
+            && (w.file == file
+                || (self.cfg.share_flushes && self.device_of(w.file) == self.device_of(file)))
+    }
+
+    /// A failed flush of `file`: with `Drop`, the covered cached writes
+    /// vanish and their visible bytes revert to media (the device lost
+    /// them).
+    fn fail_flush(&mut self, cover: u64, file: FileId) {
         if self.cfg.faults.flush_failure != FlushFailure::Drop {
             return;
         }
-        let (lost, kept): (Vec<_>, Vec<_>) = self.cache.drain(..).partition(|w| w.seq <= cover);
+        let (lost, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.cache)
+            .into_iter()
+            .partition(|w| self.covers(w, cover, file));
         self.cache = kept;
         self.cached_bytes = self.cache.iter().map(|w| w.data.len()).sum();
         for w in lost {
@@ -1196,8 +1382,10 @@ impl World {
         }
     }
 
-    fn persist_through(&mut self, cover: u64) {
-        let (done, kept): (Vec<_>, Vec<_>) = self.cache.drain(..).partition(|w| w.seq <= cover);
+    fn persist_through(&mut self, cover: u64, file: FileId) {
+        let (done, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.cache)
+            .into_iter()
+            .partition(|w| self.covers(w, cover, file));
         self.cache = kept;
         self.cached_bytes = self.cache.iter().map(|w| w.data.len()).sum();
         for w in done {
@@ -1232,52 +1420,14 @@ impl World {
             .collect();
         let mut reached: Vec<(FileId, u64, u64)> = Vec::new();
         for (i, w) in cached.iter().enumerate() {
-            let keep = match mode {
-                CrashMode::LoseAll => 0,
-                CrashMode::KeepAll => w.data.len(),
-                CrashMode::Subset(mask) => {
-                    if i < 64 && mask & (1u64 << i) != 0 {
-                        w.data.len()
-                    } else {
-                        0
-                    }
-                }
-                CrashMode::Exact(fates) => match fates.get(i) {
-                    Some(Fate::Kept) => w.data.len(),
-                    Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),
-                    Some(Fate::Lost) | None => 0,
-                },
-                CrashMode::Random => match self.rng.below(3) {
-                    0 => 0,
-                    1 => w.data.len(),
-                    _ => {
-                        let blocks = w.data.len() / lb;
-                        (self.rng.below(blocks as u64 + 1) as usize) * lb
-                    }
-                },
-            };
+            let keep = kept(&mut self.rng, i, w, mode, lb);
             if keep > 0 {
                 self.persist(w, keep);
                 reached.push((w.file, w.offset, w.offset + keep as u64));
             }
         }
         for (id, f) in &mut self.files {
-            let len = usize::try_from(f.durable_len).unwrap_or(usize::MAX);
-            f.media.resize(len, 0);
-            f.visible = f.media.clone();
-            unmark(&mut f.holes, f.durable_len, u64::MAX);
-            // Past the media as it was, a durable length (settled metadata)
-            // holds data only where a kept write put it: elsewhere
-            // unwritten, as a file system's unwritten extents.
-            mark(
-                &mut f.holes,
-                before.get(id).copied().unwrap_or(0),
-                f.durable_len,
-            );
-            for &(_, s, e) in reached.iter().filter(|r| r.0 == *id) {
-                unmark(&mut f.holes, s, e.min(f.durable_len));
-            }
-            f.valid_data = f.valid_data.min(f.durable_len);
+            revert(*id, f, &before, &reached);
         }
         for d in self.dirs.values_mut() {
             d.entries = d.durable.clone();
@@ -1286,6 +1436,61 @@ impl World {
         self.powered_off = false;
         self.epoch += 1;
         self.trace.push(TraceEvent::Crash);
+    }
+
+    /// Loses device `d` alone, as a crash of that device: its files' cached
+    /// writes are lost, they and its directories revert to what is durable,
+    /// and every handle open on its files fails each later operation
+    /// (completions of operations already submitted included) with `EIO`.
+    /// Other devices, the locks and later opens are unaffected (the device
+    /// is back, with its media, for a new open).
+    ///
+    /// # Panics
+    ///
+    /// If there is no device `d`.
+    pub fn crash_device(&mut self, d: usize, mode: &CrashMode) {
+        assert!(d < self.cfg.devices(), "no device {d}");
+        let device = |w: &World, file: FileId| w.files.get(&file).map_or(0, |f| f.device);
+        let (lost, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.cache)
+            .into_iter()
+            .partition(|w| device(self, w.file) == d);
+        self.cache = others;
+        self.cached_bytes = self.cache.iter().map(|w| w.data.len()).sum();
+        let lb = self.cfg.logical_block.max(1) as usize;
+        let before: BTreeMap<FileId, u64> = self
+            .files
+            .iter()
+            .map(|(&id, f)| (id, f.media.len() as u64))
+            .collect();
+        // The mode's fates are this device's cached writes', oldest first.
+        let mut reached: Vec<(FileId, u64, u64)> = Vec::new();
+        for (i, w) in lost.iter().enumerate() {
+            let keep = kept(&mut self.rng, i, w, mode, lb);
+            if keep > 0 {
+                self.persist(w, keep);
+                reached.push((w.file, w.offset, w.offset + keep as u64));
+            }
+        }
+        for (id, f) in self.files.iter_mut().filter(|(_, f)| f.device == d) {
+            revert(*id, f, &before, &reached);
+        }
+        for dir in self.dirs.values_mut().filter(|dir| dir.device == d) {
+            dir.entries = dir.durable.clone();
+        }
+        self.lost_through[d] = self.opens;
+        self.trace.push(TraceEvent::Crash);
+    }
+
+    /// Each cached write of device `d`, oldest first: its file, offset and
+    /// length in logical blocks (the fates [`Self::crash_device`] gives).
+    #[must_use]
+    pub fn cached_extents_of(&self, d: usize) -> Vec<(FileId, u64, usize)> {
+        let lb = self.cfg.logical_block.max(1) as usize;
+        self.cache
+            .iter()
+            .filter(|w| self.device_of(w.file) == d)
+            .map(|w| (w.file, w.offset, w.data.len().div_ceil(lb)))
+            .collect()
     }
 
     /// The durable bytes of a file reachable at `dir/name`, as a crash would
@@ -1342,6 +1547,62 @@ impl World {
         }
         h
     }
+}
+
+/// How much of the cached write `w`, the `i`-th oldest, a crash under
+/// `mode` keeps.
+fn kept(rng: &mut Rng, i: usize, w: &CachedWrite, mode: &CrashMode, lb: usize) -> usize {
+    match mode {
+        CrashMode::LoseAll => 0,
+        CrashMode::KeepAll => w.data.len(),
+        CrashMode::Subset(mask) => {
+            if i < 64 && mask & (1u64 << i) != 0 {
+                w.data.len()
+            } else {
+                0
+            }
+        }
+        CrashMode::Exact(fates) => match fates.get(i) {
+            Some(Fate::Kept) => w.data.len(),
+            Some(Fate::Torn(n)) => n.saturating_mul(lb).min(w.data.len()),
+            Some(Fate::Lost) | None => 0,
+        },
+        CrashMode::Random => match rng.below(3) {
+            0 => 0,
+            1 => w.data.len(),
+            _ => {
+                let blocks = w.data.len() / lb;
+                (rng.below(blocks as u64 + 1) as usize) * lb
+            }
+        },
+    }
+}
+
+/// A crash's effect on one file: back to its media, cut to its durable
+/// length. `before` holds each file's media length before the crash's kept
+/// writes reached it, `reached` the ranges they wrote (file, start, end).
+fn revert(
+    id: FileId,
+    f: &mut FileState,
+    before: &BTreeMap<FileId, u64>,
+    reached: &[(FileId, u64, u64)],
+) {
+    let len = usize::try_from(f.durable_len).unwrap_or(usize::MAX);
+    f.media.resize(len, 0);
+    f.visible = f.media.clone();
+    unmark(&mut f.holes, f.durable_len, u64::MAX);
+    // Past the media as it was, a durable length (settled metadata) holds
+    // data only where a kept write put it: elsewhere unwritten, as a file
+    // system's unwritten extents.
+    mark(
+        &mut f.holes,
+        before.get(&id).copied().unwrap_or(0),
+        f.durable_len,
+    );
+    for &(_, s, e) in reached.iter().filter(|r| r.0 == id) {
+        unmark(&mut f.holes, s, e.min(f.durable_len));
+    }
+    f.valid_data = f.valid_data.min(f.durable_len);
 }
 
 fn range(offset: u64, len: u64, file_len: usize) -> Option<(usize, usize)> {

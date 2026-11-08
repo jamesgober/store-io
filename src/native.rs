@@ -43,6 +43,9 @@ pub type Reservation = store_io_engine::Reservation<NativePlatform>;
 /// Many reads and writes in flight from one thread, without blocking (see
 /// [`store_io_engine::Submitter`]); from [`Store::submitter`](store_io_engine::Store::submitter).
 pub type Submitter = store_io_engine::Submitter<NativePlatform>;
+/// Stores on several devices, made durable together (see
+/// [`store_io_engine::StoreSet`]); built from [`Store`]s.
+pub type StoreSet = store_io_engine::StoreSet<NativePlatform>;
 
 /// A store: one container file in a directory of its own, on one device.
 ///
@@ -142,6 +145,12 @@ impl Deref for Store {
 impl From<store_io_engine::Store<NativePlatform>> for Store {
     fn from(s: store_io_engine::Store<NativePlatform>) -> Self {
         Self(s)
+    }
+}
+
+impl From<Store> for store_io_engine::Store<NativePlatform> {
+    fn from(s: Store) -> Self {
+        s.0
     }
 }
 

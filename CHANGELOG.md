@@ -22,7 +22,18 @@
   handed-off store is released by its poison. `append_after` and
   `write_after` on the set, and the `Submitter`'s `append_after_in` and
   `write_after_in`, check dependencies on any store of the set.
-  `distinct(i, j)` reads two stores' device identities afresh. The facade
+  `distinct(i, j)` reads two stores' device identities afresh. `ditto`
+  and `ditto_pages` (API-10) write one copy per store, refused before any
+  write (`NotWritten(SameDevice)`, a new cause) unless every pair is on
+  devices known to be distinct.
+- Linux: a device identity read no longer re-reads whether the machine is
+  a guest (read once per process): about 0.3 ms instead of 0.6.
+- Windows: a device identity read takes about 0.2 ms instead of several:
+  the network check reads the drive type from the file's own volume (no
+  walk of the path for its mount root), the firmware's guest check is read
+  once per process, and a disk's NVMe controller is asked again only when
+  its descriptor changes (which disks a volume lies on is still read every
+  time). The facade
   exports `StoreSet`, `SetStats` and `MAX_SET_STORES`.
 - Simulator: **devices** (`SimConfig::with_device`, `World::place`,
   `set_device_evidence`), each with its own kind, evidence and volume

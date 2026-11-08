@@ -201,6 +201,92 @@ where
         identity(&self.stores[i]).distinct(&identity(&self.stores[j]))
     }
 
+    /// Writes `bytes` once into each of `regions`, a copy on each device
+    /// (API-10): one result per copy, in `regions`' order. The copies are
+    /// written one after another, in set order, each by its store's own
+    /// blocking append (one lane held at a time, so dittos naming stores in
+    /// different orders cannot deadlock); a copy's failure is its store's
+    /// (a write failing after submission poisons that store). Make them
+    /// durable with [`Self::barrier`], which flushes the stores in
+    /// parallel. The quorum is the caller's.
+    ///
+    /// Every pair of the regions' stores must be on distinct devices, read
+    /// afresh ([`Self::distinct`]): two regions of one store, or stores
+    /// whose devices' identities are incomplete, are refused. (One region
+    /// has no pair: it is written as an `append` would be; none writes
+    /// nothing.) A copy its own region refuses (too large, say) is that
+    /// copy's result.
+    ///
+    /// # Errors
+    ///
+    /// Before any write: `NotWritten(ForeignPosition)` for a region of no
+    /// store in the set, `NotWritten(SameDevice)` unless every pair is
+    /// distinct.
+    pub fn ditto(
+        &self,
+        regions: &[&AppendRegion<P>],
+        bytes: &[u8],
+    ) -> Result<Vec<Result<WriteTicket, Error>>, Error> {
+        let at = self.ditto_checked(regions.iter().map(|r| r.store()))?;
+        Ok(in_set_order(&at, |k| regions[k].append(bytes)))
+    }
+
+    /// [`Self::ditto`] for pages: `bytes` written at each position, each
+    /// position's region on a distinct device.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::ditto`]; also before any write, a position its region
+    /// refuses (`ForeignPosition`, `StaleGeneration`, `OutOfBounds`,
+    /// `Misaligned`, `Empty`).
+    pub fn ditto_pages(
+        &self,
+        writes: &[(&PageRegion<P>, RegionPos)],
+        bytes: &[u8],
+    ) -> Result<Vec<Result<WriteTicket, Error>>, Error> {
+        let at = self.ditto_checked(writes.iter().map(|(r, _)| r.store()))?;
+        for (r, pos) in writes {
+            let _end = r.check(pos, bytes.len())?;
+        }
+        Ok(in_set_order(&at, |k| writes[k].0.write(writes[k].1, bytes)))
+    }
+
+    /// Each copy's store index, once every store is in the set and every
+    /// pair distinct (each identity read once for the call).
+    fn ditto_checked<'s>(
+        &self,
+        stores: impl Iterator<Item = &'s Store<P>>,
+    ) -> Result<Vec<usize>, Error>
+    where
+        P: 's,
+    {
+        let refuse = |cause| not_written(cause, ErrorContext::default());
+        let mut at = Vec::new();
+        for s in stores {
+            let i = self
+                .stores
+                .iter()
+                .position(|t| Arc::ptr_eq(&t.inner, &s.inner))
+                .ok_or_else(|| refuse(NotWrittenCause::ForeignPosition))?;
+            at.push(i);
+        }
+        let identities: Vec<_> = at
+            .iter()
+            .map(|&i| {
+                let inner = &self.stores[i].inner;
+                inner.platform.device_identity(&inner._dir, &inner.file)
+            })
+            .collect();
+        for (a, x) in identities.iter().enumerate() {
+            for y in &identities[a + 1..] {
+                if !x.distinct(y) {
+                    return Err(refuse(NotWrittenCause::SameDevice));
+                }
+            }
+        }
+        Ok(at)
+    }
+
     /// What the set's barriers did so far.
     #[must_use]
     pub fn stats(&self) -> SetStats {
@@ -381,6 +467,30 @@ where
         }
         self.write_after_with(region, deps, pos, buf, mode, tag, &set.stores)
     }
+}
+
+/// Runs `write(k)` for every copy `k`, in the set order of its store
+/// (`at[k]`), and gives the results back in the copies' order.
+fn in_set_order<T>(
+    at: &[usize],
+    mut write: impl FnMut(usize) -> Result<T, Error>,
+) -> Vec<Result<T, Error>> {
+    let mut order: Vec<usize> = (0..at.len()).collect();
+    order.sort_by_key(|&k| at[k]);
+    let mut out: Vec<Option<Result<T, Error>>> = (0..at.len()).map(|_| None).collect();
+    for k in order {
+        out[k] = Some(write(k));
+    }
+    out.into_iter()
+        .map(|r| {
+            r.unwrap_or_else(|| {
+                Err(not_written(
+                    NotWrittenCause::ForeignPosition,
+                    ErrorContext::default(),
+                ))
+            })
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- answers

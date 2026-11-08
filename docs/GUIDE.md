@@ -487,7 +487,7 @@ let t2 = index.append(entry)?;
 let receipts = set.barrier(&[&t1, &t2])?; // one flush per store, in parallel
 ```
 
-Each store is flushed at most once per call; the calling thread flushes one store itself and hands the others to their stores' flush threads, so the call takes about as long as the slowest device's flush. A power-safe store is not flushed unless a region of it forces data sync. A store's failure is its own: its flush failing poisons that store only, and `barrier_each` returns one result per ticket for a caller deciding a quorum; `barrier` returns the first failing ticket's error after flushing every store. A store whose flush hangs is released by its poison (`Store::poison`, from your watchdog), except the one the calling thread flushes itself: a flush system call cannot be interrupted. Concurrent calls on one set wait only on the stores' own flushes, which they share; each has its own answers.
+Each store is flushed at most once per call; the calling thread flushes one store itself and hands the others to their stores' flush threads, so the call takes about as long as the slowest device's flush. Stores on one device are flushed separately too, but their flushes meet in that device: on the dev box's NVMe drive two of them took as long as one after the other. A power-safe store is not flushed unless a region of it forces data sync. A store's failure is its own: its flush failing poisons that store only, and `barrier_each` returns one result per ticket for a caller deciding a quorum; `barrier` returns the first failing ticket's error after flushing every store. A store whose flush hangs is released by its poison (`Store::poison`, from your watchdog), except the one the calling thread flushes itself: a flush system call cannot be interrupted. Concurrent calls on one set wait only on the stores' own flushes, which they share; each has its own answers.
 
 Dependent writes across devices go through the set, so a dependency on any of its stores is checked (prefix, live generation) and held as one of the region's own store's would be:
 
@@ -495,6 +495,16 @@ Dependent writes across devices go through the set, so a dependency on any of it
 let (_at, value) = values.append_durable(b"the value")?;   // store A
 let t = set.append_after(&index, &[value], b"key -> value")?; // index on store B
 ```
+
+**Copies on several devices.** `ditto` appends the same bytes to a region on each of several stores, refused before any write unless every pair of them is on devices known to be distinct, read afresh at each call; the copies are written one after another and made durable together by `barrier`, and which copies a commit needs (a quorum) is yours to decide:
+
+```rust
+let copies = set.ditto(&[&log_a, &log_b], record)?;      // one result per copy
+let written: Vec<&WriteTicket> = copies.iter().filter_map(|c| c.as_ref().ok()).collect();
+let receipts = set.barrier_each(&written)?;
+```
+
+Reading each device's identity is on a ditto's path: about 0.2 ms per store on Windows (a few storage queries) and 0.3 ms on Linux (a walk of sysfs), measured in D-145, about what an append costs; beside a flush it is small, and the barrier after a ditto flushes the stores in parallel.
 
 `distinct(i, j)` tells whether two stores share no physical device, read afresh at each call (a volume moved online changes it); it is false whenever either device's identity is incomplete, as it is on most virtual and cloud disks. Like `sync_through`, a ticket behind the calling thread's own unreaped `Submitter` appends waits for completions only that thread can reap.
 

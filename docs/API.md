@@ -237,7 +237,7 @@ None of these can be constructed outside store-io.
 
 | Variant | Meaning |
 |---|---|
-| `NotWritten { cause: NotWrittenCause, ctx }` | Refused before reaching the device; media untouched. Causes include `Misaligned`, `OutOfBounds`, `ForeignPosition`, `StaleGeneration`, `PoolExhausted`, `NotReady`, `RegionFull`, `Empty`, `TooLarge`, `InvalidName`, `ReadOnly`, `QueueFull`, `NotPositioned`, `Overlap`, `NotPrefix`. |
+| `NotWritten { cause: NotWrittenCause, ctx }` | Refused before reaching the device; media untouched. Causes include `Misaligned`, `OutOfBounds`, `ForeignPosition`, `SameDevice`, `StaleGeneration`, `PoolExhausted`, `NotReady`, `RegionFull`, `Empty`, `TooLarge`, `InvalidName`, `ReadOnly`, `QueueFull`, `NotPositioned`, `Overlap`, `NotPrefix`. |
 | `DurabilityUnknown { op, raw, ctx }` | Failed after submission; the domain is now poisoned. |
 | `Poisoned { first }` | An earlier failure poisoned the domain. |
 | `NoSpace { tag, ctx }` | A reservation or provisioning ran out of space or quota; nothing poisoned. |
@@ -295,6 +295,8 @@ store-io copy [--override-refusal] [--accept-stale-pages] <old> <new>
 | `barrier(&[&WriteTicket]) -> Result<Vec<DurableReceipt>>` | Every ticket made durable, each store flushed at most once (none for a power-safe store unless a region forces data sync, or where a finished flush already covers it), every store flushed even if one fails; the first failing ticket's error. |
 | `barrier_each(&[&WriteTicket]) -> Result<Vec<Result<DurableReceipt>>>` | One result per ticket, for a quorum: a store's failure is its own. The outer error only for a ticket of no store in the set (`NotWritten(ForeignPosition)`, nothing flushed); per ticket `NotReady` (released), `StaleGeneration` (recycled), `Poisoned`, `DurabilityUnknown` (a store whose flush failed on its flush thread may answer `Poisoned`, the failed flush as its first cause). |
 | `distinct(i, j) -> bool` | Whether stores `i` and `j` share no physical device, read afresh (false when either identity is incomplete). |
+| `ditto(&[&AppendRegion], bytes) -> Result<Vec<Result<WriteTicket>>>` | One copy of `bytes` appended to each region (API-10), each on its own device: one result per copy, in the order named; the copies written one after another in set order, one lane at a time; a copy's failure is its store's. Make them durable with `barrier`. Refused before any write: a region of no store in the set `NotWritten(ForeignPosition)`; any pair of the regions' stores not known to be on distinct devices (one store twice, an incomplete identity) `NotWritten(SameDevice)`. |
+| `ditto_pages(&[(&PageRegion, RegionPos)], bytes)` | `ditto` for pages, each copy at its position. |
 | `append_after(&AppendRegion, &deps, bytes)`, `write_after(&PageRegion, &deps, pos, bytes)` | Dependent writes with dependencies on any store of the set checked as the region's own store's are; a region of a store outside the set `NotWritten(ForeignPosition)`. |
 | `stats() -> SetStats` | `barriers`; `stores` (stores waited on: each with a ticket that became ready, flushed or not); `sleeps` (waits for a flush thread's answer); `fallbacks` (stores flushed on the calling thread because no flush thread took them). |
 

@@ -97,14 +97,22 @@ pub(crate) fn device_identity(file: &PosixFile) -> store_io_core::identity::Devi
     let sx = sys::statx(file.raw(), sys::STATX_PROBE_MASK).ok();
     let bdev = file.is_block_device();
     let dev = device_number(&st, sx.as_ref(), bdev);
-    let release = sys::kernel_release();
     identity::of(
         dev,
         identity::Context {
-            hosted: virt::detect(release.as_deref()).is_some(),
+            hosted: hosted(),
             single_device: single_device_fs(file.raw(), dev, bdev),
         },
     )
+}
+
+/// Whether a hypervisor hosts this machine, read once per process: it
+/// cannot change while the process runs, and reading it (DMI, the
+/// hypervisor node, `/proc/cpuinfo`) costs hundreds of microseconds, on a
+/// ditto's path. The device walk itself is read every time.
+fn hosted() -> bool {
+    static HOSTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HOSTED.get_or_init(|| virt::detect(sys::kernel_release().as_deref()).is_some())
 }
 
 /// Whether the file's data lives only on the device `dev` names: a raw

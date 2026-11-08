@@ -197,6 +197,9 @@ pub enum NotWrittenCause {
     /// durable prefix (a receipt for one write's range): the bytes before
     /// it may not be durable, so nothing may point past them yet.
     NotPrefix,
+    /// Copies meant for distinct devices would share one, or a device's
+    /// identity is incomplete: nothing was written.
+    SameDevice,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -225,6 +228,7 @@ impl fmt::Display for NotWrittenCause {
             Self::Frozen => "allocation is frozen: a table page is stale or lost",
             Self::InvalidOptions => "the options contradict each other",
             Self::NotPrefix => "a dependency on an append region is not a durable prefix",
+            Self::SameDevice => "two copies are not on devices known to be distinct",
         })
     }
 }

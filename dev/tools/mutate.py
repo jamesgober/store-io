@@ -185,6 +185,7 @@ AFTER_SRC = "crates/store-io-engine/src/after.rs"
 IO_SRC = "crates/store-io-engine/src/io.rs"
 SUB_SRC = "crates/store-io-engine/src/submitter/mod.rs"
 MULTI_T = ["-p", "store-io-engine", "--test", "multi"]
+MULTI_CRASH = ["-p", "store-io-engine", "--test", "multi_crash"]
 MULTI_SRC = "crates/store-io-engine/src/multi.rs"
 DOMAIN_SRC = "crates/store-io-engine/src/domain/mod.rs"
 POISON_T = ["-p", "store-io-engine", "--lib", "domain::tests::test_every_poisoning"]
@@ -1494,6 +1495,21 @@ M = [
  (MULTI_SRC, '        if let Some(slot) = st.slots.get_mut(i) {', '        if let Some(slot) = st.slots.get_mut(i & 0) {', MULTI_T),
  (MULTI_SRC, '        self.fallbacks += 1;', '        self.fallbacks += 0;', MULTI_T),
  ('crates/store-io-engine/src/flusher.rs', '        if !crate::test_hook::flush_threads() {', '        if !crate::test_hook::flush_threads() && false {', MULTI_T),
+ # MULTI (V2c): a ditto is refused before any write unless every pair of
+ # its stores is distinct and every store is in the set; copies in set order.
+ (MULTI_SRC, '                if !x.distinct(y) {', '                if !x.distinct(y) && false {', MULTI_T),
+ (MULTI_SRC, '                .ok_or_else(|| refuse(NotWrittenCause::ForeignPosition))?;', '                .unwrap_or(0);', MULTI_T),
+ (MULTI_SRC, '    order.sort_by_key(|&k| at[k]);', '    order.sort_by_key(|&k| at[k] * 0);', MULTI_T),
+ # MULTI (V2c review): results in the order named; every copy written;
+ # page positions checked before any write; a lost store's tickets.
+ (MULTI_SRC, '    for k in order {\n        out[k] = Some(write(k));\n    }', '    for (j, k) in order.into_iter().enumerate() {\n        out[j] = Some(write(k));\n    }', MULTI_T),
+ (MULTI_SRC, '    for k in order {\n        out[k] = Some(write(k));\n    }', '    for k in order {\n        let r = write(k);\n        let failed = r.is_err();\n        out[k] = Some(r);\n        if failed {\n            break;\n        }\n    }', MULTI_T),
+ (MULTI_SRC, '            let _end = r.check(pos, bytes.len())?;', '            let _end = r.check(pos, bytes.len());', MULTI_T),
+ (MULTI_SRC, '        let at = self.ditto_checked(writes.iter().map(|(r, _)| r.store()))?;', '        let at: Vec<usize> = (0..writes.len()).collect();', MULTI_T),
+ (MULTI_SRC, '        if durable >= t.end {\n            return Ok(store.receipt(region, 0, durable, 0, true, synced));', '        if durable >= t.end || true {\n            return Ok(store.receipt(region, 0, t.end.max(durable), 0, true, synced));', MULTI_CRASH),
+ # WIN_ID (V2c): a disk's NVMe controller asked again for a new descriptor.
+ ('crates/store-io-win/src/probe/mod.rs', '.iter().find(|(n, d, _)| *n == number && d == desc)', '.iter().find(|(n, d, _)| *n == number && (d == desc || true))', WIN_ID),
+ ('crates/store-io-win/src/probe/mod.rs', '.iter().find(|(n, d, _)| *n == number && d == desc)', '.iter().find(|(n, d, _)| (*n == number || true) && d == desc)', WIN_ID),
 ]
 
 def kill_stuck_tests():

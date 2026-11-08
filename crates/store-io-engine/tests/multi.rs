@@ -1212,3 +1212,220 @@ fn test_a_handed_off_store_whose_flush_fails() {
     assert!(each[2].as_ref().unwrap().covers(&tickets[2]));
     assert!(set[0].poisoned().is_none() && set[2].poisoned().is_none());
 }
+
+/// Gives device `d` of `p` a complete identity of its own (`Sim { device:
+/// node }`), the evidence otherwise `s`'s.
+fn identify(p: &SimPlatform, s: &Store<SimPlatform>, d: usize, node: u32) {
+    let mut ev = s.report().evidence.clone();
+    ev.device.identity = store_io_core::identity::DeviceIdentity {
+        devices: vec![store_io_core::identity::DeviceId::node(
+            store_io_core::identity::DeviceNode::Sim { device: node },
+        )],
+        complete: true,
+    };
+    p.with_world(|w| w.set_device_evidence(d, Some(ev)));
+}
+
+/// The writes of `dir`'s container in `p`'s trace so far, as indices.
+fn writes_of(p: &SimPlatform, dir: &str) -> Vec<usize> {
+    p.with_world(|w| {
+        let id = w
+            .file_id(&PathBuf::from(dir), store_io_engine::CONTAINER)
+            .unwrap();
+        w.trace()
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e, store_io_sim::world::TraceEvent::Write { file, .. } if *file == id))
+            .map(|(i, _)| i)
+            .collect()
+    })
+}
+
+/// Ditto writes: a copy on each of two distinct devices, written in set
+/// order whatever the order named, one result per copy in the order named,
+/// each made durable by a set barrier.
+#[test]
+fn test_ditto_writes_a_copy_on_each_device_in_set_order() {
+    let p = two_devices(120, DeviceKind::VolatileCache);
+    let (a, b) = (create_in(&p, "/a"), create_in(&p, "/b"));
+    identify(&p, &a, 0, 0);
+    identify(&p, &a, 1, 1);
+    let set = StoreSet::new([a.clone(), b.clone()]).unwrap();
+    let (ra, rb) = (
+        a.provision_append_region("log", MIB).unwrap(),
+        b.provision_append_region("log", MIB).unwrap(),
+    );
+    let (wa, wb) = (writes_of(&p, "/a").len(), writes_of(&p, "/b").len());
+    let t = set.ditto(&[&rb, &ra], &[7u8; B]).unwrap();
+    let (tb, ta) = (t[0].as_ref().unwrap(), t[1].as_ref().unwrap());
+    let (na, nb) = (writes_of(&p, "/a"), writes_of(&p, "/b"));
+    assert_eq!((na.len(), nb.len()), (wa + 1, wb + 1));
+    assert!(na[wa] < nb[wb], "written in set order: a's copy first");
+    let r = set.barrier(&[ta, tb]).unwrap();
+    assert!(r[0].covers(ta) && r[1].covers(tb));
+    // Each result is its named region's: each syncs through it.
+    assert!(rb.sync_through(tb).unwrap().covers(tb));
+    assert!(ra.sync_through(ta).unwrap().covers(ta));
+    // Pages too.
+    let (pa, pb) = (
+        a.provision_page_region("pages", MIB).unwrap(),
+        b.provision_page_region("pages", MIB).unwrap(),
+    );
+    let t = set
+        .ditto_pages(
+            &[(&pb, pb.pos(B as u64).unwrap()), (&pa, pa.pos(0).unwrap())],
+            &[8u8; B],
+        )
+        .unwrap();
+    assert!(pb.sync_through(t[0].as_ref().unwrap()).is_ok());
+    assert!(pa.sync_through(t[1].as_ref().unwrap()).is_ok());
+    let r = set
+        .barrier(&[t[0].as_ref().unwrap(), t[1].as_ref().unwrap()])
+        .unwrap();
+    assert!(r[0].covers(t[0].as_ref().unwrap()) && r[1].covers(t[1].as_ref().unwrap()));
+    let mut out = vec![0u8; B];
+    pb.read(pb.pos(B as u64).unwrap(), &mut out).unwrap();
+    assert_eq!(out, vec![8u8; B]);
+}
+
+/// A ditto is refused before any write unless every pair of its stores is
+/// on devices known to be distinct (two regions of one store, incomplete
+/// identities, one identity on both), and unless every region's store is
+/// in the set.
+#[test]
+fn test_ditto_refusals_come_before_any_write() {
+    let p = two_devices(121, DeviceKind::VolatileCache);
+    let (a, b) = (create_in(&p, "/a"), create_in(&p, "/b"));
+    let outside = create_in(&p, "/c");
+    let set = StoreSet::new([a.clone(), b.clone()]).unwrap();
+    let (ra, ra2, rb) = (
+        a.provision_append_region("log", MIB).unwrap(),
+        a.provision_append_region("log2", MIB).unwrap(),
+        b.provision_append_region("log", MIB).unwrap(),
+    );
+    let pa = a.provision_page_region("pages", MIB).unwrap();
+    let pb = b.provision_page_region("pages", MIB).unwrap();
+    let rc = outside.provision_append_region("log", MIB).unwrap();
+    let writes = || p.with_world(|w| w.writes());
+    let before = writes();
+    // Incomplete identities.
+    assert_eq!(
+        cause(set.ditto(&[&ra, &rb], &[1u8; B])),
+        NotWrittenCause::SameDevice
+    );
+    assert_eq!(
+        cause(set.ditto_pages(
+            &[(&pa, pa.pos(0).unwrap()), (&pb, pb.pos(0).unwrap())],
+            &[1u8; B]
+        )),
+        NotWrittenCause::SameDevice
+    );
+    identify(&p, &a, 0, 0);
+    identify(&p, &a, 1, 0);
+    // One identity on both devices.
+    assert_eq!(
+        cause(set.ditto(&[&ra, &rb], &[1u8; B])),
+        NotWrittenCause::SameDevice
+    );
+    identify(&p, &a, 1, 1);
+    // Two regions of one store.
+    assert_eq!(
+        cause(set.ditto(&[&ra, &ra2, &rb], &[1u8; B])),
+        NotWrittenCause::SameDevice
+    );
+    // A region of no store in the set, whatever the devices.
+    assert_eq!(
+        cause(set.ditto(&[&ra, &rc], &[1u8; B])),
+        NotWrittenCause::ForeignPosition
+    );
+    assert_eq!(writes(), before, "a refused ditto wrote");
+    // Distinct now: written.
+    let t = set.ditto(&[&ra, &rb], &[1u8; B]).unwrap();
+    assert!(t.iter().all(Result::is_ok));
+    assert_eq!(writes(), before + 2);
+}
+
+/// A copy failing after submission is its store's: that store is poisoned
+/// and its copy's result is the error; the other copy is written and made
+/// durable.
+#[test]
+fn test_a_failing_ditto_copy_is_its_stores_failure() {
+    let p = two_devices(122, DeviceKind::VolatileCache);
+    let (a, b) = (create_in(&p, "/a"), create_in(&p, "/b"));
+    identify(&p, &a, 0, 0);
+    identify(&p, &a, 1, 1);
+    let set = StoreSet::new([a.clone(), b.clone()]).unwrap();
+    let (ra, rb) = (
+        a.provision_append_region("log", MIB).unwrap(),
+        b.provision_append_region("log", MIB).unwrap(),
+    );
+    // Set order: a's copy is written first, b's second, and fails.
+    p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + 2));
+    let t = set.ditto(&[&ra, &rb], &[3u8; B]).unwrap();
+    let ta = t[0].as_ref().unwrap();
+    assert!(t[1].is_err(), "{:?}", t[1]);
+    assert!(b.poisoned().is_some() && a.poisoned().is_none());
+    assert!(set.barrier(&[ta]).unwrap()[0].covers(ta));
+}
+
+/// The first copy in set order failing stops nothing: the later copy is
+/// written and made durable, and only the first's store is poisoned.
+#[test]
+fn test_a_first_ditto_copy_failing_leaves_the_later_ones() {
+    let p = two_devices(123, DeviceKind::VolatileCache);
+    let (a, b) = (create_in(&p, "/a"), create_in(&p, "/b"));
+    identify(&p, &a, 0, 0);
+    identify(&p, &a, 1, 1);
+    let set = StoreSet::new([a.clone(), b.clone()]).unwrap();
+    let (ra, rb) = (
+        a.provision_append_region("log", MIB).unwrap(),
+        b.provision_append_region("log", MIB).unwrap(),
+    );
+    // a's copy is written first (set order), and fails.
+    p.with_world(|w| w.faults_mut().fail_write = Some(w.writes() + 1));
+    let t = set.ditto(&[&rb, &ra], &[4u8; B]).unwrap();
+    assert!(t[1].is_err(), "{:?}", t[1]);
+    let tb = t[0].as_ref().unwrap();
+    assert!(a.poisoned().is_some() && b.poisoned().is_none());
+    assert!(set.barrier(&[tb]).unwrap()[0].covers(tb));
+}
+
+/// A page position its region refuses fails the whole ditto before any
+/// write, whichever copy it is.
+#[test]
+fn test_a_refused_ditto_page_position_comes_before_any_write() {
+    let p = two_devices(124, DeviceKind::VolatileCache);
+    let (a, b) = (create_in(&p, "/a"), create_in(&p, "/b"));
+    identify(&p, &a, 0, 0);
+    identify(&p, &a, 1, 1);
+    let set = StoreSet::new([a.clone(), b.clone()]).unwrap();
+    let (pa, pb) = (
+        a.provision_page_region("pages", MIB).unwrap(),
+        b.provision_page_region("pages", MIB).unwrap(),
+    );
+    let other = b.provision_page_region("other", MIB).unwrap();
+    let before = p.with_world(|w| w.writes());
+    // The second copy's position is another region's.
+    assert_eq!(
+        cause(set.ditto_pages(
+            &[(&pa, pa.pos(0).unwrap()), (&pb, other.pos(0).unwrap())],
+            &[1u8; B]
+        )),
+        NotWrittenCause::ForeignPosition
+    );
+    assert_eq!(
+        cause(set.ditto_pages(
+            &[
+                (&pa, pa.pos(0).unwrap()),
+                (&pb, pb.pos(MIB - B as u64).unwrap())
+            ],
+            &[1u8; 2 * B]
+        )),
+        NotWrittenCause::OutOfBounds
+    );
+    assert_eq!(
+        p.with_world(|w| w.writes()),
+        before,
+        "a refused ditto wrote"
+    );
+}

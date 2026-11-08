@@ -159,7 +159,7 @@ fn disk_number(root: &[u16]) -> Option<u32> {
 /// volume and storage-property queries and NVMe Identify Controller; never
 /// the write-cache query, which sends a flush). Network volumes and cloud
 /// placeholders are unknown, as in the probe.
-pub(crate) fn device_identity(dir: &WinDir, file: &WinFile) -> DeviceIdentity {
+pub(crate) fn device_identity(_dir: &WinDir, file: &WinFile) -> DeviceIdentity {
     let network = sys::volume_info(file.handle())
         .is_ok_and(|(fs, _)| volume::fs_kind(&fs) == FsKind::Network)
         || sys::attribute_tag(file.handle())
@@ -167,13 +167,18 @@ pub(crate) fn device_identity(dir: &WinDir, file: &WinFile) -> DeviceIdentity {
     if network {
         return DeviceIdentity::unknown();
     }
-    let Ok(root) = sys::volume_mount_root(dir.path()) else {
+    // The file's own volume (`\\?\Volume{GUID}\`, cheap from its handle)
+    // gives the drive type: no walk of the directory's path for its mount
+    // root (`GetVolumePathNameW`, milliseconds, on a ditto's path), and no
+    // junction on the way can name another volume. A network file has no
+    // volume GUID: unknown.
+    let Ok(volume) = sys::volume_guid_root(file.handle()) else {
         return DeviceIdentity::unknown();
     };
-    if volume::drive_class(sys::drive_type(&root)) == volume::DriveClass::Network {
+    if volume::drive_class(sys::drive_type(&volume)) == volume::DriveClass::Network {
         return DeviceIdentity::unknown();
     }
-    identity(&root, file)
+    identity_in(&volume)
 }
 
 /// Most extents a volume's identity reads (a spanned or striped volume
@@ -192,7 +197,11 @@ pub(crate) fn identity(_root: &[u16], file: &WinFile) -> DeviceIdentity {
     let Ok(volume) = sys::volume_guid_root(file.handle()) else {
         return DeviceIdentity::unknown();
     };
-    let root = volume.as_slice();
+    identity_in(&volume)
+}
+
+/// [`identity`] of the volume `root` (`\\?\Volume{GUID}\`).
+fn identity_in(root: &[u16]) -> DeviceIdentity {
     let (disks, all) = match volume_disks(root) {
         Some(found) => found,
         // The extents could not be listed: the device number names one
@@ -214,15 +223,17 @@ pub(crate) fn identity(_root: &[u16], file: &WinFile) -> DeviceIdentity {
                 .as_ref()
                 .is_some_and(|d| storage::bus_from_code(d.bus) == Bus::Nvme);
             let controller = drive.as_ref().filter(|_| nvme_bus).and_then(|d| {
-                nvme(
-                    d,
-                    NvmeQuery::Identify {
-                        cns: storage::NVME_CNS_CONTROLLER,
-                        nsid: 0,
-                    },
-                    4096,
-                )
-                .and_then(|(data, _)| nvme::parse_identify_controller(&data))
+                controller_of(number, desc.as_ref(), || {
+                    nvme(
+                        d,
+                        NvmeQuery::Identify {
+                            cns: storage::NVME_CNS_CONTROLLER,
+                            nsid: 0,
+                        },
+                        4096,
+                    )
+                    .and_then(|(data, _)| nvme::parse_identify_controller(&data))
+                })
             });
             Disk {
                 number,
@@ -232,6 +243,48 @@ pub(crate) fn identity(_root: &[u16], file: &WinFile) -> DeviceIdentity {
         })
         .collect();
     identity_of(&found, all, smbios_guest() || cpuid_guest())
+}
+
+/// Disks whose NVMe Identify Controller [`controller_of`] keeps (a few
+/// disks per machine; past it the oldest is forgotten).
+const CONTROLLERS: usize = 64;
+
+/// Each disk's NVMe Identify Controller, by its number and descriptor.
+type Controllers = Vec<(u32, storage::DeviceDesc, nvme::IdentifyController)>;
+
+static KNOWN_CONTROLLERS: std::sync::Mutex<Controllers> = std::sync::Mutex::new(Vec::new());
+
+/// Disk `number`'s controller: asked of the device by `read` (an NVMe admin
+/// command, hundreds of microseconds) only when the disk is not one already
+/// asked with the same descriptor (vendor, product, revision and serial:
+/// the namespace's EUI-64 on NVMe). A disk swapped or renumbered has
+/// another descriptor and is asked afresh; which disks a volume lies on is
+/// always read afresh (`volume_disks`). Nothing is kept without a
+/// descriptor to check it by.
+fn controller_of(
+    number: u32,
+    desc: Option<&storage::DeviceDesc>,
+    read: impl FnOnce() -> Option<nvme::IdentifyController>,
+) -> Option<nvme::IdentifyController> {
+    let Some(desc) = desc else {
+        return read();
+    };
+    let lock = || {
+        KNOWN_CONTROLLERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some((_, _, c)) = lock().iter().find(|(n, d, _)| *n == number && d == desc) {
+        return Some(c.clone());
+    }
+    let c = read()?;
+    let mut known = lock();
+    known.retain(|(n, _, _)| *n != number);
+    if known.len() >= CONTROLLERS {
+        let _oldest = known.remove(0);
+    }
+    known.push((number, desc.clone(), c.clone()));
+    Some(c)
 }
 
 /// Whether CPUID says this machine is a guest: a hypervisor is present
@@ -328,8 +381,10 @@ fn cpuid_says_guest(c: &HvCpuid) -> bool {
 /// describes the hardware the OS was booted on).
 fn smbios_guest() -> bool {
     // Only a table that positively describes physical hardware counts as
-    // bare metal: an unreadable or malformed one is a guest.
-    !sys::smbios_raw().is_some_and(|raw| storage::smbios_says_physical(&raw))
+    // bare metal: an unreadable or malformed one is a guest. Read once: the
+    // firmware's tables do not change while the process runs.
+    static GUEST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *GUEST.get_or_init(|| !sys::smbios_raw().is_some_and(|raw| storage::smbios_says_physical(&raw)))
 }
 
 /// What the identity reads of one disk.
@@ -666,6 +721,40 @@ fn probe_nvme(drive: &Handle, ev: &mut Evidence) {
 #[cfg(test)]
 mod identity_tests {
     use super::*;
+
+    /// A disk's controller is asked once while its descriptor stays the
+    /// same, and again when it changes (a disk swapped in under the same
+    /// number) or with no descriptor to check it by.
+    #[test]
+    fn test_a_controller_is_asked_again_only_for_a_new_descriptor() {
+        let desc = |serial: &str| storage::DeviceDesc {
+            serial: Some(serial.to_owned()),
+            ..storage::DeviceDesc::default()
+        };
+        let ctl = |serial: &str| nvme::IdentifyController {
+            serial: Some(serial.to_owned()),
+            ..nvme::IdentifyController::default()
+        };
+        // Disk numbers no other test uses: the cache is the process's.
+        let (n, first, second) = (9_001, desc("eui-1"), desc("eui-2"));
+        assert_eq!(
+            controller_of(n, Some(&first), || Some(ctl("c1"))),
+            Some(ctl("c1"))
+        );
+        assert_eq!(
+            controller_of(n, Some(&first), || panic!("asked again")),
+            Some(ctl("c1"))
+        );
+        assert_eq!(
+            controller_of(n, Some(&second), || Some(ctl("c2"))),
+            Some(ctl("c2"))
+        );
+        assert_eq!(controller_of(n, None, || Some(ctl("c3"))), Some(ctl("c3")));
+        // Nothing kept without a descriptor: asked again. Another disk with
+        // disk 9_001's descriptor is asked itself.
+        assert_eq!(controller_of(n, None, || Some(ctl("c4"))), Some(ctl("c4")));
+        assert_eq!(controller_of(9_002, Some(&second), || None), None);
+    }
 
     /// The rule on bare metal.
     fn id(disks: &[Disk], all: bool) -> DeviceIdentity {

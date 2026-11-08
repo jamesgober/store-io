@@ -216,6 +216,71 @@ fn leaf_id(leaf: &Path, hosted: bool) -> Option<(DeviceId, bool)> {
     Some((d, counts))
 }
 
+/// Most members read from one btrfs file system's sysfs directory.
+const MEMBERS_MAX: usize = 64;
+
+/// The whole disks a btrfs file system's members live on, `fd` an open file
+/// on it: its fsid from `BTRFS_IOC_FS_INFO` (any subvolume answers for the
+/// file system), then every member in `/sys/fs/btrfs/<fsid>/devices/`, each
+/// walked as any device. Empty when any of it cannot be read (no sysfs in a
+/// container, a denied ioctl, one member unreadable): pacing then treats the
+/// store as unknown, never as on fewer disks than it is.
+pub(crate) fn btrfs_members(fd: std::os::fd::RawFd, hosted: bool) -> Vec<DeviceId> {
+    let Ok(fsid) = crate::sys::btrfs_fsid(fd) else {
+        return Vec::new();
+    };
+    members_in(Path::new("/sys/fs/btrfs"), &fsid, |dev| {
+        let mut id = DeviceIdentity::unknown();
+        add(&mut id, dev, hosted, 0);
+        id.devices
+    })
+}
+
+/// The members under `root/<fsid as a UUID>/devices/`: each entry's `dev`
+/// (`major:minor`) given to `walk`, the devices it returns gathered once
+/// each. Empty when the directory, or any one entry, cannot be read, when
+/// an entry's walk names no device, or when there are more than
+/// [`MEMBERS_MAX`] entries: a partial list would pace the store apart from a
+/// disk it shares.
+pub(crate) fn members_in(
+    root: &Path,
+    fsid: &[u8; 16],
+    walk: impl Fn((u32, u32)) -> Vec<DeviceId>,
+) -> Vec<DeviceId> {
+    let mut uuid = String::with_capacity(36);
+    for (i, b) in fsid.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            uuid.push('-');
+        }
+        uuid.push_str(&format!("{b:02x}"));
+    }
+    let Ok(entries) = std::fs::read_dir(root.join(uuid).join("devices")) else {
+        return Vec::new();
+    };
+    let mut out: Vec<DeviceId> = Vec::new();
+    for (n, e) in entries.enumerate() {
+        if n >= MEMBERS_MAX {
+            return Vec::new();
+        }
+        let Ok(e) = e else {
+            return Vec::new();
+        };
+        let Some(dev) = read_sysfs(&e.path().join("dev")).and_then(|s| parse_dev(&s)) else {
+            return Vec::new();
+        };
+        let found = walk(dev);
+        if found.is_empty() {
+            return Vec::new();
+        }
+        for d in found {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
 /// Parses sysfs `dev` (`major:minor`).
 pub(crate) fn parse_dev(s: &str) -> Option<(u32, u32)> {
     let (a, b) = s.trim().split_once(':')?;
@@ -225,6 +290,100 @@ pub(crate) fn parse_dev(s: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixture `/sys/fs/btrfs` with one file system whose members are
+    /// `devs` (name, `dev` contents).
+    fn btrfs_fixture(tag: &str, fsid: &[u8; 16], devs: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("sio-btrfs-{tag}-{}", std::process::id()));
+        let _gone = std::fs::remove_dir_all(&root);
+        let mut uuid = String::new();
+        for (i, b) in fsid.iter().enumerate() {
+            if matches!(i, 4 | 6 | 8 | 10) {
+                uuid.push('-');
+            }
+            uuid.push_str(&format!("{b:02x}"));
+        }
+        for (name, dev) in devs {
+            let d = root.join(&uuid).join("devices").join(name);
+            assert!(std::fs::create_dir_all(&d).is_ok());
+            assert!(std::fs::write(d.join("dev"), dev).is_ok());
+        }
+        assert!(std::fs::create_dir_all(root.join(&uuid).join("devices")).is_ok());
+        root
+    }
+
+    /// The fixture walk: a partition `8:N` lives on the disk `8:(N & !15)`.
+    fn disk_of(dev: (u32, u32)) -> Vec<DeviceId> {
+        vec![DeviceId::node(DeviceNode::Linux {
+            major: dev.0,
+            minor: dev.1 & !15,
+        })]
+    }
+
+    const FSID: [u8; 16] = [
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef,
+    ];
+
+    #[test]
+    fn test_btrfs_members_are_read_from_the_fsid_directory() {
+        let root = btrfs_fixture("one", &FSID, &[("sda2", "8:2\n")]);
+        assert!(root.join("12345678-9abc-def0-0123-456789abcdef").is_dir());
+        let m = members_in(&root, &FSID, disk_of);
+        assert_eq!(m, disk_of((8, 0)));
+        let _gone = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_btrfs_members_of_two_disks_are_both_named_once() {
+        let root = btrfs_fixture(
+            "two",
+            &FSID,
+            &[("sda2", "8:2\n"), ("sda3", "8:3\n"), ("sdb", "8:16\n")],
+        );
+        let mut m = members_in(&root, &FSID, disk_of);
+        m.sort_by_key(|d| format!("{:?}", d.node));
+        assert_eq!(m.len(), 2, "{m:?}");
+        assert!(m.contains(&disk_of((8, 0))[0]) && m.contains(&disk_of((8, 16))[0]));
+        let _gone = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_btrfs_members_with_one_unreadable_give_nothing() {
+        let root = btrfs_fixture(
+            "part",
+            &FSID,
+            &[("sda2", "8:2\n"), ("sdb", "eight:sixteen")],
+        );
+        assert!(members_in(&root, &FSID, disk_of).is_empty());
+        // A member the walk names nothing for (a hidden device) is as bad.
+        let root2 = btrfs_fixture("hidden", &FSID, &[("sda2", "8:2\n"), ("sdb", "8:16\n")]);
+        let walk = |d: (u32, u32)| if d.1 == 16 { Vec::new() } else { disk_of(d) };
+        assert!(members_in(&root2, &FSID, walk).is_empty());
+        let _gone = (
+            std::fs::remove_dir_all(&root),
+            std::fs::remove_dir_all(&root2),
+        );
+    }
+
+    #[test]
+    fn test_btrfs_members_past_the_bound_give_nothing() {
+        let names: Vec<String> = (0..=MEMBERS_MAX).map(|i| format!("d{i}")).collect();
+        let devs: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "8:0\n")).collect();
+        let root = btrfs_fixture("many", &FSID, &devs);
+        assert!(members_in(&root, &FSID, disk_of).is_empty());
+        let _gone = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_btrfs_members_missing_or_malformed_give_nothing() {
+        let root = btrfs_fixture("bad", &FSID, &[("sda2", "eight:two"), ("sdb", "")]);
+        assert!(members_in(&root, &FSID, disk_of).is_empty());
+        let other = [0u8; 16];
+        assert!(members_in(&root, &other, disk_of).is_empty());
+        assert!(members_in(Path::new("/nonexistent-sio"), &FSID, disk_of).is_empty());
+        let _gone = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn test_parse_dev_reads_major_and_minor() {

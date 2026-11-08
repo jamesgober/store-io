@@ -1083,3 +1083,26 @@ fn test_a_lost_device_takes_a_crash_mode_and_its_directory_handles() {
     assert_eq!((media[0], media[4096]), (0, 3));
     assert_eq!(p.with_world(|w| w.cached_writes()), 1);
 }
+
+#[test]
+fn test_fine_clock_is_the_world_clock_and_moves_only_when_advanced() {
+    let (p, _dir, _file, _pool) = setup(SimConfig::volatile(4));
+    assert_eq!(p.monotonic_ns(), 0);
+    p.with_world(|w| w.advance_clock_ns(1_500));
+    assert_eq!(p.monotonic_ns(), 1_500);
+    assert_eq!(p.monotonic_ms(), 0);
+    p.with_world(|w| w.advance_clock(2));
+    assert_eq!(p.monotonic_ns(), 2_001_500);
+    assert_eq!(p.monotonic_ms(), 2);
+}
+
+#[test]
+fn test_each_world_is_its_own_identity_scope_and_the_probe_names_its_volume() {
+    let (a, adir, afile, _pool) = setup(SimConfig::volatile(4));
+    let (b, _bdir, _bfile, _pool2) = setup(SimConfig::volatile(4));
+    assert_ne!(a.identity_scope(), b.identity_scope());
+    assert_eq!(a.identity_scope(), a.with_world(|w| w.id()));
+    let ev = a.probe(&adir, &afile).unwrap();
+    assert_eq!(ev.fs.device, Some(a.file_identity(&afile).unwrap().volume));
+    assert_eq!(ev.fs.device.map(|v| v >> 16), Some(a.identity_scope()));
+}

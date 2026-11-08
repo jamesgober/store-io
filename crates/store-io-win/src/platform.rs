@@ -114,6 +114,10 @@ impl Platform for WinPlatform {
         sys::tick_count_ms()
     }
 
+    fn monotonic_ns(&self) -> u64 {
+        sys::monotonic_ns()
+    }
+
     fn io_path(&self) -> store_io_platform::IoPath {
         store_io_platform::IoPath {
             interface: store_io_platform::IoInterface::Iocp,
@@ -167,7 +171,9 @@ impl Platform for WinPlatform {
     }
 
     fn probe(&self, dir: &WinDir, file: &WinFile) -> RawResult<Evidence> {
-        probe::probe(dir, file)
+        let mut ev = probe::probe(dir, file)?;
+        ev.fs.device = self.file_identity(file).ok().map(|i| i.volume);
+        Ok(ev)
     }
 
     fn device_identity(&self, dir: &WinDir, file: &WinFile) -> DeviceIdentity {

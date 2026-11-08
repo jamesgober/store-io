@@ -175,6 +175,10 @@ impl Platform for PosixPlatform {
         sys::monotonic_ms()
     }
 
+    fn monotonic_ns(&self) -> u64 {
+        sys::monotonic_ns()
+    }
+
     fn io_path(&self) -> IoPath {
         IoPath {
             interface: IoInterface::Synchronous,
@@ -222,7 +226,9 @@ impl Platform for PosixPlatform {
     }
 
     fn probe(&self, dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
-        probe::probe(dir, file)
+        let mut ev = probe::probe(dir, file)?;
+        ev.fs.device = self.file_identity(file).ok().map(|i| i.volume);
+        Ok(ev)
     }
 
     fn device_identity(&self, _dir: &PosixDir, file: &PosixFile) -> DeviceIdentity {

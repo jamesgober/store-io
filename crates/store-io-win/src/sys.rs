@@ -696,6 +696,36 @@ fn sentinel_overlapped(ev: &Handle) -> OVERLAPPED {
     ov
 }
 
+/// `QueryPerformanceCounter` in nanoseconds: a user-space read of the
+/// invariant TSC on current Windows, never decreasing. The frequency is read
+/// once. 0 if the counter cannot be read (it cannot since Windows XP).
+pub fn monotonic_ns() -> u64 {
+    use windows_sys::Win32::System::Performance::{
+        QueryPerformanceCounter, QueryPerformanceFrequency,
+    };
+    static FREQ: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let freq = *FREQ.get_or_init(|| {
+        let mut f = 0i64;
+        // SAFETY: writes one i64 through the pointer, valid for the call.
+        let ok = unsafe { QueryPerformanceFrequency(&mut f) };
+        if ok == 0 { 0 } else { f as u64 }
+    });
+    if freq == 0 {
+        return 0;
+    }
+    let mut c = 0i64;
+    // SAFETY: writes one i64 through the pointer, valid for the call.
+    if unsafe { QueryPerformanceCounter(&mut c) } == 0 {
+        return 0;
+    }
+    // Whole seconds and the remainder apart, so the product never
+    // overflows for any uptime.
+    let (c, f) = (c as u64, freq);
+    (c / f)
+        .saturating_mul(1_000_000_000)
+        .saturating_add((c % f) * 1_000_000_000 / f)
+}
+
 /// `GetTickCount64`: milliseconds since boot, from shared memory (no system
 /// call), resolution 10-16 ms, never decreasing.
 pub fn tick_count_ms() -> u64 {

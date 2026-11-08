@@ -297,6 +297,24 @@ pub(crate) fn ofd_setlk(fd: RawFd, lock_type: c_int) -> RawResult<()> {
     check(unsafe { libc::fcntl(fd, libc::F_OFD_SETLK, &raw const fl) })
 }
 
+/// `clock_gettime(CLOCK_MONOTONIC)` in nanoseconds: a vDSO read where the
+/// clock source has one (TSC, arch timer), a system call otherwise. 0 if the
+/// call fails (it cannot for a valid clock id and pointer).
+pub(crate) fn monotonic_ns() -> u64 {
+    let mut ts = MaybeUninit::<libc::timespec>::zeroed();
+    // SAFETY: clock_gettime(2) writes one `struct timespec` through the
+    // pointer, which is valid and exclusively borrowed for the call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, ts.as_mut_ptr()) };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: zero-initialised, and filled by the successful call above.
+    let ts = unsafe { ts.assume_init() };
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
 /// `clock_gettime(CLOCK_MONOTONIC_COARSE)` in milliseconds: a vDSO read of
 /// the kernel's tick, no system call. 0 if the call fails (it cannot for a
 /// valid clock id and pointer).
@@ -408,6 +426,35 @@ pub(crate) fn preadv2(
     // 1); one iovec is passed.
     let n = unsafe { libc::preadv2(fd, &raw const iov, 1, offset, flags) };
     usize::try_from(n).map_err(|_| last_errno())
+}
+
+// ----- btrfs ----------------------------------------------------------------
+
+/// `BTRFS_IOC_FS_INFO`: `_IOR(0x94, 31, struct btrfs_ioctl_fs_info_args)`,
+/// the argument 1024 bytes (asm-generic encoding: on architectures whose
+/// read bit differs the call fails `ENOTTY`, and the caller reads nothing).
+const BTRFS_IOC_FS_INFO: libc::Ioctl = 0x8400_941Fu32 as libc::Ioctl;
+
+/// The fsid of the btrfs file system `fd` is on (any subvolume answers for
+/// it): `struct btrfs_ioctl_fs_info_args`'s `fsid`, after `max_id` and
+/// `num_devices`.
+///
+/// # Errors
+///
+/// The errno (`ENOTTY` on a file of another kind).
+pub(crate) fn btrfs_fsid(fd: RawFd) -> RawResult<[u8; 16]> {
+    let mut args = [0u8; 1024];
+    // SAFETY: BTRFS_IOC_FS_INFO writes one `struct btrfs_ioctl_fs_info_args`
+    // (1024 bytes) through the pointer, valid and exclusively borrowed for
+    // the call; the buffer is zeroed, so its `flags` asks for the base fields
+    // only.
+    let rc = unsafe { libc::ioctl(fd, BTRFS_IOC_FS_INFO, args.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(last_errno());
+    }
+    let mut fsid = [0u8; 16];
+    fsid.copy_from_slice(&args[16..32]);
+    Ok(fsid)
 }
 
 // ----- FIEMAP ---------------------------------------------------------------
@@ -665,6 +712,17 @@ mod tests {
         assert_eq!(FS_IOC_FIEMAP, fiemap as libc::Ioctl);
         let nvme = (3u32 << 30) | (72 << 16) | (u32::from(b'N') << 8) | 0x41;
         assert_eq!(NVME_IOCTL_ADMIN_CMD, nvme as libc::Ioctl);
+        // _IOR(type, nr, size) = (2 << 30) | (size << 16) | (type << 8) | nr
+        let btrfs = (2u32 << 30) | (1024 << 16) | (0x94 << 8) | 31;
+        assert_eq!(BTRFS_IOC_FS_INFO, btrfs as libc::Ioctl);
+    }
+
+    #[test]
+    fn test_btrfs_fsid_of_a_file_elsewhere_is_an_error() {
+        let Ok(f) = std::fs::File::open("/proc/self/stat") else {
+            panic!("/proc/self/stat");
+        };
+        assert!(btrfs_fsid(std::os::fd::AsRawFd::as_raw_fd(&f)).is_err());
     }
 
     #[test]

@@ -549,6 +549,14 @@ impl Platform for SimPlatform {
         lock(&self.world).clock_ms()
     }
 
+    fn monotonic_ns(&self) -> u64 {
+        lock(&self.world).clock_ns()
+    }
+
+    fn identity_scope(&self) -> u64 {
+        lock(&self.world).id()
+    }
+
     fn flush_errors_per_handle(&self) -> bool {
         // A flush persists the file whatever the handle, and reports its
         // own outcome.
@@ -719,6 +727,7 @@ impl Platform for SimPlatform {
             cow: Tri::No,
             dio_mem_align: 4096,
             dio_offset_align: w.config().logical_block,
+            device: Some(w.volume_of(file.id())),
             ..FsFacts::default()
         };
         ev.privilege = Privilege::Full;

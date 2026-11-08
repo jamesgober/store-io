@@ -214,6 +214,8 @@ fn test_create_allocate_write_read_roundtrip_with_probe_alignment() {
     assert_eq!(p.size(&file).unwrap(), 1 << 20);
 
     let ev = p.probe(&dir, &file).unwrap();
+    // The device pacing keys by: the file's volume, one encoding.
+    assert_eq!(ev.fs.device, Some(p.file_identity(&file).unwrap().volume));
     // statx reports direct-I/O alignment from 6.1 (STATX_DIOALIGN).
     if ev.kernel.is_some_and(|k| k >= (6, 1, 0)) {
         assert!(ev.fs.dio_offset_align > 0, "{ev:?}");

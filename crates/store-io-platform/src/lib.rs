@@ -539,6 +539,21 @@ pub trait Platform: Send + Sync + 'static {
     /// `oldest_outstanding`, never on the I/O path.
     fn monotonic_ms(&self) -> u64;
 
+    /// A fine monotonic clock in nanoseconds that never decreases, from
+    /// one origin across the process's threads. Allowed on the I/O path
+    /// (pacing reads it at commit barriers): a user-space read where the
+    /// operating system offers one (Linux's vDSO, Windows's performance
+    /// counter, macOS's uptime clock). Deterministic in the simulator.
+    fn monotonic_ns(&self) -> u64;
+
+    /// The scope device identities of this backend are unique in: two
+    /// identities, file-system devices or volumes from backends of
+    /// different scopes never name one device. 0 for every backend on real
+    /// devices; the simulator's world (each world's devices are its own).
+    fn identity_scope(&self) -> u64 {
+        0
+    }
+
     /// A queue as [`Platform::queue`] makes it, with `file` registered with
     /// it where the backend can (D-078, D-107: an io_uring direct descriptor
     /// on a thread-owned ring, used by reads only), so an operation on `file`

@@ -502,6 +502,10 @@ mod platform {
             sys::monotonic_coarse_ms()
         }
 
+        fn monotonic_ns(&self) -> u64 {
+            sys::monotonic_ns()
+        }
+
         fn io_path(&self) -> IoPath {
             let fell_back = self.fell_back.load(Ordering::Acquire);
             let refused = self.refused.load(Ordering::Acquire);
@@ -578,7 +582,16 @@ mod platform {
         }
 
         fn probe(&self, dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
-            probe::probe(dir, file)
+            let mut ev = probe::probe(dir, file)?;
+            // A raw block device has no file system: its `st_dev` is
+            // devtmpfs's, shared by every device node, so it names no device
+            // (its identity's nodes key its pacing).
+            ev.fs.device = if file.is_block_device() {
+                None
+            } else {
+                self.file_identity(file).ok().map(|i| i.volume)
+            };
+            Ok(ev)
         }
 
         fn device_identity(&self, _dir: &PosixDir, file: &PosixFile) -> DeviceIdentity {

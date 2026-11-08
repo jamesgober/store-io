@@ -118,6 +118,12 @@ pub struct DeviceFacts {
     pub multi_controller: bool,
     /// The physical devices the bytes may live on (PLANNING R5.2).
     pub identity: crate::identity::DeviceIdentity,
+    /// The member disks of a file system spanning devices of its own,
+    /// found at open (Linux btrfs: its members in sysfs), each a whole disk;
+    /// empty elsewhere or when they could not be read. Read only by device
+    /// pacing, to pace stores on one disk together: never by
+    /// [`Self::identity`]'s distinctness.
+    pub members: Vec<crate::identity::DeviceId>,
 }
 
 /// NVMe atomic-write fields exactly as the specification defines them.
@@ -211,6 +217,12 @@ pub struct FsFacts {
     pub dio_mem_align: u32,
     /// Direct-I/O offset alignment in bytes (0 = unknown).
     pub dio_offset_align: u32,
+    /// The device the file system reports for the store's file, in the
+    /// encoding of `FileIdentity::volume` (`st_dev` on Linux and macOS, the
+    /// volume serial on Windows; the simulator's world-qualified volume);
+    /// `None` when it could not be read. Device pacing's key of last resort
+    /// (PLANNING R5.4).
+    pub device: Option<u64>,
 }
 
 /// One layer of the storage stack between the filesystem and the device.

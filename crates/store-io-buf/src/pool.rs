@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::arena::{Arena, ArenaError, Protection};
 use crate::stack::IndexStack;
+use crate::sync::{AtomicU32, Ordering};
 use crate::wipe::wipe;
 
 /// One size class: `count` buffers of `size` bytes.
@@ -86,6 +87,59 @@ struct Class {
     count: u32,
     /// Free buffers, most recently returned first (warm in the caches).
     free: IndexStack,
+    /// Buffers of this class background work holds ([`BufPool::take_capped`]).
+    background: Holdings,
+}
+
+/// A count of held units that never passes a cap (background buffers of
+/// one class): a unit is reserved by compare-and-swap before anything is
+/// taken, so concurrent takers never overshoot and a taker below the cap is
+/// never refused spuriously.
+pub(crate) struct Holdings {
+    held: AtomicU32,
+}
+
+impl Holdings {
+    pub(crate) fn new() -> Self {
+        Self {
+            held: AtomicU32::new(0),
+        }
+    }
+
+    /// Reserves one unit if fewer than `cap` are held.
+    pub(crate) fn try_hold(&self, cap: u32) -> bool {
+        let mut held = self.held.load(Ordering::Relaxed);
+        loop {
+            if held >= cap {
+                return false;
+            }
+            // Acquire on success: pairs with a release's Release, so a taker
+            // that takes a unit a drop gave back also sees the buffer the drop
+            // pushed before it.
+            match self.held.compare_exchange_weak(
+                held,
+                held + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(now) => {
+                    held = now;
+                    crate::sync::spin();
+                }
+            }
+        }
+    }
+
+    /// Returns one unit reserved by [`Self::try_hold`].
+    pub(crate) fn release(&self) {
+        let _was = self.held.fetch_sub(1, Ordering::Release);
+    }
+
+    /// The units held now.
+    pub(crate) fn held(&self) -> u32 {
+        self.held.load(Ordering::Relaxed)
+    }
 }
 
 struct Inner {
@@ -181,6 +235,7 @@ impl BufPool {
                 base,
                 count: c.count,
                 free,
+                background: Holdings::new(),
             });
             base += c.size * c.count as usize;
         }
@@ -214,6 +269,37 @@ impl BufPool {
         self.take_within(len, usize::MAX)
     }
 
+    /// As [`Self::take_within`], for background work (PLANNING R5.4): never
+    /// a buffer of a class whose background holdings are already half of
+    /// its buffers (rounded down), so background work can never leave
+    /// commits without buffers. The buffer counts as a background holding
+    /// until it is dropped. Never allocates, never blocks. A class of one
+    /// buffer has a cap of 0: background work never uses it (a store's pool
+    /// has at least four buffers of every class).
+    ///
+    /// A capped take may be refused while another capped take holds a unit
+    /// for an instant before finding its class empty: background callers
+    /// treat a refusal as back-pressure (reap, then take again), never as a
+    /// failure.
+    ///
+    /// # Errors
+    ///
+    /// [`Exhausted`] when no class of `len` to `max` bytes has both a free
+    /// buffer and room under its cap.
+    pub fn take_capped(&self, len: usize, max: usize) -> Result<IoBuf, Exhausted> {
+        self.take_from(len, max, true)
+    }
+
+    /// Background buffers held per class, as `(size, held, cap)`.
+    #[must_use]
+    pub fn background_holdings(&self) -> Vec<(usize, u32, u32)> {
+        self.inner
+            .classes
+            .iter()
+            .map(|c| (c.size, c.background.held(), c.count / 2))
+            .collect()
+    }
+
     /// The size of the smallest class that holds `len` bytes (`None` when
     /// none does): with [`Self::take_within`], a buffer of exactly that
     /// class.
@@ -235,6 +321,10 @@ impl BufPool {
     ///
     /// [`Exhausted`] when no class of `len` to `max` bytes has a free buffer.
     pub fn take_within(&self, len: usize, max: usize) -> Result<IoBuf, Exhausted> {
+        self.take_from(len, max, false)
+    }
+
+    fn take_from(&self, len: usize, max: usize, background: bool) -> Result<IoBuf, Exhausted> {
         let inner = &self.inner;
         for (ci, class) in inner.classes.iter().enumerate() {
             if class.size < len {
@@ -243,20 +333,28 @@ impl BufPool {
             if class.size > max {
                 break;
             }
-            if let Some(index) = class.free.pop() {
-                let at = inner.offset + class.base + index as usize * class.size;
-                // SAFETY: `at + class.size ≤ offset + total ≤ arena.len()` by
-                // construction in `new`, so the pointer stays inside the arena.
-                let ptr = unsafe { NonNull::new_unchecked(inner.arena.base().as_ptr().add(at)) };
-                return Ok(IoBuf {
-                    pool: Arc::clone(&self.inner),
-                    ptr,
-                    cap: class.size,
-                    len,
-                    class: ci as u16,
-                    index,
-                });
+            if background && !class.background.try_hold(class.count / 2) {
+                continue;
             }
+            let Some(index) = class.free.pop() else {
+                if background {
+                    class.background.release();
+                }
+                continue;
+            };
+            let at = inner.offset + class.base + index as usize * class.size;
+            // SAFETY: `at + class.size ≤ offset + total ≤ arena.len()` by
+            // construction in `new`, so the pointer stays inside the arena.
+            let ptr = unsafe { NonNull::new_unchecked(inner.arena.base().as_ptr().add(at)) };
+            return Ok(IoBuf {
+                pool: Arc::clone(&self.inner),
+                ptr,
+                cap: class.size,
+                len,
+                class: ci as u16,
+                index,
+                background,
+            });
         }
         Err(Exhausted)
     }
@@ -325,6 +423,9 @@ pub struct IoBuf {
     len: usize,
     class: u16,
     index: u32,
+    /// Taken by [`BufPool::take_capped`]: released from its class's
+    /// background holdings on drop.
+    background: bool,
 }
 
 // SAFETY: an IoBuf exclusively owns its slot of the arena (the free list hands
@@ -427,13 +528,159 @@ impl Drop for IoBuf {
         if let Some(class) = self.pool.classes.get(usize::from(self.class)) {
             // The stack has room for every index of the class.
             let _returned = class.free.push(self.index);
+            // After the buffer is back: a capped take that sees the unit
+            // free finds the buffer too.
+            if self.background {
+                class.background.release();
+            }
         }
+    }
+}
+
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use loom::sync::Arc;
+
+    use super::Holdings;
+
+    /// Two takers race for the last unit under a cap of 2 with one held:
+    /// exactly one wins, and the count never passes the cap; a release
+    /// makes the unit available again.
+    #[test]
+    fn loom_background_holdings_never_pass_their_cap() {
+        loom::model(|| {
+            let h = Arc::new(Holdings::new());
+            assert!(h.try_hold(2));
+            let t: Vec<_> = (0..2)
+                .map(|_| {
+                    let h = Arc::clone(&h);
+                    loom::thread::spawn(move || h.try_hold(2))
+                })
+                .collect();
+            let won = t
+                .into_iter()
+                .map(|t| t.join().unwrap())
+                .filter(|w| *w)
+                .count();
+            assert_eq!(won, 1);
+            assert_eq!(h.held(), 2);
+            h.release();
+            assert!(h.try_hold(2));
+            assert!(!h.try_hold(2));
+        });
+    }
+
+    /// A buffer's drop (push, then release) racing a capped take (hold, then
+    /// pop) at a cap of 1 with the class's one buffer held: a taker that
+    /// wins the unit always finds the buffer (no spurious empty pop).
+    #[test]
+    fn loom_a_capped_take_after_a_drop_finds_the_buffer() {
+        use crate::stack::IndexStack;
+        loom::model(|| {
+            let free = Arc::new(IndexStack::with_capacity(1));
+            let h = Arc::new(Holdings::new());
+            assert!(h.try_hold(1));
+            let dropper = {
+                let (free, h) = (Arc::clone(&free), Arc::clone(&h));
+                loom::thread::spawn(move || {
+                    free.push(0).unwrap();
+                    h.release();
+                })
+            };
+            if h.try_hold(1) {
+                assert_eq!(
+                    free.pop(),
+                    Some(0),
+                    "the unit was free but the buffer was not"
+                );
+            }
+            dropper.join().unwrap();
+        });
+    }
+
+    /// A release racing a taker at the cap: the taker either sees the
+    /// release and wins, or does not and loses; the count stays within the
+    /// cap and is never lost.
+    #[test]
+    fn loom_background_release_racing_a_take() {
+        loom::model(|| {
+            let h = Arc::new(Holdings::new());
+            assert!(h.try_hold(1));
+            let r = {
+                let h = Arc::clone(&h);
+                loom::thread::spawn(move || h.release())
+            };
+            let got = h.try_hold(1);
+            r.join().unwrap();
+            assert_eq!(h.held(), u32::from(got));
+        });
     }
 }
 
 #[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_take_capped_stops_at_half_a_class_and_frees_on_drop() {
+        let p = pool(4);
+        let a = p
+            .take_capped(4096, 4096)
+            .unwrap_or_else(|_| panic!("first"));
+        let b = p
+            .take_capped(4096, 4096)
+            .unwrap_or_else(|_| panic!("second"));
+        assert!(
+            p.take_capped(4096, 4096).is_err(),
+            "a third passes the cap of 2"
+        );
+        // Commit-class takes still get the rest.
+        let c = p
+            .take_within(4096, 4096)
+            .unwrap_or_else(|_| panic!("commit 1"));
+        let d = p
+            .take_within(4096, 4096)
+            .unwrap_or_else(|_| panic!("commit 2"));
+        assert_eq!(p.background_holdings().first().copied(), Some((4096, 2, 2)));
+        drop(a);
+        assert_eq!(p.background_holdings()[0].1, 1);
+        let e = p
+            .take_capped(4096, 4096)
+            .unwrap_or_else(|_| panic!("after a drop"));
+        drop((b, c, d, e));
+        assert_eq!(p.background_holdings()[0].1, 0);
+    }
+
+    #[test]
+    fn test_take_capped_with_no_free_buffer_gives_its_unit_back() {
+        let p = pool(4);
+        let held: Vec<_> = (0..4)
+            .map(|_| p.take_within(4096, 4096).unwrap_or_else(|_| panic!("take")))
+            .collect();
+        assert!(p.take_capped(4096, 4096).is_err());
+        assert_eq!(p.background_holdings()[0].1, 0, "the unit was given back");
+        drop(held);
+        let x = p
+            .take_capped(4096, 4096)
+            .unwrap_or_else(|_| panic!("free again"));
+        assert_eq!(p.background_holdings()[0].1, 1);
+        drop(x);
+    }
+
+    #[test]
+    fn test_take_capped_moves_to_a_larger_class_under_the_cap() {
+        let p = pool(2);
+        let a = p
+            .take_capped(4096, 8192)
+            .unwrap_or_else(|_| panic!("4 KiB"));
+        assert_eq!(a.capacity(), 4096);
+        let b = p
+            .take_capped(4096, 8192)
+            .unwrap_or_else(|_| panic!("8 KiB"));
+        assert_eq!(b.capacity(), 8192, "the 4 KiB class's cap of 1 is used");
+        assert!(p.take_capped(4096, 8192).is_err());
+        drop((a, b));
+    }
 
     fn pool(count: u32) -> BufPool {
         let cfg = PoolConfig::uniform(4096, 4096, 65536, count);

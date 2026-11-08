@@ -200,6 +200,11 @@ pub enum NotWrittenCause {
     /// Copies meant for distinct devices would share one, or a device's
     /// identity is incomplete: nothing was written.
     SameDevice,
+    /// Background work refused by its device's pacing while commits are
+    /// active (PLANNING R5.4): back-pressure, never a failure. Nothing was
+    /// reserved or written; reap the issuer's own completions and submit
+    /// again.
+    Paced,
 }
 
 impl fmt::Display for NotWrittenCause {
@@ -229,6 +234,7 @@ impl fmt::Display for NotWrittenCause {
             Self::InvalidOptions => "the options contradict each other",
             Self::NotPrefix => "a dependency on an append region is not a durable prefix",
             Self::SameDevice => "two copies are not on devices known to be distinct",
+            Self::Paced => "background work paced while commits are active: reap and retry",
         })
     }
 }

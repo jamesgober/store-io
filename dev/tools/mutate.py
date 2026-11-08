@@ -176,6 +176,10 @@ IDENT = ["-p", "store-io-core", "--lib", "identity::"]
 STORE_T = ["-p", "store-io-engine", "--test", "store"]
 LINUX_ID = ["-p", "store-io-posix", "--lib", "probe::identity::"]
 WIN_ID = ["-p", "store-io-win", "--lib", "probe::identity_tests"]
+BUF_LIB = ["-p", "store-io-buf", "--lib"]
+POSIX_LINUX_T = ["-p", "store-io-posix", "--test", "linux"]
+WIN_NTFS_T = ["-p", "store-io-win", "--test", "ntfs"]
+ROOT_CONFORMANCE = ["-p", "store-io", "--test", "conformance"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
 MAC_ID = ["-p", "store-io-posix", "--lib", "probe::tests::test_only_one_physical_store"]
@@ -1510,6 +1514,28 @@ M = [
  # WIN_ID (V2c): a disk's NVMe controller asked again for a new descriptor.
  ('crates/store-io-win/src/probe/mod.rs', '.iter().find(|(n, d, _)| *n == number && d == desc)', '.iter().find(|(n, d, _)| *n == number && (d == desc || true))', WIN_ID),
  ('crates/store-io-win/src/probe/mod.rs', '.iter().find(|(n, d, _)| *n == number && d == desc)', '.iter().find(|(n, d, _)| (*n == number || true) && d == desc)', WIN_ID),
+
+ # POOL (V3a): background buffers never pass half a class; a unit is given
+ # back when no buffer was free, and on the buffer's drop.
+ ("crates/store-io-buf/src/pool.rs", '            if background && !class.background.try_hold(class.count / 2) {', '            if background && !class.background.try_hold(class.count) {', BUF_LIB),
+ ("crates/store-io-buf/src/pool.rs", '            if held >= cap {\n                return false;', '            if held > cap {\n                return false;', BUF_LIB),
+ ("crates/store-io-buf/src/pool.rs", '                if background {\n                    class.background.release();\n                }\n                continue;', '                if background && false {\n                    class.background.release();\n                }\n                continue;', BUF_LIB),
+ ("crates/store-io-buf/src/pool.rs", '            if self.background {\n                class.background.release();', '            if self.background && false {\n                class.background.release();', BUF_LIB),
+ ("crates/store-io-buf/src/pool.rs", '            if held >= cap {\n                return false;', '            if held >= cap.saturating_add(1) {\n                return false;', LOOM_BUF, LOOM),
+ # LINUX_ID (V3a): btrfs members gathered once each, from the fsid's
+ # directory named as a UUID.
+ ("crates/store-io-posix/src/probe/identity.rs", '        for d in found {\n            if !out.contains(&d) {', '        for d in found {\n            if true {', LINUX_ID),
+ ("crates/store-io-posix/src/probe/identity.rs", '    for (i, b) in fsid.iter().enumerate() {\n        if matches!(i, 4 | 6 | 8 | 10) {\n            uuid.push(\'-\');\n        }\n        uuid.push_str(&format!("{b:02x}"));\n    }\n    let Ok(entries)', '    for (i, b) in fsid.iter().enumerate() {\n        if matches!(i, 4 | 6 | 8) {\n            uuid.push(\'-\');\n        }\n        uuid.push_str(&format!("{b:02x}"));\n    }\n    let Ok(entries)', LINUX_ID),
+ # PROBE_DEV (V3a): every probe names the file's volume as its device.
+ ("crates/store-io-posix/src/lib.rs", '                self.file_identity(file).ok().map(|i| i.volume)\n            };', '                None\n            };', POSIX_LINUX_T),
+ ("crates/store-io-win/src/platform.rs", '        ev.fs.device = self.file_identity(file).ok().map(|i| i.volume);', '        ev.fs.device = None;', WIN_NTFS_T),
+ (SIMP, '            device: Some(w.volume_of(file.id())),', '            device: None,', MODEL),
+ (SIMP, '    fn identity_scope(&self) -> u64 {\n        lock(&self.world).id()\n    }', '    fn identity_scope(&self) -> u64 {\n        let _ = lock(&self.world).id();\n        0\n    }', MODEL),
+ (SIMW, '        self.clock_ns = self.clock_ns.saturating_add(ns);', '        self.clock_ns = self.clock_ns.saturating_add(ns / 1_000);', MODEL),
+ ("crates/store-io-buf/src/pool.rs", '        self.take_from(len, max, true)', '        self.take_from(len, max, false)', BUF_LIB),
+ ("crates/store-io-buf/src/pool.rs", '                held + 1,\n                Ordering::Acquire,', '                held + 1,\n                Ordering::Relaxed,', LOOM_BUF, LOOM),
+ ("crates/store-io-buf/src/pool.rs", '        let _was = self.held.fetch_sub(1, Ordering::Release);', '        let _was = self.held.fetch_sub(1, Ordering::Relaxed);', LOOM_BUF, LOOM),
+ ("crates/store-io-posix/src/mac/platform.rs", '        ev.fs.device = self.file_identity(file).ok().map(|i| i.volume);', '        ev.fs.device = None;', ROOT_CONFORMANCE),
 ]
 
 def kill_stuck_tests():

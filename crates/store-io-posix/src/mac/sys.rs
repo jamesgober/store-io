@@ -277,6 +277,24 @@ fn sysctl_int(name: &CStr) -> Result<c_int, c_int> {
     }
 }
 
+/// Nanoseconds from `CLOCK_UPTIME_RAW`: `mach_absolute_time` scaled by the
+/// timebase, read in user space (the commpage); it stops in sleep. 0 if the
+/// call fails (it cannot for a valid clock id and pointer).
+pub(crate) fn monotonic_ns() -> u64 {
+    let mut ts = MaybeUninit::<libc::timespec>::zeroed();
+    // SAFETY: clock_gettime(3) writes one `struct timespec` through the
+    // pointer, which is valid and exclusively borrowed for the call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_UPTIME_RAW, ts.as_mut_ptr()) };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: zero-initialised, and filled by the successful call above.
+    let ts = unsafe { ts.assume_init() };
+    (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64)
+}
+
 /// Milliseconds from `CLOCK_UPTIME_RAW_APPROX` (a value cached at context
 /// switch: no system call; it stops in sleep). 0 if the call fails (it
 /// cannot for a valid clock id and pointer).

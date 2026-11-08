@@ -80,6 +80,9 @@ pub(crate) fn probe(dir: &PosixDir, file: &PosixFile) -> RawResult<Evidence> {
             single_device: single_device_fs(fd, dev, bdev),
         },
     );
+    if ev.fs.kind == FsKind::Btrfs {
+        ev.device.members = identity::btrfs_members(fd, ev.hypervisor.is_some());
+    }
 
     let len = u64::try_from(st.st_size).unwrap_or(0).max(1);
     if sys::cachestat(fd, 0, len).is_err() {

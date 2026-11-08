@@ -13,6 +13,26 @@
 
 ### Added
 
+- Core: **`IoClass`** (`Commit`, `Read`, `Background`; PLANNING R5.4) and
+  `NotWrittenCause::Paced`, the vocabulary of v0.6's device pacing (used
+  from a later change). `FsFacts::device` (the device the file system
+  reports, in `FileIdentity::volume`'s encoding) and
+  `DeviceFacts::members` (btrfs's member disks on Linux, read from its
+  `BTRFS_IOC_FS_INFO` fsid and sysfs), filled by every probe. Both are
+  fields added to public structs: literal constructors must add them
+  (`..Default::default()` keeps working).
+- Platform: **`Platform::monotonic_ns`**, a fine monotonic clock allowed on
+  the I/O path (Linux `CLOCK_MONOTONIC`, macOS `CLOCK_UPTIME_RAW`, Windows
+  `QueryPerformanceCounter`; the simulator's world clock, now kept in
+  nanoseconds, with `World::advance_clock_ns` and `World::clock_ns`).
+  **Breaking for outside implementers of `Platform`**: `monotonic_ns` is a
+  required method. Also `Platform::identity_scope` (0, the
+  simulator's world id, so simulated worlds never share a device).
+- Buffers: **`BufPool::take_capped`**, for background work: never more than
+  half of a size class's buffers held at once, so background work cannot
+  leave commits without buffers; `BufPool::background_holdings`.
+- Conformance: both clocks never go back, on one thread or two; the probe's
+  device is the file's volume.
 - CI: the **multi-device** job (four `null_blk` devices, ext4, one store
   each) runs the new `tests/multi_dev.rs` (set barriers, a pointer across
   devices, ditto and concurrent callers on real devices) and the

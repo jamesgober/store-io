@@ -20,6 +20,14 @@ fn test_the_native_backend_conforms() {
     conforms(&NativePlatform::new(), "native");
 }
 
+/// A real device's identities are unique on the machine: the scope is 0
+/// (only the simulator's worlds are scopes of their own).
+#[test]
+fn test_the_native_backend_identity_scope_is_zero() {
+    use store_io_platform::Platform;
+    assert_eq!(NativePlatform::new().identity_scope(), 0);
+}
+
 /// The io_uring tier (D-103 3b): the stores as on that tier (inline
 /// lone-operation lanes, ring parallel lanes and submitters, D-104); the
 /// suite's own queues inline.

@@ -25,6 +25,6 @@ pub mod observe;
 pub mod set;
 pub mod untorn;
 
-pub use class::{DurabilityClass, ReceiptLabel};
+pub use class::{DurabilityClass, IoClass, ReceiptLabel};
 pub use error::{Error, Result};
 pub use id::{Generation, RegionId, VolumeId};

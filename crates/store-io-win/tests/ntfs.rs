@@ -357,6 +357,8 @@ fn test_two_files_in_one_directory_share_a_device_and_differ_as_files() {
     }
     let fa = fx.p.file_identity(&a).unwrap();
     assert_eq!(fa, fx.p.path_identity(&fx.dir, &name("a.sio")).unwrap());
+    // The device pacing keys by: the file's volume, one encoding.
+    assert_eq!(fx.p.probe(&fx.dir, &a).unwrap().fs.device, Some(fa.volume));
     assert_ne!(fa, fx.p.file_identity(&b).unwrap());
     assert!(fx.p.path_identity(&fx.dir, &name("none.sio")).is_err());
 }

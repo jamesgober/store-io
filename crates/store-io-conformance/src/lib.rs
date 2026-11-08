@@ -241,7 +241,10 @@ where
                 "file identity follows the file, and one directory is one device",
                 file_identity,
             ),
-            ("the monotonic clock never goes back", monotonic_clock),
+            (
+                "the monotonic clocks never go back, on one thread or two",
+                monotonic_clock,
+            ),
             (
                 "readers share the lock on read-only handles and exclude the owner",
                 shared_lock,
@@ -729,6 +732,15 @@ fn file_identity<P: Platform>(c: &Ctx<'_, P>) -> Check {
             .distinct(&c.p.device_identity(&dir, &b)),
         "two files in one directory are distinct devices"
     );
+    // The probe's device is the file identity's volume (one encoding, so a
+    // store's pacing key meets a sink's by its file's volume).
+    let ev = ok(c.p.probe(&dir, &a), "probe a")?;
+    check!(
+        ev.fs.device == Some(ia.volume),
+        "the probe's device {:?} is not the file's volume {}",
+        ev.fs.device,
+        ia.volume
+    );
     // A rename over `b`: its name now names `a`'s file.
     ok(
         c.p.rename_replace(&dir, &name("a")?, &name("b")?, &a),
@@ -760,6 +772,22 @@ fn monotonic_clock<P: Platform>(c: &Ctx<'_, P>) -> Check {
         check!(now >= last, "the clock went back: {last} then {now}");
         last = now;
     }
+    let mut last = c.p.monotonic_ns();
+    for _ in 0..10_000 {
+        let now = c.p.monotonic_ns();
+        check!(now >= last, "the fine clock went back: {last} then {now}");
+        last = now;
+    }
+    // One origin across threads: a read on another thread after this one
+    // (ordered by the spawn and the join) is never earlier.
+    let before = c.p.monotonic_ns();
+    let theirs = std::thread::scope(|s| s.spawn(|| c.p.monotonic_ns()).join());
+    let theirs = theirs.map_err(|_| "the clock's thread panicked".to_owned())?;
+    let after = c.p.monotonic_ns();
+    check!(
+        before <= theirs && theirs <= after,
+        "the fine clock is not one clock across threads: {before}, {theirs}, {after}"
+    );
     Ok(())
 }
 

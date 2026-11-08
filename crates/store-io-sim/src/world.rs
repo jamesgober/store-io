@@ -424,7 +424,7 @@ pub struct World {
     writes_completed: u64,
     reads_completed: u64,
     misaligned_reads: u64,
-    clock_ms: u64,
+    clock_ns: u64,
     waits: u64,
     write_submits: u64,
     lock_calls: u64,
@@ -469,7 +469,7 @@ impl World {
             writes_completed: 0,
             reads_completed: 0,
             misaligned_reads: 0,
-            clock_ms: 0,
+            clock_ns: 0,
             waits: 0,
             write_submits: 0,
             lock_calls: 0,
@@ -743,12 +743,31 @@ impl World {
     /// only when a test advances it).
     #[must_use]
     pub fn clock_ms(&self) -> u64 {
-        self.clock_ms
+        self.clock_ns / 1_000_000
+    }
+
+    /// The simulated monotonic clock, in nanoseconds (the same clock as
+    /// [`Self::clock_ms`]).
+    #[must_use]
+    pub fn clock_ns(&self) -> u64 {
+        self.clock_ns
     }
 
     /// Advances the simulated clock by `ms` milliseconds.
     pub fn advance_clock(&mut self, ms: u64) {
-        self.clock_ms = self.clock_ms.saturating_add(ms);
+        self.clock_ns = self.clock_ns.saturating_add(ms.saturating_mul(1_000_000));
+    }
+
+    /// Advances the simulated clock by `ns` nanoseconds.
+    pub fn advance_clock_ns(&mut self, ns: u64) {
+        self.clock_ns = self.clock_ns.saturating_add(ns);
+    }
+
+    /// This world's id: unique in the process, the high bits of every
+    /// volume number it hands out and its platform's identity scope.
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Reads refused with EINVAL for breaking the device's alignment.

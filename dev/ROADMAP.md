@@ -142,7 +142,7 @@ Exit criteria (dispositions recorded 2026-10-19, at the v0.4.0 release):
 
 macOS backend (`F_FULLFSYNC` for every flush; never classed power-safe); container format 2 (a paged region table, 65,536 regions by default; regions that grow in place, fixed size by default, or reserved and capped with `max_size`; any freed space reused; a damaged region made unavailable without closing the store); format-1 stores read-only, with a copy tool; one portable format on every system; unprivileged mode as a tested guarantee.
 
-Exit criteria:
+Exit criteria (dispositions recorded 2026-11-09, at the v0.5.0 release; the performance gates in CI's memory-backed device all pass, G1 included: 0.46 us over the raw primitive in 20 alternated rounds, none over the gate. Deferred to 0.6 or 0.7: the check of a store on a Mac's own drive on real hardware, D-134; CI's macOS runners are virtual machines, and the class of such a store stays "meant to be flush-required, not yet confirmed"):
 - [x] Conformance on APFS (CI runner), NTFS and ext4. (APFS: the macOS backend, M2-M4; every CI run on macOS stable and 1.85.)
 - [x] Containers made by the same operations on Linux, Windows and macOS identical in structure and data (field by field and byte for byte, except the fields that differ between any two creates: ids, times, fill keys), and each opens on every system. (`tests/portable.rs`, on every CI system: the masked container hashes the same, and a container made on Linux opens, reads and writes on all three.)
 - [x] Zero idle wakeups. (`tests/idle.rs` in CI on every system: Linux on both tiers, macOS and Windows; 60 s with no thread of the store switched in or on a CPU.)

@@ -167,7 +167,7 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "store-io"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
  "store-io-conformance",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-buf"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
  "loom",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-conformance"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "store-io-buf",
  "store-io-core",
@@ -203,11 +203,11 @@ dependencies = [
 
 [[package]]
 name = "store-io-core"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "store-io-engine"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "loom",
  "store-io-buf",
@@ -220,11 +220,11 @@ dependencies = [
 
 [[package]]
 name = "store-io-format"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "store-io-platform"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "store-io-buf",
  "store-io-core",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-posix"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
  "loom",
@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-sim"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "store-io-buf",
  "store-io-core",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "store-io-win"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "store-io-buf",
  "store-io-core",

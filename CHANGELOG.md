@@ -242,6 +242,21 @@
   refused `Paced` and resubmitted): no futex call and no timed wait on its
   submit, reap or wait in either, nor in the commit-class window with an
   idle background `Submitter` registered.
+
+### Fixed
+
+- Engine: **a blocking write split into pieces, and a region's
+  provisioning fill, stop at a poison** set by another operation
+  (fail-stop, FAIL-01): each checks the store before every piece, submits
+  none after the poison, waits for those in flight and returns `Poisoned`
+  (an append's reserved range settled as a hole; a write so stopped may
+  have some pieces on the media, none reported durable). Before, they
+  submitted their remaining pieces.
+
+## [0.5.0] - 2026-11-09
+
+### Added
+
 - Tests: **fencing after a killed owner on Windows** (`store-io-win`'s
   `tests/kill.rs`, run once in CI). A child process holds the ownership
   lock with 512 MiB of unbuffered writes in flight (odd rounds issue them
@@ -1135,14 +1150,6 @@
   failed, instead of reporting that it cannot see io-wq threads.
 
 ### Fixed
-
-- Engine: **a blocking write split into pieces, and a region's
-  provisioning fill, stop at a poison** set by another operation
-  (fail-stop, FAIL-01): each checks the store before every piece, submits
-  none after the poison, waits for those in flight and returns `Poisoned`
-  (an append's reserved range settled as a hole; a write so stopped may
-  have some pieces on the media, none reported durable). Before, they
-  submitted their remaining pieces.
 
 - Engine: **a release whose commit was durable could still fail** (since
   0.3.0): when the queue for its Released header write could not be
@@ -2285,7 +2292,8 @@ The project scaffold. Reserves the crate name; no public API.
   `.gitattributes`, `.github/FUNDING.yml`.
 - `docs/API.md` and `docs/release/v0.1.0.md`.
 
-[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamesgober/store-io/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jamesgober/store-io/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jamesgober/store-io/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/jamesgober/store-io/compare/v0.3.0...v0.3.1

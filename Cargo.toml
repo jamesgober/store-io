@@ -3,7 +3,7 @@
 # =============================================================================
 [package]
 name    = "store-io"
-version = "0.4.1"
+version = "0.5.0"
 
 # Minimum Supported Rust Version (MSRV). Provisional for the scaffold; the
 # Phase 0 crate survey (io-uring, rustix, windows-sys) confirms or raises it,
@@ -80,20 +80,20 @@ cli = []
 # backend for this operating system. Every third-party dependency is
 # justified in the crate that adds it.
 [dependencies]
-store-io-core     = { path = "crates/store-io-core", version = "0.4.1" }
-store-io-platform = { path = "crates/store-io-platform", version = "0.4.1" }
-store-io-engine   = { path = "crates/store-io-engine", version = "0.4.1" }
+store-io-core     = { path = "crates/store-io-core", version = "0.5.0" }
+store-io-platform = { path = "crates/store-io-platform", version = "0.5.0" }
+store-io-engine   = { path = "crates/store-io-engine", version = "0.5.0" }
 
 # The native backend: one per operating system.
 [target.'cfg(windows)'.dependencies]
-store-io-win = { path = "crates/store-io-win", version = "0.4.1" }
+store-io-win = { path = "crates/store-io-win", version = "0.5.0" }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-store-io-posix = { path = "crates/store-io-posix", version = "0.4.1" }
+store-io-posix = { path = "crates/store-io-posix", version = "0.5.0" }
 
 [dev-dependencies]
-store-io-conformance = { path = "crates/store-io-conformance", version = "0.4.1" }
-store-io-format = { path = "crates/store-io-format", version = "0.4.1" }
+store-io-conformance = { path = "crates/store-io-conformance", version = "0.5.0" }
+store-io-format = { path = "crates/store-io-format", version = "0.5.0" }
 
 # The idle test's per-thread counters (tests/idle.rs): the crates the
 # backends already depend on, with the features that read them.
@@ -121,7 +121,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version      = "0.4.1"
+version      = "0.5.0"
 edition      = "2024"
 rust-version = "1.85"
 license      = "Apache-2.0 OR MIT"

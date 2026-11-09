@@ -227,9 +227,8 @@
 - Tests: **paced calls make progress with their I/O really in flight**
   (`tests/progress_uring.rs`, Linux, on a parallel io_uring queue:
   `conformance-linux` runs it on ext4 and XFS, where a missing io_uring
-  fails). `copy_store` and a caller's scan, each paced (at most the
-  call's one piece seen in flight), unpaced (several, at most
-  `background_unpaced`) and switched from one to the other while it has
+  fails). `copy_store` and a caller's scan, each paced (the call's one
+  piece in flight), unpaced (several, at most `background_unpaced`) and switched from one to the other while it has
   pieces in flight, complete with their data intact (every word checked
   against its offset), under a watchdog that aborts a call waiting on
   itself in two minutes instead of hanging.

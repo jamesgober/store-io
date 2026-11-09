@@ -7,7 +7,8 @@
 //! the same device; the device group is seen with at most the call's one
 //! piece in flight), **unpaced** (commits quiet throughout; several pieces
 //! seen in flight, at most `background_unpaced`, set below the scan's
-//! depth so its cap binds), and **switched** from unpaced to paced (the
+//! depth so its cap binds; a copy's samples also count the admission each
+//! of its two threads may be checking, below), and **switched** from unpaced to paced (the
 //! hold taken once the call has pieces in flight, the call still running
 //! after it), and must complete with its data intact (every 8-byte word
 //! carries its own offset, so a piece read or written at the wrong place
@@ -297,20 +298,26 @@ fn copy_in(mode: Mode) {
     )
     .unwrap();
     eprintln!("{name}: at most {before} piece(s) in flight, {after} after the switch");
-    // One piece of the call while paced, and one more a refused admission
-    // of its other thread charges while it is checked (`qos.rs`).
+    // The group's count also holds each admission being checked: charged
+    // first and taken back if refused (`qos.rs`), one at a time per thread
+    // of the call, its reader's and its fill's. So the call's one piece
+    // while paced, its cap while quiet, and up to two more.
+    const CHECKING: u64 = 2;
     match mode {
-        Mode::Paced => assert!((1..=2).contains(&before), "{name}: {before} in flight"),
+        Mode::Paced => assert!(
+            (1..=1 + CHECKING).contains(&before),
+            "{name}: {before} in flight"
+        ),
         Mode::Unpaced => {
             assert!(
-                (2..=UNPACED + 1).contains(&before),
+                (2..=UNPACED + CHECKING).contains(&before),
                 "{name}: {before} in flight"
             );
             assert!(!holder.qos().active, "{name}: commits went active");
         }
         Mode::Switch => {
             assert!(hold.is_some(), "{name}: the switch was never reached");
-            assert!(after <= UNPACED + 1, "{name}: {after} in flight");
+            assert!(after <= UNPACED + CHECKING, "{name}: {after} in flight");
         }
     }
     drop(hold);

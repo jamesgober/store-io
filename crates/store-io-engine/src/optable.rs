@@ -54,6 +54,21 @@ pub(crate) struct Split {
     pub(crate) total: usize,
     /// Bytes done before the piece in flight.
     pub(crate) done: usize,
+    /// The largest piece (a background submitter's `background_io`, else
+    /// unbounded): pieces end at a run's end or here, whichever is first.
+    pub(crate) piece_max: usize,
+}
+
+/// An operation's next piece not submitted yet: refused by pacing (held
+/// here, its row still live, until it is admitted at the submitter's next
+/// `reap`, `wait` or drop; R5.4: a parked piece is a live write, never
+/// dropped while the submitter can still write), or reaped by a drop whose
+/// wait failed (then never submitted: the store is poisoned instead).
+pub(crate) struct Parked {
+    pub(crate) qtag: u64,
+    pub(crate) offset: u64,
+    pub(crate) buf: IoBuf,
+    pub(crate) write: bool,
 }
 
 /// What an I/O completion came to.
@@ -89,6 +104,9 @@ struct Live {
     held: Option<(Option<IoBuf>, WriteTicket, Option<u64>)>,
     /// An operation across runs: where it stands.
     split: Option<Split>,
+    /// The pacing charge of the piece in flight (a background submitter's):
+    /// released when the piece completes, or with the row, however it ends.
+    charge: Option<crate::qos::Charge>,
 }
 
 /// One row. `generation` changes each time the row is freed, so a queue tag
@@ -119,6 +137,9 @@ pub(crate) struct Table {
     /// for once the whole pass is finished (one row each, so never more
     /// than the depth: no allocation after creation).
     pub(crate) asks: Vec<(u64, u64)>,
+    /// Pieces not submitted yet (see [`Parked`]), oldest first (never more
+    /// than the depth: one per live row at most).
+    pub(crate) parked: VecDeque<Parked>,
     next_seq: u64,
     /// Busy mark for `Store::oldest_outstanding`: `2 * oldest + 1` while
     /// anything is in flight, even otherwise (D-095's lane-mark rules).
@@ -141,6 +162,7 @@ impl Table {
             flushing: 0,
             asked: 0,
             asks: Vec::with_capacity(depth),
+            parked: VecDeque::with_capacity(depth),
             next_seq: 0,
             mark,
         }
@@ -256,6 +278,7 @@ impl Table {
             durable,
             held: None,
             split: None,
+            charge: None,
         });
         self.live += 1;
         self.publish();
@@ -266,6 +289,13 @@ impl Table {
     pub(crate) fn set_split(&mut self, index: u32, split: Split) {
         if let Some(live) = self.rows[index as usize].live.as_mut() {
             live.split = Some(split);
+        }
+    }
+
+    /// Gives the piece about to be submitted under `qtag` its pacing charge.
+    pub(crate) fn set_charge(&mut self, qtag: u64, charge: Option<crate::qos::Charge>) {
+        if let Some(live) = self.row(qtag).and_then(|r| r.live.as_mut()) {
+            live.charge = charge;
         }
     }
 
@@ -336,6 +366,9 @@ impl Table {
         let Some(live) = row.and_then(|r| r.live.as_mut()) else {
             return Finish::Done;
         };
+        // The piece is over: its charge is released, the next piece (if any)
+        // admitted afresh.
+        live.charge = None;
         if let Some(split) = live.split {
             let piece = buf.as_ref().map_or(0, IoBuf::len);
             let whole = buf.is_some() && matches!(result, Ok(n) if n == piece);
@@ -344,7 +377,9 @@ impl Table {
                 (whole, left > 0, region(live), buf.as_mut())
             {
                 let pos = start_of(live.kind) + (split.done + piece) as u64;
-                let next = (state.map.run_left(pos) as usize).min(left);
+                let next = (state.map.run_left(pos) as usize)
+                    .min(left)
+                    .min(split.piece_max);
                 // The rest to the front: the next piece starts at the start.
                 let fits = b.set_len(split.total);
                 debug_assert!(fits, "a split buffer shorter than its operation");
@@ -355,6 +390,7 @@ impl Table {
                 let next_split = Split {
                     total: split.total,
                     done: split.done + piece,
+                    piece_max: split.piece_max,
                 };
                 // Every piece moves the operation on (one that did not would
                 // be re-issued for ever): checked in release builds too.
@@ -421,6 +457,38 @@ impl Table {
             }
         }
         self.conclude(store, qtag, buf, raw.map_or(Ok(split.done), Err))
+    }
+
+    /// The next piece of a write across pieces was not submitted because the
+    /// store is poisoned (fail-stop, FAIL-01): the operation ends there,
+    /// `Poisoned`; an append's reserved range is settled as a write that
+    /// did not transfer first (a hole).
+    pub(crate) fn refused_poisoned<P: Platform>(
+        &mut self,
+        store: &Store<P>,
+        qtag: u64,
+        mut buf: Option<IoBuf>,
+        first: store_io_core::error::FirstCause,
+    ) -> Finish
+    where
+        P::Queue: Send,
+    {
+        let Some(live) = self.row(qtag).and_then(|r| r.live.as_mut()) else {
+            return Finish::Done;
+        };
+        if let Some(split) = live.split.take() {
+            if let Some(b) = buf.as_mut() {
+                let fits = b.set_len(split.total);
+                debug_assert!(fits, "a split buffer shorter than its operation");
+                b.as_mut_slice().rotate_left(split.total - split.done);
+            }
+        }
+        if let (Kind::Append(r), Some(state)) = (live.kind, region(live)) {
+            let mut no_prefix = None;
+            let _hole = settle_write(store, state, Wrote::Append(r), false, None, &mut no_prefix);
+        }
+        self.release(qtag, buf, Err(Error::Poisoned { first }));
+        Finish::Done
     }
 
     /// Settles an operation whose I/O is over (see [`Self::finish`]).

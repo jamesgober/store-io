@@ -29,6 +29,7 @@ pub(super) fn ask<P: Platform>(
     qtag: u64,
     need: u64,
     flush: bool,
+    class: store_io_core::IoClass,
 ) where
     P::Queue: Send,
 {
@@ -42,20 +43,16 @@ pub(super) fn ask<P: Platform>(
         Some(Ok(need))
     } else if let Some(first) = domain.poisoned() {
         Some(Err(Error::Poisoned { first }))
-    } else if store.flusher().is_some_and(|f| {
-        f.request(
-            need,
-            store_io_core::IoClass::Commit,
-            qtag,
-            Arc::clone(inbox) as Arc<dyn Answer>,
-        )
-    }) {
+    } else if store
+        .flusher()
+        .is_some_and(|f| f.request(need, class, qtag, Arc::clone(inbox) as Arc<dyn Answer>))
+    {
         table.asked += 1;
         None
     } else {
         // No flush thread (the OS refused it): the flush runs here, the one
         // case where a submitter call blocks.
-        Some(store.barrier_to(need).map(|()| need))
+        Some(store.barrier_to_classed(need, class).map(|()| need))
     };
     if let Some(outcome) = now {
         table.flushed(store, qtag, outcome);
@@ -163,6 +160,7 @@ where
             return Err(NotWrittenCause::QueueFull);
         };
         self.core.table.start(index, tag, kind, None, false);
+        let class = self.barrier_class();
         ask(
             &mut self.core.table,
             &self.store,
@@ -170,6 +168,7 @@ where
             qtag,
             need,
             flush,
+            class,
         );
         Ok(())
     }

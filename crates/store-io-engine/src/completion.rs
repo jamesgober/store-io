@@ -2,6 +2,7 @@
 //! configuration, refusals and completions.
 
 use std::collections::VecDeque;
+use store_io_core::IoClass;
 
 use store_io_core::error::Error;
 use store_io_platform::IoBuf;
@@ -17,11 +18,33 @@ pub struct SubmitterConfig {
     /// most (1 to [`crate::MAX_DEPTH`]; default 64). Also the depth of the
     /// submitter's queue.
     pub depth: u32,
+    /// The class of this submitter's I/O (PLANNING R5.4).
+    ///
+    /// - `Commit` (the default): never paced; its barriers, and on a
+    ///   power-safe store its writes, mark the device's commits active.
+    /// - `Background`: its reads and writes go out in pieces of at most
+    ///   `StoreOptions::background_io`, admitted by its device's pacing: while
+    ///   the device's commits are active, one piece of the submitter in
+    ///   flight (unless its group has room), else up to
+    ///   `background_unpaced`. An operation refused before anything is
+    ///   reserved is `NotWritten(Paced)` with its buffer (reap and retry);
+    ///   its later pieces wait in the submitter, oldest first, and go out at
+    ///   its next `reap` or `wait`, or at its drop. Its buffers
+    ///   ([`crate::Submitter::take_buf`]) never hold more than half of a pool
+    ///   class; its barriers and writes never mark commits active. An append
+    ///   whose pieces wait holds back its region's completed prefix, so a
+    ///   commit syncing that region waits for the submitter's thread to reap
+    ///   or wait: keep commits and background appends in separate regions.
+    /// - `Read`: its reads are of the read class, its writes `Commit`.
+    pub class: IoClass,
 }
 
 impl Default for SubmitterConfig {
     fn default() -> Self {
-        Self { depth: 64 }
+        Self {
+            depth: 64,
+            class: IoClass::Commit,
+        }
     }
 }
 
@@ -30,6 +53,13 @@ impl SubmitterConfig {
     #[must_use]
     pub fn with_depth(mut self, depth: u32) -> Self {
         self.depth = depth;
+        self
+    }
+
+    /// The same, of `class`.
+    #[must_use]
+    pub fn with_class(mut self, class: IoClass) -> Self {
+        self.class = class;
         self
     }
 }

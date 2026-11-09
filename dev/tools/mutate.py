@@ -312,7 +312,7 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '            Some(f) if full => {', '            Some(f) if full || true => {'),
  ('crates/store-io-engine/src/settle.rs', '                f.complete(r);\n', '                let _ = (f, r);\n'),
  ('crates/store-io-engine/src/gate.rs', '        held.gate().admit()?;\n', '        held.gate().admit()?;\n        held.gate().leave();\n'),
- (SUB, '        while self.core.table.live > 0 && self.core.queue.in_flight() > 0 {', '        while self.core.table.live > 0 && self.core.queue.in_flight() > 0 && false {'),
+ (SUB, '        while self.core.table.live > 0\n            && (self.core.queue.in_flight() > 0 || !self.core.table.parked.is_empty())\n        {', '        while self.core.table.live > 0\n            && (self.core.queue.in_flight() > 0 || !self.core.table.parked.is_empty())\n            && false\n        {'),
  (SUB, '            && (self.core.table.writes_live() || !self.core.table.consistent())\n        {', '            && (self.core.table.writes_live() || !self.core.table.consistent())\n            && false\n        {'),
  (SUB, '        if !Arc::ptr_eq(&store.inner, &self.store.inner) {', '        if !Arc::ptr_eq(&store.inner, &self.store.inner) && false {'),
  (SUB, '        if !self.store.inner.pool.owns(buf) {', '        if !self.store.inner.pool.owns(buf) && false {'),
@@ -393,7 +393,7 @@ M = [
  ('crates/store-io-engine/src/settle.rs', '            settle_write(store, state, wrote, false, raw, &mut no_prefix)', '            settle_write(store, state, wrote, true, raw, &mut no_prefix)'),
  # A1 C3: a submitter operation is recorded (busy mark published) before it
  # is submitted, and a refused submission is aborted
- ('crates/store-io-engine/src/submitter/mod.rs', '        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Some(s) = split {\n            self.core.table.set_split(index, s);\n        }\n        if let Err(r) = self.core.queue.submit(op, qtag) {', '        let refused = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Some(s) = split {\n            self.core.table.set_split(index, s);\n        }\n        if let Err(r) = refused {'),
+ ('crates/store-io-engine/src/submitter/mod.rs', '        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Some(s) = split {\n            self.core.table.set_split(index, s);\n        }\n        // Held by the row: released when the piece completes, or with the\n        // row (a refused submission below aborts it).\n        self.core.table.set_charge(qtag, charge);\n        if let Err(r) = self.core.queue.submit(op, qtag) {', '        let refused = self.core.queue.submit(op, qtag);\n        self.core.table.start(index, tag, kind, Some(pass), durable);\n        if let Some(s) = split {\n            self.core.table.set_split(index, s);\n        }\n        self.core.table.set_charge(qtag, charge);\n        if let Err(r) = refused {'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n        self.live -= 1;', '        drop(live);\n        self.free.push(index);'),
  ('crates/store-io-engine/src/optable.rs', '        drop(live);\n        self.free.push(index);\n', '        drop(live);\n'),
  # A1 C5: a lane's operations live in its op table; a refused submission
@@ -714,7 +714,7 @@ M = [
  # rotation after each piece and at the end; settled once, over the whole
  # operation; a refused next piece settles over what was done; a refused
  # first piece gives the buffer back whole
- ('crates/store-io-engine/src/submitter/mod.rs', 'let piece = (state.map.run_left(start) as usize).min(total);', 'let piece = total;', F2E),
+ ('crates/store-io-engine/src/submitter/mod.rs', '    let piece = (state.map.run_left(start) as usize)\n        .min(total)\n        .min(piece_max);', '    let piece = total.min(piece_max);', F2E),
  ('crates/store-io-engine/src/optable.rs', 'b.as_mut_slice().rotate_left(piece);', 'b.as_mut_slice().rotate_left(0);', F2E),
  ('crates/store-io-engine/src/optable.rs', '                b.as_mut_slice().rotate_left(split.total - split.done);\n            }\n            result', '                b.as_mut_slice().rotate_left(0);\n            }\n            result', F2E),
  ('crates/store-io-engine/src/optable.rs', '(whole, left > 0, region(live), buf.as_mut())', '(whole, false, region(live), buf.as_mut())', F2E),
@@ -1451,9 +1451,9 @@ M = [
  (IO_SRC, "        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }\n        let obs = &self.inner.observer;", "        let _keep = before_issue()?;\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }\n        let obs = &self.inner.observer;", AFTER_RACE),
  ("crates/store-io-engine/src/region.rs", "        on_reserved(before);", "        let _keep = (before, &on_reserved);", AFTER_RACE),
  (SUB_SRC, "        on_reserved(passes);", "        let _keep = (passes, &on_reserved);", AFTER_RACE),
- (SUB_SRC, "        drop(passes);\n        self.issue(req, tag, kind,", "        let _keep = passes;\n        self.issue(req, tag, kind,", AFTER_RACE),
+ (SUB_SRC, "        drop(passes);\n        self.issue(\n            req,", "        let _keep = passes;\n        self.issue(\n            req,", AFTER_RACE),
  # AFTER: a Submitter page write's hook before its buffer is cut to a run.
- (SUB_SRC, "        let passes = admit!(before_issue(), buf);\n        let (offset, split) = first_piece(state, pos.offset, &mut buf);", "        let (offset, split) = first_piece(state, pos.offset, &mut buf);\n        let passes = admit!(before_issue(), buf);", EXTENTS_T),
+ (SUB_SRC, "        let passes = admit!(before_issue(), buf);\n        // A background write is admitted by pacing before it is issued.\n        let charge = admit!(self.admit_first(c), buf);\n        let (offset, split) = first_piece(state, pos.offset, &mut buf, self.piece_max);", "        let (offset, split) = first_piece(state, pos.offset, &mut buf, self.piece_max);\n        let passes = admit!(before_issue(), buf);\n        // A background write is admitted by pacing before it is issued.\n        let charge = admit!(self.admit_first(c), buf);", EXTENTS_T),
  # MULTI (V2b): a set barrier matches each ticket to its store and region;
  # no flush where none is needed; receipts by each ticket's kind; a failed
  # store's tickets only what is published; set-wide dependent writes.
@@ -1589,7 +1589,7 @@ M = [
  ("crates/store-io-engine/src/domain/mod.rs", '        if class.is_commit() {\n            self.note_commit();\n        }', '        if class.is_commit() && false {\n            self.note_commit();\n        }', QOS_STORE_T),
  (IO_SRC, '        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }', '        drop(before_issue()?);\n        if self.inner.policy.dsync && false {\n            self.inner.domain.note_commit();\n        }', QOS_STORE_T, INLINE_ENV),
  (IO_SRC, '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync {', '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync && false {', QOS_STORE_T),
- (SUB_SRC, '                if inner.policy.dsync {\n                    inner.domain.note_commit();\n                }', '                if inner.policy.dsync && false {\n                    inner.domain.note_commit();\n                }', QOS_STORE_T),
+ (SUB_SRC, '                if inner.policy.dsync && !self.class.is_background() {\n                    inner.domain.note_commit();\n                }', '                if inner.policy.dsync && false {\n                    inner.domain.note_commit();\n                }', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '    let ok = io >= 4096\n        && io % 4096 == 0', '    let ok = io >= 4096\n        && (io % 4096 == 0 || true)', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '        && io <= 256 << 10', '        && io <= 512 << 10', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '        && (1..=64).contains(&opts.background_unpaced)', '        && (0..=65).contains(&opts.background_unpaced)', QOS_STORE_T),
@@ -1607,6 +1607,36 @@ M = [
  (EXEC_SRC, '            if poisoned() {\n                stopped = true;', '            if poisoned() && false {\n                stopped = true;', PUMP_POISON_T, INLINE_ENV),
  (EXEC_SRC, '        None if stopped => Pumped::Poisoned,', '        None if stopped && false => Pumped::Poisoned,', PUMP_POISON_T),
  ("crates/store-io-engine/src/provision.rs", '            if let Some(first) = inner.domain.poisoned() {\n                return Err(Error::Poisoned { first });', '            if let Some(first) = inner.domain.poisoned().filter(|_| false) {\n                return Err(Error::Poisoned { first });', PUMP_POISON_T),
+ # QOS_SUB (V3c3): a background Submitter's first piece admitted before any
+ # reservation; its pieces capped at background_io, each charged, released
+ # at completion; later pieces parked, never dropped, resubmitted by reap,
+ # wait and drop; none to a poisoned store; its buffers capped; its barriers
+ # and power-safe writes never commits.
+ (SUB_SRC, '                None => Err(not_written(NotWrittenCause::Paced, c)),', '                None => Ok::<_, Error>(None).or(Err(not_written(NotWrittenCause::Paced, c))),', QOS_STORE_T),
+ (SUB_SRC, '                inner.qos.background_io() as usize\n', '                usize::MAX\n', QOS_STORE_T),
+ (SUB_SRC, '    let piece = (state.map.run_left(start) as usize)\n        .min(total)\n        .min(piece_max);', '    let piece = (state.map.run_left(start) as usize).min(total).min(piece_max.max(usize::MAX));', QOS_STORE_T),
+ ("crates/store-io-engine/src/optable.rs", '                    .min(left)\n                    .min(split.piece_max);', '                    .min(left)\n                    .min(split.piece_max.max(usize::MAX));', QOS_STORE_T),
+ (SUB_SRC, '        if write {\n            if let Some(first) = self.store.inner.domain.poisoned() {\n                return self', '        if write {\n            if let Some(first) = self.store.inner.domain.poisoned().filter(|_| false) {\n                return self', QOS_STORE_T),
+ (SUB_SRC, '        if self.class.is_background() {\n            IoClass::Background\n        } else {', '        if false {\n            IoClass::Background\n        } else {', QOS_STORE_T),
+ (SUB_SRC, '                if inner.policy.dsync && !self.class.is_background() {\n', '                if inner.policy.dsync {\n', QOS_STORE_T),
+ (SUB_SRC, '        if self.issuer.is_some() {\n            // Background work never holds more than half of a class (R5.4).', '        if self.issuer.is_some() && false {\n            // Background work never holds more than half of a class (R5.4).', QOS_STORE_T),
+ ("crates/store-io-engine/src/flusher.rs", '        let class = if guard.batch.iter().any(|r| r.class.is_commit()) {', '        let class = if guard.batch.iter().any(|r| r.class.is_commit()) || true {', QOS_STORE_T),
+ (IO_SRC, '            .barrier_classed(need, class, |slot, _k| {', '            .barrier_classed(need, if class.is_commit() || true { IoClass::Commit } else { class }, |slot, _k| {', QOS_STORE_T),
+ ("crates/store-io-engine/src/submitter/durable.rs", '.is_some_and(|f| f.request(need, class, qtag, Arc::clone(inbox) as Arc<dyn Answer>))', '.is_some_and(|f| f.request(need, store_io_core::IoClass::Commit, qtag, Arc::clone(inbox) as Arc<dyn Answer>))', QOS_STORE_T),
+ ("crates/store-io-engine/src/optable.rs", '        // admitted afresh.\n        live.charge = None;', '        // admitted afresh.\n        let _kept = &live.charge;', QOS_STORE_T),
+ # QOS_SUB (V3c3, the review's): continuation pieces paced and parked
+ # behind older parked ones; parked pieces poison-checked; a parked
+ # piece's operation in flight; reads paced and split; nothing unparked by a
+ # drop whose wait failed.
+ (SUB_SRC, '            self.admit()\n        } else {\n            None\n        };\n        let Some(charge) = admitted else {', '            self.admit().or(Some(None))\n        } else {\n            None\n        };\n        let Some(charge) = admitted else {', QOS_STORE_T),
+ (SUB_SRC, '        let admitted = if self.issue && self.table.parked.is_empty() {', '        let admitted = if self.issue && (self.table.parked.is_empty() || true) {', QOS_STORE_T),
+ (SUB_SRC, '        let admitted = if self.issue && self.table.parked.is_empty() {', '        let admitted = if (self.issue || true) && self.table.parked.is_empty() {', QOS_STORE_T),
+ (SUB_SRC, '                None if force && self.queue.in_flight() == 0 => {', '                None if force || true => {', QOS_STORE_T),
+ (SUB_SRC, '                if let Some(first) = self.store.inner.domain.poisoned() {\n                    let _done = self', '                if let Some(first) = self.store.inner.domain.poisoned().filter(|_| false) {\n                    let _done = self', QOS_STORE_T),
+ (SUB_SRC, '        let charge = admit!(self.admit_first(c), buf);\n        let (at, split)', '        let charge = admit!(Ok::<_, Error>(None), buf);\n        let (at, split)', QOS_STORE_T),
+ (SUB_SRC, 'let (at, split) = first_piece(state, offset, &mut buf, self.piece_max);', 'let (at, split) = first_piece(state, offset, &mut buf, usize::MAX);', QOS_STORE_T),
+ (SUB_SRC, '+ self.core.table.parked.len() +', '+ self.core.table.parked.len() * 0 +', QOS_STORE_T),
+ (SUB_SRC, '        let issue = failed.is_none();', '        let issue = failed.is_none() || true;', QOS_STORE_T),
 ]
 
 def kill_stuck_tests():

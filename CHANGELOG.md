@@ -23,8 +23,21 @@
   `Store::commit_hold` keeps them active while it lives; `Store::qos`
   reports the device's pacing (`QosReport`). Only a commit-class barrier
   marks activity (a flush thread's batch is commit-class if any request
-  in it is). Nothing is paced yet: the background paths that pace come in
-  later changes.
+  in it is). The background `Submitter` (below) is paced; the blocking
+  background paths (copy, scan, provisioning) come in later changes.
+- Engine: **a background `Submitter`**
+  (`SubmitterConfig::default().with_class(IoClass::Background)`): its
+  reads and writes go out in `background_io` pieces, each admitted by its
+  device's pacing. While commits are active it has one piece in flight;
+  while they are quiet, up to `background_unpaced`. An operation whose
+  first piece is refused returns `NotWritten(Paced)` with its buffer,
+  nothing reserved: reap and retry. A later piece pacing holds back waits
+  inside the submitter, oldest first, and goes out at a later `reap`,
+  `wait` or drop, never dropped (`in_flight` counts its operation).
+  Its barriers and durable writes never mark commits active; its
+  `take_buf` holds at most half of each buffer class (`PoolExhausted`,
+  never waiting). `SubmitterConfig::class` (default `Commit`); a
+  `Read`-class submitter's writes count as commits.
 - Options: `StoreOptions::background_io` (256 KiB), `background_unpaced`
   (8), `background_pacing` (on) and `commit_quiet` (5 s), checked at
   `create`, `open` and `open_readonly` (`NotWritten(InvalidOptions)`

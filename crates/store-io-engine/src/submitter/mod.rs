@@ -22,6 +22,7 @@ mod durable;
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use store_io_core::IoClass;
 
 use store_io_core::error::{Error, ErrorContext, FirstCause, NotWrittenCause, Op, OsError};
 use store_io_core::observe::Counter;
@@ -33,7 +34,7 @@ use crate::flusher::{Inbox, SubmitterWaker, WakerOf};
 use crate::gate::{Gate, Gated, OwnedPass};
 use crate::io::{ctx, ctx_range, not_written};
 use crate::lifecycle::retired_error;
-use crate::optable::{Finish, Kind, Split};
+use crate::optable::{Finish, Kind, Parked, Split, Table};
 use crate::queue_core::Core;
 use crate::receipt::RegionPos;
 use crate::region::{AppendRegion, PageRegion};
@@ -97,6 +98,13 @@ where
     inbox: Arc<Inbox<<P::Queue as Queue>::Waker>>,
     id: u64,
     pub(crate) store: Store<P>,
+    /// The class of its I/O (`SubmitterConfig::class`).
+    class: IoClass,
+    /// A background submitter's pacing record (one issuer: R5.4).
+    issuer: Option<Arc<crate::qos::Issuer>>,
+    /// The largest piece of one of its operations (`background_io` for a
+    /// background submitter; else unbounded).
+    piece_max: usize,
     _thread: PhantomData<*const ()>,
 }
 
@@ -123,13 +131,24 @@ enum Req {
 /// or (format 2, across a run's end, spec §11) the piece up to the run's
 /// end, `buf` shortened to it, the rest following under the same row
 /// ([`Split`]). Returns its file offset.
-fn first_piece(state: &LiveRegion, start: u64, buf: &mut IoBuf) -> (u64, Option<Split>) {
+fn first_piece(
+    state: &LiveRegion,
+    start: u64,
+    buf: &mut IoBuf,
+    piece_max: usize,
+) -> (u64, Option<Split>) {
     let total = buf.len();
-    let piece = (state.map.run_left(start) as usize).min(total);
+    let piece = (state.map.run_left(start) as usize)
+        .min(total)
+        .min(piece_max);
     let split = (piece < total).then(|| {
         let fits = buf.set_len(piece);
         debug_assert!(fits, "a piece longer than its buffer");
-        Split { total, done: 0 }
+        Split {
+            total,
+            done: 0,
+            piece_max,
+        }
     });
     (state.map.locate(start, piece as u64), split)
 }
@@ -186,11 +205,19 @@ where
         let mark = Arc::new(LaneMark::new());
         let inbox = Arc::new(Inbox::new(n, queue.waker()));
         let id = self.register_submitter(&mark);
+        let background = cfg.class.is_background();
         Ok(Submitter {
             core: Core::new(queue, n, mark),
             inbox,
             id,
             store: self.clone(),
+            class: cfg.class,
+            issuer: background.then(|| crate::qos::Issuer::new(&inner.qos)),
+            piece_max: if background {
+                inner.qos.background_io() as usize
+            } else {
+                usize::MAX
+            },
             _thread: PhantomData,
         })
     }
@@ -205,13 +232,23 @@ where
     /// # Errors
     ///
     /// `NotWritten(TooLarge)` beyond [`Self::max_buf`];
-    /// `NotWritten(PoolExhausted)` if none is free.
+    /// `NotWritten(PoolExhausted)` if none is free (for a background
+    /// submitter: if its class's background half is taken).
     pub fn take_buf(&self, len: usize) -> Result<IoBuf, Error> {
         if len > self.max_buf() {
             return Err(not_written(
                 NotWrittenCause::TooLarge,
                 ErrorContext::default(),
             ));
+        }
+        if self.issuer.is_some() {
+            // Background work never holds more than half of a class (R5.4).
+            return self
+                .store
+                .inner
+                .pool
+                .take_capped(len, usize::MAX)
+                .map_err(|_| not_written(NotWrittenCause::PoolExhausted, ErrorContext::default()));
         }
         self.store.take_any(len, ErrorContext::default())
     }
@@ -227,16 +264,18 @@ where
     }
 
     /// Operations submitted whose completions have not been handed to
-    /// `reap` or `wait` yet: I/O in flight, and durable writes and barriers
-    /// waiting for their flush.
+    /// `reap` or `wait` yet: I/O in flight, a background submitter's
+    /// operations whose next piece pacing holds back, and durable writes and
+    /// barriers waiting for their flush.
     #[must_use]
     pub fn in_flight(&self) -> usize {
         // Never more than are really pending (an operation lost to a panic
         // in processing is no longer waited for; the store is poisoned then).
+        // An operation has one piece at a time: in the queue or parked.
         self.core
             .table
             .live
-            .min(self.core.queue.in_flight() + self.core.table.asked)
+            .min(self.core.queue.in_flight() + self.core.table.parked.len() + self.core.table.asked)
     }
 
     /// Ends this submitter's current or next [`Self::wait`] from another
@@ -333,6 +372,10 @@ where
             return Err(rejected(not_written(NotWrittenCause::TooLarge, c), buf));
         }
         let passes = admit!(before_reserve(), buf);
+        // A background write's first piece is admitted by pacing before any
+        // space is reserved: refused, it is `Paced` with nothing reserved
+        // (R5.4); a refused reservation drops the charge.
+        let charge = admit!(self.admit_first(c), buf);
         let domain = &self.store.inner.domain;
         let reserved = f
             .reserve(len as u64)
@@ -355,13 +398,13 @@ where
             generation: state.generation,
             offset: r.start,
         };
-        let (offset, split) = first_piece(state, r.start, &mut buf);
+        let (offset, split) = first_piece(state, r.start, &mut buf, self.piece_max);
         let req = Req::Write { offset, buf };
         let durable = mode == WriteMode::Durable;
         // Never held through the issue: on a queue that performs at once the
         // write runs inside it (R5.3).
         on_reserved(passes);
-        let issued = self.issue(req, tag, Kind::Append(r), pass, durable, split);
+        let issued = self.issue(req, tag, Kind::Append(r), pass, durable, split, charge);
         let _r = held.disarm();
         match issued {
             Ok(()) => Ok(pos),
@@ -414,29 +457,41 @@ where
         let end = admit!(region.check(&pos, buf.len()), buf);
         let c = ctx_range(state, pos.offset, end);
         let passes = admit!(before_issue(), buf);
-        let (offset, split) = first_piece(state, pos.offset, &mut buf);
+        // A background write is admitted by pacing before it is issued.
+        let charge = admit!(self.admit_first(c), buf);
+        let (offset, split) = first_piece(state, pos.offset, &mut buf, self.piece_max);
         let req = Req::Write { offset, buf };
         let kind = Kind::Page {
             start: pos.offset,
             end,
         };
         drop(passes);
-        self.issue(req, tag, kind, pass, mode == WriteMode::Durable, split)
-            .map_err(|(raw, buf)| Rejected {
-                error: Store::<P>::refused(raw, c),
-                buf,
-            })
+        self.issue(
+            req,
+            tag,
+            kind,
+            pass,
+            mode == WriteMode::Durable,
+            split,
+            charge,
+        )
+        .map_err(|(raw, buf)| Rejected {
+            error: Store::<P>::refused(raw, c),
+            buf,
+        })
     }
 
     /// Reads into the buffer (whole blocks) from the block-aligned `offset`
     /// of an append region; the completion carries the bytes. Reads work on
-    /// read-only and poisoned stores.
+    /// read-only and poisoned stores. A background submitter's reads are
+    /// paced as its writes are.
     ///
     /// # Errors
     ///
     /// [`Rejected`], with the buffer: `NotWritten` (empty, misaligned, out
-    /// of range, submitter full, another store's region or buffer), or `Io`
-    /// if the OS refused it.
+    /// of range, submitter full, another store's region or buffer; `Paced`
+    /// for a background submitter while commits are active: reap and
+    /// retry), or `Io` if the OS refused it.
     pub fn read_append(
         &mut self,
         region: &AppendRegion<P>,
@@ -499,13 +554,16 @@ where
         if offset.checked_add(len).is_none_or(|e| e > state.map.len()) {
             return Err(rejected(not_written(NotWrittenCause::OutOfBounds, c), buf));
         }
-        let (at, split) = first_piece(state, offset, &mut buf);
+        // A background read is admitted by pacing as a write is (R5.4: the
+        // class is the submitter's).
+        let charge = admit!(self.admit_first(c), buf);
+        let (at, split) = first_piece(state, offset, &mut buf, self.piece_max);
         let req = Req::Read { offset: at, buf };
         let kind = Kind::Read {
             start: offset,
             end: offset + len,
         };
-        self.issue(req, tag, kind, pass, false, split)
+        self.issue(req, tag, kind, pass, false, split, charge)
             .map_err(|(raw, buf)| Rejected {
                 error: match raw {
                     Some(raw) => Error::Io {
@@ -521,6 +579,9 @@ where
 
     /// Submits an admitted operation into a free row. On a refusal the row
     /// stays free and the pass is released.
+    // An operation's request, tag, kind, pass, durability, split and pacing
+    // charge are all needed, and none derives from another.
+    #[allow(clippy::too_many_arguments)]
     fn issue(
         &mut self,
         req: Req,
@@ -529,6 +590,7 @@ where
         pass: OwnedPass<LiveRegion>,
         durable: bool,
         split: Option<Split>,
+        charge: Option<crate::qos::Charge>,
     ) -> Result<(), (Option<OsError>, Option<IoBuf>)> {
         // A refusal gives the caller's buffer back whole (a split's first
         // piece is its front: nothing was moved).
@@ -551,7 +613,7 @@ where
         let (op, write) = match req {
             Req::Write { offset, buf } => {
                 let bytes = buf.len() as u64;
-                if inner.policy.dsync {
+                if inner.policy.dsync && !self.class.is_background() {
                     inner.domain.note_commit();
                 }
                 let op = IoOp::Write {
@@ -570,6 +632,9 @@ where
         if let Some(s) = split {
             self.core.table.set_split(index, s);
         }
+        // Held by the row: released when the piece completes, or with the
+        // row (a refused submission below aborts it).
+        self.core.table.set_charge(qtag, charge);
         if let Err(r) = self.core.queue.submit(op, qtag) {
             self.core.table.abort(index);
             if r.raw.is_none() {
@@ -643,6 +708,11 @@ where
             } else if self.core.table.asked > 0 {
                 self.inbox.wait(true);
                 self.process();
+            } else if !self.core.table.parked.is_empty() {
+                // Only parked pieces: nothing of this submitter in flight, so
+                // the oldest goes out (R5.4: a wait never ends early on pieces
+                // pacing held back).
+                self.unpark_idle();
             } else {
                 break;
             }
@@ -652,74 +722,273 @@ where
         })
     }
 
-    /// Processes every raw completion collected.
+    /// Processes every raw completion collected, then resubmits parked
+    /// pieces while pacing admits them, then asks for the flushes the pass
+    /// wants and takes the answers.
     fn process(&mut self) {
-        let _unwind = PoisonOnUnwind::new(&self.store);
-        for c in self.core.raw.drain() {
+        self.process_with(true);
+    }
+
+    /// [`Self::process`]; with `issue` false nothing more is submitted, no
+    /// parked piece and no next piece (parked instead: a drop whose wait
+    /// failed, fail-stop; its live writes poison the store).
+    fn process_with(&mut self, issue: bool) {
+        let class = self.barrier_class();
+        let Self {
+            core,
+            inbox,
+            store,
+            issuer,
+            ..
+        } = self;
+        let _unwind = PoisonOnUnwind::new(store);
+        let mut pieces = Pieces {
+            table: &mut core.table,
+            queue: &mut core.queue,
+            store,
+            issuer: issuer.as_ref(),
+            issue,
+        };
+        for c in core.raw.drain() {
             // Only a write needing a flush asks (see `Table::finish`).
-            let mut finished = self.core.table.finish(&self.store, c.tag, c.buf, c.result);
-            while let Finish::Next {
+            let finished = pieces.table.finish(store, c.tag, c.buf, c.result);
+            pieces.follow(finished);
+        }
+        if issue {
+            pieces.unpark(false);
+        }
+        pieces.ask_and_take(inbox, class);
+    }
+
+    /// Resubmits parked pieces with nothing in flight (a wait, a drop): the
+    /// oldest always goes out.
+    fn unpark_idle(&mut self) {
+        let class = self.barrier_class();
+        let Self {
+            core,
+            inbox,
+            store,
+            issuer,
+            ..
+        } = self;
+        let _unwind = PoisonOnUnwind::new(store);
+        let mut pieces = Pieces {
+            table: &mut core.table,
+            queue: &mut core.queue,
+            store,
+            issuer: issuer.as_ref(),
+            issue: true,
+        };
+        pieces.unpark(true);
+        pieces.ask_and_take(inbox, class);
+    }
+
+    /// The class its barriers run as: a background submitter's never mark
+    /// commits active; a read-class submitter's are commit-class (its writes
+    /// are).
+    pub(crate) fn barrier_class(&self) -> IoClass {
+        if self.class.is_background() {
+            IoClass::Background
+        } else {
+            IoClass::Commit
+        }
+    }
+
+    /// Admits a background operation's first piece (R5.4): `None` for a
+    /// submitter that is not background.
+    fn admit_first(&self, c: ErrorContext) -> Result<Option<crate::qos::Charge>, Error> {
+        match &self.issuer {
+            None => Ok(None),
+            Some(i) => match i.admit(self.store.inner.platform.monotonic_ns()) {
+                Some(charge) => Ok(Some(charge)),
+                None => Err(not_written(NotWrittenCause::Paced, c)),
+            },
+        }
+    }
+}
+
+/// What processing a pass's pieces needs of a submitter, borrowed field by
+/// field (so the raw completions can be drained beside it).
+struct Pieces<'a, P: Platform>
+where
+    P::Queue: Send,
+{
+    table: &'a mut Table,
+    queue: &'a mut P::Queue,
+    store: &'a Store<P>,
+    issuer: Option<&'a Arc<crate::qos::Issuer>>,
+    /// Pieces may be submitted (false: every next piece is parked).
+    issue: bool,
+}
+
+impl<P: Platform> Pieces<'_, P>
+where
+    P::Queue: Send,
+{
+    /// Follows a completion through every next piece it leads to; a flush
+    /// it wants is asked for at the end of the pass.
+    fn follow(&mut self, mut finished: Finish) {
+        while let Finish::Next {
+            qtag,
+            offset,
+            buf,
+            write,
+        } = finished
+        {
+            finished = self.next_piece(qtag, offset, buf, write);
+        }
+        if let Finish::Flush(qtag, need) = finished {
+            self.table.asks.push((qtag, need));
+        }
+    }
+
+    /// Pacing's admission of one more piece: `Some(None)` for a submitter
+    /// that is not background, `None` when refused.
+    fn admit(&self) -> Option<Option<crate::qos::Charge>> {
+        match self.issuer {
+            None => Some(None),
+            Some(i) => i.admit(self.store.inner.platform.monotonic_ns()).map(Some),
+        }
+    }
+
+    /// The next piece of an operation across pieces: never a write piece to
+    /// a poisoned store (fail-stop: the operation ends `Poisoned`); a
+    /// background piece admitted by pacing, or parked, never dropped; behind
+    /// any piece parked before it (oldest first: the pass's `unpark`
+    /// submits them in order); parked, never submitted, once a drop's wait
+    /// has failed.
+    fn next_piece(&mut self, qtag: u64, offset: u64, buf: IoBuf, write: bool) -> Finish {
+        if write {
+            if let Some(first) = self.store.inner.domain.poisoned() {
+                return self
+                    .table
+                    .refused_poisoned(self.store, qtag, Some(buf), first);
+            }
+        }
+        let admitted = if self.issue && self.table.parked.is_empty() {
+            self.admit()
+        } else {
+            None
+        };
+        let Some(charge) = admitted else {
+            self.table.parked.push_back(Parked {
                 qtag,
                 offset,
                 buf,
                 write,
-            } = finished
-            {
-                let inner = &*self.store.inner;
-                let file = &inner.file;
-                let bytes = buf.len() as u64;
-                let op = if write {
-                    IoOp::Write {
-                        file,
-                        offset,
-                        buf,
-                        dsync: inner.policy.dsync,
-                    }
-                } else {
-                    IoOp::Read { file, offset, buf }
-                };
-                finished = match self.core.queue.submit(op, qtag) {
-                    Ok(()) => {
-                        if write {
-                            inner.observer.add(Counter::Writes, 1);
-                            inner.observer.add(Counter::WriteBytes, bytes);
-                        }
-                        Finish::Done
-                    }
-                    Err(r) => {
-                        if r.raw.is_none() {
-                            inner.observer.add(Counter::Refused, 1);
-                        }
-                        self.core
-                            .table
-                            .refused_next(&self.store, qtag, r.buf, r.raw)
-                    }
-                };
+            });
+            return Finish::Done;
+        };
+        self.submit_piece(qtag, offset, buf, write, charge)
+    }
+
+    /// Submits a piece, its charge held by its row.
+    fn submit_piece(
+        &mut self,
+        qtag: u64,
+        offset: u64,
+        buf: IoBuf,
+        write: bool,
+        charge: Option<crate::qos::Charge>,
+    ) -> Finish {
+        let inner = &*self.store.inner;
+        let file = &inner.file;
+        let bytes = buf.len() as u64;
+        self.table.set_charge(qtag, charge);
+        let op = if write {
+            IoOp::Write {
+                file,
+                offset,
+                buf,
+                dsync: inner.policy.dsync,
             }
-            if let Finish::Flush(qtag, need) = finished {
-                self.core.table.asks.push((qtag, need));
+        } else {
+            IoOp::Read { file, offset, buf }
+        };
+        match self.queue.submit(op, qtag) {
+            Ok(()) => {
+                if write {
+                    inner.observer.add(Counter::Writes, 1);
+                    inner.observer.add(Counter::WriteBytes, bytes);
+                }
+                Finish::Done
+            }
+            Err(r) => {
+                if r.raw.is_none() {
+                    inner.observer.add(Counter::Refused, 1);
+                }
+                self.table.refused_next(self.store, qtag, r.buf, r.raw)
             }
         }
+    }
+
+    /// Resubmits parked pieces, oldest first, while pacing admits them. With
+    /// `force`, the oldest is submitted (uncharged) even if refused when
+    /// nothing at all is in flight: pacing admits a call with nothing in
+    /// flight anyway, so this changes nothing in a correct run, and a drain
+    /// or a wait with only parked pieces can never spin.
+    fn unpark(&mut self, force: bool) {
+        while let Some(p) = self.table.parked.pop_front() {
+            let Parked {
+                qtag,
+                offset,
+                buf,
+                write,
+            } = p;
+            if write {
+                if let Some(first) = self.store.inner.domain.poisoned() {
+                    let _done = self
+                        .table
+                        .refused_poisoned(self.store, qtag, Some(buf), first);
+                    continue;
+                }
+            }
+            let charge = match self.admit() {
+                Some(charge) => charge,
+                None if force && self.queue.in_flight() == 0 => {
+                    // Pacing admits an issuer with nothing in flight, and a
+                    // piece's charge goes at its completion: so only a
+                    // charge that outlived its piece is refused here.
+                    // (After a panic in processing, a completion dropped
+                    // unprocessed keeps its row's charge: the store is
+                    // poisoned then, and no write goes out.)
+                    debug_assert!(
+                        self.issuer.is_none_or(|i| i.in_flight() == 0)
+                            || self.store.inner.domain.poisoned().is_some(),
+                        "a charge outlived its piece"
+                    );
+                    None
+                }
+                None => {
+                    self.table.parked.push_front(Parked {
+                        qtag,
+                        offset,
+                        buf,
+                        write,
+                    });
+                    return;
+                }
+            };
+            let finished = self.submit_piece(qtag, offset, buf, write, charge);
+            self.follow(finished);
+        }
+    }
+
+    /// Asks the flush thread for what the pass wants, and takes its answers.
+    fn ask_and_take(&mut self, inbox: &Arc<Inbox<<P::Queue as Queue>::Waker>>, class: IoClass) {
         // Asked once every completion of the pass is finished, the largest
         // need first, so one flush can cover them all. Taken one at a time:
         // after a panic the rest stay to be asked for, in the same buffer.
-        while let Some((qtag, need)) = self.core.table.asks.pop() {
-            durable::ask(
-                &mut self.core.table,
-                &self.store,
-                &self.inbox,
-                qtag,
-                need,
-                true,
-            );
+        while let Some((qtag, need)) = self.table.asks.pop() {
+            durable::ask(self.table, self.store, inbox, qtag, need, true, class);
         }
         // Flush outcomes too, under the same guard.
-        while self.core.table.asked > 0 {
-            let Some((qtag, outcome)) = self.inbox.pop() else {
+        while self.table.asked > 0 {
+            let Some((qtag, outcome)) = inbox.pop() else {
                 break;
             };
-            self.core.table.asked -= 1;
-            self.core.table.flushed(&self.store, qtag, outcome);
+            self.table.asked -= 1;
+            self.table.flushed(self.store, qtag, outcome);
         }
     }
 }
@@ -770,16 +1039,25 @@ where
 {
     /// Waits for every operation in flight, untimed (TYP-05), so nothing the
     /// device may still touch is released. If waiting fails, the queue's own
-    /// drop keeps what the kernel owns, and the store is poisoned when a
-    /// write was in flight: its range may never be written, and nothing of
-    /// its generation may be recycled while it could still land. The same
-    /// if a panic interrupted the processing of a completion (an operation
-    /// left unaccounted may have been an append).
+    /// drop keeps what the kernel owns, nothing more is submitted (no
+    /// parked piece, no next piece), and the store is poisoned when a write
+    /// was in flight or unfinished: its range may never be written, and
+    /// nothing of its generation may be recycled while it could still land.
+    /// The same if a panic interrupted the processing of a completion (an
+    /// operation left unaccounted may have been an append).
     fn drop(&mut self) {
         let mut failed = None;
         // First every I/O (a durable write's completion may ask for a
-        // flush)...
-        while self.core.table.live > 0 && self.core.queue.in_flight() > 0 {
+        // flush), parked pieces submitted as pacing admits them (a parked
+        // piece is a live write: never dropped while the waits succeed; with
+        // nothing in flight the oldest is always admitted)...
+        while self.core.table.live > 0
+            && (self.core.queue.in_flight() > 0 || !self.core.table.parked.is_empty())
+        {
+            if self.core.queue.in_flight() == 0 {
+                self.unpark_idle();
+                continue;
+            }
             match self
                 .core
                 .queue
@@ -793,14 +1071,16 @@ where
             }
             self.core.table.ready.clear();
         }
-        // ... with whatever the queue collected before a failed wait...
+        // ... with whatever the queue collected before a failed wait (and
+        // then nothing more submitted: the store is poisoned below)...
+        let issue = failed.is_none();
         let _added = self.core.queue.reap(&mut self.core.raw);
-        self.process();
+        self.process_with(issue);
         // ... then every flush asked for: the flush thread answers every
         // request it accepted.
         while self.core.table.asked > 0 {
             self.inbox.wait(false);
-            self.process();
+            self.process_with(issue);
         }
         if self.core.table.live > 0
             && (self.core.table.writes_live() || !self.core.table.consistent())

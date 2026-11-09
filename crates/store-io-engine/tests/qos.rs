@@ -8,8 +8,10 @@
 use std::path::Path;
 use std::time::Duration;
 
+use store_io_core::IoClass;
 use store_io_core::error::{Error, NotWrittenCause};
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
+use store_io_engine::completion::{Completion, Rejected};
 use store_io_engine::{Store, StoreOptions, SubmitterConfig, WriteMode};
 use store_io_platform::Platform;
 use store_io_sim::{DeviceKind, SimConfig, SimPlatform};
@@ -47,14 +49,33 @@ fn create(p: &SimPlatform, dir: &str) -> Store<SimPlatform> {
     Store::create(p.clone(), Path::new(dir), StoreOptions::default()).unwrap()
 }
 
-/// A durable append and its barrier.
+/// A durable append and its barrier, in a region of its own (never one a
+/// test's background writes go to: its `sync_through` would wait for them,
+/// and they are reaped only by the test's own thread).
 fn commit(s: &Store<SimPlatform>) {
-    let r = match s.append_region("log") {
+    let r = match s.append_region("commits") {
         Ok(r) => r,
-        Err(_) => s.provision_append_region("log", 1 << 20).unwrap(),
+        Err(_) => s.provision_append_region("commits", 1 << 20).unwrap(),
     };
     let t = r.append(&[7u8; 4096]).unwrap();
     let _receipt = r.sync_through(&t).unwrap();
+}
+
+/// The byte at `i` of an operation seeded `seed`: every 4 KiB block of a
+/// 1 MiB operation differs, so a piece landing at another offset (or two
+/// swapped) never reads back right.
+fn byte_at(i: usize, seed: u8) -> u8 {
+    ((i / 4096) as u8).wrapping_mul(37) ^ (i as u8) ^ seed
+}
+
+fn pattern(buf: &mut [u8], seed: u8) {
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = byte_at(i, seed);
+    }
+}
+
+fn is_pattern(back: &[u8], seed: u8) -> bool {
+    back.iter().enumerate().all(|(i, &b)| b == byte_at(i, seed))
 }
 
 fn advance(p: &SimPlatform, ns: u64) {
@@ -278,4 +299,492 @@ fn test_pacing_options_out_of_range_are_refused() {
     };
     assert!(Store::open(p.clone(), Path::new("/y"), bad_open.clone()).is_err());
     assert!(Store::open_readonly(p, Path::new("/y"), bad_open).is_err());
+}
+
+// ------------------------------------------------- the background Submitter
+
+fn background(s: &Store<SimPlatform>) -> store_io_engine::Submitter<SimPlatform> {
+    s.submitter(SubmitterConfig::default().with_class(IoClass::Background))
+        .unwrap()
+}
+
+/// Every completion of `sub`, waited for until none is in flight.
+fn drain(sub: &mut store_io_engine::Submitter<SimPlatform>) -> Vec<Completion> {
+    let mut out = Vec::new();
+    while sub.in_flight() > 0 {
+        out.extend(sub.wait(1).unwrap());
+    }
+    out.extend(sub.reap());
+    out
+}
+
+fn is_paced(r: &Result<store_io_engine::RegionPos, Rejected>) -> bool {
+    matches!(
+        r,
+        Err(Rejected {
+            error: Error::NotWritten {
+                cause: NotWrittenCause::Paced,
+                ..
+            },
+            buf: Some(_),
+        })
+    )
+}
+
+#[test]
+fn test_a_background_submitter_is_paced_while_commits_are_active() {
+    let p = two_devices(20, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    commit(&a);
+    assert!(a.qos().active);
+    let first = sub
+        .append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, 1)
+        .unwrap();
+    // One piece in flight while commits are active: the next is refused
+    // before anything is reserved, its buffer given back.
+    let second = sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, 2);
+    assert!(is_paced(&second), "{second:?}");
+    assert_eq!(a.qos().in_flight, 1);
+    let _done = drain(&mut sub);
+    assert_eq!(
+        a.qos().in_flight,
+        0,
+        "a completed piece's charge is released"
+    );
+    let next = sub
+        .append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, 3)
+        .unwrap();
+    assert_eq!(
+        next.offset(),
+        first.offset() + 4096,
+        "the refusal reserved nothing"
+    );
+    let _done = drain(&mut sub);
+}
+
+#[test]
+fn test_a_background_submitter_runs_unpaced_while_commits_are_quiet() {
+    let p = two_devices(21, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    advance(&p, 6 * SECOND);
+    for t in 0..8 {
+        sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, t)
+            .unwrap();
+    }
+    let ninth = sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, 9);
+    assert!(is_paced(&ninth), "background_unpaced bounds it: {ninth:?}");
+    let _done = drain(&mut sub);
+}
+
+#[test]
+fn test_a_background_write_goes_out_in_pieces() {
+    let p = two_devices(22, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    commit(&a);
+    let mut buf = sub.take_buf(1 << 20).unwrap();
+    pattern(buf.as_mut_slice(), 0x5a);
+    let before = p.with_world(|w| w.write_submits());
+    let pos = sub.append(&log, buf, WriteMode::Plain, 1).unwrap();
+    assert_eq!(
+        p.with_world(|w| w.write_submits()) - before,
+        1,
+        "one piece at once"
+    );
+    let done = drain(&mut sub);
+    assert_eq!(done.len(), 1);
+    assert!(done[0].outcome.is_ok(), "{:?}", done[0].outcome);
+    // 1 MiB in 256 KiB pieces, each after the last.
+    assert_eq!(p.with_world(|w| w.write_submits()) - before, 4);
+    assert_eq!(a.qos().in_flight, 0);
+    let mut back = vec![0u8; 1 << 20];
+    log.read(pos.offset(), &mut back).unwrap();
+    assert!(is_pattern(&back, 0x5a), "the pieces in order");
+}
+
+#[test]
+fn test_a_background_submitter_s_barriers_and_writes_mark_no_activity() {
+    let p = two_devices(23, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    advance(&p, 6 * SECOND);
+    sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Durable, 1)
+        .unwrap();
+    let done = drain(&mut sub);
+    assert!(done.iter().all(|c| c.outcome.is_ok()), "{done:?}");
+    assert!(
+        !a.qos().active,
+        "a background durable write's flush is no commit"
+    );
+    // A commit-class submitter's flush is.
+    let mut commit_sub = a.submitter(SubmitterConfig::default()).unwrap();
+    commit_sub
+        .append(
+            &log,
+            commit_sub.take_buf(4096).unwrap(),
+            WriteMode::Durable,
+            2,
+        )
+        .unwrap();
+    let _done = drain(&mut commit_sub);
+    assert!(a.qos().active);
+}
+
+#[test]
+fn test_a_dropped_background_submitter_finishes_its_write() {
+    let p = two_devices(24, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    commit(&a);
+    let mut buf = sub.take_buf(1 << 20).unwrap();
+    pattern(buf.as_mut_slice(), 0x6b);
+    let before = p.with_world(|w| w.write_submits());
+    let pos = sub.append(&log, buf, WriteMode::Plain, 1).unwrap();
+    // Dropped at once, its later pieces never submitted yet: the drop
+    // submits them under pacing and drains (a write never left unfinished).
+    drop(sub);
+    assert_eq!(p.with_world(|w| w.write_submits()) - before, 4);
+    assert!(a.poisoned().is_none(), "no hole was left");
+    let mut back = vec![0u8; 1 << 20];
+    log.read(pos.offset(), &mut back).unwrap();
+    assert!(is_pattern(&back, 0x6b));
+}
+
+#[test]
+fn test_a_poison_stops_a_background_write_s_pieces() {
+    let p = two_devices(25, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    commit(&a);
+    let before = p.with_world(|w| w.write_submits());
+    let buf = sub.take_buf(1 << 20).unwrap();
+    sub.append(&log, buf, WriteMode::Plain, 1).unwrap();
+    a.poison();
+    let done = drain(&mut sub);
+    assert_eq!(done.len(), 1);
+    assert!(
+        matches!(done[0].outcome, Err(Error::Poisoned { .. })),
+        "{:?}",
+        done[0].outcome
+    );
+    assert_eq!(
+        p.with_world(|w| w.write_submits()) - before,
+        1,
+        "no piece after the poison"
+    );
+}
+
+#[test]
+fn test_a_background_submitter_holds_at_most_half_a_buffer_class() {
+    let p = two_devices(26, DeviceKind::VolatileCache);
+    let opts = StoreOptions {
+        buffers_per_class: 8,
+        ..StoreOptions::default()
+    };
+    let a = Store::create(p.clone(), Path::new("/a"), opts).unwrap();
+    let sub = background(&a);
+    // Background takes move up the classes as each class's half is held,
+    // until every class's half is.
+    let mut held = Vec::new();
+    while let Ok(b) = sub.take_buf(4096) {
+        held.push(b);
+        assert!(held.len() < 10_000, "the background takes never stop");
+    }
+    // Exactly half of every class (8 each): 4 of each size, never more.
+    let mut per = std::collections::BTreeMap::<usize, usize>::new();
+    for b in &held {
+        *per.entry(b.capacity()).or_default() += 1;
+    }
+    assert!(!per.is_empty());
+    assert!(per.values().all(|&n| n == 4), "{per:?}");
+    // The other half is the commits': a commit-class submitter takes the
+    // other four of every class (largest first, so each take is of exactly
+    // its class).
+    let commit_sub = a.submitter(SubmitterConfig::default()).unwrap();
+    let mut commits = Vec::new();
+    for &size in per.keys().rev() {
+        for _ in 0..4 {
+            let b = commit_sub.take_buf(size).unwrap();
+            assert_eq!(b.capacity(), size);
+            commits.push(b);
+        }
+    }
+    drop(held);
+}
+
+#[test]
+fn test_a_read_class_submitter_s_writes_are_commits() {
+    let p = two_devices(27, DeviceKind::PowerSafe);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = a
+        .submitter(SubmitterConfig::default().with_class(IoClass::Read))
+        .unwrap();
+    advance(&p, 6 * SECOND);
+    sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, 1)
+        .unwrap();
+    assert!(a.qos().active, "its writes are commit-class");
+    let _done = drain(&mut sub);
+    // A background one's are not.
+    let mut bg = background(&a);
+    advance(&p, 6 * SECOND);
+    bg.append(&log, bg.take_buf(4096).unwrap(), WriteMode::Plain, 2)
+        .unwrap();
+    assert!(
+        !a.qos().active,
+        "a background power-safe write is no commit"
+    );
+    let _done = drain(&mut bg);
+}
+
+/// Two large background writes in flight when commits become active: their
+/// later pieces wait their turn (parked), and every byte lands; a wait or a
+/// drop never ends with a piece left behind.
+#[test]
+fn test_background_pieces_wait_their_turn_once_commits_are_active() {
+    for drop_it in [false, true] {
+        let p = two_devices(28 + u64::from(drop_it), DeviceKind::VolatileCache);
+        let a = create(&p, "/a");
+        let log = a.provision_append_region("log", 8 << 20).unwrap();
+        let mut sub = background(&a);
+        advance(&p, 6 * SECOND);
+        let mut at = Vec::new();
+        for (i, fill) in [0x11u8, 0x22].into_iter().enumerate() {
+            let mut buf = sub.take_buf(1 << 20).unwrap();
+            pattern(buf.as_mut_slice(), fill);
+            at.push((
+                sub.append(&log, buf, WriteMode::Plain, i as u64).unwrap(),
+                fill,
+            ));
+        }
+        commit(&a);
+        let before = p.with_world(|w| w.write_submits());
+        if drop_it {
+            drop(sub);
+            assert!(a.poisoned().is_none(), "a parked piece was dropped");
+        } else {
+            let done = drain(&mut sub);
+            assert_eq!(done.len(), 2, "a wait ended with a piece left behind");
+            assert!(done.iter().all(|c| c.outcome.is_ok()), "{done:?}");
+        }
+        assert_eq!(
+            p.with_world(|w| w.write_submits()) - before,
+            6,
+            "the six pieces left"
+        );
+        for (pos, fill) in at {
+            let mut back = vec![0u8; 1 << 20];
+            log.read(pos.offset(), &mut back).unwrap();
+            assert!(is_pattern(&back, fill), "a write's pieces out of place");
+        }
+    }
+}
+
+/// Two background appends of 1 MiB issued while commits are quiet; then
+/// commits. One write submitter step per reap (the simulator completes
+/// whatever is submitted).
+/// What [`two_appends_then_commits`] leaves: the world, the store, the
+/// region, the submitter and each write's position and fill.
+struct TwoAppends {
+    p: SimPlatform,
+    a: Store<SimPlatform>,
+    log: store_io_engine::AppendRegion<SimPlatform>,
+    sub: store_io_engine::Submitter<SimPlatform>,
+    at: Vec<(store_io_engine::RegionPos, u8)>,
+}
+
+fn two_appends_then_commits(seed: u64) -> TwoAppends {
+    let p = two_devices(seed, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 8 << 20).unwrap();
+    let mut sub = background(&a);
+    advance(&p, 6 * SECOND);
+    let mut at = Vec::new();
+    for (t, fill) in [(1u64, 0x31u8), (2, 0x32)] {
+        let mut buf = sub.take_buf(1 << 20).unwrap();
+        pattern(buf.as_mut_slice(), fill);
+        at.push((sub.append(&log, buf, WriteMode::Plain, t).unwrap(), fill));
+    }
+    commit(&a);
+    TwoAppends { p, a, log, sub, at }
+}
+
+/// Their later pieces take turns, oldest first, never two in flight while
+/// commits are active; an operation whose next piece waits is still in
+/// flight; every byte lands.
+#[test]
+fn test_background_pieces_take_turns_one_in_flight_at_a_time() {
+    let TwoAppends {
+        p,
+        a,
+        log,
+        mut sub,
+        at,
+    } = two_appends_then_commits(30);
+    let mut order = Vec::new();
+    let mut steps = 0;
+    while sub.in_flight() > 0 {
+        steps += 1;
+        assert!(steps < 64, "the pieces never finished");
+        let before = p.with_world(|w| w.write_submits());
+        for c in sub.reap() {
+            assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+            order.push(c.tag);
+        }
+        let sent = p.with_world(|w| w.write_submits()) - before;
+        assert!(
+            sent <= 1,
+            "two pieces at once while commits are active (step {steps})"
+        );
+        assert!(a.qos().in_flight <= 1);
+        if steps == 1 {
+            assert_eq!(
+                sub.in_flight(),
+                2,
+                "a waiting piece's operation is in flight"
+            );
+        }
+    }
+    assert_eq!(
+        order,
+        [1, 2],
+        "the older write first: its pieces never passed"
+    );
+    for (pos, fill) in at {
+        let mut back = vec![0u8; 1 << 20];
+        log.read(pos.offset(), &mut back).unwrap();
+        assert!(is_pattern(&back, fill), "a write's pieces out of place");
+    }
+}
+
+/// A poison stops a piece that pacing parked, as it stops a continuation.
+#[test]
+fn test_a_poison_stops_a_parked_piece() {
+    let TwoAppends { p, a, mut sub, .. } = two_appends_then_commits(31);
+    let _first = sub.reap().count();
+    assert_eq!(sub.in_flight(), 2, "one piece in flight, one parked");
+    a.poison();
+    let before = p.with_world(|w| w.write_submits());
+    let done = drain(&mut sub);
+    assert_eq!(done.len(), 2);
+    assert!(
+        done.iter()
+            .all(|c| matches!(c.outcome, Err(Error::Poisoned { .. }))),
+        "{done:?}"
+    );
+    assert_eq!(
+        p.with_world(|w| w.write_submits()) - before,
+        0,
+        "no piece after the poison"
+    );
+}
+
+/// A drop whose wait fails submits no parked piece (fail-stop): the store
+/// is poisoned instead, a write being left unwritten.
+#[test]
+fn test_a_drop_whose_wait_fails_submits_no_parked_piece() {
+    let TwoAppends { p, a, mut sub, .. } = two_appends_then_commits(32);
+    let _first = sub.reap().count();
+    assert_eq!(sub.in_flight(), 2, "one piece in flight, one parked");
+    p.with_world(|w| {
+        let next = w.waits() + 1;
+        w.faults_mut().fail_wait = Some((next, 5));
+    });
+    let before = p.with_world(|w| w.write_submits());
+    drop(sub);
+    assert_eq!(
+        p.with_world(|w| w.write_submits()) - before,
+        0,
+        "a piece submitted after the drain failed"
+    );
+    assert!(
+        a.poisoned().is_some(),
+        "a write left unwritten poisons the store"
+    );
+}
+
+/// A background submitter's reads are paced and split as its writes are
+/// (R5.4: the class is the submitter's).
+#[test]
+fn test_a_background_submitter_s_reads_are_paced_and_split() {
+    let p = two_devices(33, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    advance(&p, 6 * SECOND);
+    let mut buf = sub.take_buf(1 << 20).unwrap();
+    pattern(buf.as_mut_slice(), 0x7c);
+    let pos = sub.append(&log, buf, WriteMode::Plain, 1).unwrap();
+    let _done = drain(&mut sub);
+    commit(&a);
+    // A piece in flight while commits are active: a read is refused, its
+    // buffer given back.
+    sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, 2)
+        .unwrap();
+    let refused = sub.read_append(&log, pos.offset(), sub.take_buf(1 << 20).unwrap(), 3);
+    assert!(
+        matches!(
+            refused,
+            Err(Rejected {
+                error: Error::NotWritten {
+                    cause: NotWrittenCause::Paced,
+                    ..
+                },
+                buf: Some(_),
+            })
+        ),
+        "{refused:?}"
+    );
+    drop(refused);
+    let _done = drain(&mut sub);
+    let before = p.with_world(|w| w.reads());
+    sub.read_append(&log, pos.offset(), sub.take_buf(1 << 20).unwrap(), 4)
+        .unwrap();
+    let done = drain(&mut sub);
+    assert_eq!(
+        p.with_world(|w| w.reads()) - before,
+        4,
+        "1 MiB in 256 KiB pieces"
+    );
+    let read = done.iter().find(|c| c.tag == 4).unwrap();
+    assert!(read.outcome.is_ok(), "{:?}", read.outcome);
+    let bytes = read.buf.as_ref().unwrap().as_slice();
+    assert_eq!(bytes.len(), 1 << 20);
+    assert!(is_pattern(bytes, 0x7c), "a read's pieces out of place");
+}
+
+/// A drop whose wait fails submits no next piece of an operation in flight
+/// either (fail-stop): one write, its first piece in flight.
+#[test]
+fn test_a_drop_whose_wait_fails_submits_no_next_piece() {
+    let p = two_devices(34, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut sub = background(&a);
+    sub.append(&log, sub.take_buf(1 << 20).unwrap(), WriteMode::Plain, 1)
+        .unwrap();
+    assert_eq!(sub.in_flight(), 1, "its first piece in flight");
+    p.with_world(|w| {
+        let next = w.waits() + 1;
+        w.faults_mut().fail_wait = Some((next, 5));
+    });
+    let before = p.with_world(|w| w.write_submits());
+    drop(sub);
+    assert_eq!(
+        p.with_world(|w| w.write_submits()) - before,
+        0,
+        "a piece submitted after the drain failed"
+    );
+    assert!(
+        a.poisoned().is_some(),
+        "a write left unwritten poisons the store"
+    );
 }

@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: 0.4 &mdash; io_uring and the engine layer.</strong> The simple and batch APIs on Windows and Linux, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>; power-cut certification follows in <code>1.x</code>. In development for 0.5: the macOS backend (APFS; <code>F_FULLFSYNC</code> for every flush; a store on APFS on the Mac's own drive is meant to be flush-required, not yet confirmed on real hardware, and anything else Unverified or Unsafe: <code>docs/PLATFORMS.md</code> section 5); container format 2 (a paged region table, 65,536 regions by default, and regions that can grow); a store made before 0.5 (format 1) opens read-only there and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>); a store whose region table is damaged still opens, the damage reported and nothing guessed, with three ways out (repair an entry, accept a rolled-back page, or copy what can be copied: <code>docs/GUIDE.md</code> section 15). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: 0.5 &mdash; macOS and the single-file container.</strong> The simple and batch APIs on Windows, Linux and macOS, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. On macOS, APFS with <code>F_FULLFSYNC</code> for every flush; a store on APFS on the Mac's own drive is meant to be flush-required, not yet confirmed on real hardware, and anything else is Unverified or Unsafe (<code>docs/PLATFORMS.md</code> section 5). Container format 2: a paged region table (65,536 regions by default) and regions that can grow; a store made before 0.5 (format 1) opens read-only and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>); a store whose region table is damaged still opens, the damage reported and nothing guessed, with three ways out (repair an entry, accept a rolled-back page, or copy what can be copied: <code>docs/GUIDE.md</code> section 15). Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>; power-cut certification follows in <code>1.x</code>. In development for 0.6: several devices (a barrier across stores, dependent and ditto writes), pacing of background I/O against commits, and streaming export, import and copy. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -96,7 +96,7 @@ let (start, receipt) = batch.commit()?;
 
 ```toml
 [dependencies]
-store-io = "0.4"
+store-io = "0.5"
 ```
 
 The `store-io` command-line tool (`store-io probe <dir>`, `store-io info <store>`, `store-io copy <old> <new>`) is behind the `cli` feature.

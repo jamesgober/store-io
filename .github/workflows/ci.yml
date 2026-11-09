@@ -144,6 +144,14 @@ jobs:
         env:
           STORE_IO_TEST_DIR: /mnt/sio
           STORE_IO_EXPECT_URING: "1"
+      # R5.13: every paced call completes with its pieces really in flight
+      # (the simulator's inline queue has none), paced, unpaced and across
+      # the switch, each under a watchdog.
+      - name: Progress on a parallel io_uring queue
+        run: cargo test --test progress_uring -- --nocapture
+        env:
+          STORE_IO_TEST_DIR: /mnt/sio
+          STORE_IO_EXPECT_URING: "1"
       # v0.4 exit criteria on this kernel and file system: an idle store is
       # silent (60 s, both tiers), and nothing runs on io_uring's io-wq
       # workers (fails closed: a positive control must see them, and every

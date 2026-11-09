@@ -4,7 +4,12 @@
 //!
 //! The store is exercised first (durable appends, a page batch, a
 //! `Submitter` with writes and a barrier), so its flush thread and any
-//! submit-pool workers exist. Once every thread store-io started is asleep
+//! submit-pool workers exist, and so is v0.6's machinery (R5.4): a second
+//! store, with the first in a `StoreSet`, after a set barrier; a background
+//! `Submitter` that wrote and stays registered, idle; and a `CommitHold`
+//! live for the window's first half, dropped at its middle, so commits go
+//! from active to quiet inside it (activity is read at admissions, never
+//! kept or expired by a timer). Once every thread store-io started is asleep
 //! and their counters have stopped moving (the idle moment; nothing is
 //! exempted after it), they are watched for `STORE_IO_IDLE_SECS` (default
 //! 60). None may exit, none may start, and per system:
@@ -59,7 +64,9 @@ use std::time::{Duration, Instant};
 
 use store_io::engine::completion::Done;
 use store_io::engine::{SubmitterConfig, WriteMode};
-use store_io::{DurableOpen, IoInterface, LinuxTier, Store, StoreOptions, Trust};
+use store_io::{
+    DurableOpen, IoClass, IoInterface, LinuxTier, Store, StoreOptions, StoreSet, Trust,
+};
 
 /// A thread: its id, and when it started (where the system keeps it), since
 /// Windows soon hands a dead thread's id to a new one.
@@ -566,7 +573,7 @@ fn idle_on(tier: Option<LinuxTier>) {
     if let Some(t) = tier {
         opts.linux_tier = t;
     }
-    let store = match Store::create(dir.join("s"), opts) {
+    let store = match Store::create(dir.join("s"), opts.clone()) {
         Ok(s) => s,
         Err(e) if tier == Some(LinuxTier::Uring) => {
             assert!(
@@ -629,8 +636,39 @@ fn idle_on(tier: Option<LinuxTier>) {
             flushed = true;
         }
     }
-    // The submitter stays alive through the window: a live submitter must
-    // be idle too.
+    // v0.6 (the module's docs): a set barrier over two stores, a background
+    // submitter's write, and a hold, all left in place.
+    let other = Store::create(dir.join("t"), opts).unwrap();
+    let owal = other.provision_append_region("wal", 1 << 20).unwrap();
+    let set = StoreSet::new([store.clone(), other.clone()]).unwrap();
+    let (t1, t2) = (
+        wal.append(&[1; 100]).unwrap(),
+        owal.append(&[2; 100]).unwrap(),
+    );
+    let receipts = set.barrier(&[&t1, &t2]).unwrap();
+    assert!(receipts[0].covers(&t1) && receipts[1].covers(&t2));
+    let mut bg = store
+        .submitter(SubmitterConfig::default().with_class(IoClass::Background))
+        .unwrap();
+    let mut b = bg.take_buf(blk as usize).unwrap();
+    b.as_mut_slice().fill(7);
+    // Commits are active (the barrier): paced, and admitted (nothing of
+    // its own in flight).
+    bg.write(&pages, pages.pos(20 * blk).unwrap(), b, WriteMode::Plain, 1)
+        .map_err(|r| r.error)
+        .unwrap();
+    let mut done = false;
+    while !done {
+        let got: Vec<_> = bg.wait(1).unwrap().collect();
+        assert!(!got.is_empty() || bg.in_flight() > 0, "the write was lost");
+        for c in got {
+            assert!(c.outcome.is_ok(), "{:?}", c.outcome);
+            done = true;
+        }
+    }
+    let mut hold = Some(store.commit_hold());
+    // The submitters stay alive through the window: a live submitter, of
+    // either class, must be idle too.
     let watched = || -> BTreeMap<Key, Activity> {
         threads()
             .into_iter()
@@ -669,6 +707,8 @@ fn idle_on(tier: Option<LinuxTier>) {
     let disk = storage_bytes();
     std::thread::sleep(Duration::from_millis(secs * 500));
     poke.send(()).unwrap();
+    // Commits quiet from here (the barrier's activity long past).
+    drop(hold.take());
     std::thread::sleep(Duration::from_millis(secs * 500));
     let end = watched();
     let control_end = control_activity();
@@ -714,6 +754,7 @@ fn idle_on(tier: Option<LinuxTier>) {
         busy.is_empty(),
         "{label}: an idle store was active: {busy:#?}"
     );
+    drop((hold, bg, set, owal, other));
     drop((sub, wal, pages, batch, store));
     drop(poke);
     control.join().unwrap();

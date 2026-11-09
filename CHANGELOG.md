@@ -224,6 +224,24 @@
   FUA, NVMe) now also come from the file's own volume, not the
   directory's path text, which a junction could point elsewhere.
 
+- Tests: **paced calls make progress with their I/O really in flight**
+  (`tests/progress_uring.rs`, Linux, on a parallel io_uring queue:
+  `conformance-linux` runs it on ext4 and XFS, where a missing io_uring
+  fails). `copy_store` and a caller's scan, each paced (at most the
+  call's one piece seen in flight), unpaced (several, at most
+  `background_unpaced`) and switched from one to the other while it has
+  pieces in flight, complete with their data intact (every word checked
+  against its offset), under a watchdog that aborts a call waiting on
+  itself in two minutes instead of hanging.
+- Tests: **an idle store with v0.6's machinery is silent**
+  (`tests/idle.rs`, every system): a second store, with the first in a
+  `StoreSet` after a set barrier, a background `Submitter` that wrote and
+  stays registered, and a `CommitHold` dropped halfway (commits going
+  quiet inside the window), and still no thread wakes for the 60 s. G8b (`tests/hotpath.rs` under strace) measures two more
+  windows, a background `Submitter` unpaced and paced (writes over the cap
+  refused `Paced` and resubmitted): no futex call and no timed wait on its
+  submit, reap or wait in either, nor in the commit-class window with an
+  idle background `Submitter` registered.
 - Tests: **fencing after a killed owner on Windows** (`store-io-win`'s
   `tests/kill.rs`, run once in CI). A child process holds the ownership
   lock with 512 MiB of unbuffered writes in flight (odd rounds issue them

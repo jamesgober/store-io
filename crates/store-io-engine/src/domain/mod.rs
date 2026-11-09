@@ -467,6 +467,15 @@ impl Domain {
         self.activity.as_ref().and_then(|a| a.pace.as_ref())
     }
 
+    /// A new background call on the store's device group (a caller's scan:
+    /// R5.4's class `Background`, an issuer record of its own); `None` for
+    /// a domain without activity (never paced).
+    pub(crate) fn new_pace(&self) -> Option<crate::pace::Pace> {
+        self.activity
+            .as_ref()
+            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))
+    }
+
     /// Marks the store's device group's commits active (a commit-class
     /// barrier's entry, or a commit-class `dsync` write on a power-safe
     /// store, where no barrier flushes): one clock read, a relaxed load and

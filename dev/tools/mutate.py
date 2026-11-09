@@ -184,6 +184,8 @@ QOS_SRC = "crates/store-io-engine/src/qos.rs"
 QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
 QOS_STORE_T = ["-p", "store-io-engine", "--test", "qos"]
 PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
+COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
+COPY_UNIT_T = ["-p", "store-io-engine", "--lib", "copy::tests"]
 PUMP_POISON_T = ["-p", "store-io-engine", "--test", "pump_poison"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
@@ -218,8 +220,8 @@ M = [
  ("crates/store-io-engine/src/scan.rs", "                if len <= sector {", "                if len <= sector || true {"),
  ("crates/store-io-engine/src/scan.rs", "            Some((_, e)) if *e == start => *e = end,", "            Some((_, e)) if *e == start && false => *e = end,"),
  ("crates/store-io-engine/src/scan.rs", "                if ring[idx].as_ref().is_none_or(|p| p.done.is_none()) {", "                if ring[idx].is_none() {"),
- ("crates/store-io-engine/src/scan.rs", "                            out.unreadable(start + n as u64, start + len as u64);", ""),
- ("crates/store-io-engine/src/scan.rs", "        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() {", "        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() && false {"),
+ ("crates/store-io-engine/src/scan.rs", "                                out.unreadable(start + n as u64, start + len as u64, &mut drain);", ""),
+ ("crates/store-io-engine/src/scan.rs", "        if (self.visit)(ScanItem::Data { offset, bytes }, drain).is_break() {", "        if (self.visit)(ScanItem::Data { offset, bytes }, drain).is_break() && false {"),
  ("crates/store-io-engine/src/scan.rs", "                let half = (len / unit).div_ceil(2) * unit;", "                let half = len - unit;"),
  ("crates/store-io-engine/src/gate.rs", "            LIVE => Ok(()),\n            s => {\n                self.leave();", "            s if s == LIVE || s != LIVE => Ok(()),\n            s => {\n                self.leave();"),
  ("crates/store-io-engine/src/gate.rs", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 {", "        while self.active.fetch_add(0, Ordering::AcqRel) != 0 && false {"),
@@ -1053,8 +1055,8 @@ M = [
  (COPY_SRC, ".chain(v2.holds.iter().flat_map(|h| h.own.iter().copied()))", ".chain(v2.holds.iter().flat_map(|h| h.own.iter().copied()).filter(|_| false))", COPYS),
  (COPY_SRC, ".chain(core::iter::once((0, self.inner.layout.data_start())))", ".chain(core::iter::once((0, self.inner.layout.data_start())).filter(|_| false))", COPYS),
  (COPY_SRC, "        if let Some(extra) = extra.filter(|_| !lost) {", "        if let Some(extra) = extra.filter(|_| !lost || true) {", COPYS),
- (COPY_SRC, "            offset += piece.len() as u64;\n            at += piece.len() as u64;", "            offset += 0 * piece.len() as u64;\n            at += piece.len() as u64;", COPYS),
- (COPY_SRC, "                    src.read_raw(&f.source, at, file + done, &mut buf[..n])?;", "                    src.read_raw(&f.source, at, file, &mut buf[..n])?;", COPYS),
+ (COPY_SRC, "            offset += piece.len() as u64;\n            at += piece.len() as u64;", "            offset += 0 * piece.len() as u64;\n            at += piece.len() as u64;", COPY_UNIT_T),
+ (COPY_SRC, "                    src.read_raw(&f.source, at, file + done, &mut buf[..n], reading)?;", "                    src.read_raw(&f.source, at, file, &mut buf[..n], reading)?;", COPYS),
  (COPY_SRC, ".filter(|e| e.1 != r.id.get())", ".filter(|_| false)", COPYS),
  (COPY_SRC, "a < b + m && b < a + n;", "a < b + m && n > 0;", COPYS),
  (COPY_SRC, "a < b + m && b < a + n;", "b < a + n && m > 0;", COPYS),
@@ -1300,7 +1302,7 @@ M = [
  (SCAN_SRC, '        let _held = self.held.get_or_insert_with(Vec::new);', '        let _held = self.held.as_ref();', SCAN_TEST),
  (SCAN_SRC, '                                        drop(l);\n                                        out.release();', '                                        out.release();\n                                        drop(l);', SCAN_TEST),
  ('crates/store-io-engine/src/exec.rs', '        self._notify.is_some()', '        false', SCAN_TEST),
- (SCAN_SRC, '        self.scan_region(r, from, to, true, |item| {', '        self.scan_region(r, from, to, false, |item| {', SCAN_TEST),
+ (SCAN_SRC, '        self.scan_region(r, from, to, true, pace.as_ref(), |item, _drain| {', '        self.scan_region(r, from, to, false, pace.as_ref(), |item, _drain| {', SCAN_TEST),
  (SCAN_SRC, '                if lane.is_none() {\n                    match take() {', '                if false {\n                    match take() {', SCAN_TEST),
  ('crates/store-io-engine/src/io.rs', '                    drop(lane);\n                    if !f.wait_completed(seen + 1', '                    if !f.wait_completed(seen + 1', SUBMITTER_TEST),
  # A release whose commit is durable succeeds unless the store is poisoned.
@@ -1547,7 +1549,7 @@ M = [
  # apart; a pruned member's commit kept.
  (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)', '                    rec.is_some_and(|r| r.in_flight() <= 1)', QOS_T),
  (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)', '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 2)', QOS_T),
- (QOS_SRC, '                } else {\n                    mine < cap\n                };', '                } else {\n                    mine <= cap\n                };', QOS_T),
+ (QOS_SRC, '                } else {\n                    mine + leave < cap || mine == 0\n                };', '                } else {\n                    mine + leave <= cap || mine == 0\n                };', QOS_T),
  (QOS_SRC, '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));', '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now) && false);', QOS_T),
  (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);', '        let _m = i.in_flight.fetch_sub(0, Ordering::SeqCst);', QOS_T),
  (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);\n        i.wake();', '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);\n        if false {\n            i.wake();\n        }', QOS_T),
@@ -1659,6 +1661,37 @@ M = [
  (COPY_SRC, '            store_io_core::IoClass::Background,', '            store_io_core::IoClass::Commit,', QOS_STORE_T),
  (COPY_SRC, 'let piece = pace.map_or(CHUNK, |p| p.piece().min(CHUNK));', 'let piece = pace.map_or(CHUNK, |p| p.piece().max(CHUNK));', COPYS),
  (COPY_SRC, '                    let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '                    let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', COPYS),
+ # QOS_READ (V3d2): a background scan (region.scan, a copy's reader) admits
+ # each read in background_io pieces under the pool's cap, its charge
+ # released when collected; a refused read reaps its own reads first; a
+ # copy's reader shares the fill's record on one device group and drains
+ # before blocking on its full feed; a copy's raw reads are paced.
+ ('crates/store-io-engine/src/qos.rs', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y) && false,', QOS_T),
+ ('crates/store-io-engine/src/qos.rs', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),\n            _ => false,', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),\n            _ => true,', QOS_T),
+ ('crates/store-io-engine/src/domain/mod.rs', '            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))', '            .filter(|_| false)\n            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))', QOS_STORE_T),
+ (SCAN_SRC, '        let pace = self.inner.domain.new_pace();', '        let pace = self.inner.domain.new_pace().filter(|_| false);', QOS_STORE_T),
+ (SCAN_SRC, '        let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));', '        let chunk = pace.map_or(self.chunk(), |p| p.piece().max(self.chunk()));', QOS_STORE_T),
+ (SCAN_SRC, '                Some(_) => self.inner.pool.take_capped(chunk, chunk).ok(),', '                Some(_) => self.inner.pool.take_within(chunk, chunk).ok(),', PACE_T),
+ (SCAN_SRC, '                let charge = match pace {', '                let charge = match pace.filter(|_| false) {', QOS_STORE_T),
+ (SCAN_SRC, '                    Some(p) => match p.try_charge() {', '                    Some(p) => match p.try_charge().filter(|_| false) {', QOS_STORE_T),
+ (SCAN_SRC, '                        None if in_flight > 0 => {', '                        None if in_flight > 0 && false => {', QOS_STORE_T),
+ (SCAN_SRC, '            p.charge = None;', '            let _kept = &p.charge;', QOS_STORE_T),
+ (SCAN_SRC, '        if err.is_none() {', '        if err.is_none() && false {', COPY_FEED_T),
+ (SCAN_SRC, '        let piece = pace.map(Pace::admit).transpose()?;', '        let piece = pace.map(Pace::admit).transpose()?.filter(|_| false);', QOS_STORE_T),
+ (COPY_SRC, '                                        drain() && {', '                                        (true || drain()) && {', COPY_FEED_T),
+ (COPY_SRC, '        let reading = dst.reader_pace(&src);', '        let reading = dst.reader_pace(&src).filter(|_| false);', COPY_FEED_T),
+ (COPY_SRC, '                            reading.cloned(),', '                            reading.cloned().filter(|_| false),', COPY_FEED_T),
+ (COPY_SRC, '        if Qos::same_group(&self.inner.qos, &src.inner.qos) {', '        if Qos::same_group(&self.inner.qos, &src.inner.qos) && false {', COPY_UNIT_T),
+ (COPY_SRC, '            src.inner.domain.new_pace()\n', '            src.inner.domain.new_pace().filter(|_| false)\n', QOS_STORE_T),
+ (COPY_SRC, '        let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));', '        let chunk = pace.map_or(self.chunk(), |p| p.piece().max(self.chunk()));', COPY_UNIT_T),
+ (COPY_SRC, '                Some(_) => self.take_capped(piece.len(), c)?,', '                Some(_) => self.take(piece.len(), c)?,', COPY_UNIT_T),
+ (COPY_SRC, '            let admitted = pace.map(Pace::admit).transpose()?;', '            let admitted = pace.map(Pace::admit).transpose()?.filter(|_| false);', COPY_UNIT_T),
+ (COPY_SRC, '                    src.read_raw(&f.source, at, file + done, &mut buf[..n], reading)?;', '                    src.read_raw(&f.source, at, file + done, &mut buf[..n], reading.filter(|_| false))?;', COPYS),
+ (SCAN_SRC, '                        None if in_flight > 0 => {\n                            free.push(buf);', '                        None if in_flight > 0 => {\n                            drop(buf);', QOS_STORE_T),
+ (QOS_SRC, '                    mine + leave < cap || mine == 0', '                    mine + leave * 0 < cap || mine == 0', QOS_T),
+ (QOS_SRC, '                    mine + leave < cap || mine == 0', '                    mine + leave < cap', QOS_T),
+ ("crates/store-io-engine/src/pace.rs", '            leave: 1,\n', '            leave: 0,\n', COPY_UNIT_T),
+ ("crates/store-io-engine/src/pace.rs", '        self.issuer.admit_leaving((self.clock)(), self.leave)', '        self.issuer.admit_leaving((self.clock)(), self.leave * 0)', PACE_T),
 ]
 
 def kill_stuck_tests():

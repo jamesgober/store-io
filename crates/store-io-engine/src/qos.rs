@@ -615,6 +615,17 @@ impl Qos {
         }
     }
 
+    /// Whether `a` and `b` are paced as one device group now (one
+    /// published record): a copy's reader then shares its fill's issuer
+    /// record (R5.4: one record per device group a call uses). Stores never
+    /// paced (a memory file system's) are in no group.
+    pub(crate) fn same_group(a: &Self, b: &Self) -> bool {
+        match (a.record(), b.record()) {
+            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),
+            _ => false,
+        }
+    }
+
     /// Whether the group's commits are active now.
     pub(crate) fn active(&self, now: u64) -> bool {
         self.with_record(|r| r.is_some_and(|r| self.active_in(r, now)))
@@ -800,6 +811,15 @@ impl Issuer {
     /// registered during continuous commits is paced from its first piece
     /// (R5.4's "starts paced": it never reads a stale quiet).
     pub(crate) fn admit(self: &Arc<Self>, now: u64) -> Option<Charge> {
+        self.admit_leaving(now, 0)
+    }
+
+    /// As [`Self::admit`], leaving `leave` of the call's unpaced pieces to
+    /// its other threads (a copy's reader leaves one to the fill sharing
+    /// its record, so the reader's read-ahead never refuses the fill).
+    /// With nothing of the call in flight a piece is admitted whatever
+    /// `leave`; paced, `leave` changes nothing (the call has one piece).
+    pub(crate) fn admit_leaving(self: &Arc<Self>, now: u64, leave: u64) -> Option<Charge> {
         let admitted = self.qos.with_record(|rec| {
             let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));
             let cap = u64::from(
@@ -820,7 +840,7 @@ impl Issuer {
                 let ok = if paced {
                     mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)
                 } else {
-                    mine < cap
+                    mine + leave < cap || mine == 0
                 };
                 if !ok {
                     let _u = self.qos.counters.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -842,14 +862,19 @@ impl Issuer {
         })
     }
 
-    /// Waits until a piece is admitted, the call ends with an error
-    /// elsewhere, or one of its stores is poisoned. Only a thread holding
-    /// none of the call's pieces waits (R5.4's progress rule).
-    pub(crate) fn wait_admit(self: &Arc<Self>, clock: &dyn Fn() -> u64) -> Result<Charge, Ended> {
+    /// Waits until a piece is admitted (leaving `leave`, as
+    /// [`Self::admit_leaving`]), the call ends with an error elsewhere, or
+    /// one of its stores is poisoned. Only a thread holding none of the
+    /// call's pieces waits (R5.4's progress rule).
+    pub(crate) fn wait_admit(
+        self: &Arc<Self>,
+        clock: &dyn Fn() -> u64,
+        leave: u64,
+    ) -> Result<Charge, Ended> {
         let mut g = self.lock.lock().unwrap_or_else(PoisonError::into_inner);
         let _w = self.waiters.fetch_add(1, Ordering::SeqCst);
         let out = loop {
-            if let Some(c) = self.admit(clock()) {
+            if let Some(c) = self.admit_leaving(clock(), leave) {
                 break Ok(c);
             }
             if self.ended.load(Ordering::SeqCst) {
@@ -1022,6 +1047,34 @@ mod tests {
         let _was = t.fetch_add(5_000 * MS, Ordering::Relaxed);
         assert!(!b.active(c()), "past commit_quiet");
         assert_eq!(a.report(c()).members, 2);
+    }
+
+    #[test]
+    fn test_same_group_follows_the_published_record() {
+        let (r, _t, c) = fixture();
+        let (a, b, x) = (
+            join(r, &on(1), &c),
+            join(r, &on(1), &c),
+            join(r, &on(2), &c),
+        );
+        assert!(Qos::same_group(&a, &b), "one device");
+        assert!(!Qos::same_group(&a, &x), "two devices");
+        let m = join(r, &Placement::Memory, &c);
+        assert!(!Qos::same_group(&m, &m), "a memory store is in no group");
+        // A store meeting both groups merges them: one record for all.
+        let both = Placement::Keyed {
+            identity: DeviceIdentity {
+                devices: vec![
+                    DeviceId::node(DeviceNode::Sim { device: 1 }),
+                    DeviceId::node(DeviceNode::Sim { device: 2 }),
+                ],
+                complete: true,
+            },
+            members: Vec::new(),
+            fs_device: None,
+        };
+        let _s = join(r, &both, &c);
+        assert!(Qos::same_group(&a, &x), "merged");
     }
 
     #[test]
@@ -1206,7 +1259,7 @@ mod tests {
         let i3 = Arc::clone(&i);
         let got = waited(
             &i,
-            move || i2.wait_admit(&|| 1_000_000_000).map(|_| ()),
+            move || i2.wait_admit(&|| 1_000_000_000, 0).map(|_| ()),
             move || i3.watch(src as Arc<dyn PoisonSource>),
         );
         drop(held);
@@ -1254,6 +1307,23 @@ mod tests {
         ua.commit(c());
         assert!(!b.active(c()) && !ub.active(c()));
         assert!(a.active(c()) && ua.active(c()));
+    }
+
+    #[test]
+    fn test_an_issuer_leaving_a_piece_stops_one_short_of_its_cap() {
+        let (r, _t, c) = fixture();
+        let m = join(r, &Placement::Memory, &c);
+        let i = Issuer::new(&m);
+        let mut held: Vec<_> = (0..7)
+            .map(|_| i.admit_leaving(c(), 1).expect("admitted"))
+            .collect();
+        assert!(i.admit_leaving(c(), 1).is_none(), "one left");
+        held.push(i.admit(c()).expect("the one left, for another thread"));
+        drop(held);
+        let one = i
+            .admit_leaving(c(), 8)
+            .expect("nothing in flight: admitted");
+        drop(one);
     }
 
     #[test]
@@ -1438,7 +1508,7 @@ mod tests {
         let i2 = Arc::clone(&i);
         let got = waited(
             &i,
-            move || i2.wait_admit(&|| 1_000_000_000).map(|_| ()),
+            move || i2.wait_admit(&|| 1_000_000_000, 0).map(|_| ()),
             || drop(Binding::new(&i)),
         );
         drop(held);
@@ -1478,7 +1548,7 @@ mod tests {
         let i2 = Arc::clone(&i);
         let got = waited(
             &i,
-            move || i2.wait_admit(&|| 1_000_000_000).is_ok(),
+            move || i2.wait_admit(&|| 1_000_000_000, 0).is_ok(),
             move || drop(held),
         );
         assert!(got, "the release did not admit the waiter");
@@ -1515,7 +1585,7 @@ mod tests {
         let s2 = Arc::clone(&src);
         let got = waited(
             &i,
-            move || i2.wait_admit(&|| 1_000_000_000).map(|_| ()),
+            move || i2.wait_admit(&|| 1_000_000_000, 0).map(|_| ()),
             move || {
                 s2.poisoned.store(true, Ordering::SeqCst);
                 let w = s2.wake.lock().unwrap().clone().unwrap();
@@ -1531,7 +1601,8 @@ mod tests {
         let h = j.admit(c()).expect("admitted");
         let j2 = Arc::clone(&j);
         let (tx, rx) = std::sync::mpsc::channel();
-        let _t = std::thread::spawn(move || tx.send(j2.wait_admit(&|| 1_000_000_000).map(|_| ())));
+        let _t =
+            std::thread::spawn(move || tx.send(j2.wait_admit(&|| 1_000_000_000, 0).map(|_| ())));
         let got = rx.recv_timeout(std::time::Duration::from_secs(10));
         drop(h);
         assert_eq!(
@@ -1602,7 +1673,7 @@ mod loom_tests {
             let held = i.admit(c()).expect("admitted");
             let t = {
                 let i = Arc::clone(&i);
-                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000).is_ok())
+                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000, 0).is_ok())
             };
             drop(held);
             assert!(t.join().unwrap());
@@ -1691,7 +1762,7 @@ mod loom_tests {
             let held = i.admit(c()).unwrap();
             let t = {
                 let i = Arc::clone(&i);
-                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000).map(|_| ()))
+                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000, 0).map(|_| ()))
             };
             let src = Arc::new(Poison {
                 set: AtomicBool::new(true),
@@ -1711,7 +1782,7 @@ mod loom_tests {
             let held = i.admit(c()).expect("admitted");
             let t = {
                 let i = Arc::clone(&i);
-                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000).map(|_| ()))
+                loom::thread::spawn(move || i.wait_admit(&|| 1_000_000_000, 0).map(|_| ()))
             };
             i.end();
             let got = t.join().unwrap();

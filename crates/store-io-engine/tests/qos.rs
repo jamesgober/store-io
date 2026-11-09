@@ -5,6 +5,7 @@
 
 #![allow(clippy::unwrap_used, unused_results)]
 
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,7 +15,8 @@ use store_io_core::error::{Error, NotWrittenCause};
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 use store_io_engine::completion::{Completion, Rejected};
 use store_io_engine::{
-    CONTAINER, CopyOptions, Store, StoreOptions, SubmitterConfig, WriteMode, copy_store,
+    AppendRegion, CONTAINER, CopyOptions, ScanItem, Store, StoreOptions, SubmitterConfig,
+    WriteMode, copy_store,
 };
 use store_io_platform::Platform;
 use store_io_sim::world::TraceEvent;
@@ -862,12 +864,15 @@ fn test_a_copy_writes_its_target_in_admitted_background_pieces() {
     p.with_world(|w| w.set_submit_probe(None));
     let writes = p.with_world(|w| w.write_submits()) - before;
     let seen = seen.lock().unwrap().clone();
-    // Every write of the copy is charged when it is submitted (a read of
-    // the source's, on the reader's thread, may be sampled during one too).
+    // Every write of the copy is charged when it is submitted, and so is
+    // every read of its reader (the call's other thread, on the same
+    // record: the two hold one piece between them). A sample may count one
+    // more: the other thread's admission, charged tentatively while it is
+    // checked and undone when refused.
     let charged = seen.iter().filter(|&&n| n >= 1).count() as u64;
     assert!(charged >= writes, "{charged} of {writes} writes admitted");
     assert!(
-        seen.iter().all(|&n| n <= 1),
+        seen.iter().all(|&n| n <= 2),
         "one piece at a time: {seen:?}"
     );
     let lens = write_lens(&p, "/c");
@@ -936,4 +941,221 @@ fn test_a_caller_s_own_provisioning_is_unpaced() {
         write_lens(&p, "/a").contains(&(1 << 20)),
         "its fill in 1 MiB pieces"
     );
+}
+
+// ------------------------------------------------------------------- scans
+
+/// `/a` with a region "log" of 4 MiB (pattern `0x50`), durable.
+fn scan_source(p: &SimPlatform) -> (Store<SimPlatform>, AppendRegion<SimPlatform>) {
+    let a = create(p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut data = vec![0u8; 4 << 20];
+    pattern(&mut data, 0x50);
+    let mut last = None;
+    for c in data.chunks(1 << 20) {
+        last = Some(log.append(c).unwrap());
+    }
+    let _receipt = log.sync_through(&last.unwrap()).unwrap();
+    (a, log)
+}
+
+/// The reads of `dir`'s container in the trace from `from` on: (offset,
+/// length).
+fn reads_since(p: &SimPlatform, dir: &str, from: usize) -> Vec<(u64, u64)> {
+    p.with_world(|w| {
+        let f = w.file_id(&PathBuf::from(dir), CONTAINER).unwrap();
+        w.trace()[from..]
+            .iter()
+            .filter_map(|e| match e {
+                TraceEvent::Read {
+                    file, offset, len, ..
+                } if *file == f => Some((*offset, *len)),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Scans `log` whole with the group's pieces in flight sampled at every
+/// submission: the samples, the scan's reads (offset, length) and the
+/// unreadable bytes. Its data reads back as the pattern.
+fn scan_sampled(
+    p: &SimPlatform,
+    s: &Store<SimPlatform>,
+    log: &AppendRegion<SimPlatform>,
+) -> (Vec<u64>, Vec<(u64, u64)>, u64) {
+    let from = p.with_world(|w| w.trace().len());
+    let seen = sample_in_flight(p, s);
+    let mut back = vec![0u8; 4 << 20];
+    let sum = log
+        .scan(0, |item| {
+            if let ScanItem::Data { offset, bytes } = item {
+                back[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    p.with_world(|w| w.set_submit_probe(None));
+    let mut want = vec![0u8; 4 << 20];
+    pattern(&mut want, 0x50);
+    for (i, (b, w)) in back.iter().zip(&want).enumerate() {
+        assert!(
+            b == w || (sum.unreadable > 0 && *b == 0),
+            "byte {i} of the scan"
+        );
+    }
+    let seen = seen.lock().unwrap().clone();
+    (seen, reads_since(p, "/a", from), sum.unreadable)
+}
+
+/// A caller's scan is a background call (R5.4): while commits are active
+/// it reads one `background_io` piece at a time, each admitted (charged to
+/// the device group) before it is submitted.
+#[test]
+fn test_a_scan_reads_one_admitted_piece_at_a_time_while_commits_are_active() {
+    let p = two_devices(48, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    let _hold = s.commit_hold();
+    let (seen, reads, _) = scan_sampled(&p, &s, &log);
+    assert_eq!(seen.len(), reads.len(), "only the scan's reads: {seen:?}");
+    assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+    assert_eq!(
+        reads.iter().map(|r| r.1).collect::<Vec<_>>(),
+        vec![256 << 10; 16]
+    );
+}
+
+/// While commits are quiet a scan runs at its own depth, still in
+/// `background_io` pieces, each admitted.
+#[test]
+fn test_a_scan_runs_unpaced_in_background_pieces_while_commits_are_quiet() {
+    let p = two_devices(49, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    advance(&p, 10 * SECOND);
+    assert!(!s.qos().active);
+    let (seen, reads, _) = scan_sampled(&p, &s, &log);
+    assert_eq!(seen.len(), reads.len());
+    assert!(seen.iter().all(|&n| (1..=8).contains(&n)), "{seen:?}");
+    assert!(seen.iter().any(|&n| n > 1), "several in flight: {seen:?}");
+    assert_eq!(
+        reads.iter().map(|r| r.1).collect::<Vec<_>>(),
+        vec![256 << 10; 16]
+    );
+}
+
+/// A scan keeps every buffer a refusal hands back: one that starts while
+/// commits are active (one piece at a time) runs at its depth again once
+/// they go quiet, here after 12 of its 16 pieces.
+#[test]
+fn test_a_paced_scan_keeps_its_depth_for_when_commits_go_quiet() {
+    let p = two_devices(58, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    let mut hold = Some(s.commit_hold());
+    let seen = sample_in_flight(&p, &s);
+    let (mut items, mut quiet_from) = (0, None);
+    let sum = log
+        .scan(0, |item| {
+            if let ScanItem::Data { .. } = item {
+                items += 1;
+                if items == 12 {
+                    drop(hold.take());
+                    advance(&p, 10 * SECOND);
+                    quiet_from = Some(seen.lock().unwrap().len());
+                }
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    p.with_world(|w| w.set_submit_probe(None));
+    assert_eq!(sum.unreadable, 0);
+    assert!(!s.qos().active);
+    let seen = seen.lock().unwrap().clone();
+    let Some(quiet_from) = quiet_from else {
+        panic!("12 pieces delivered")
+    };
+    assert!(
+        seen[..quiet_from].iter().all(|&n| n == 1),
+        "paced while active: {seen:?}"
+    );
+    assert!(
+        seen[quiet_from..].iter().any(|&n| n > 1),
+        "several in flight once quiet: {seen:?}"
+    );
+}
+
+/// A scan beside another background call holding the group's cap is never
+/// refused for good (R5.4: an issuer with nothing in flight is always
+/// admitted): it reads one piece at a time beside the other call's.
+#[test]
+fn test_a_scan_beside_a_submitter_holding_the_cap_reads_one_piece_at_a_time() {
+    let p = two_devices(50, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    let bg = s.provision_append_region("bg", 1 << 20).unwrap();
+    let _hold = s.commit_hold();
+    let mut sub = background(&s);
+    let _pos = sub
+        .append(&bg, sub.take_buf(4096).unwrap(), WriteMode::Plain, 1)
+        .unwrap();
+    assert_eq!(s.qos().in_flight, 1, "the submitter's piece");
+    let (seen, reads, _) = scan_sampled(&p, &s, &log);
+    assert_eq!(seen.len(), reads.len());
+    assert!(seen.iter().all(|&n| n == 2), "{seen:?}");
+    assert_eq!(reads.len(), 16);
+    let _done = drain(&mut sub);
+    assert_eq!(s.qos().in_flight, 0);
+}
+
+/// A scan's bisection of a read the device cannot complete is paced too:
+/// every read of it is admitted, one at a time while commits are active.
+#[test]
+fn test_a_scan_s_bisection_reads_are_admitted_pieces() {
+    let p = two_devices(51, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    // The region's first data block in the container: the first read of
+    // an unpaced scan.
+    let from = p.with_world(|w| w.trace().len());
+    let _sum = log.scan(0, |_| ControlFlow::Continue(())).unwrap();
+    let first = reads_since(&p, "/a", from)[0].0;
+    let file = p.with_world(|w| w.file_id(&PathBuf::from("/a"), CONTAINER).unwrap());
+    let bad = first + 3 * 4096;
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, bad, bad + 4096)]);
+    let _hold = s.commit_hold();
+    let (seen, reads, unreadable) = scan_sampled(&p, &s, &log);
+    p.with_world(|w| w.faults_mut().bad_ranges.clear());
+    assert_eq!(unreadable, 4096, "the one block");
+    assert!(reads.len() > 16, "the failed piece bisected: {reads:?}");
+    assert_eq!(seen.len(), reads.len());
+    assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+}
+
+/// A copy across two device groups holds one record on each (R5.4): its
+/// reader's reads are pieces of the call on the source's group, each
+/// admitted there, one at a time while that group's commits are active
+/// (the fill, on the target's group, never shares its cap).
+#[test]
+fn test_a_copy_s_reads_are_paced_on_the_source_s_group() {
+    let p = two_devices(56, DeviceKind::VolatileCache);
+    copy_source(&p);
+    let w = create(&p, "/w");
+    let _hold = w.commit_hold();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (out, w2) = (Arc::clone(&seen), w.clone());
+    p.with_world(|x| {
+        x.set_submit_probe(Some(Arc::new(move || {
+            if std::thread::current().name() == Some("store-io-copy") {
+                out.lock().unwrap().push(w2.qos().in_flight);
+            }
+        })))
+    });
+    copy_store(
+        p.clone(),
+        Path::new("/a"),
+        Path::new("/b"),
+        CopyOptions::default(),
+    )
+    .unwrap();
+    p.with_world(|x| x.set_submit_probe(None));
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.len() >= 16, "{seen:?}");
+    assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
 }

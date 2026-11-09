@@ -8,6 +8,14 @@
 //! submits one piece at a time and holds none between them, so a refused
 //! piece waits on the record (R5.4's progress rule: only a thread holding
 //! none of the call's pieces waits); it never parks.
+//!
+//! A background scan (`region.scan`, a copy's reader) keeps several reads
+//! in flight: each is admitted before it is submitted ([`Pace::try_charge`])
+//! and its charge released the moment its completion is collected. A read
+//! refused with reads of its own in flight reaps them first; with none, it
+//! waits ([`Pace::wait_charge`]) for a piece of the call on another thread
+//! (a copy's fill, which shares the reader's record when both stores are in
+//! one device group).
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -15,7 +23,7 @@ use std::sync::Arc;
 use store_io_core::error::{Error, ErrorContext, NotWrittenCause};
 use store_io_platform::Clock;
 
-use crate::qos::{Charge, Ended, Issuer, Qos};
+use crate::qos::{Charge, Issuer, Qos};
 
 /// A created store's device group, joined before its metadata is written
 /// (so a background call's metadata goes out as paced pieces from its
@@ -27,11 +35,16 @@ pub(crate) struct Joined {
 }
 
 /// One background call's pacing: its issuer record, the clock admission
-/// reads, and the piece its I/O is split at.
+/// reads, and the piece its I/O is split at. A clone is the same call (one
+/// record: a copy's reader and fill on one device group).
+#[derive(Clone)]
 pub(crate) struct Pace {
     issuer: Arc<Issuer>,
     clock: Clock,
     piece: usize,
+    /// The call's unpaced pieces this part leaves to its others
+    /// ([`Pace::second`]).
+    leave: u64,
 }
 
 impl Pace {
@@ -42,6 +55,18 @@ impl Pace {
             issuer: Issuer::new(qos),
             clock,
             piece: qos.background_io() as usize,
+            leave: 0,
+        }
+    }
+
+    /// The same call, for a second thread of it that reads ahead (a copy's
+    /// reader beside its fill): while commits are quiet it leaves one of
+    /// the call's unpaced pieces to the first, so its read-ahead never
+    /// refuses the other's piece.
+    pub(crate) fn second(&self) -> Self {
+        Self {
+            leave: 1,
+            ..self.clone()
         }
     }
 
@@ -49,6 +74,22 @@ impl Pace {
     /// block, at least one).
     pub(crate) fn piece(&self) -> usize {
         self.piece
+    }
+
+    /// Admits one piece now, or refuses it: a scan's read, whose charge
+    /// rides with it until its completion is collected. Refused, the scan
+    /// reaps its own reads first ([`Self::wait_charge`] only with none in
+    /// flight).
+    pub(crate) fn try_charge(&self) -> Option<Charge> {
+        self.issuer.admit_leaving((self.clock)(), self.leave)
+    }
+
+    /// Waits for one piece's admission, on a thread with none of the
+    /// call's pieces in flight (R5.4's progress rule): it is admitted once
+    /// a piece of the call on another thread completes. `None` if the wait
+    /// ended without an admission (the record's end or poison wake).
+    pub(crate) fn wait_charge(&self) -> Option<Charge> {
+        self.issuer.wait_admit(&*self.clock, self.leave).ok()
     }
 
     /// Admits one piece for a thread holding none of the call's pieces: at
@@ -61,28 +102,38 @@ impl Pace {
     /// # Errors
     ///
     /// `NotWritten(Interrupted)` if the wait ended without an admission
-    /// (the record's end or poison wake). No caller can meet it yet: each
-    /// call's blocking pieces run on one thread with nothing of the call in
-    /// flight elsewhere, and a piece in flight always completes, so a wait
-    /// always ends in an admission.
+    /// (the record's end or poison wake). No caller can meet it yet: a wait
+    /// ends once a piece of the call on another thread completes, and every
+    /// piece in flight does (a copy's reader drains its reads before it
+    /// blocks; a caller's scan, whose visitor may block holding reads, is a
+    /// call of its own, which no other thread waits on).
     pub(crate) fn admit(&self) -> Result<Piece, Error> {
         debug_assert_eq!(
             HELD.with(Cell::get),
             0,
             "a background piece admitted while this thread holds one: it could wait on itself"
         );
-        let charge = match self.issuer.admit((self.clock)()) {
+        let charge = match self.try_charge() {
             Some(c) => c,
-            None => self
-                .issuer
-                .wait_admit(&*self.clock)
-                .map_err(|_: Ended| Error::NotWritten {
-                    cause: NotWrittenCause::Interrupted,
-                    ctx: ErrorContext::default(),
-                })?,
+            None => self.wait_charge().ok_or(Error::NotWritten {
+                cause: NotWrittenCause::Interrupted,
+                ctx: ErrorContext::default(),
+            })?,
         };
         HELD.with(|h| h.set(h.get() + 1));
         Ok(Piece { _charge: charge })
+    }
+
+    /// Whether this part leaves a piece to the call's other part.
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn is_second(&self) -> bool {
+        self.leave > 0
+    }
+
+    /// Whether `other` is this same call (one issuer record).
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn same_call(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.issuer, &other.issuer)
     }
 }
 
@@ -184,6 +235,62 @@ mod tests {
             assert!(writes > 0);
             drop(w);
         }
+    }
+
+    /// A caller's scan takes its buffers under the pool's background cap.
+    #[test]
+    fn test_a_scan_takes_capped_buffers() {
+        let p = SimPlatform::new(SimConfig::volatile(52));
+        let s = Store::create(p.clone(), Path::new("/s"), StoreOptions::default()).unwrap();
+        let log = s.provision_append_region("log", 1 << 20).unwrap();
+        let t = log.append(&[9u8; 1 << 20]).unwrap();
+        let _receipt = log.sync_through(&t).unwrap();
+        let s2 = s.clone();
+        let holdings = move || {
+            s2.inner
+                .pool
+                .background_holdings()
+                .iter()
+                .map(|c| u64::from(c.1))
+                .sum()
+        };
+        let (held, writes) = sampled(&p, holdings, || {
+            let _sum = log
+                .scan(0, |_| std::ops::ControlFlow::Continue(()))
+                .unwrap();
+        });
+        assert_eq!(writes, 0);
+        assert!(!held.is_empty());
+        assert!(held.iter().all(|&n| n >= 1), "{held:?}");
+    }
+
+    /// A clone of a call's pacing is the same call (one record), a new one
+    /// another.
+    #[test]
+    fn test_a_clone_is_the_same_call() {
+        let p = SimPlatform::new(SimConfig::volatile(53));
+        let s = Store::create(p.clone(), Path::new("/s"), StoreOptions::default()).unwrap();
+        let a = s.inner.domain.new_pace().unwrap();
+        assert!(a.same_call(&a.clone()));
+        assert!(!a.same_call(&s.inner.domain.new_pace().unwrap()));
+    }
+
+    /// A call's second part (a copy's reader) leaves one of the call's
+    /// unpaced pieces to the first (its fill): it stops one short of the
+    /// cap, and the first still gets its piece.
+    #[test]
+    fn test_a_second_part_leaves_the_first_a_piece() {
+        let p = SimPlatform::new(SimConfig::volatile(57));
+        let s = Store::create(p.clone(), Path::new("/s"), StoreOptions::default()).unwrap();
+        p.with_world(|w| w.advance_clock_ns(10_000_000_000));
+        assert!(!s.qos().active);
+        let first = s.inner.domain.new_pace().unwrap();
+        let second = first.second();
+        let mut held: Vec<_> = (0..7).map(|_| second.try_charge().unwrap()).collect();
+        assert!(second.try_charge().is_none(), "one left");
+        held.push(first.try_charge().unwrap());
+        assert!(first.try_charge().is_none(), "the cap");
+        drop(held);
     }
 
     /// A background call's store takes every write's buffer under the

@@ -44,6 +44,9 @@ pub enum Step {
     PumpPiece,
     /// Provisioning's fill, before its poison check and its next piece.
     FillPiece,
+    /// A copy's reader, its feed full and its scan's reads drained, about
+    /// to block on its send.
+    FeedBlocking,
 }
 
 #[cfg(feature = "sim-hooks")]

@@ -407,12 +407,20 @@ fn test_a_wrong_count_of_parallel_queues_is_a_failed_start() {
 }
 
 /// A scan of one buffer's range, or with only one buffer to pipeline,
-/// is a single read: it stays on a shared lane and starts nothing.
+/// is a single read: it stays on a shared lane and starts nothing. A
+/// caller's scan is background I/O: its buffer is one `background_io`
+/// piece, from that class under the pool's background cap.
 #[test]
 fn test_a_scan_of_one_buffer_stays_on_a_shared_lane() {
     let (_p, s) = store();
+    let chunk = s
+        .inner
+        .domain
+        .new_pace()
+        .map_or(s.chunk(), |p| p.piece().min(s.chunk()));
+    assert!(chunk < s.chunk(), "the scan's buffer is a piece");
     // Exactly one buffer's range: the boundary itself stays single.
-    let small = s.provision_page_region("small", s.chunk() as u64).unwrap();
+    let small = s.provision_page_region("small", chunk as u64).unwrap();
     let summary = small
         .scan(0, |_| core::ops::ControlFlow::Continue(()))
         .unwrap();
@@ -423,9 +431,8 @@ fn test_a_scan_of_one_buffer_stays_on_a_shared_lane() {
     );
     let big = s.provision_page_region("big", 8 << 20).unwrap();
     // Leave the pool one buffer of the scan's size: a pipeline of one.
-    let chunk = s.chunk();
     let mut hold = Vec::new();
-    while let Ok(b) = s.inner.pool.take_within(chunk, chunk) {
+    while let Ok(b) = s.inner.pool.take_capped(chunk, chunk) {
         hold.push(b);
     }
     drop(hold.pop());

@@ -23,8 +23,8 @@
   `Store::commit_hold` keeps them active while it lives; `Store::qos`
   reports the device's pacing (`QosReport`). Only a commit-class barrier
   marks activity (a flush thread's batch is commit-class if any request
-  in it is). The background `Submitter` and `copy_store`'s target (below)
-  are paced; scans and a copy's reads come in a later change.
+  in it is). The background `Submitter`, `copy_store` and a caller's
+  scans (below) are paced.
 - Engine: **a background `Submitter`**
   (`SubmitterConfig::default().with_class(IoClass::Background)`): its
   reads and writes go out in `background_io` pieces, each admitted by its
@@ -38,8 +38,21 @@
   `take_buf` holds at most half of each buffer class (`PoolExhausted`,
   never waiting). `SubmitterConfig::class` (default `Commit`); a
   `Read`-class submitter's writes count as commits.
-- Engine: **`copy_store`'s target is paced**: the copy creates, fills and
-  closes it as background I/O. It joins its device's group before its
+- Engine: **a caller's scan is paced** (`AppendRegion::scan`,
+  `PageRegion::scan`): background I/O of its own, read in `background_io`
+  pieces, each admitted by its device's pacing before it is submitted
+  (one in flight while commits are active, up to `background_unpaced`
+  while they are quiet), into buffers under the pool's background cap
+  (with fewer, the scan runs shallower). A read the pacing refuses first
+  waits for the scan's own reads, and is never reported `QueueFull`; a
+  bad range's bisection is paced too. A read's own search for its bad
+  sectors is unchanged.
+- Engine: **`copy_store` is paced**, its reads and its target alike. Its
+  reader is a piece of the same call: on the target's device it shares
+  the target's pacing (one piece in flight between the two while commits
+  are active), else it is paced by the source's device; it never blocks
+  on a full feed with reads in flight. The copy creates, fills and
+  closes its target as background I/O. It joins its device's group before its
   first metadata write, and every write to it (metadata, fills, a stale
   page's full copy) goes out in `background_io` pieces, each admitted by
   the device's pacing before it is submitted, its buffer under the pool's
@@ -117,7 +130,10 @@
   writes meet the mode's fates; its file and directory handles fail). A
   flush now makes only its own file's cached writes durable
   (`SimConfig::share_flushes`: every file's on the same device), so a
-  store relying on another file's flush is caught.
+  store relying on another file's flush is caught. `TraceEvent::Read`
+  carries the read's length (`len`, not part of `trace_hash`, so recorded
+  hashes are unchanged): a field added to a public variant, so exhaustive
+  patterns must add it (`..` keeps working).
 - Engine: **dependent writes** (PLANNING R5.3, API-09's `write_after`):
   `AppendRegion::append_after(&deps, bytes)`,
   `PageRegion::write_after(&deps, pos, bytes)`, and the `Submitter`'s

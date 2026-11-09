@@ -331,6 +331,8 @@ pub enum TraceEvent {
         file: FileId,
         /// Offset.
         offset: u64,
+        /// Bytes asked for (not part of [`World::trace_hash`]).
+        len: u64,
         /// Error code, or 0.
         err: i32,
     },
@@ -1294,6 +1296,7 @@ impl World {
                 self.trace.push(TraceEvent::Read {
                     file,
                     offset,
+                    len,
                     err: code,
                 });
                 return Err(OsError {
@@ -1312,6 +1315,7 @@ impl World {
             self.trace.push(TraceEvent::Read {
                 file,
                 offset,
+                len,
                 err: EIO.code,
             });
             return Err(EIO);
@@ -1334,6 +1338,7 @@ impl World {
         self.trace.push(TraceEvent::Read {
             file,
             offset,
+            len,
             err: 0,
         });
         Ok(n)
@@ -1555,7 +1560,9 @@ impl World {
                     eat(u64::from(file));
                     eat(err as u64);
                 }
-                TraceEvent::Read { file, offset, err } => {
+                TraceEvent::Read {
+                    file, offset, err, ..
+                } => {
                     eat(3);
                     eat(u64::from(file));
                     eat(offset);

@@ -867,7 +867,7 @@ where
     /// transient failure is still reported, never hidden).
     fn first_unreadable(&self, r: &LiveRegion, start: u64, end: u64) -> Result<(u64, u64), Error> {
         let mut first = None;
-        let _summary = self.scan_region(r, start, end, false, |item| match item {
+        let _summary = self.scan_region(r, start, end, false, None, |item, _| match item {
             ScanItem::Unreadable { start, end } => {
                 first = Some((start, end));
                 ControlFlow::Break(())
@@ -890,21 +890,22 @@ where
     ) -> Result<usize, Error> {
         let mut copied = 0usize;
         let mut unreadable = None;
-        let summary = self.scan_region(r, offset, offset + len, false, |item| match item {
-            ScanItem::Data { offset: at, bytes } => {
-                let start = (at - offset) as usize;
-                if start < out.len() {
-                    let n = bytes.len().min(out.len() - start);
-                    out[start..start + n].copy_from_slice(&bytes[..n]);
-                    copied = copied.max(start + n);
+        let summary =
+            self.scan_region(r, offset, offset + len, false, None, |item, _| match item {
+                ScanItem::Data { offset: at, bytes } => {
+                    let start = (at - offset) as usize;
+                    if start < out.len() {
+                        let n = bytes.len().min(out.len() - start);
+                        out[start..start + n].copy_from_slice(&bytes[..n]);
+                        copied = copied.max(start + n);
+                    }
+                    ControlFlow::Continue(())
                 }
-                ControlFlow::Continue(())
-            }
-            ScanItem::Unreadable { start, end } => {
-                unreadable = Some((start, end));
-                ControlFlow::Break(())
-            }
-        })?;
+                ScanItem::Unreadable { start, end } => {
+                    unreadable = Some((start, end));
+                    ControlFlow::Break(())
+                }
+            })?;
         if unreadable.is_some() || summary.unreadable > 0 {
             // Name the exact range, as a single read does.
             let ctx = match unreadable {

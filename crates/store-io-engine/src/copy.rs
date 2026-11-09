@@ -34,6 +34,8 @@ use store_io_format::slot::FORMAT_2;
 use store_io_platform::{FileMode, FileName, IoOp, Platform};
 
 use crate::exec::{Ran, clear_stale, run};
+use crate::pace::Pace;
+use crate::qos::Qos;
 use crate::settle::settle_read;
 
 use crate::store::{CONTAINER, LiveRegion, Store, StoreOptions, io, lock_meta};
@@ -161,7 +163,9 @@ const FEED_PIECE: usize = 1 << 20;
 const FEED_DEPTH: usize = 8;
 
 /// A copied region's bytes, in order, from the source's scan on another
-/// thread (D-137): the scan's reads stay in flight while the fill writes.
+/// thread (D-137): the scan's reads stay in flight while the fill writes
+/// (while commits are quiet; while they are active the call has one piece
+/// in flight, a read or a write, when both stores are on one device).
 struct Feed {
     pieces: std::sync::mpsc::Receiver<Result<(u64, Vec<u8>), Error>>,
     spent: std::sync::mpsc::Sender<Vec<u8>>,
@@ -186,6 +190,7 @@ impl Feed {
         src: &'s Store<P>,
         r: &'s LiveRegion,
         len: u64,
+        pace: Option<Pace>,
     ) -> Result<(std::thread::ScopedJoinHandle<'s, Result<(), Error>>, Self), Error>
     where
         P::Queue: Send,
@@ -196,37 +201,55 @@ impl Feed {
             .name("store-io-copy".into())
             .spawn_scoped(s, move || {
                 let mut fail = None;
-                let scanned = src.scan_region(r, 0, len, false, |item| match item {
-                    ScanItem::Data { offset, bytes } => {
-                        for (i, part) in bytes.chunks(FEED_PIECE).enumerate() {
-                            let at = offset + (i * FEED_PIECE) as u64;
-                            let mut v = back.try_recv().unwrap_or_default();
-                            v.clear();
-                            // Memory the pool does not account for: a failed
-                            // allocation is reported, never an abort.
-                            if v.try_reserve_exact(part.len()).is_err() {
-                                fail = Some(crate::io::not_written(
-                                    NotWrittenCause::PoolExhausted,
-                                    crate::io::ctx_range(r, at, at + part.len() as u64),
-                                ));
-                                return ControlFlow::Break(());
+                let scanned =
+                    src.scan_region(r, 0, len, false, pace.as_ref(), |item, drain| match item {
+                        ScanItem::Data { offset, bytes } => {
+                            for (i, part) in bytes.chunks(FEED_PIECE).enumerate() {
+                                let at = offset + (i * FEED_PIECE) as u64;
+                                let mut v = back.try_recv().unwrap_or_default();
+                                v.clear();
+                                // Memory the pool does not account for: a failed
+                                // allocation is reported, never an abort.
+                                if v.try_reserve_exact(part.len()).is_err() {
+                                    fail = Some(crate::io::not_written(
+                                        NotWrittenCause::PoolExhausted,
+                                        crate::io::ctx_range(r, at, at + part.len() as u64),
+                                    ));
+                                    return ControlFlow::Break(());
+                                }
+                                v.extend_from_slice(part);
+                                // Never blocked on a full feed holding reads in
+                                // flight (R5.4's progress rule): the fill may be
+                                // waiting on the call's record for one of them,
+                                // so the scan's reads are drained first.
+                                let sent = match put.try_send(Ok((at, v))) {
+                                    Ok(()) => true,
+                                    Err(std::sync::mpsc::TrySendError::Full(piece)) => {
+                                        drain() && {
+                                            crate::test_hook::step(
+                                                crate::test_hook::Step::FeedBlocking,
+                                            );
+                                            put.send(piece).is_ok()
+                                        }
+                                    }
+                                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
+                                };
+                                // The fill stopped (or the drain failed: the scan
+                                // reports it): so does the scan.
+                                if !sent {
+                                    return ControlFlow::Break(());
+                                }
                             }
-                            v.extend_from_slice(part);
-                            if put.send(Ok((at, v))).is_err() {
-                                // The fill stopped: so does the scan.
-                                return ControlFlow::Break(());
-                            }
+                            ControlFlow::Continue(())
                         }
-                        ControlFlow::Continue(())
-                    }
-                    ScanItem::Unreadable { start, end } => {
-                        fail = Some(Error::Corruption {
-                            kind: store_io_core::error::CorruptionKind::MediaError,
-                            ctx: crate::io::ctx_range(r, start, end),
-                        });
-                        ControlFlow::Break(())
-                    }
-                });
+                        ScanItem::Unreadable { start, end } => {
+                            fail = Some(Error::Corruption {
+                                kind: store_io_core::error::CorruptionKind::MediaError,
+                                ctx: crate::io::ctx_range(r, start, end),
+                            });
+                            ControlFlow::Break(())
+                        }
+                    });
                 let failed = match (scanned, fail) {
                     (_, Some(e)) | (Err(e), None) => Some(e),
                     (Ok(_), None) => None,
@@ -477,8 +500,9 @@ where
         if dst.report().block_size != block {
             return Err(refused(NotWrittenCause::Misaligned, None));
         }
+        let reading = dst.reader_pace(&src);
         for f in &facts {
-            bytes += dst.recreate(&src, f)?;
+            bytes += dst.recreate(&src, f, reading.as_ref())?;
         }
         // One barrier for every byte not written as a fill (a stale page's
         // full copies; the clean close is best effort and reports nothing).
@@ -624,26 +648,37 @@ where
     /// Reads `out.len()` bytes of the container at `offset` (both whole
     /// blocks), whatever `r`'s data size says: a copy's full region, `at`
     /// the region offset they stand for (named in an error, as a region
-    /// read's verdict is: `settle_read`).
+    /// read's verdict is: `settle_read`). With `pace` (the copy's reader's
+    /// call), in its pieces, each admitted before it is submitted and
+    /// charged until it completes, their buffers under the pool's
+    /// background cap.
     fn read_raw(
         &self,
         r: &LiveRegion,
         mut at: u64,
         mut offset: u64,
         out: &mut [u8],
+        pace: Option<&Pace>,
     ) -> Result<(), Error> {
         let mut lane = self.inner.queues.get(0);
         clear_stale(&mut lane).map_err(|raw| io(Op::Read, raw))?;
-        let chunk = self.chunk();
+        let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));
         for piece in out.chunks_mut(chunk) {
             let c = crate::io::ctx_range(r, at, at + piece.len() as u64);
-            let buf = self.take(piece.len(), c)?;
+            let buf = match pace {
+                Some(_) => self.take_capped(piece.len(), c)?,
+                None => self.take(piece.len(), c)?,
+            };
             let op = IoOp::Read {
                 file: &self.inner.file,
                 offset,
                 buf,
             };
-            let (got, result) = match run(&mut lane, op) {
+            let admitted = pace.map(Pace::admit).transpose()?;
+            let ran = run(&mut lane, op);
+            // Completed (or abandoned): its charge goes with it.
+            drop(admitted);
+            let (got, result) = match ran {
                 Ok(Ran::Done { buf, result }) => (buf, result),
                 // The wait failed with the read in flight: the queue's
                 // failure, no verdict on the media.
@@ -662,6 +697,22 @@ where
             at += piece.len() as u64;
         }
         Ok(())
+    }
+
+    /// The pacing of this copy's reads of `src` (R5.4: a call holds one
+    /// issuer record per device group it uses): the target's own (the
+    /// call's) when `src` is in its group, so the reader and the fill share
+    /// one piece while commits are active and, while they are quiet, the
+    /// reader leaves one of the call's pieces to the fill; else a record of
+    /// the call on `src`'s group. `None` for a target that is no
+    /// background call's.
+    fn reader_pace(&self, src: &Store<P>) -> Option<Pace> {
+        let own = self.inner.domain.pace()?;
+        if Qos::same_group(&self.inner.qos, &src.inner.qos) {
+            Some(own.second())
+        } else {
+            src.inner.domain.new_pace()
+        }
     }
 
     /// Whether `r`, on a stale or possibly accepted page while another page
@@ -781,7 +832,7 @@ where
     /// verified before its header, D-137), a full copy's after it (not yet
     /// durable: the caller's one barrier makes it so). Returns the bytes
     /// copied.
-    fn recreate(&self, src: &Store<P>, f: &Facts) -> Result<u64, Error> {
+    fn recreate(&self, src: &Store<P>, f: &Facts, reading: Option<&Pace>) -> Result<u64, Error> {
         let mut opts = RegionOptions::default().size(f.data_size);
         if let Some(cap) = f.cap {
             opts = opts.max_size(cap);
@@ -807,10 +858,11 @@ where
                 // region is placed: a region read in one piece is then read
                 // while this thread waits for it, in a fixed order with this
                 // thread's steps (the simulator's crash enumerations count
-                // them). It may wait on its queue holding a lane of the
-                // source, and the fill on it holding the target's queue 0:
-                // both stores are this copy's own, opened by it, so nothing
-                // else waits for either (D-136 forbids it in general).
+                // them). It may wait on its queue, or on the call's record
+                // for the fill's piece, holding a lane of the source, and the
+                // fill on it holding the target's queue 0: both stores are
+                // this copy's own, opened by it, so nothing else waits for
+                // either (D-136 forbids it in general).
                 let mut feed = None;
                 let mut content = |index: u64, dst: &mut [u8]| -> Result<(), Error> {
                     // A request for nothing (a first chunk all header
@@ -820,7 +872,13 @@ where
                         return Ok(());
                     }
                     if feed.is_none() {
-                        feed = Some(Feed::start(s, src, &f.source, f.data_size)?);
+                        feed = Some(Feed::start(
+                            s,
+                            src,
+                            &f.source,
+                            f.data_size,
+                            reading.cloned(),
+                        )?);
                     }
                     match feed.as_mut() {
                         Some((_, reader)) => reader.read(index, dst),
@@ -883,7 +941,7 @@ where
                 let mut done = 0u64;
                 while done < len {
                     let n = (len - done).min(piece as u64).min(made.map.run_left(at)) as usize;
-                    src.read_raw(&f.source, at, file + done, &mut buf[..n])?;
+                    src.read_raw(&f.source, at, file + done, &mut buf[..n], reading)?;
                     let charge = pace.map(crate::pace::Pace::admit).transpose()?;
                     match f.kind {
                         RegionKind::Page => {
@@ -919,5 +977,100 @@ where
                 Ok(0)
             }
         }
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    #![allow(clippy::unwrap_used, unused_results)]
+
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use store_io_core::IoClass;
+    use store_io_sim::world::TraceEvent;
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use crate::store::container_name;
+    use crate::{Store, StoreOptions};
+
+    fn background(p: &SimPlatform, dir: &str) -> Store<SimPlatform> {
+        Store::create_named(
+            p.clone(),
+            Path::new(dir),
+            StoreOptions::default(),
+            &container_name().unwrap(),
+            IoClass::Background,
+        )
+        .unwrap()
+    }
+
+    /// A copy's reader is a piece of its call: on the target's device group
+    /// it shares the target's record (the call's), so reader and fill hold
+    /// one piece between them while commits are active. A store that is no
+    /// background call's has no reader pacing.
+    #[test]
+    fn test_a_copy_s_reader_shares_its_call_s_record_on_one_group() {
+        let p = SimPlatform::new(SimConfig::volatile(54));
+        let src = Store::create(p.clone(), Path::new("/a"), StoreOptions::default()).unwrap();
+        let dst = background(&p, "/c");
+        let own = dst.inner.domain.pace().unwrap();
+        let reader = dst.reader_pace(&src).unwrap();
+        assert!(reader.same_call(own));
+        assert!(
+            reader.is_second() && !own.is_second(),
+            "it leaves the fill a piece"
+        );
+        assert!(src.reader_pace(&dst).is_none());
+    }
+
+    /// A copy's raw reads with its reader's pacing: `background_io`
+    /// pieces, each charged when it is submitted, its buffer under the
+    /// pool's background cap.
+    #[test]
+    fn test_a_paced_raw_read_reads_charged_capped_pieces() {
+        let p = SimPlatform::new(SimConfig::volatile(55));
+        let s = Store::create(p.clone(), Path::new("/s"), StoreOptions::default()).unwrap();
+        let log = s.provision_append_region("log", 1 << 20).unwrap();
+        let data: Vec<u8> = (0..1usize << 20)
+            .map(|i| (i as u8) ^ ((i / 4096) as u8).wrapping_mul(37))
+            .collect();
+        let t = log.append(&data).unwrap();
+        let _receipt = log.sync_through(&t).unwrap();
+        let _hold = s.commit_hold();
+        let r = Arc::clone(log.state());
+        assert!(r.map.run_left(0) >= 1 << 20, "one run");
+        let at = r.map.locate(0, 1 << 20);
+        let pace = s.inner.domain.new_pace().unwrap();
+        let (s2, seen) = (s.clone(), Arc::new(Mutex::new(Vec::new())));
+        let out = Arc::clone(&seen);
+        p.with_world(|w| {
+            w.set_submit_probe(Some(Arc::new(move || {
+                let held: u64 = s2
+                    .inner
+                    .pool
+                    .background_holdings()
+                    .iter()
+                    .map(|c| u64::from(c.1))
+                    .sum();
+                out.lock().unwrap().push((s2.qos().in_flight, held));
+            })))
+        });
+        let from = p.with_world(|w| w.trace().len());
+        let mut back = vec![0u8; 1 << 20];
+        s.read_raw(&r, 0, at, &mut back, Some(&pace)).unwrap();
+        p.with_world(|w| w.set_submit_probe(None));
+        assert!(back == data);
+        let lens: Vec<u64> = p.with_world(|w| {
+            w.trace()[from..]
+                .iter()
+                .filter_map(|e| match e {
+                    TraceEvent::Read { len, .. } => Some(*len),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(lens, vec![256 << 10; 4]);
+        assert_eq!(*seen.lock().unwrap(), vec![(1, 1); 4]);
     }
 }

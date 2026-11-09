@@ -22,6 +22,18 @@
 //! [`ScanItem::Unreadable`] (adjacent ones merged), and the scan carries on
 //! after it. Only the caller decides where valid data ends, by returning
 //! [`ControlFlow::Break`] from its visitor.
+//!
+//! A background scan (a caller's `region.scan`, a copy's reader: R5.4)
+//! reads in `background_io` pieces into buffers under the pool's
+//! background cap, and admits each read through its call's issuer record
+//! before it is submitted; the read's charge rides in its ring slot and is
+//! released the moment its completion is collected. A read refused with
+//! reads of the scan's own in flight reaps them first; with none in flight
+//! it waits for the call's piece on another thread (a refusal is never
+//! `QueueFull`, and never a wait on the scan's own reads). A visitor is
+//! handed a drain hook: it collects every read of the scan in flight, so a
+//! visitor that must block (a copy's reader on its full feed) blocks
+//! holding none of the call's pieces.
 
 use std::ops::ControlFlow;
 
@@ -32,6 +44,8 @@ use store_io_platform::{IoBuf, IoOp, Platform, Queue, RawResult};
 
 use crate::exec::{Lane, LaneGuard, Ran, run};
 use crate::io::{ctx_range, not_written};
+use crate::pace::Pace;
+use crate::qos::Charge;
 use crate::store::{LiveRegion, Store};
 
 /// Reads kept in flight by a scan.
@@ -86,7 +100,10 @@ enum Held {
     Unreadable(u64, u64),
 }
 
-impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
+/// A scan's visitor is handed each item and the drain hook, which collects
+/// every read of the scan in flight (`false` if one could not be: the scan
+/// then fails with the queue's error once the visitor returns).
+impl<F: FnMut(ScanItem<'_>, &mut dyn FnMut() -> bool) -> ControlFlow<()>> Emitter<F> {
     /// Holds back every item until [`Self::release`].
     fn hold(&mut self) {
         let _held = self.held.get_or_insert_with(Vec::new);
@@ -94,23 +111,24 @@ impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
 
     /// Delivers the items held back, in order.
     fn release(&mut self) {
+        // Delivered with the lane put back and nothing in flight.
         for item in self.held.take().unwrap_or_default() {
             match item {
-                Held::Data(offset, bytes) => self.data(offset, &bytes),
-                Held::Unreadable(start, end) => self.unreadable(start, end),
+                Held::Data(offset, bytes) => self.data(offset, &bytes, &mut || true),
+                Held::Unreadable(start, end) => self.unreadable(start, end, &mut || true),
             }
         }
     }
 
-    fn flush_bad(&mut self) {
+    fn flush_bad(&mut self, drain: &mut dyn FnMut() -> bool) {
         if let Some((start, end)) = self.bad.take() {
-            if (self.visit)(ScanItem::Unreadable { start, end }).is_break() {
+            if (self.visit)(ScanItem::Unreadable { start, end }, drain).is_break() {
                 self.sum.stopped = true;
             }
         }
     }
 
-    fn data(&mut self, offset: u64, bytes: &[u8]) {
+    fn data(&mut self, offset: u64, bytes: &[u8], drain: &mut dyn FnMut() -> bool) {
         if let Some(held) = &mut self.held {
             held.push(Held::Data(offset, bytes.to_vec()));
             return;
@@ -118,17 +136,17 @@ impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
         if self.sum.stopped {
             return;
         }
-        self.flush_bad();
+        self.flush_bad(drain);
         if self.sum.stopped || bytes.is_empty() {
             return;
         }
         self.sum.end = offset + bytes.len() as u64;
-        if (self.visit)(ScanItem::Data { offset, bytes }).is_break() {
+        if (self.visit)(ScanItem::Data { offset, bytes }, drain).is_break() {
             self.sum.stopped = true;
         }
     }
 
-    fn unreadable(&mut self, start: u64, end: u64) {
+    fn unreadable(&mut self, start: u64, end: u64, drain: &mut dyn FnMut() -> bool) {
         if let Some(held) = &mut self.held {
             held.push(Held::Unreadable(start, end));
             return;
@@ -141,15 +159,17 @@ impl<F: FnMut(ScanItem<'_>) -> ControlFlow<()>> Emitter<F> {
         match &mut self.bad {
             Some((_, e)) if *e == start => *e = end,
             _ => {
-                self.flush_bad();
+                self.flush_bad(drain);
                 self.bad = Some((start, end));
             }
         }
     }
 
+    /// The summary, the last unreadable range delivered (nothing is in
+    /// flight by now).
     fn finish(mut self) -> ScanSummary {
         if !self.sum.stopped {
-            self.flush_bad();
+            self.flush_bad(&mut || true);
         }
         self.sum
     }
@@ -160,6 +180,9 @@ struct Pending {
     start: u64,
     len: usize,
     done: Option<(RawResult<usize>, Option<IoBuf>)>,
+    /// A background scan's charge for the read: released when its
+    /// completion is collected (or the scan is abandoned).
+    charge: Option<Charge>,
 }
 
 fn read_error(raw: OsError, c: ErrorContext) -> Error {
@@ -188,7 +211,9 @@ where
         F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
     {
         let obs = &self.inner.observer;
-        self.scan_region(r, from, to, true, |item| {
+        // A caller's scan is a background call of its own (R5.4).
+        let pace = self.inner.domain.new_pace();
+        self.scan_region(r, from, to, true, pace.as_ref(), |item, _drain| {
             if matches!(item, ScanItem::Unreadable { .. }) {
                 obs.add(Counter::MediaErrors, 1);
             }
@@ -198,17 +223,20 @@ where
 
     /// Scans `r` from `from` to `to` (clamped to the data area). `calls_store`:
     /// the visitor may call the store (a caller's), so it never runs while a
-    /// shared lane is held (the module's docs).
+    /// shared lane is held (the module's docs). `pace`: a background scan's
+    /// call (the module's docs); `None` reads unpaced (a read's own search
+    /// for its bad sectors, class `Read`).
     pub(crate) fn scan_region<F>(
         &self,
         r: &LiveRegion,
         from: u64,
         to: u64,
         calls_store: bool,
+        pace: Option<&Pace>,
         visit: F,
     ) -> Result<ScanSummary, Error>
     where
-        F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
+        F: FnMut(ScanItem<'_>, &mut dyn FnMut() -> bool) -> ControlFlow<()>,
     {
         let block = self.block();
         let to = to.min(r.map.len());
@@ -231,9 +259,15 @@ where
         if from == to {
             return Ok(out.finish());
         }
-        let chunk = self.chunk();
+        // A background scan's reads are always split at its piece (R5.4),
+        // their buffers under the pool's background cap: with fewer than
+        // `DEPTH` it runs shallower, as with fewer buffers of any kind.
+        let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));
         let mut free: Vec<IoBuf> = (0..DEPTH)
-            .map_while(|_| self.inner.pool.take_within(chunk, chunk).ok())
+            .map_while(|_| match pace {
+                Some(_) => self.inner.pool.take_capped(chunk, chunk).ok(),
+                None => self.inner.pool.take_within(chunk, chunk).ok(),
+            })
             .collect();
         if free.is_empty() {
             return Err(not_written(NotWrittenCause::PoolExhausted, c));
@@ -263,6 +297,9 @@ where
         let mut next = from;
         let mut in_flight = 0usize;
         let mut failure: Option<Error> = None;
+        // A drain hook's failure (the queue's), reported once the visitor
+        // returns.
+        let mut drained: Option<OsError> = None;
         loop {
             let progress = (submitted, delivered);
             // Keep the pipeline full.
@@ -283,6 +320,28 @@ where
                 let Some(mut buf) = free.pop() else { break };
                 // Never across a run's end (one device operation each).
                 let len = (to - next).min(chunk as u64).min(r.map.run_left(next)) as usize;
+                // A background read is admitted before it is submitted.
+                // Refused with reads of its own in flight, the scan reaps
+                // them (below) and tries again; with none, the cap is held
+                // by the call's piece on another thread, which completes.
+                let charge = match pace {
+                    None => None,
+                    Some(p) => match p.try_charge() {
+                        Some(ch) => Some(ch),
+                        None if in_flight > 0 => {
+                            free.push(buf);
+                            break;
+                        }
+                        None => match p.wait_charge() {
+                            Some(ch) => Some(ch),
+                            None => {
+                                free.push(buf);
+                                failure = Some(not_written(NotWrittenCause::Interrupted, c));
+                                break;
+                            }
+                        },
+                    },
+                };
                 // `len ≤ chunk ≤ capacity`.
                 let _fits = buf.set_len(len);
                 let op = IoOp::Read {
@@ -296,6 +355,7 @@ where
                             start: next,
                             len,
                             done: None,
+                            charge,
                         });
                         submitted += 1;
                         next += len as u64;
@@ -332,6 +392,7 @@ where
                     start,
                     len,
                     done: Some((result, buf)),
+                    ..
                 }) = ring[idx].take()
                 else {
                     break;
@@ -355,10 +416,23 @@ where
                         Ok(n) => match &buf {
                             Some(b) => {
                                 let n = n.min(len);
-                                out.data(start, &b.as_slice()[..n]);
+                                let mut drain = drainer(
+                                    &mut lane,
+                                    &mut ring,
+                                    depth,
+                                    &mut in_flight,
+                                    &mut drained,
+                                );
+                                out.data(start, &b.as_slice()[..n], &mut drain);
                                 // A short read inside the container: the
                                 // rest could not be read.
-                                out.unreadable(start + n as u64, start + len as u64);
+                                out.unreadable(start + n as u64, start + len as u64, &mut drain);
+                                drop(drain);
+                                if let Some(e) = drained.take() {
+                                    // As below: the reads in flight keep
+                                    // their buffers.
+                                    return Err(read_error(e, c));
+                                }
                             }
                             // No bytes came back (a backend breaking
                             // platform contract 1): the scan stops, never
@@ -381,9 +455,8 @@ where
                                 // store's own visitors), delivering as it goes.
                                 Some(b) if !deferred => {
                                     let bisected = match &mut lane {
-                                        Some(l) => {
-                                            self.bisect(l, r, start, len as u64, b, &mut out, c)
-                                        }
+                                        Some(l) => self
+                                            .bisect(l, r, start, len as u64, b, &mut out, c, pace),
                                         None => Err(not_written(NotWrittenCause::Interrupted, c)),
                                     };
                                     match bisected {
@@ -396,8 +469,9 @@ where
                                 Some(b) => match self.lane(r, Op::Read) {
                                     Ok(mut l) => {
                                         out.hold();
-                                        let bisected = self
-                                            .bisect(&mut l, r, start, len as u64, b, &mut out, c);
+                                        let bisected = self.bisect(
+                                            &mut l, r, start, len as u64, b, &mut out, c, pace,
+                                        );
                                         drop(l);
                                         out.release();
                                         match bisected {
@@ -454,7 +528,9 @@ where
 
     /// Reads `[start, start + len)` again in halves on an idle lane until each
     /// failing piece is one sector ([`Store::sector`]), delivering in order.
-    /// Returns the buffer.
+    /// Returns the buffer. A background scan's reads here are pieces of its
+    /// call, one at a time (nothing of the scan's is in flight: the lane is
+    /// idle), each charged until it completes.
     #[allow(clippy::too_many_arguments)]
     fn bisect<F>(
         &self,
@@ -465,9 +541,10 @@ where
         mut buf: IoBuf,
         out: &mut Emitter<F>,
         c: ErrorContext,
+        pace: Option<&Pace>,
     ) -> Result<IoBuf, Error>
     where
-        F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
+        F: FnMut(ScanItem<'_>, &mut dyn FnMut() -> bool) -> ControlFlow<()>,
     {
         if out.sum.stopped {
             return Ok(buf);
@@ -475,6 +552,7 @@ where
         let sector = self.sector();
         // `len ≤ chunk ≤ capacity`.
         let _fits = buf.set_len(len as usize);
+        let piece = pace.map(Pace::admit).transpose()?;
         let done = run(
             lane,
             IoOp::Read {
@@ -483,6 +561,9 @@ where
                 buf,
             },
         );
+        // Completed (or abandoned): its charge goes with it, before
+        // anything is delivered.
+        drop(piece);
         let (result, back) = match done {
             Ok(Ran::Done { buf, result }) => (result, buf),
             Ok(Ran::Abandoned(raw)) => return Err(read_error(raw, c)),
@@ -502,13 +583,13 @@ where
                 let n = (n as u64).min(len);
                 self.inner.observer.add(Counter::Reads, 1);
                 self.inner.observer.add(Counter::ReadBytes, n);
-                out.data(start, &buf.as_slice()[..n as usize]);
-                out.unreadable(start + n, start + len);
+                out.data(start, &buf.as_slice()[..n as usize], &mut || true);
+                out.unreadable(start + n, start + len, &mut || true);
                 Ok(buf)
             }
             Err(raw) if is_media_error(raw) => {
                 if len <= sector {
-                    out.unreadable(start, start + len);
+                    out.unreadable(start, start + len, &mut || true);
                     return Ok(buf);
                 }
                 // Whole blocks while the piece spans several, so every read
@@ -517,15 +598,15 @@ where
                 let block = self.block();
                 let unit = if len > block { block } else { sector };
                 let half = (len / unit).div_ceil(2) * unit;
-                let buf = self.bisect(lane, r, start, half, buf, out, c)?;
-                self.bisect(lane, r, start + half, len - half, buf, out, c)
+                let buf = self.bisect(lane, r, start, half, buf, out, c, pace)?;
+                self.bisect(lane, r, start + half, len - half, buf, out, c, pace)
             }
             // Below the store block the device refused the smaller read
             // (alignment) rather than failing on the media: this piece lies
             // in a block that failed with a media error, so it is reported
             // unreadable and the scan goes on.
             Err(_) if len < self.block() => {
-                out.unreadable(start, start + len);
+                out.unreadable(start, start + len, &mut || true);
                 Ok(buf)
             }
             Err(raw) => Err(read_error(raw, c)),
@@ -545,9 +626,33 @@ fn collect_one<Q: Queue>(
         *in_flight = in_flight.saturating_sub(1);
         if let Some(p) = ring[(comp.tag % depth as u64) as usize].as_mut() {
             p.done = Some((comp.result, comp.buf));
+            // Completed: its piece is no longer in flight.
+            p.charge = None;
         }
     }
     Ok(())
+}
+
+/// The drain hook a visitor is handed: collects every read of the scan in
+/// flight (each charge released as its completion is collected) and says
+/// whether none is left; a failed wait is kept in `err` for the scan.
+fn drainer<'x, Q: Queue>(
+    lane: &'x mut Option<LaneGuard<'_, Q>>,
+    ring: &'x mut [Option<Pending>],
+    depth: usize,
+    in_flight: &'x mut usize,
+    err: &'x mut Option<OsError>,
+) -> impl FnMut() -> bool + 'x {
+    move || {
+        if err.is_none() {
+            if let Some(l) = lane.as_mut() {
+                if let Err(e) = collect(l, &mut *ring, depth, &mut *in_flight) {
+                    *err = Some(e);
+                }
+            }
+        }
+        *in_flight == 0
+    }
 }
 
 /// Waits for every read in flight.

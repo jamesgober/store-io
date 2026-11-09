@@ -570,7 +570,7 @@ fn test_a_full_copy_writes_in_background_pieces() {
             out.lock().unwrap().push(ro2.qos().in_flight);
         })))
     });
-    let before = p.with_world(|w| w.write_submits());
+    let (before, traced) = p.with_world(|w| (w.write_submits(), w.trace().len()));
     copy_store(
         p.clone(),
         Path::new(DIR),
@@ -586,9 +586,35 @@ fn test_a_full_copy_writes_in_background_pieces() {
     .unwrap();
     p.with_world(|w| w.set_submit_probe(None));
     let writes = p.with_world(|w| w.write_submits()) - before;
+    // The copy's reads of the region's data (past its header pair): the
+    // full copy's, each a piece of the call (the open's reads of the
+    // metadata, its region headers included, are `Read` class, unpaced).
+    let reads: Vec<u64> = p.with_world(|w| {
+        let f = w
+            .file_id(&std::path::PathBuf::from(DIR), store_io_engine::CONTAINER)
+            .unwrap();
+        w.trace()[traced..]
+            .iter()
+            .filter_map(|e| match e {
+                store_io_sim::world::TraceEvent::Read {
+                    file, offset, len, ..
+                } if *file == f && *offset >= BASE + 2 * B => Some(*len),
+                _ => None,
+            })
+            .collect()
+    });
     let seen = seen.lock().unwrap().clone();
     let charged = seen.iter().filter(|&&n| n >= 1).count() as u64;
-    assert_eq!(charged, writes, "every write admitted: {seen:?}");
+    assert_eq!(
+        charged,
+        writes + reads.len() as u64,
+        "every write and data read admitted: {seen:?}"
+    );
+    assert!(!reads.is_empty());
+    assert!(
+        reads.iter().all(|&n| n <= piece),
+        "a read over the piece: {reads:?}"
+    );
     drop(ro);
     let lens: Vec<(u64, u64)> = p.with_world(|w| {
         let f = w

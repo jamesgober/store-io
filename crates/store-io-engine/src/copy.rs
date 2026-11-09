@@ -462,7 +462,15 @@ where
         .max(u32::try_from(facts.len()).unwrap_or(u32::MAX));
     let mut bytes = 0u64;
     {
-        let dst = Store::create_named(platform.clone(), to, target_opts, &temp)?;
+        // The target is this call's own (R5.4): created, filled and closed
+        // as background I/O, paced by its device's commits.
+        let dst = Store::create_named(
+            platform.clone(),
+            to,
+            target_opts,
+            &temp,
+            store_io_core::IoClass::Background,
+        )?;
         // A device that needs larger blocks than the source's would round
         // every size up: refused (the temporary store is removed by the
         // next copy).
@@ -862,13 +870,21 @@ where
         // The data size as the source's (checked above).
         debug_assert_eq!(made.map.len(), f.data_size, "{}", f.name);
         if let Some((ranges, _)) = &f.full {
-            let mut buf = vec![0u8; CHUNK];
+            // This call's pieces (the target's `Domain::pace`), each
+            // admitted before it is written and never across one of the
+            // target's runs, so each charge covers one device I/O. Their
+            // buffers are the region write path's own: the target's pool is
+            // the call's, shared with no commit.
+            let pace = self.inner.domain.pace();
+            let piece = pace.map_or(CHUNK, |p| p.piece().min(CHUNK));
+            let mut buf = vec![0u8; piece];
             let mut at = 0u64;
             for &(file, len) in ranges {
                 let mut done = 0u64;
                 while done < len {
-                    let n = (len - done).min(CHUNK as u64) as usize;
+                    let n = (len - done).min(piece as u64).min(made.map.run_left(at)) as usize;
                     src.read_raw(&f.source, at, file + done, &mut buf[..n])?;
+                    let charge = pace.map(crate::pace::Pace::admit).transpose()?;
                     match f.kind {
                         RegionKind::Page => {
                             let to = self.page_region(&f.name)?;
@@ -878,6 +894,7 @@ where
                             let _ticket = self.append_region(&f.name)?.append(&buf[..n])?;
                         }
                     }
+                    drop(charge);
                     done += n as u64;
                     at += n as u64;
                 }

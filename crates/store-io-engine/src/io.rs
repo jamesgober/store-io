@@ -333,6 +333,16 @@ where
             .map_err(|_| not_written(NotWrittenCause::PoolExhausted, c))
     }
 
+    /// As [`Self::take`], for a background call's piece: under the pool's
+    /// background cap (PLANNING R5.4: background work never leaves commits
+    /// without buffers).
+    pub(crate) fn take_capped(&self, len: usize, c: ErrorContext) -> Result<IoBuf, Error> {
+        self.inner
+            .pool
+            .take_capped(len, self.ordinary())
+            .map_err(|_| not_written(NotWrittenCause::PoolExhausted, c))
+    }
+
     /// As [`Self::take`], from any class (a submitter's buffer).
     pub(crate) fn take_any(&self, len: usize, c: ErrorContext) -> Result<IoBuf, Error> {
         self.inner

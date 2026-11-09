@@ -536,6 +536,7 @@ pub(crate) fn create_metadata<P: Platform>(
     layout: &Layout,
     volume: VolumeId,
     created_unix_s: u64,
+    pace: Option<&crate::pace::Pace>,
 ) -> Result<Meta, Error> {
     let allocate = |len: u64| {
         platform
@@ -557,7 +558,15 @@ pub(crate) fn create_metadata<P: Platform>(
         let payload = page_payload(p)?;
         let mut next = plan_next(&PairRead::blank(), &payload, 1)?;
         next.meta_seq = u64::from(p) + 1;
-        let w = write_slot(q, file, pool, &pair_page(volume, layout, p), &next, false)?;
+        let w = write_slot(
+            q,
+            file,
+            pool,
+            &pair_page(volume, layout, p),
+            &next,
+            false,
+            pace,
+        )?;
         pages.push(Page2 {
             pair: PairRead::blank().after(w),
             standing: Standing::Confirmed,
@@ -588,7 +597,15 @@ pub(crate) fn create_metadata<P: Platform>(
     let vbuf = volume_payload(&vm)?;
     let mut next = plan_next(&PairRead::blank(), &vbuf, 1)?;
     next.meta_seq = u64::from(layout.pages) + 1;
-    let w = write_slot(q, file, pool, &pair_volume(volume, layout), &next, false)?;
+    let w = write_slot(
+        q,
+        file,
+        pool,
+        &pair_volume(volume, layout),
+        &next,
+        false,
+        pace,
+    )?;
     full_flush(platform, file)?;
     Ok(Meta {
         volume: vm.base,

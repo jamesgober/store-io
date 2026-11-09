@@ -183,6 +183,7 @@ ROOT_CONFORMANCE = ["-p", "store-io", "--test", "conformance"]
 QOS_SRC = "crates/store-io-engine/src/qos.rs"
 QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
 QOS_STORE_T = ["-p", "store-io-engine", "--test", "qos"]
+PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
 PUMP_POISON_T = ["-p", "store-io-engine", "--test", "pump_poison"]
 WIN_SMBIOS = ["-p", "store-io-win", "--lib", "probe::storage::tests::test_smbios_says_physical"]
 WIN_SYS = ["-p", "store-io-win", "--lib", "sys::tests::test_a_file_id_of_zero_or_minus_one_identifies_nothing"]
@@ -1599,7 +1600,7 @@ M = [
  ("crates/store-io-engine/src/store.rs", '        background_io: (piece / block * block).max(block),', '        background_io: piece.max(block * 0),', QOS_STORE_T),
  ("crates/store-io-engine/src/open.rs", '    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        crate::store::check_pacing(&opts)?;', '    pub fn open(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        let _ = crate::store::check_pacing(&opts);', QOS_STORE_T),
  ("crates/store-io-engine/src/create.rs", '    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        crate::store::check_pacing(&opts)?;', '    pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {\n        let _ = crate::store::check_pacing(&opts);', QOS_STORE_T),
- ("crates/store-io-engine/src/open.rs", '            platform.identity_scope(),\n            &crate::store::placement(&report.evidence),', '            0,\n            &crate::store::placement(&report.evidence),', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        platform.identity_scope(),\n        &placement(ev),', '        0,\n        &placement(ev),', QOS_STORE_T),
  # QOS_CLASS (V3c2): only a commit-class barrier marks activity; the pump
  # never submits a piece to a poisoned store, and reports the stop.
  ("crates/store-io-engine/src/domain/mod.rs", '        if class.is_commit() {\n            self.note_commit();\n        }', '        if class.is_commit() || true {\n            self.note_commit();\n        }', DOMAIN_ALL),
@@ -1637,6 +1638,27 @@ M = [
  (SUB_SRC, 'let (at, split) = first_piece(state, offset, &mut buf, self.piece_max);', 'let (at, split) = first_piece(state, offset, &mut buf, usize::MAX);', QOS_STORE_T),
  (SUB_SRC, '+ self.core.table.parked.len() +', '+ self.core.table.parked.len() * 0 +', QOS_STORE_T),
  (SUB_SRC, '        let issue = failed.is_none();', '        let issue = failed.is_none() || true;', QOS_STORE_T),
+ # QOS_PACE (V3d1): a store created at Background (copy_store's target) is
+ # its call's: joined before its metadata, every write a charged piece of at
+ # most background_io under the pool's cap, from creation to clean close;
+ # its barriers and dsync writes mark no activity; a power-safe slot commit
+ # does; a caller's own provisioning unchanged.
+ ("crates/store-io-engine/src/domain/mod.rs", '            if a.pace.is_none() {', '            if a.pace.is_none() || true {', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '    if policy.dsync {\n        domain.note_commit();\n    }', '    if policy.dsync && false {\n        domain.note_commit();\n    }', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace())', 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace().filter(|_| false))', PACE_T),
+ ("crates/store-io-engine/src/slots.rs", '        Some(_) => pool.take_capped(at.size(), usize::MAX),', '        Some(_) => pool.take(at.size()),', PACE_T),
+ ("crates/store-io-engine/src/slots.rs", '    let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '    let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
+ ("crates/store-io-engine/src/provision.rs", '            Some(p) => p.piece() as u64,', '            Some(p) => (p.piece() as u64).max(1 << 20),', QOS_STORE_T),
+ ("crates/store-io-engine/src/provision.rs", '                Some(_) => self.take_capped(len as usize, ErrorContext::default())?,', '                Some(_) => self.take(len as usize, ErrorContext::default()).or_else(|_| self.take_capped(len as usize, ErrorContext::default()))?,', PACE_T),
+ ("crates/store-io-engine/src/provision.rs", '            let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '            let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
+ ("crates/store-io-engine/src/create.rs", '        let pace = class\n            .is_background()', '        let pace = (class.is_background() && false)', QOS_STORE_T),
+ ("crates/store-io-engine/src/create.rs", '                    created,\n                    pace.as_ref(),', '                    created,\n                    pace.as_ref().filter(|_| false),', PACE_T),
+ ("crates/store-io-engine/src/create.rs", '&vat, &next_v, false, pace.as_ref())?;', '&vat, &next_v, false, pace.as_ref().filter(|_| false))?;', PACE_T),
+ ("crates/store-io-engine/src/create.rs", '&tat, &next_t, false, pace.as_ref())?;', '&tat, &next_t, false, pace.as_ref().filter(|_| false))?;', PACE_T),
+ ("crates/store-io-engine/src/open.rs", '            Some(j) => (j.qos, j.pace),', '            Some(j) => (j.qos, j.pace.filter(|_| false)),', QOS_STORE_T),
+ (COPY_SRC, '            store_io_core::IoClass::Background,', '            store_io_core::IoClass::Commit,', QOS_STORE_T),
+ (COPY_SRC, 'let piece = pace.map_or(CHUNK, |p| p.piece().min(CHUNK));', 'let piece = pace.map_or(CHUNK, |p| p.piece().max(CHUNK));', COPYS),
+ (COPY_SRC, '                    let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '                    let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', COPYS),
 ]
 
 def kill_stuck_tests():

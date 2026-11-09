@@ -218,6 +218,7 @@ where
                     opened.owner_generation,
                     opts,
                     opened.found_seq,
+                    None,
                 ));
             }
         };
@@ -357,6 +358,7 @@ where
             opts,
             // Format 1, read-only: nothing is recorded.
             None,
+            None,
         ))
     }
 
@@ -378,6 +380,7 @@ where
         owner_generation: u64,
         opts: StoreOptions,
         found_seq: Option<u64>,
+        joined: Option<crate::pace::Joined>,
     ) -> Self {
         let acct = match meta.v2.as_deref() {
             Some(v2) => Accounting::from_usage(&v2.usage),
@@ -413,18 +416,22 @@ where
                 crate::frontier::note_open(volume, id, epoch, found_seq);
             }
         }
-        // Every store, read-only included, joins its device's group (R5.4):
-        // never fails; what the evidence does not name is paced the safe way.
-        let qos = crate::qos::Registry::global().join(
-            platform.identity_scope(),
-            &crate::store::placement(&report.evidence),
-            crate::store::qos_options(&opts, layout.block()),
-            platform.monotonic_ns(),
-        );
+        // Every store, read-only included, joins its device's group (R5.4);
+        // a created one joined before its metadata was written.
+        let (qos, pace) = match joined {
+            Some(j) => (j.qos, j.pace),
+            None => (
+                crate::store::join_group(&platform, &report.evidence, &opts, layout.block()),
+                None,
+            ),
+        };
         Self {
             inner: Arc::new(Inner {
-                domain: Domain::with_slots(1 + flush_files.len())
-                    .with_activity(Arc::clone(&qos), platform.clock()),
+                domain: Domain::with_slots(1 + flush_files.len()).with_activity(
+                    Arc::clone(&qos),
+                    platform.clock(),
+                    pace,
+                ),
                 qos,
                 flush_files: flush_files.into_boxed_slice(),
                 platform,

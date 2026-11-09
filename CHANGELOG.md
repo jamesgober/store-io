@@ -23,8 +23,8 @@
   `Store::commit_hold` keeps them active while it lives; `Store::qos`
   reports the device's pacing (`QosReport`). Only a commit-class barrier
   marks activity (a flush thread's batch is commit-class if any request
-  in it is). The background `Submitter` (below) is paced; the blocking
-  background paths (copy, scan, provisioning) come in later changes.
+  in it is). The background `Submitter` and `copy_store`'s target (below)
+  are paced; scans and a copy's reads come in a later change.
 - Engine: **a background `Submitter`**
   (`SubmitterConfig::default().with_class(IoClass::Background)`): its
   reads and writes go out in `background_io` pieces, each admitted by its
@@ -38,6 +38,17 @@
   `take_buf` holds at most half of each buffer class (`PoolExhausted`,
   never waiting). `SubmitterConfig::class` (default `Commit`); a
   `Read`-class submitter's writes count as commits.
+- Engine: **`copy_store`'s target is paced**: the copy creates, fills and
+  closes it as background I/O. It joins its device's group before its
+  first metadata write, and every write to it (metadata, fills, a stale
+  page's full copy) goes out in `background_io` pieces, each admitted by
+  the device's pacing before it is submitted, its buffer under the pool's
+  background cap (a stale page's full copy through the region's own write
+  path, one I/O per piece). Its flushes and durable writes never mark
+  commits active. On a power-safe store every durable metadata write (a
+  slot commit, provisioning, a clean close) now marks them active, as a
+  flushing store's metadata flushes already did. A caller's own
+  provisioning is unchanged.
 - Options: `StoreOptions::background_io` (256 KiB), `background_unpaced`
   (8), `background_pacing` (on) and `commit_quiet` (5 s), checked at
   `create`, `open` and `open_readonly` (`NotWritten(InvalidOptions)`

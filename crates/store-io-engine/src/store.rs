@@ -237,6 +237,22 @@ pub(crate) fn qos_options(opts: &StoreOptions, block: u64) -> crate::qos::QosOpt
     }
 }
 
+/// Joins the device group a store with `ev` and `opts` belongs to (R5.4):
+/// never fails; what the evidence does not name is paced the safe way.
+pub(crate) fn join_group<P: Platform>(
+    platform: &P,
+    ev: &Evidence,
+    opts: &StoreOptions,
+    block: u64,
+) -> Arc<crate::qos::Qos> {
+    crate::qos::Registry::global().join(
+        platform.identity_scope(),
+        &placement(ev),
+        qos_options(opts, block),
+        platform.monotonic_ns(),
+    )
+}
+
 /// Where a store with `ev` joins pacing: a memory file system joins no
 /// group; anything else by its device's keys.
 pub(crate) fn placement(ev: &Evidence) -> crate::qos::Placement {
@@ -684,14 +700,21 @@ pub(crate) fn durable_slot<P: Platform>(
     if let Some(first) = domain.poisoned() {
         return Err(Error::Poisoned { first });
     }
-    let written = write_slot(q, file, pool, at, next, policy.dsync).inspect_err(|e| {
-        if matches!(e, Error::DurabilityUnknown { .. }) {
-            domain.poison(FirstCause {
-                op: Some(Op::Write),
-                raw: None,
-            });
-        }
-    })?;
+    // On a power-safe store the `dsync` write is the slot's flush: a
+    // commit's marks the device's commits active (a background call's
+    // marks nothing: `Domain::note_commit`).
+    if policy.dsync {
+        domain.note_commit();
+    }
+    let written =
+        write_slot(q, file, pool, at, next, policy.dsync, domain.pace()).inspect_err(|e| {
+            if matches!(e, Error::DurabilityUnknown { .. }) {
+                domain.poison(FirstCause {
+                    op: Some(Op::Write),
+                    raw: None,
+                });
+            }
+        })?;
     if policy.flush {
         let need = domain.ticket();
         // Through this lane and the main handle: slot 0's.

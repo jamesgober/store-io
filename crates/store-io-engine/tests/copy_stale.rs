@@ -23,7 +23,7 @@ use format2_util::craft::{lose_page, region, tear_newer_copy_of, write_regions};
 use format2_util::*;
 use store_io_core::error::{Error, NotWrittenCause};
 use store_io_core::id::RegionId;
-use store_io_engine::{CopyOptions, CopyReport, Store, copy_store};
+use store_io_engine::{CopyOptions, CopyReport, Store, StoreOptions, copy_store};
 use store_io_format::meta::{RegionKind, RegionState};
 use store_io_sim::{CrashMode, SimConfig, SimPlatform};
 
@@ -542,4 +542,73 @@ fn test_a_full_copy_is_durable_without_the_clean_close() {
     });
     let s = target(&p);
     assert!(page_bytes(&s, "p") == data, "the full copy's bytes");
+}
+
+/// A stale page's region copied in full goes out in the copy's background
+/// pieces (`background_io`), as its fills do: no write to the target's
+/// data area is larger, and every write is admitted (charged) when it is
+/// submitted.
+#[test]
+fn test_a_full_copy_writes_in_background_pieces() {
+    let p = fresh(1603);
+    let pr = region(0, RegionKind::Page, "p", BASE, CAP);
+    write_regions(&p, 0, &[pr]);
+    let pdata = pattern(3, CAP);
+    put(&p, BASE + 2 * B, &pdata);
+    tear_newer_copy_of(&p, 0);
+    let piece = 2 * B;
+    // A store of the same device, whose group's pieces in flight are read
+    // at every submission: the copy runs on this thread alone here (a full
+    // copy has no reader thread), so each write's sample is its own.
+    // (The probe holds a clone: it is dropped under the world's lock.)
+    let ro = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+    let ro2 = ro.clone();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = std::sync::Arc::clone(&seen);
+    p.with_world(|w| {
+        w.set_submit_probe(Some(std::sync::Arc::new(move || {
+            out.lock().unwrap().push(ro2.qos().in_flight);
+        })))
+    });
+    let before = p.with_world(|w| w.write_submits());
+    copy_store(
+        p.clone(),
+        Path::new(DIR),
+        Path::new(OTHER),
+        CopyOptions {
+            store: StoreOptions {
+                background_io: piece as u32,
+                ..opts()
+            },
+            accept_stale_pages: true,
+        },
+    )
+    .unwrap();
+    p.with_world(|w| w.set_submit_probe(None));
+    let writes = p.with_world(|w| w.write_submits()) - before;
+    let seen = seen.lock().unwrap().clone();
+    let charged = seen.iter().filter(|&&n| n >= 1).count() as u64;
+    assert_eq!(charged, writes, "every write admitted: {seen:?}");
+    drop(ro);
+    let lens: Vec<(u64, u64)> = p.with_world(|w| {
+        let f = w
+            .file_id(&std::path::PathBuf::from(OTHER), store_io_engine::CONTAINER)
+            .unwrap();
+        w.trace()
+            .iter()
+            .filter_map(|e| match e {
+                store_io_sim::world::TraceEvent::Write {
+                    file, offset, len, ..
+                } if *file == f => Some((*offset, *len)),
+                _ => None,
+            })
+            .collect()
+    });
+    // The data area (past the table): headers, fills and the full copy.
+    assert!(
+        lens.iter().filter(|w| w.0 >= BASE).all(|w| w.1 <= piece),
+        "a write over the piece: {lens:?}"
+    );
+    let s = target(&p);
+    assert!(page_bytes(&s, "p") == pdata, "p copied whole");
 }

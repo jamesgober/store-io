@@ -5,15 +5,19 @@
 
 #![allow(clippy::unwrap_used, unused_results)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use store_io_core::IoClass;
 use store_io_core::error::{Error, NotWrittenCause};
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 use store_io_engine::completion::{Completion, Rejected};
-use store_io_engine::{Store, StoreOptions, SubmitterConfig, WriteMode};
+use store_io_engine::{
+    CONTAINER, CopyOptions, Store, StoreOptions, SubmitterConfig, WriteMode, copy_store,
+};
 use store_io_platform::Platform;
+use store_io_sim::world::TraceEvent;
 use store_io_sim::{DeviceKind, SimConfig, SimPlatform};
 
 const SECOND: u64 = 1_000_000_000;
@@ -786,5 +790,150 @@ fn test_a_drop_whose_wait_fails_submits_no_next_piece() {
     assert!(
         a.poisoned().is_some(),
         "a write left unwritten poisons the store"
+    );
+}
+
+// ------------------------------------------------- a copy's target (V3d1)
+
+/// A source store in `/a` (device 0) whose 4 MiB append region holds
+/// `pattern(.., 0x40)`, closed so a copy can open it.
+fn copy_source(p: &SimPlatform) {
+    let a = create(p, "/a");
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut data = vec![0u8; 4 << 20];
+    pattern(&mut data, 0x40);
+    let mut last = None;
+    for c in data.chunks(1 << 20) {
+        last = Some(log.append(c).unwrap());
+    }
+    let _receipt = log.sync_through(&last.unwrap()).unwrap();
+}
+
+fn copy_to_c(p: &SimPlatform) {
+    copy_store(
+        p.clone(),
+        Path::new("/a"),
+        Path::new("/c"),
+        CopyOptions::default(),
+    )
+    .unwrap();
+}
+
+/// The lengths of the writes to `dir`'s container in the trace.
+fn write_lens(p: &SimPlatform, dir: &str) -> Vec<u64> {
+    p.with_world(|w| {
+        let f = w.file_id(&PathBuf::from(dir), CONTAINER).unwrap();
+        w.trace()
+            .iter()
+            .filter_map(|e| match e {
+                TraceEvent::Write { file, len, .. } if *file == f => Some(*len),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// Samples `s`'s group's pieces in flight at every submission until the
+/// returned guard's samples are taken.
+fn sample_in_flight(p: &SimPlatform, s: &Store<SimPlatform>) -> Arc<Mutex<Vec<u64>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (out, s) = (Arc::clone(&seen), s.clone());
+    p.with_world(|w| {
+        w.set_submit_probe(Some(Arc::new(move || {
+            out.lock().unwrap().push(s.qos().in_flight);
+        })))
+    });
+    seen
+}
+
+/// A copy's target is the call's own (R5.4): created, filled and closed
+/// in background pieces of at most `background_io`, each admitted
+/// (charged to the device group) before it is submitted, here while
+/// commits are active; the copy is whole.
+#[test]
+fn test_a_copy_writes_its_target_in_admitted_background_pieces() {
+    let p = two_devices(40, DeviceKind::VolatileCache);
+    copy_source(&p);
+    let w = create(&p, "/w");
+    let _hold = w.commit_hold();
+    let before = p.with_world(|w| w.write_submits());
+    let seen = sample_in_flight(&p, &w);
+    copy_to_c(&p);
+    p.with_world(|w| w.set_submit_probe(None));
+    let writes = p.with_world(|w| w.write_submits()) - before;
+    let seen = seen.lock().unwrap().clone();
+    // Every write of the copy is charged when it is submitted (a read of
+    // the source's, on the reader's thread, may be sampled during one too).
+    let charged = seen.iter().filter(|&&n| n >= 1).count() as u64;
+    assert!(charged >= writes, "{charged} of {writes} writes admitted");
+    assert!(
+        seen.iter().all(|&n| n <= 1),
+        "one piece at a time: {seen:?}"
+    );
+    let lens = write_lens(&p, "/c");
+    assert!(
+        lens.iter().all(|&n| n <= 256 << 10),
+        "a piece over background_io: {lens:?}"
+    );
+    assert!(
+        lens.iter().filter(|&&n| n == 256 << 10).count() >= 16,
+        "the region's 4 MiB in 256 KiB pieces: {lens:?}"
+    );
+    let c = Store::open(p.clone(), Path::new("/c"), StoreOptions::default()).unwrap();
+    let log = c.append_region("log").unwrap();
+    let mut back = vec![0u8; 4 << 20];
+    log.read(0, &mut back).unwrap();
+    assert!(is_pattern(&back, 0x40), "the copy is whole");
+}
+
+/// A copy's own metadata and flushes (its target's creation, provisioning,
+/// table and clean close) mark no activity, on a flushing device and on a
+/// power-safe one (whose `dsync` slot writes are its flushes).
+#[test]
+fn test_a_copy_marks_no_activity() {
+    for (seed, kind) in [(41, DeviceKind::VolatileCache), (42, DeviceKind::PowerSafe)] {
+        let p = two_devices(seed, kind);
+        copy_source(&p);
+        let w = create(&p, "/w");
+        advance(&p, 6 * SECOND);
+        assert!(!w.qos().active);
+        copy_to_c(&p);
+        assert!(
+            !w.qos().active,
+            "a copy marked its device active ({kind:?})"
+        );
+    }
+}
+
+/// On a power-safe store a slot commit's `dsync` write is its flush: it
+/// marks the device's commits active.
+#[test]
+fn test_a_power_safe_store_s_slot_commits_mark_activity() {
+    let p = two_devices(43, DeviceKind::PowerSafe);
+    let a = create(&p, "/a");
+    let slot = a.provision_slot("obj").unwrap();
+    advance(&p, 6 * SECOND);
+    assert!(!a.qos().active);
+    let _receipt = slot.commit(b"object").unwrap();
+    assert!(a.qos().active, "a slot commit is a commit");
+}
+
+/// A caller's own provisioning is commit-class, as before: its fill in
+/// 1 MiB pieces, none charged.
+#[test]
+fn test_a_caller_s_own_provisioning_is_unpaced() {
+    let p = two_devices(44, DeviceKind::VolatileCache);
+    let a = create(&p, "/a");
+    let _hold = a.commit_hold();
+    let seen = sample_in_flight(&p, &a);
+    let _log = a.provision_append_region("log", 4 << 20).unwrap();
+    p.with_world(|w| w.set_submit_probe(None));
+    assert!(
+        seen.lock().unwrap().iter().all(|&n| n == 0),
+        "a commit-class fill was charged"
+    );
+    assert!(
+        write_lens(&p, "/a").contains(&(1 << 20)),
+        "its fill in 1 MiB pieces"
     );
 }

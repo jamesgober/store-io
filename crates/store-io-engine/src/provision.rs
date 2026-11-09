@@ -321,7 +321,11 @@ where
     /// Writes `[offset, offset + extent)` of the container: its first
     /// `zeros` bytes zero, every later byte from `content(index, dst)`, which
     /// fills `dst` with the bytes of region offsets `index..` (`key_at` for
-    /// the first byte past the zeros). One write in flight at a time. A
+    /// the first byte past the zeros). One write in flight at a time: in
+    /// 1 MiB pieces, or for a background call's store (`Domain::pace`) in
+    /// its pieces (`background_io`), each buffer under the pool's background
+    /// cap and each piece admitted by the device group before it is
+    /// submitted (PLANNING R5.4). A
     /// write that failed after submission poisons (`DurabilityUnknown`);
     /// running out of space is `NoSpace`, unpoisoned; an error from
     /// `content` stops the fill before that piece is written, unpoisoned
@@ -336,7 +340,11 @@ where
     ) -> Result<(), Error> {
         let inner = &self.inner;
         let block = inner.layout.block();
-        let chunk = (self.chunk() as u64).min(1 << 20).max(block);
+        let pace = inner.domain.pace();
+        let chunk = match pace {
+            Some(p) => p.piece() as u64,
+            None => (self.chunk() as u64).min(1 << 20).max(block),
+        };
         let mut q = inner.queues.get(0);
         let mut at = 0u64;
         while at < extent {
@@ -348,7 +356,13 @@ where
                 return Err(Error::Poisoned { first });
             }
             let len = chunk.min(extent - at);
-            let mut buf = self.take(len as usize, ErrorContext::default())?;
+            // (A capped refusal is final here: the store's one background
+            // taker is this call's single writer, so no other capped take
+            // can hold a unit for an instant.)
+            let mut buf = match pace {
+                Some(_) => self.take_capped(len as usize, ErrorContext::default())?,
+                None => self.take(len as usize, ErrorContext::default())?,
+            };
             // The content from the first byte past the zeros, even inside a
             // chunk that also covers some of them.
             let dst = buf.as_mut_slice();
@@ -356,6 +370,7 @@ where
             dst[..z].fill(0);
             let index = key_at + (at + z as u64).saturating_sub(zeros);
             content(index, &mut dst[z..])?;
+            let charge = pace.map(crate::pace::Pace::admit).transpose()?;
             let ran = run(
                 &mut q,
                 IoOp::Write {
@@ -374,6 +389,8 @@ where
                     |r| space_err(Op::Write, r, 0),
                 )
             })?;
+            // Completed (or abandoned): the piece's charge goes with it.
+            drop(charge);
             // A fill write that failed after submission stops the store
             // (fail-stop, D-071); only running out of space is reported as
             // `NoSpace` without poisoning: the region never became Ready.

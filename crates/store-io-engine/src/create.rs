@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use store_io_buf::BufPool;
+use store_io_core::IoClass;
 use store_io_core::decide::decide;
 use store_io_core::error::{Error, ErrorContext, Named, Op};
 use store_io_core::id::VolumeId;
@@ -12,6 +13,7 @@ use store_io_platform::{FileMode, FileName, IoOp, Platform, Queue};
 
 use crate::exec::{Lane, QueueSet, Ran, run};
 use crate::layout::{Layout, choose_log2_block};
+use crate::pace::{Joined, Pace};
 use crate::slots::{PairRead, plan_next, write_slot};
 use crate::store::*;
 
@@ -37,16 +39,21 @@ where
     /// and the fields after it), before anything is created.
     pub fn create(platform: P, path: &Path, opts: StoreOptions) -> Result<Self, Error> {
         crate::store::check_pacing(&opts)?;
-        Self::create_named(platform, path, opts, &container_name()?)
+        Self::create_named(platform, path, opts, &container_name()?, IoClass::Commit)
     }
 
     /// [`Self::create`] with the container under `name` (`copy_store`
-    /// builds its target under a temporary one).
+    /// builds its target under a temporary one), for a call of `class`: a
+    /// store created at `Background` belongs to its creating call (PLANNING
+    /// R5.4), so its metadata, from the first write of its creation to its
+    /// clean close, and its regions' data go out as that call's pieces,
+    /// admitted by its device group, and mark no activity.
     pub(crate) fn create_named(
         platform: P,
         path: &Path,
         opts: StoreOptions,
         name: &store_io_platform::FileName,
+        class: IoClass,
     ) -> Result<Self, Error> {
         let dir = platform
             .open_dir(path, true)
@@ -68,9 +75,9 @@ where
             }
             Err(e) => return Err(io(Op::Create, e)),
         };
-        let built = Self::build_new(&platform, &dir, &file, &opts);
+        let built = Self::build_new(&platform, &dir, &file, &opts, class);
         match built {
-            Ok((meta, report, layout, policy, pool, queues)) => {
+            Ok((meta, report, layout, policy, pool, queues, joined)) => {
                 if let Err(e) = platform.sync_dir(&dir) {
                     return Err(Error::DurabilityUnknown {
                         op: Op::SyncDir,
@@ -97,6 +104,7 @@ where
                     opts,
                     // A new container: no earlier open to vouch for.
                     None,
+                    Some(joined),
                 ))
             }
             Err(e) => {
@@ -208,6 +216,7 @@ where
         dir: &P::Dir,
         file: &P::File,
         opts: &StoreOptions,
+        class: IoClass,
     ) -> Result<
         (
             Meta,
@@ -216,6 +225,7 @@ where
             Policy,
             BufPool,
             QueueSet<P::Queue>,
+            Joined,
         ),
         Error,
     > {
@@ -231,6 +241,12 @@ where
             Layout::v1(log2_block, log2_table)
         };
         let policy = policy_of(&decision);
+        // Joined before any metadata is written: a background call's first
+        // write is already its piece, admitted by the group (R5.4).
+        let qos = join_group(platform, &evidence, opts, layout.block());
+        let pace = class
+            .is_background()
+            .then(|| Pace::new(&qos, platform.clock()));
         let pool = make_pool(&evidence, &layout, opts, true)?;
         let lanes = if policy.flush {
             flush_slots(platform, opts)
@@ -245,7 +261,16 @@ where
         if v2 {
             let meta = {
                 let mut q = queues.get(0);
-                crate::v2::create_metadata(platform, file, &mut q, &pool, &layout, volume, created)?
+                crate::v2::create_metadata(
+                    platform,
+                    file,
+                    &mut q,
+                    &pool,
+                    &layout,
+                    volume,
+                    created,
+                    pace.as_ref(),
+                )?
             };
             let report = StoreReport {
                 evidence,
@@ -262,7 +287,15 @@ where
                 metadata: MetadataReport::default(),
                 flushes_in_flight: 1,
             };
-            return Ok((meta, report, layout, policy, pool, queues));
+            return Ok((
+                meta,
+                report,
+                layout,
+                policy,
+                pool,
+                queues,
+                Joined { qos, pace },
+            ));
         }
         let header_len = layout.data_start();
         platform
@@ -286,9 +319,9 @@ where
         let empty = PairRead::blank();
         let mut q = queues.get(0);
         let next_v = plan_next(&empty, &vbuf, 1)?;
-        let volume_slot = write_slot(&mut q, file, &pool, &vat, &next_v, false)?;
+        let volume_slot = write_slot(&mut q, file, &pool, &vat, &next_v, false, pace.as_ref())?;
         let next_t = plan_next(&empty, &tbuf[..tlen], 1)?;
-        let table_slot = write_slot(&mut q, file, &pool, &tat, &next_t, false)?;
+        let table_slot = write_slot(&mut q, file, &pool, &tat, &next_t, false, pace.as_ref())?;
         drop(q);
         platform
             .flush_all(file)
@@ -325,7 +358,15 @@ where
             unavailable: Vec::new(),
             repairs: Vec::new(),
         };
-        Ok((meta, report, layout, policy, pool, queues))
+        Ok((
+            meta,
+            report,
+            layout,
+            policy,
+            pool,
+            queues,
+            Joined { qos, pace },
+        ))
     }
 }
 

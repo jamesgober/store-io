@@ -382,6 +382,11 @@ pub struct Domain {
 struct Activity {
     qos: Arc<crate::qos::Qos>,
     clock: store_io_platform::Clock,
+    /// The background call the store belongs to (a store created at
+    /// `Background`: `copy_store`'s target): its barriers and its `dsync`
+    /// writes are that call's, never commits, and its metadata writes are
+    /// the call's pieces.
+    pace: Option<crate::pace::Pace>,
 }
 
 impl core::fmt::Debug for Activity {
@@ -443,23 +448,36 @@ impl Domain {
     }
 
     /// The domain of a store in the device group `qos`, its barriers
-    /// stamping commit activity with `clock` (its platform's fine clock).
+    /// stamping commit activity with `clock` (its platform's fine clock),
+    /// unless the store belongs to the background call `pace`.
     pub(crate) fn with_activity(
         mut self,
         qos: Arc<crate::qos::Qos>,
         clock: store_io_platform::Clock,
+        pace: Option<crate::pace::Pace>,
     ) -> Self {
-        self.activity = Some(Activity { qos, clock });
+        self.activity = Some(Activity { qos, clock, pace });
         self
+    }
+
+    /// The background call the store belongs to, if any (see
+    /// [`Self::with_activity`]): its metadata and data writes are that
+    /// call's pieces, admitted by its device group (PLANNING R5.4).
+    pub(crate) fn pace(&self) -> Option<&crate::pace::Pace> {
+        self.activity.as_ref().and_then(|a| a.pace.as_ref())
     }
 
     /// Marks the store's device group's commits active (a commit-class
     /// barrier's entry, or a commit-class `dsync` write on a power-safe
     /// store, where no barrier flushes): one clock read, a relaxed load and
-    /// a compare; a store at most once a millisecond (R5.4).
+    /// a compare; a store at most once a millisecond (R5.4). A background
+    /// call's store marks nothing: its every barrier and write is the
+    /// call's (so a copy's own metadata never marks its group active).
     pub(crate) fn note_commit(&self) {
         if let Some(a) = &self.activity {
-            a.qos.commit((a.clock)());
+            if a.pace.is_none() {
+                a.qos.commit((a.clock)());
+            }
         }
     }
 

@@ -50,6 +50,7 @@ mod open;
 mod open2;
 mod optable;
 mod options;
+mod pace;
 mod provision;
 mod provision2;
 // Device pacing: stores join and commits mark activity (V3c1); background

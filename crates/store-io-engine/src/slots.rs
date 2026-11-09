@@ -522,6 +522,12 @@ pub(crate) struct NextSlot<'a> {
 ///
 /// # Errors
 ///
+/// For a background call (`pace`: a store created at `Background`) the slot
+/// is one of the call's pieces (one device I/O whatever its size, at most a
+/// table slot's 64 KiB): its buffer under the pool's background cap, and
+/// admitted by the device group before it is submitted, charged until it
+/// completes (PLANNING R5.4).
+///
 /// `NotWritten` if nothing reached the device; `Corruption(Metadata)` before
 /// any I/O if the encoded bytes do not validate (an encoder defect);
 /// `DurabilityUnknown` (the caller poisons) for a failed or short write.
@@ -532,6 +538,7 @@ pub(crate) fn write_slot<Q: Queue>(
     at: &PairAt,
     next: &NextSlot<'_>,
     dsync: bool,
+    pace: Option<&crate::pace::Pace>,
 ) -> Result<Written, Error> {
     let ctx = ErrorContext::default();
     // A numbered format-2 object carries a meta_seq, and nothing else does.
@@ -540,7 +547,11 @@ pub(crate) fn write_slot<Q: Queue>(
         at.format == store_io_format::slot::FORMAT_2 && at.numbered,
         "meta_seq for a numbered format-2 object only"
     );
-    let mut buf = pool.take(at.size()).map_err(|_| pool_err(ctx))?;
+    let mut buf = match pace {
+        Some(_) => pool.take_capped(at.size(), usize::MAX),
+        None => pool.take(at.size()),
+    }
+    .map_err(|_| pool_err(ctx))?;
     let fields = SlotFields {
         volume_uuid: at.volume,
         object_id: at.object,
@@ -584,6 +595,7 @@ pub(crate) fn write_slot<Q: Queue>(
         payload: Some(info.payload(buf.as_slice()).to_vec()),
         facts: header_facts(buf.as_slice(), &expect),
     };
+    let charge = pace.map(crate::pace::Pace::admit).transpose()?;
     let ran = run(
         q,
         IoOp::Write {
@@ -601,6 +613,8 @@ pub(crate) fn write_slot<Q: Queue>(
         },
         ctx,
     })?;
+    // Completed (or abandoned): the piece's charge goes with it.
+    drop(charge);
     let result = match ran {
         Ran::Done { result, .. } => result,
         Ran::Abandoned(raw) => Err(raw),
@@ -695,7 +709,7 @@ mod tests {
         for _ in 0..2 {
             let mut q = inner.queues.get(0);
             let next = plan_next(&prev, &payload, 1).unwrap();
-            let w = write_slot(&mut q, &inner.file, &inner.pool, &at, &next, false).unwrap();
+            let w = write_slot(&mut q, &inner.file, &inner.pool, &at, &next, false, None).unwrap();
             let after = prev.after(w);
             let read = read_pair(&mut q, &inner.file, &inner.pool, &at).unwrap();
             assert_eq!(after.report.a, read.report.a);

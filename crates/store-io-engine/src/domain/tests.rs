@@ -679,7 +679,7 @@ fn test_only_a_commit_class_barrier_marks_activity() {
         crate::qos::QosOptions::default(),
         at,
     );
-    let d = Domain::with_slots(1).with_activity(Arc::clone(&qos), Arc::new(move || at));
+    let d = Domain::with_slots(1).with_activity(Arc::clone(&qos), Arc::new(move || at), None);
     let need = d.ticket();
     assert!(
         d.barrier_classed(need, IoClass::Background, |_, _| Ok(()))

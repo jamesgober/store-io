@@ -1073,4 +1073,39 @@ mod tests {
         assert_eq!(lens, vec![256 << 10; 4]);
         assert_eq!(*seen.lock().unwrap(), vec![(1, 1); 4]);
     }
+
+    /// A reader with no pacing (a `Feed` given none: every store has a
+    /// record today, but the type allows it) reads in the store's chunk,
+    /// here 4 MiB (`max_io`), and still sends `FEED_PIECE` parts, each at
+    /// its own offset (the reader's bound on the bytes it holds); the fill
+    /// reads the region whole, in order.
+    #[test]
+    fn test_an_unpaced_feed_sends_pieces_at_their_offsets() {
+        let p = SimPlatform::new(SimConfig::volatile(59));
+        let opts = StoreOptions {
+            max_io: 4 << 20,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p.clone(), Path::new("/s"), opts).unwrap();
+        assert!(s.chunk() > super::FEED_PIECE, "a chunk of several parts");
+        let len = 8usize << 20;
+        let log = s.provision_append_region("log", len as u64).unwrap();
+        let data: Vec<u8> = (0..len)
+            .map(|i| (i as u8) ^ ((i / 4096) as u8).wrapping_mul(37) ^ ((i >> 20) as u8))
+            .collect();
+        let t = log.append(&data).unwrap();
+        let _receipt = log.sync_through(&t).unwrap();
+        let r = Arc::clone(log.state());
+        let back = std::thread::scope(|sc| {
+            let (reader, mut feed) = super::Feed::start(sc, &s, &r, len as u64, None).unwrap();
+            let mut back = vec![0u8; len];
+            for (i, part) in back.chunks_mut(1 << 20).enumerate() {
+                feed.read((i << 20) as u64, part).unwrap();
+            }
+            drop(feed);
+            reader.join().unwrap().unwrap();
+            back
+        });
+        assert!(back == data);
+    }
 }

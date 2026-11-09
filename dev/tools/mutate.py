@@ -1342,7 +1342,7 @@ M = [
  # in it (resumed on the copying thread).
  (COPY_SRC, "                    (_, Some(e)) | (Err(e), None) => Some(e),\n                    (Ok(_), None) => None,", "                    (Err(e), _) => Some(e),\n                    (Ok(_), _) => None,", COPYT),
  (COPY_SRC, "        if f.full.is_none() && f.kind != RegionKind::Slot && f.data_size > 0 {", "        if f.full.is_none() && f.kind != RegionKind::Slot && f.data_size > 0 && false {", COPYT),
- (COPY_SRC, "                            let at = offset + (i * FEED_PIECE) as u64;", "                            let at = offset + (i * 0) as u64;", COPYT),
+ (COPY_SRC, "                            let at = offset + (i * FEED_PIECE) as u64;", "                            let at = offset + (i * 0) as u64;", COPY_UNIT_T),
  (COPY_SRC, "                        drop(reader);\n                        match handle.join() {", "                        let _kept = &reader;\n                        match handle.join() {", COPYT),
  ("crates/store-io-engine/src/provision2.rs", "                self.write_range(pl.offset, head, 2 * block, 0, data)?;", "                self.write_range(pl.offset, head, 0, 0, data)?;", COPYT),
  ("crates/store-io-engine/src/provision2.rs", "                if filled > head {", "                if filled > head && false {", COPYT),

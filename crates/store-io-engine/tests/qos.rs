@@ -891,6 +891,47 @@ fn test_a_copy_writes_its_target_in_admitted_background_pieces() {
     assert!(is_pattern(&back, 0x40), "the copy is whole");
 }
 
+/// A copy while commits are quiet writes its target's data in larger
+/// pieces, still one at a time (D-156): as many of its pieces as the call
+/// may then keep in flight (`background_unpaced`), at most 1 MiB; commits
+/// active, in pieces of `background_io` (the test above). The copy is
+/// whole.
+#[test]
+fn test_a_quiet_copy_writes_larger_pieces_one_at_a_time() {
+    for (seed, unpaced, most) in [(43, 8u32, 1u64 << 20), (44, 2, 512 << 10)] {
+        let p = two_devices(seed, DeviceKind::VolatileCache);
+        copy_source(&p);
+        let w = create(&p, "/w");
+        // The source's appends were commits: quiet once `commit_quiet`
+        // has passed.
+        advance(&p, 6 * SECOND);
+        assert!(!w.qos().active, "commits still active");
+        let store = StoreOptions {
+            background_unpaced: unpaced,
+            ..StoreOptions::default()
+        };
+        let opts = CopyOptions {
+            store,
+            ..CopyOptions::default()
+        };
+        copy_store(p.clone(), Path::new("/a"), Path::new("/c"), opts).unwrap();
+        let lens = write_lens(&p, "/c");
+        assert!(
+            lens.iter().all(|&n| n <= most),
+            "unpaced {unpaced}: a piece over {most}: {lens:?}"
+        );
+        assert!(
+            lens.iter().filter(|&&n| n == most).count() >= 3,
+            "unpaced {unpaced}: the region's 4 MiB not in {most}-byte pieces: {lens:?}"
+        );
+        let c = Store::open(p.clone(), Path::new("/c"), StoreOptions::default()).unwrap();
+        let log = c.append_region("log").unwrap();
+        let mut back = vec![0u8; 4 << 20];
+        log.read(0, &mut back).unwrap();
+        assert!(is_pattern(&back, 0x40), "the copy is whole");
+    }
+}
+
 /// A copy's own metadata and flushes (its target's creation, provisioning,
 /// table and clean close) mark no activity, on a flushing device and on a
 /// power-safe one (whose `dsync` slot writes are its flushes).

@@ -150,7 +150,11 @@ pub struct StoreOptions {
     pub region_defaults: Option<crate::RegionOptions>,
     /// Device pacing (PLANNING R5.4): background work (scans, copies,
     /// background `Submitter`s; paced as each lands in v0.6) is split into
-    /// pieces of this many bytes, whatever the device's state. A multiple of
+    /// pieces of this many bytes, whatever the device's state, except a
+    /// copy's fill of its target, which keeps one piece in flight: while
+    /// commits are quiet its pieces are `background_unpaced` of these, at
+    /// most 1 MiB (as many bytes as a deeper call may then keep in flight;
+    /// D-156). A multiple of
     /// 4096 from 4096 to 256 KiB (PERF-10's piece); default 256 KiB. The
     /// store splits at the smaller of this and its largest I/O (`max_io`
     /// rounded up to a power of two, at least 128 KiB), rounded down to

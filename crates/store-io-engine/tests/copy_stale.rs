@@ -545,9 +545,10 @@ fn test_a_full_copy_is_durable_without_the_clean_close() {
 }
 
 /// A stale page's region copied in full goes out in the copy's background
-/// pieces (`background_io`), as its fills do: no write to the target's
-/// data area is larger, and every write is admitted (charged) when it is
-/// submitted.
+/// pieces (`background_io`), as its fills do while commits are active (a
+/// `CommitHold` here; quiet, a fill's pieces are larger, `tests/qos.rs`,
+/// D-156): no write to the target's data area is larger, and every write
+/// is admitted (charged) when it is submitted.
 #[test]
 fn test_a_full_copy_writes_in_background_pieces() {
     let p = fresh(1603);
@@ -562,6 +563,7 @@ fn test_a_full_copy_writes_in_background_pieces() {
     // copy has no reader thread), so each write's sample is its own.
     // (The probe holds a clone: it is dropped under the world's lock.)
     let ro = Store::open_readonly(p.clone(), Path::new(DIR), opts()).unwrap();
+    let hold = ro.commit_hold();
     let ro2 = ro.clone();
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let out = std::sync::Arc::clone(&seen);
@@ -615,7 +617,7 @@ fn test_a_full_copy_writes_in_background_pieces() {
         reads.iter().all(|&n| n <= piece),
         "a read over the piece: {reads:?}"
     );
-    drop(ro);
+    drop((hold, ro));
     let lens: Vec<(u64, u64)> = p.with_world(|w| {
         let f = w
             .file_id(&std::path::PathBuf::from(OTHER), store_io_engine::CONTAINER)

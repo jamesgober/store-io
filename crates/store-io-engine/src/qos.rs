@@ -814,6 +814,23 @@ impl Issuer {
         self.admit_leaving(now, 0)
     }
 
+    /// Whether the group paces background work at `now` (pacing on and its
+    /// commits active), and the pieces a call may keep in flight while it
+    /// does not (`background_unpaced`): what [`Self::admit`] reads, for a
+    /// call sizing its next piece (D-156). A hint: activity may begin
+    /// after the piece is sized and before it is admitted (a fill sizes it
+    /// before it fetches its content, which may wait on the call's reader),
+    /// so at a switch to active one quiet-sized piece may still go out.
+    pub(crate) fn pacing(self: &Arc<Self>, now: u64) -> (bool, u64) {
+        self.qos.with_record(|rec| {
+            let paced = rec.is_some_and(|r| self.qos.active_in(r, now) && r.opts.pacing);
+            let cap = rec.map_or(self.qos.opts.background_unpaced, |r| {
+                r.opts.background_unpaced
+            });
+            (paced, u64::from(cap.max(1)))
+        })
+    }
+
     /// As [`Self::admit`], leaving `leave` of the call's unpaced pieces to
     /// its other threads (a copy's reader leaves one to the fill sharing
     /// its record, so the reader's read-ahead never refuses the fill).

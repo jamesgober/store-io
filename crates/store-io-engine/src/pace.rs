@@ -76,6 +76,23 @@ impl Pace {
         self.piece
     }
 
+    /// The length of the next piece of a call that keeps one piece in
+    /// flight at a time (a fill, D-156): its piece while the group paces;
+    /// while commits are quiet as many of its pieces as the call may then
+    /// keep in flight (`background_unpaced`), so the device holds no more
+    /// of it than it would hold of a deeper call, at most `max` (`max` is
+    /// a multiple of the piece; the result is never under one piece).
+    pub(crate) fn lone_piece(&self, max: usize) -> usize {
+        let (paced, cap) = self.issuer.pacing((self.clock)());
+        if paced {
+            return self.piece;
+        }
+        let quiet = self
+            .piece
+            .saturating_mul(usize::try_from(cap).unwrap_or(usize::MAX));
+        (quiet.min(max) / self.piece).max(1) * self.piece
+    }
+
     /// Admits one piece now, or refuses it: a scan's read, whose charge
     /// rides with it until its completion is collected. Refused, the scan
     /// reaps its own reads first ([`Self::wait_charge`] only with none in

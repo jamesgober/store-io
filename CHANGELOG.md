@@ -57,7 +57,12 @@
   page's full copy) goes out in `background_io` pieces, each admitted by
   the device's pacing before it is submitted, its buffer under the pool's
   background cap (a stale page's full copy through the region's own write
-  path, one I/O per piece). Its flushes and durable writes never mark
+  path, one I/O per piece). The exception is the fill of a recreated
+  region's data, one write at a time as in v0.5: while commits are quiet
+  each of its writes is `background_unpaced` pieces long, at most 1 MiB
+  and the store's largest I/O (D-156), so a quiet copy runs as fast as
+  v0.5's (in 256 KiB pieces it ran 40% slower;
+  `harness/examples/copy_cost.rs` measures it). Its flushes and durable writes never mark
   commits active. On a power-safe store every durable metadata write (a
   slot commit, provisioning, a clean close) now marks them active, as a
   flushing store's metadata flushes already did. A caller's own

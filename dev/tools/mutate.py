@@ -1661,7 +1661,13 @@ M = [
  ("crates/store-io-engine/src/store.rs", 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace())', 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace().filter(|_| false))', PACE_T),
  ("crates/store-io-engine/src/slots.rs", '        Some(_) => pool.take_capped(at.size(), usize::MAX),', '        Some(_) => pool.take(at.size()),', PACE_T),
  ("crates/store-io-engine/src/slots.rs", '    let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '    let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
- ("crates/store-io-engine/src/provision.rs", '            Some(p) => p.piece() as u64,', '            Some(p) => (p.piece() as u64).max(1 << 20),', QOS_STORE_T),
+ ("crates/store-io-engine/src/provision.rs", '                Some(p) => p.lone_piece(chunk as usize) as u64,', '                Some(p) => (p.lone_piece(chunk as usize) as u64).max(1 << 20),', QOS_STORE_T),
+ # D-156: a fill's piece, while commits are quiet, is as many pieces as the
+ # call may keep in flight, at most the store's chunk; paced, its piece
+ ("crates/store-io-engine/src/pace.rs", '        if paced {\n            return self.piece;\n        }', '        if paced && false {\n            return self.piece;\n        }', QOS_STORE_T),
+ ("crates/store-io-engine/src/pace.rs", '            .saturating_mul(usize::try_from(cap).unwrap_or(usize::MAX));', '            .saturating_mul(usize::try_from(cap).unwrap_or(usize::MAX).max(4));', QOS_STORE_T),
+ ("crates/store-io-engine/src/pace.rs", '        (quiet.min(max) / self.piece).max(1) * self.piece', '        (quiet.max(max) / self.piece).max(1) * self.piece', QOS_STORE_T),
+ ("crates/store-io-engine/src/qos.rs", '            let paced = rec.is_some_and(|r| self.qos.active_in(r, now) && r.opts.pacing);', '            let paced = rec.is_some_and(|r| self.qos.active_in(r, now) && r.opts.pacing && false);', QOS_STORE_T),
  ("crates/store-io-engine/src/provision.rs", '                Some(_) => self.take_capped(len as usize, ErrorContext::default())?,', '                Some(_) => self.take(len as usize, ErrorContext::default()).or_else(|_| self.take_capped(len as usize, ErrorContext::default()))?,', PACE_T),
  ("crates/store-io-engine/src/provision.rs", '            let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '            let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
  ("crates/store-io-engine/src/create.rs", '        let pace = class\n            .is_background()', '        let pace = (class.is_background() && false)', QOS_STORE_T),

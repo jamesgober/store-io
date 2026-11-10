@@ -322,10 +322,12 @@ where
     /// `zeros` bytes zero, every later byte from `content(index, dst)`, which
     /// fills `dst` with the bytes of region offsets `index..` (`key_at` for
     /// the first byte past the zeros). One write in flight at a time: in
-    /// 1 MiB pieces, or for a background call's store (`Domain::pace`) in
-    /// its pieces (`background_io`), each buffer under the pool's background
-    /// cap and each piece admitted by the device group before it is
-    /// submitted (PLANNING R5.4). A
+    /// 1 MiB pieces (the store's chunk at most), or for a background call's
+    /// store (`Domain::pace`) in its pieces (`background_io`) while the
+    /// device group paces and larger while commits are quiet (up to
+    /// `background_unpaced` pieces and 1 MiB, `Pace::lone_piece`, D-156),
+    /// each buffer under the pool's background cap and each piece admitted
+    /// by the device group before it is submitted (PLANNING R5.4). A
     /// write that failed after submission poisons (`DurabilityUnknown`);
     /// running out of space is `NoSpace`, unpoisoned; an error from
     /// `content` stops the fill before that piece is written, unpoisoned
@@ -341,10 +343,7 @@ where
         let inner = &self.inner;
         let block = inner.layout.block();
         let pace = inner.domain.pace();
-        let chunk = match pace {
-            Some(p) => p.piece() as u64,
-            None => (self.chunk() as u64).min(1 << 20).max(block),
-        };
+        let chunk = (self.chunk() as u64).min(1 << 20).max(block);
         let mut q = inner.queues.get(0);
         let mut at = 0u64;
         while at < extent {
@@ -355,7 +354,12 @@ where
             if let Some(first) = inner.domain.poisoned() {
                 return Err(Error::Poisoned { first });
             }
-            let len = chunk.min(extent - at);
+            // Sized at each piece: commits may begin or go quiet mid-fill.
+            let piece = match pace {
+                Some(p) => p.lone_piece(chunk as usize) as u64,
+                None => chunk,
+            };
+            let len = piece.min(extent - at);
             // (A capped refusal is final here: the store's one background
             // taker is this call's single writer, so no other capped take
             // can hold a unit for an instant.)

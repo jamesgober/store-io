@@ -73,6 +73,8 @@ pub enum Command {
     MultiGates,
     /// G19 alone.
     G19,
+    /// G7's shape study (an experiment).
+    G7Shape,
     /// Device report only.
     Probe,
     /// The observer's cost per durable write.
@@ -96,6 +98,7 @@ impl Command {
             Self::Gates => "gates",
             Self::MultiGates => "multi-gates",
             Self::G19 => "g19",
+            Self::G7Shape => "g7-shape",
             Self::Probe => "probe",
             Self::ObserveCost => "observe-cost",
             Self::Help => "help",
@@ -114,6 +117,7 @@ impl Command {
             Self::Gates,
             Self::MultiGates,
             Self::G19,
+            Self::G7Shape,
             Self::Probe,
             Self::ObserveCost,
             Self::Help,

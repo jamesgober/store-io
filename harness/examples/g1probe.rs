@@ -37,7 +37,10 @@ fn main() {
     fn cpu() -> Duration {
         // SAFETY: clock_gettime fills the struct it is given.
         let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) }, 0);
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) },
+            0
+        );
         Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
     }
 

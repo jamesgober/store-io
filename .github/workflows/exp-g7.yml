@@ -1,0 +1,67 @@
+name: exp-g7-shape
+
+# Experiment only (branch exp/g7-shape, never merged): G7's scan beside fio
+# at several shapes on the gates' memory-backed device, on several runners.
+
+on:
+  push:
+    branches: [exp/g7-shape]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  shape:
+    name: g7 shape (${{ matrix.n }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: harness
+      - name: CPU and mitigations
+        run: |
+          grep -m1 "model name" /proc/cpuinfo
+          nproc
+          uname -r
+          grep . /sys/devices/system/cpu/vulnerabilities/* || true
+          cat /proc/cmdline
+      - name: Build the harness
+        run: cargo build --release --manifest-path harness/Cargo.toml
+      - name: The gates' memory-backed device
+        run: |
+          set -eux
+          bash dev/tools/apt-install.sh --update fio
+          if sudo modprobe null_blk nr_devices=1 gb=6 bs=4096 memory_backed=1 cache_size=1024 queue_mode=2 irqmode=0 completion_nsec=0; then
+            DEV=/dev/nullb0
+          else
+            sudo truncate -s 6G /dev/shm/gates.img
+            DEV=$(sudo losetup --show -f -b 4096 /dev/shm/gates.img)
+          fi
+          cat /sys/block/$(basename "$DEV")/queue/max_sectors_kb
+          sudo mkfs.ext4 -q -m 0 -b 4096 -E lazy_itable_init=0,lazy_journal_init=0 "$DEV"
+          sudo mkdir -p /mnt/gates
+          sudo mount "$DEV" /mnt/gates
+          sudo chown "$(id -u):$(id -g)" /mnt/gates
+      - name: g7-shape
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/g7"
+          harness/target/release/store-io-harness g7-shape --secs 3 --tier uring \
+            --settle 0 --dir /mnt/gates --out "$RUNNER_TEMP/g7"
+          f=$(ls "$RUNNER_TEMP"/g7/*.md)
+          grep -m1 "^| CPU" "$f"
+          sed -n '/^| variant |/,/^$/p' "$f"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g7-shape-${{ matrix.n }}
+          path: ${{ runner.temp }}/g7/
+          if-no-files-found: ignore

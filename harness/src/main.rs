@@ -54,7 +54,7 @@ struct Workload {
     fixed_secs: f64,
 }
 
-const WORKLOADS: [Workload; 9] = [
+const WORKLOADS: [Workload; 10] = [
     Workload {
         command: Command::Lone,
         run: workloads::lone::run,
@@ -131,6 +131,13 @@ const WORKLOADS: [Workload; 9] = [
         points: 40,
         settles: 0,
         fixed_secs: 650.0,
+    },
+    Workload {
+        command: Command::G7Shape,
+        run: workloads::g7_shape::run,
+        points: 60,
+        settles: 0,
+        fixed_secs: 0.0,
     },
 ];
 
@@ -295,7 +302,8 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
             (args.command == Command::All
                 && w.command != Command::Gates
                 && w.command != Command::MultiGates
-                && w.command != Command::G19)
+                && w.command != Command::G19
+                && w.command != Command::G7Shape)
                 || w.command == args.command
         })
         .collect();

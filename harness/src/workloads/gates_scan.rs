@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use store_io_engine::ScanItem;
 
 use super::stamp::{self, BLOCK};
-use super::{Ctx, sioerr, with_store};
+use store_io_engine::StoreOptions;
+
+use super::{Ctx, sioerr, with_store_using};
 use crate::report::{Point, System, Verify};
 
 /// The region scanned.
@@ -32,8 +34,18 @@ const MIB: u64 = 1 << 20;
 /// no gap, whole blocks) and each block's first word; one more scan
 /// afterwards, outside the window, checks every word.
 pub fn scan(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point {
-    let p = Point::new(System::StoreIo, "PageRegion::scan, whole region");
-    with_store(ctx, "g7", p, |store, p| {
+    scan_using(ctx, &ctx.opts, "PageRegion::scan, whole region", fio)
+}
+
+/// As [`scan`], on a store made with `opts`, the point named `variant`.
+pub fn scan_using(
+    ctx: &Ctx,
+    opts: &StoreOptions,
+    variant: &str,
+    fio: &mut dyn FnMut() -> Result<f64, String>,
+) -> Point {
+    let p = Point::new(System::StoreIo, variant);
+    with_store_using(ctx, "g7", opts, p, |store, p| {
         let pages = store
             .provision_page_region("g7", SPAN)
             .map_err(|e| sioerr("provision", &e))?;

@@ -4,6 +4,7 @@
 
 pub mod caller_batch;
 pub mod concurrent;
+pub mod g7_shape;
 pub mod gates;
 pub mod gates_extra;
 pub mod gates_g1;

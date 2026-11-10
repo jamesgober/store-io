@@ -43,10 +43,16 @@ pub(super) fn ask<P: Platform>(
         Some(Ok(need))
     } else if let Some(first) = domain.poisoned() {
         Some(Err(Error::Poisoned { first }))
-    } else if store
-        .flusher()
-        .is_some_and(|f| f.request(need, class, qtag, Arc::clone(inbox) as Arc<dyn Answer>))
-    {
+    } else if store.flusher().is_some_and(|f| {
+        let arrived = class.is_commit().then(|| domain.arrival()).flatten();
+        f.request(
+            need,
+            class,
+            arrived,
+            qtag,
+            Arc::clone(inbox) as Arc<dyn Answer>,
+        )
+    }) {
         table.asked += 1;
         None
     } else {

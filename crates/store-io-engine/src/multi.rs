@@ -947,6 +947,7 @@ where
             if f.request(
                 need,
                 store_io_core::IoClass::Commit,
+                store.inner.domain.arrival(),
                 tag,
                 Arc::clone(&self.answers) as Arc<dyn Answer>,
             ) {

@@ -696,3 +696,186 @@ fn test_only_a_commit_class_barrier_marks_activity() {
     );
     assert!(qos.active(at));
 }
+
+/// A domain whose store is in a device group of its own, auto-tuned or
+/// not, its clock a word the test sets.
+fn tuning_domain(autotune: bool) -> (Arc<Domain>, Arc<crate::qos::Qos>, Arc<AtomicU64>) {
+    let r: &'static crate::qos::Registry = Box::leak(Box::new(crate::qos::Registry::new()));
+    let now = Arc::new(AtomicU64::new(1_000));
+    let qos = r.join(
+        0,
+        &crate::qos::Placement::Keyed {
+            identity: store_io_core::identity::DeviceIdentity {
+                devices: vec![store_io_core::identity::DeviceId::node(
+                    store_io_core::identity::DeviceNode::Sim { device: 1 },
+                )],
+                complete: true,
+            },
+            members: Vec::new(),
+            fs_device: None,
+        },
+        crate::qos::QosOptions {
+            autotune,
+            ..crate::qos::QosOptions::default()
+        },
+        1_000,
+    );
+    let clock = Arc::clone(&now);
+    let d = Domain::with_slots(1).with_activity(
+        Arc::clone(&qos),
+        Arc::new(move || clock.load(Ordering::SeqCst)),
+        None,
+    );
+    (Arc::new(d), qos, now)
+}
+
+/// Auto-tuning's sample of a commit that leads its flush: from its entry
+/// (or, through a flush thread, from the batch's earliest arrival) to the
+/// flush's completion; none at all with auto-tuning off.
+#[test]
+fn test_a_commit_leader_is_timed_from_its_entry_to_its_flush() {
+    let (d, qos, now) = tuning_domain(true);
+    now.store(1_000, Ordering::SeqCst);
+    let need = d.ticket();
+    let clock = Arc::clone(&now);
+    assert!(
+        d.barrier_classed(need, IoClass::Commit, |_, _| {
+            clock.store(1_250, Ordering::SeqCst);
+            Ok(())
+        })
+        .is_ok()
+    );
+    // A flush thread's batch: timed from its earliest arrival, 900.
+    let need = d.ticket();
+    let clock = Arc::clone(&now);
+    assert!(
+        d.barrier_classed_from(need, IoClass::Commit, Some(900), |_, _| {
+            clock.store(1_400, Ordering::SeqCst);
+            Ok(())
+        })
+        .is_ok()
+    );
+    // A background barrier with no commit waiting: no sample.
+    let need = d.ticket();
+    assert!(
+        d.barrier_classed(need, IoClass::Background, |_, _| Ok(()))
+            .is_ok()
+    );
+    assert_eq!(qos.samples_written(), [250, 500]);
+    assert_eq!(d.earliest.load(Ordering::SeqCst), u64::MAX);
+    let (off, q, _now) = tuning_domain(false);
+    let need = off.ticket();
+    assert!(
+        off.barrier_classed(need, IoClass::Commit, |_, _| Ok(()))
+            .is_ok()
+    );
+    assert!(q.samples_written().is_empty(), "auto-tuning off: no sample");
+}
+
+/// A flush a background barrier leads while a commit waits for it is
+/// timed from that commit's entry; the flush before it, issued before the
+/// commit arrived, is timed for nobody.
+#[test]
+fn test_a_background_led_flush_is_timed_from_the_commit_it_covers() {
+    let (d, qos, now) = tuning_domain(true);
+    let (go, wait_go) = mpsc::channel::<()>();
+    let (started, on_start) = mpsc::channel::<()>();
+    // Flush 1, a background barrier's, held.
+    let first = {
+        let d = Arc::clone(&d);
+        std::thread::spawn(move || {
+            let need = d.ticket();
+            d.barrier_classed(need, IoClass::Background, |_, _| {
+                let _sent = started.send(());
+                let _released = wait_go.recv_timeout(3 * LONG);
+                Ok(())
+            })
+        })
+    };
+    assert_eq!(on_start.recv_timeout(LONG), Ok(()));
+    // A background barrier needing flush 2 waits as its designate; its
+    // flush completes at 1,000.
+    let lead = {
+        let (d, clock) = (Arc::clone(&d), Arc::clone(&now));
+        std::thread::spawn(move || {
+            let need = d.ticket();
+            d.barrier_classed(need, IoClass::Background, |_, _| {
+                clock.store(1_000, Ordering::SeqCst);
+                Ok(())
+            })
+        })
+    };
+    until_waiting(&d, 1);
+    assert_eq!(d.lock().designate, Some(2));
+    // A commit at 300 needing flush 2 waits behind it.
+    now.store(300, Ordering::SeqCst);
+    let commit = {
+        let d = Arc::clone(&d);
+        std::thread::spawn(move || {
+            let need = d.ticket();
+            d.barrier_classed(need, IoClass::Commit, |_, _| Ok(()))
+        })
+    };
+    until_waiting(&d, 2);
+    assert_eq!(d.earliest.load(Ordering::SeqCst), 300);
+    let _sent = go.send(());
+    for h in [first, lead, commit] {
+        assert!(matches!(h.join(), Ok(Ok(()))));
+    }
+    assert_eq!(
+        qos.samples_written(),
+        [700],
+        "flush 2 from the commit's 300 to 1,000"
+    );
+    assert_eq!(
+        d.earliest.load(Ordering::SeqCst),
+        u64::MAX,
+        "taken by its leader"
+    );
+}
+
+/// A commit that joins a flush already issued is that flush's: its entry
+/// never times a later flush a background barrier leads alone.
+#[test]
+fn test_a_commit_joining_an_issued_flush_times_no_later_one() {
+    let (d, qos, now) = tuning_domain(true);
+    let (go, wait_go) = mpsc::channel::<()>();
+    let (started, on_start) = mpsc::channel::<()>();
+    let need = d.ticket();
+    // Flush 1, a background barrier's, held; a commit at 300 needing only
+    // flush 1 joins it (no flush to wait for that is not issued).
+    let first = {
+        let d = Arc::clone(&d);
+        std::thread::spawn(move || {
+            d.barrier_classed(need, IoClass::Background, |_, _| {
+                let _sent = started.send(());
+                let _released = wait_go.recv_timeout(3 * LONG);
+                Ok(())
+            })
+        })
+    };
+    assert_eq!(on_start.recv_timeout(LONG), Ok(()));
+    now.store(300, Ordering::SeqCst);
+    let joiner = {
+        let d = Arc::clone(&d);
+        std::thread::spawn(move || d.barrier_classed(need, IoClass::Commit, |_, _| Ok(())))
+    };
+    until_waiting(&d, 1);
+    assert_eq!(d.earliest.load(Ordering::SeqCst), u64::MAX);
+    let _sent = go.send(());
+    for h in [first, joiner] {
+        assert!(matches!(h.join(), Ok(Ok(()))));
+    }
+    // A background barrier alone on flush 2: nobody's.
+    now.store(900, Ordering::SeqCst);
+    let need = d.ticket();
+    assert!(
+        d.barrier_classed(need, IoClass::Background, |_, _| Ok(()))
+            .is_ok()
+    );
+    assert!(
+        qos.samples_written().is_empty(),
+        "{:?}",
+        qos.samples_written()
+    );
+}

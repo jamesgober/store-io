@@ -174,18 +174,24 @@ pub struct StoreOptions {
     /// least 1 ms; default 5 s. Stores of one device take the largest.
     pub commit_quiet: std::time::Duration,
     /// Opt-in auto-tuning of the device's background budget (PLANNING
-    /// R5.4; default `false`). Not yet wired, so hidden: from V3f3, while
-    /// commits are active, the budget will follow windows of commit latency
-    /// compared with the budget's floor measured in the same conditions,
-    /// from 1 up to `background_depth_max`. On only if every store of the
-    /// device asks for it.
-    #[doc(hidden)]
+    /// R5.4; default `false`). While commits are active, the pieces the
+    /// device group admits beyond each background call's own one follow
+    /// windows of commit latency (200 commits, or 2 s with at least 50),
+    /// each compared with a window run at the floor (1) in the same
+    /// conditions, not with an idle figure: the budget rises by one after
+    /// three windows within 1.25x of the latest floor window's p99, halves
+    /// at once on one over 1.4x, and every eighth window measures the floor
+    /// again, up to `background_depth_max`. Its bound, documented and not
+    /// gated: commits may run at up to 1.4x the floor's own latency for as
+    /// long as background work runs (the default, off, keeps the floor,
+    /// which G19 gates within 2x of idle). On only if every store of the
+    /// device asks for it. A device whose commits are only a power-safe
+    /// store's asynchronous `Submitter` writes is never sampled, so stays
+    /// at the floor. [`crate::QosReport`] says what it does.
     pub background_autotune: bool,
-    /// Auto-tuning's ceiling (1 to 8; default 8). Not yet wired, so
-    /// hidden: from V3f3, the background pieces in flight the device group
-    /// may reach while commits are active. Stores of one device take the
-    /// smallest.
-    #[doc(hidden)]
+    /// Auto-tuning's ceiling: the background pieces the device group may
+    /// admit while commits are active (1 to 8; default 8), and never more
+    /// than `background_unpaced`. Stores of one device take the smallest.
     pub background_depth_max: u32,
 }
 
@@ -726,9 +732,11 @@ pub(crate) fn durable_slot<P: Platform>(
     // On a power-safe store the `dsync` write is the slot's flush: a
     // commit's marks the device's commits active (a background call's
     // marks nothing: `Domain::note_commit`).
-    if policy.dsync {
-        domain.note_commit();
-    }
+    let entry = if policy.dsync {
+        domain.note_commit()
+    } else {
+        None
+    };
     let written =
         write_slot(q, file, pool, at, next, policy.dsync, domain.pace()).inspect_err(|e| {
             if matches!(e, Error::DurabilityUnknown { .. }) {
@@ -738,6 +746,8 @@ pub(crate) fn durable_slot<P: Platform>(
                 });
             }
         })?;
+    // The power-safe slot write was the commit: auto-tuning's sample.
+    domain.sample_since(entry);
     if policy.flush {
         let need = domain.ticket();
         // Through this lane and the main handle: slot 0's.

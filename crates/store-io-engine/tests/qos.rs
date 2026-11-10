@@ -1224,3 +1224,177 @@ fn test_a_copy_s_reads_are_paced_on_the_source_s_group() {
     assert!(seen.len() >= 16, "{seen:?}");
     assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
 }
+
+// ------------------------------------------------- auto-tuning (V3f3)
+
+/// Runs `f` on a thread of its own, failing the test (never hanging it) if
+/// it takes over 60 s (generous for a debug build under a mutation run).
+fn within(name: &str, f: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || {
+        f();
+        let _sent = tx.send(());
+    });
+    match rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(()) => t.join().unwrap(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The scenario panicked: its own message.
+            if let Err(e) = t.join() {
+                std::panic::resume_unwind(e);
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{name}: no result within 60 s (a hang)")
+        }
+    }
+}
+
+fn tuned() -> StoreOptions {
+    StoreOptions {
+        background_autotune: true,
+        ..StoreOptions::default()
+    }
+}
+
+/// `rounds` rounds on `s`: a background append (its admission closes a
+/// due window; refused while paced, it is dropped), a commit (a durable
+/// page write: its barrier's leader is auto-tuning's sample), then the
+/// background's completions. `each` runs before every commit. Returns the
+/// largest tuned budget the store reported and how many times it fell
+/// (probes, at the floor for a window, are not falls).
+fn tune_rounds(s: &Store<SimPlatform>, rounds: usize, mut each: impl FnMut()) -> (u64, u32) {
+    let log = s.provision_append_region("tune-log", 16 << 20).unwrap();
+    let pages = s.provision_page_region("tune-commits", 64 << 10).unwrap();
+    let mut sub = background(s);
+    let (mut most, mut fell, mut was) = (0, 0, 1);
+    for i in 0..rounds {
+        let _maybe = sub.append(
+            &log,
+            sub.take_buf(4096).unwrap(),
+            WriteMode::Plain,
+            i as u64,
+        );
+        each();
+        let pos = pages.pos((i as u64 % 16) * 4096).unwrap();
+        let _rc = pages.write_durable(pos, &[i as u8; 4096]).unwrap();
+        let _done = drain(&mut sub);
+        let b = s.qos().tuned_budget;
+        most = most.max(b);
+        fell += u32::from(b < was);
+        was = b;
+    }
+    (most, fell)
+}
+
+#[test]
+fn test_auto_tuning_raises_the_budget_while_commits_stay_as_fast() {
+    within("rise", || {
+        let p = two_devices(60, DeviceKind::VolatileCache);
+        let a = Store::create(p.clone(), Path::new("/a"), tuned()).unwrap();
+        // Commits at time 0 never count as recent: move the clock first.
+        advance(&p, SECOND);
+        assert!(a.qos().autotune);
+        // The clock moves only here, so every sample is the same: each
+        // window at the budget is as fast as the floor's.
+        let (most, fell) = tune_rounds(&a, 2400, || {});
+        let q = a.qos();
+        assert!(most >= 3, "the budget rose: {q:?} (at most {most})");
+        assert_eq!(fell, 0, "nothing slowed: never halved");
+        assert!(q.floor_p99_ns > 0, "floor windows closed: {q:?}");
+        assert!(q.tuned_budget <= 8 && q.budget <= q.tuned_budget);
+    });
+}
+
+#[test]
+fn test_auto_tuning_halves_a_budget_that_slows_commits() {
+    within("halving", || {
+        let p = two_devices(61, DeviceKind::VolatileCache);
+        let a = Store::create(p.clone(), Path::new("/a"), tuned()).unwrap();
+        advance(&p, SECOND);
+        // A device whose every step costs 100 us times the square of the
+        // budget: a window at budget 2 is 4x the floor's, over 1.4x.
+        let budget = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let seen = Arc::clone(&budget);
+        let clock = p.clone();
+        p.with_world(|w| {
+            w.set_step_probe(Some(Arc::new(move || {
+                let b = seen.load(std::sync::atomic::Ordering::SeqCst);
+                clock.with_world(|w| w.advance_clock_ns(100_000 * b * b));
+                false
+            })))
+        });
+        let b = Arc::clone(&budget);
+        let a2 = &a;
+        let (most, fell) = tune_rounds(&a, 3000, || {
+            b.store(a2.qos().budget, std::sync::atomic::Ordering::SeqCst);
+        });
+        p.with_world(|w| w.set_step_probe(None));
+        let q = a.qos();
+        assert!(q.floor_p99_ns > 0 && q.loaded_p99_ns > 0, "{q:?}");
+        // It tries 2 (three windows at 1 as fast as the floor), finds it
+        // 4x the floor, and halves at once: never past 2.
+        assert_eq!(most, 2, "{q:?}");
+        assert!(fell >= 1, "halved: {q:?}");
+    });
+}
+
+#[test]
+fn test_without_auto_tuning_the_budget_stays_the_floor() {
+    within("off", || {
+        let p = two_devices(62, DeviceKind::VolatileCache);
+        let a = create(&p, "/a");
+        advance(&p, SECOND);
+        let (most, fell) = tune_rounds(&a, 1200, || {});
+        let q = a.qos();
+        assert_eq!((most, fell), (1, 0));
+        assert!(
+            !q.autotune && q.floor_p99_ns == 0 && q.loaded_p99_ns == 0,
+            "{q:?}"
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_samples_a_power_safe_store_s_dsync_commits() {
+    within("power-safe", || {
+        let p = two_devices(63, DeviceKind::PowerSafe);
+        let a = Store::create(p.clone(), Path::new("/a"), tuned()).unwrap();
+        advance(&p, SECOND);
+        // No barrier flushes there: the dsync page writes are the commits,
+        // and auto-tuning's samples.
+        let (most, fell) = tune_rounds(&a, 1200, || {});
+        let q = a.qos();
+        assert!(q.floor_p99_ns > 0, "windows closed on dsync commits: {q:?}");
+        assert!(most >= 2 && fell == 0, "{most} {fell} {q:?}");
+    });
+}
+
+#[test]
+fn test_auto_tuning_samples_a_power_safe_store_s_large_commits() {
+    within("power-safe, large", || {
+        let p = two_devices(64, DeviceKind::PowerSafe);
+        // Commits of two 128 KiB pieces: past the store's largest I/O, so
+        // each goes out through the pump, not as one buffer.
+        let opts = StoreOptions {
+            max_io: 128 << 10,
+            ..tuned()
+        };
+        let a = Store::create(p.clone(), Path::new("/a"), opts).unwrap();
+        advance(&p, SECOND);
+        let log = a.provision_append_region("tune-log", 8 << 20).unwrap();
+        let pages = a.provision_page_region("big", 1 << 20).unwrap();
+        let mut sub = background(&a);
+        let big = vec![5u8; 256 << 10];
+        for i in 0..900u64 {
+            let _maybe = sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, i);
+            let pos = pages.pos((i % 4) * (256 << 10)).unwrap();
+            let _rc = pages.write_durable(pos, &big).unwrap();
+            let _done = drain(&mut sub);
+        }
+        let q = a.qos();
+        assert!(
+            q.floor_p99_ns > 0,
+            "windows closed on pumped dsync commits: {q:?}"
+        );
+    });
+}

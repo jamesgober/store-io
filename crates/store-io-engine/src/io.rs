@@ -424,9 +424,35 @@ where
         let _fits = buf.set_len(padded);
         let mut lane = self.lane(r, Op::Write)?;
         drop(before_issue()?);
-        if self.inner.policy.dsync {
-            self.inner.domain.note_commit();
+        // A power-safe commit: the `dsync` write is its whole cost, timed
+        // for auto-tuning from here to its outcome.
+        let entry = if self.inner.policy.dsync {
+            self.inner.domain.note_commit()
+        } else {
+            None
+        };
+        let outcome = self.write_one(&mut lane, r, offset, buf, padded, data, block, chunk);
+        // Only a commit that went out whole is a sample (a refusal is not a
+        // commit's latency).
+        if matches!(outcome, Ok(Pumped::All)) {
+            self.inner.domain.sample_since(entry);
         }
+        outcome
+    }
+
+    /// The single-buffer write of [`Self::write_staged_with`], on `lane`.
+    #[allow(clippy::too_many_arguments)]
+    fn write_one(
+        &self,
+        lane: &mut Lane<P::Queue>,
+        r: &LiveRegion,
+        offset: u64,
+        buf: IoBuf,
+        padded: usize,
+        data: &[u8],
+        block: usize,
+        chunk: usize,
+    ) -> Result<Pumped, Error> {
         let obs = &self.inner.observer;
         let op = IoOp::Write {
             file: &self.inner.file,
@@ -460,7 +486,7 @@ where
                 };
                 stream.at(offset);
                 let outcome = pump(
-                    &mut lane,
+                    lane,
                     &self.inner.file,
                     self.inner.policy.dsync,
                     &mut Mapped::new(&r.map, &mut stream),
@@ -484,9 +510,12 @@ where
 
     /// Submits a staged write on `lane`.
     pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {
-        if self.inner.policy.dsync {
-            self.inner.domain.note_commit();
-        }
+        // A power-safe commit: timed for auto-tuning to its outcome.
+        let entry = if self.inner.policy.dsync {
+            self.inner.domain.note_commit()
+        } else {
+            None
+        };
         let obs = &self.inner.observer;
         let _timed = obs.span(Stage::Write);
         let outcome = pump(
@@ -501,6 +530,9 @@ where
             obs.add(Counter::Refused, 1);
         } else if src.is_split() {
             obs.add(Counter::Splits, 1);
+        }
+        if matches!(outcome, Pumped::All) {
+            self.inner.domain.sample_since(entry);
         }
         outcome
     }
@@ -665,13 +697,24 @@ where
     /// [`Self::barrier_to`] for a caller of `class`: only a commit-class
     /// barrier marks the device's commits active.
     pub(crate) fn barrier_to_classed(&self, need: u64, class: IoClass) -> Result<(), Error> {
+        self.barrier_to_classed_from(need, class, None)
+    }
+
+    /// [`Self::barrier_to_classed`] timed for auto-tuning from `entry` (a
+    /// flush thread's batch: its earliest commit's arrival).
+    pub(crate) fn barrier_to_classed_from(
+        &self,
+        need: u64,
+        class: IoClass,
+        entry: Option<u64>,
+    ) -> Result<(), Error> {
         let obs = &self.inner.observer;
         obs.add(Counter::Barriers, 1);
         let _timed = obs.span(Stage::Barrier);
         let inner = &self.inner;
         inner
             .domain
-            .barrier_classed(need, class, |slot, _k| {
+            .barrier_classed_from(need, class, entry, |slot, _k| {
                 let _flush = obs.span(Stage::Flush);
                 obs.add(Counter::Flushes, 1);
                 // Each slot its own handle and lane (D-124); the domain

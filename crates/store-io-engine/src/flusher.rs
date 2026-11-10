@@ -213,6 +213,9 @@ struct Request {
     /// The requester's class (PLANNING R5.4): a batch is commit-class if any
     /// of its requests is.
     class: IoClass,
+    /// When the request arrived (the store's clock), for auto-tuning's
+    /// sample; `None` unless auto-tuning is on.
+    arrived: Option<u64>,
     tag: u64,
     answer: Arc<dyn Answer>,
     /// Its outcome, decided while the thread still holds the store and
@@ -273,13 +276,15 @@ where
         })
     }
 
-    /// Asks for a flush `>= need`, answered into `answer` under `tag`.
-    /// Returns false if the thread no longer takes requests (the caller then
-    /// flushes on its own thread).
+    /// Asks for a flush `>= need`, answered into `answer` under `tag`;
+    /// `arrived` is the requester's arrival for auto-tuning
+    /// (`Domain::arrival`). Returns false if the thread no longer takes
+    /// requests (the caller then flushes on its own thread).
     pub(crate) fn request(
         &self,
         need: u64,
         class: IoClass,
+        arrived: Option<u64>,
         tag: u64,
         answer: Arc<dyn Answer>,
     ) -> bool {
@@ -290,6 +295,7 @@ where
         st.requests.push(Request {
             need,
             class,
+            arrived,
             tag,
             answer,
             outcome: None,
@@ -354,7 +360,17 @@ where
         } else {
             IoClass::Background
         };
-        let outcome = held.barrier_to_classed(need, class).map(|()| need);
+        // Auto-tuning times the batch's flush from its earliest commit's
+        // arrival, not from the batch.
+        let entry = guard
+            .batch
+            .iter()
+            .filter(|r| r.class.is_commit())
+            .filter_map(|r| r.arrived)
+            .min();
+        let outcome = held
+            .barrier_to_classed_from(need, class, entry)
+            .map(|()| need);
         guard.decide(&held, &outcome);
         // Let go of the store before anything is posted: once a submitter
         // sees its outcome it may drop the store's last other handle, and
@@ -536,6 +552,7 @@ mod tests {
             for (need, tag) in [(t1.need, 1), (t2.need, 2)] {
                 st.requests.push(Request {
                     need,
+                    arrived: None,
                     class: store_io_core::IoClass::Commit,
                     tag,
                     answer: Arc::clone(&inbox) as Arc<dyn Answer>,

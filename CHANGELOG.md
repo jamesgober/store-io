@@ -68,10 +68,31 @@
   flushing store's metadata flushes already did. A caller's own
   provisioning is unchanged.
 - Options: `StoreOptions::background_io` (256 KiB), `background_unpaced`
-  (8), `background_pacing` (on) and `commit_quiet` (5 s), checked at
+  (8), `background_pacing` (on), `commit_quiet` (5 s),
+  `background_autotune` (off) and `background_depth_max` (8), checked at
   `create`, `open` and `open_readonly` (`NotWritten(InvalidOptions)`
   otherwise). Fields added to a public struct: literal constructors must
   add them (`..StoreOptions::default()` keeps working).
+- Engine: **opt-in auto-tuning** of a device's background budget
+  (`StoreOptions::background_autotune`, PLANNING R5.4, D-146, D-158). The
+  default is unchanged: while commits are active a background call keeps
+  one piece in flight. With it on (every store of the device asking),
+  the pieces the device group admits beyond each call's own one follow
+  windows of commit latency (200 commits, or 2 s with at least 50), each
+  compared with a window run at that floor in the same conditions: up by
+  one after three windows within 1.25x of the latest floor window's p99,
+  halved at once on one over 1.4x, the floor measured again every eighth
+  window and after a slow one, up to `background_depth_max` and never
+  above `background_unpaced`. Commits may then run at up to 1.4x the
+  floor's own latency (documented; G19 gates the default). The samples:
+  a commit leading its flush, from its entry (through a flush thread,
+  from its earliest arrival) to the flush's completion; a flush a
+  background barrier leads while a commit waits, from that commit's
+  entry; a power-safe store's blocking `dsync` commit writes. A window
+  closes at a background admission, never on the commit path; samples
+  taken while the background was quiet are dropped. With it off, the
+  default, it costs one load per flush. `QosReport` gains `autotune`, `depth_max`, the live
+  `budget`, `tuned_budget` and the latest floor and other window p99s.
 - Platform: **`Platform::clock`**, a shareable handle to the
   `monotonic_ns` clock. **Breaking for outside implementers of
   `Platform`**: a required method.

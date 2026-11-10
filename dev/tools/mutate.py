@@ -337,7 +337,7 @@ M = [
  # completion succeeded; barriers check their tickets; drop waits for flushes
  ('crates/store-io-engine/src/optable.rs', '        if live.durable && flushes() {', '        if live.durable && flushes() && false {'),
  ('crates/store-io-engine/src/optable.rs', '                let need = w.ticket.need;', '                let need = 0 * w.ticket.need;'),
- ('crates/store-io-engine/src/flusher.rs', '        let outcome = held.barrier_to_classed(need, class).map(|()| need);', '        let outcome = held.barrier_to_classed(need, class).map(|()| need).or(Ok(need));'),
+ ('crates/store-io-engine/src/flusher.rs', '            .barrier_to_classed_from(need, class, entry)\n            .map(|()| need);', '            .barrier_to_classed_from(need, class, entry)\n            .map(|()| need)\n            .or(Ok(need));'),
  ('crates/store-io-engine/src/flusher.rs', '        let need = guard.batch.iter().map(|r| r.need).max().unwrap_or(0);', '        let need = guard.batch.iter().map(|r| r.need).min().unwrap_or(0);'),
  ('crates/store-io-engine/src/submitter/durable.rs', '            Some((g, live, _)) if g != ticket.generation || !live => {', '            Some((g, live, _)) if (g != ticket.generation || !live) && false => {'),
  ('crates/store-io-engine/src/submitter/durable.rs', '        if ticket.epoch != inner.epoch || ticket.volume != inner.volume {', '        if (ticket.epoch != inner.epoch || ticket.volume != inner.volume) && false {'),
@@ -1461,7 +1461,7 @@ M = [
  ], AFTER_RACE),
  (IO_SRC, "                    drop(held);\n                    drop(lane);", "                    drop(lane);", AFTER_RACE),
  (IO_SRC, "            drop(before_issue()?);\n            return Ok(self.pump(", "            let _keep = before_issue()?;\n            return Ok(self.pump(", AFTER_RACE),
- (IO_SRC, "        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }\n        let obs = &self.inner.observer;", "        let _keep = before_issue()?;\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }\n        let obs = &self.inner.observer;", AFTER_RACE),
+ (IO_SRC, "        drop(before_issue()?);\n        // A power-safe commit: the", "        let _keep = before_issue()?;\n        // A power-safe commit: the", AFTER_RACE),
  ("crates/store-io-engine/src/region.rs", "        on_reserved(before);", "        let _keep = (before, &on_reserved);", AFTER_RACE),
  (SUB_SRC, "        on_reserved(passes);", "        let _keep = (passes, &on_reserved);", AFTER_RACE),
  (SUB_SRC, "        drop(passes);\n        self.issue(\n            req,", "        let _keep = passes;\n        self.issue(\n            req,", AFTER_RACE),
@@ -1602,10 +1602,10 @@ M = [
  # QOS_STORE (V3c1): a commit-class barrier's entry and a power-safe store's dsync
  # writes mark commits active; the pacing options checked; a memory file
  # system's store never paced; the join's group and clock reach the domain.
- ("crates/store-io-engine/src/domain/mod.rs", '        if class.is_commit() {\n            self.note_commit();\n        }', '        if class.is_commit() && false {\n            self.note_commit();\n        }', QOS_STORE_T),
- (IO_SRC, '        drop(before_issue()?);\n        if self.inner.policy.dsync {\n            self.inner.domain.note_commit();\n        }', '        drop(before_issue()?);\n        if self.inner.policy.dsync && false {\n            self.inner.domain.note_commit();\n        }', QOS_STORE_T, INLINE_ENV),
- (IO_SRC, '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync {', '    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {\n        if self.inner.policy.dsync && false {', QOS_STORE_T),
- (SUB_SRC, '                if inner.policy.dsync && !self.class.is_background() {\n                    inner.domain.note_commit();\n                }', '                if inner.policy.dsync && false {\n                    inner.domain.note_commit();\n                }', QOS_STORE_T),
+ ("crates/store-io-engine/src/domain/mod.rs", '        let entry = if class.is_commit() {\n            self.note_commit().map(', '        let entry = if class.is_commit() && false {\n            self.note_commit().map(', QOS_STORE_T),
+ (IO_SRC, '        // for auto-tuning from here to its outcome.\n        let entry = if self.inner.policy.dsync {', '        // for auto-tuning from here to its outcome.\n        let entry = if self.inner.policy.dsync && false {', QOS_STORE_T, INLINE_ENV),
+ (IO_SRC, '        // A power-safe commit: timed for auto-tuning to its outcome.\n        let entry = if self.inner.policy.dsync {', '        // A power-safe commit: timed for auto-tuning to its outcome.\n        let entry = if self.inner.policy.dsync && false {', QOS_STORE_T),
+ (SUB_SRC, '                if inner.policy.dsync && !self.class.is_background() {\n                    let _entry = inner.domain.note_commit();', '                if inner.policy.dsync && false {\n                    let _entry = inner.domain.note_commit();', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '    let ok = io >= 4096\n        && io % 4096 == 0', '    let ok = io >= 4096\n        && (io % 4096 == 0 || true)', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '        && io <= 256 << 10', '        && io <= 512 << 10', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '        && (1..=64).contains(&opts.background_unpaced)', '        && (0..=65).contains(&opts.background_unpaced)', QOS_STORE_T),
@@ -1618,7 +1618,7 @@ M = [
  ("crates/store-io-engine/src/store.rs", '        platform.identity_scope(),\n        &placement(ev),', '        0,\n        &placement(ev),', QOS_STORE_T),
  # QOS_CLASS (V3c2): only a commit-class barrier marks activity; the pump
  # never submits a piece to a poisoned store, and reports the stop.
- ("crates/store-io-engine/src/domain/mod.rs", '        if class.is_commit() {\n            self.note_commit();\n        }', '        if class.is_commit() || true {\n            self.note_commit();\n        }', DOMAIN_ALL),
+ ("crates/store-io-engine/src/domain/mod.rs", '        let entry = if class.is_commit() {\n            self.note_commit().map(', '        let entry = if class.is_commit() || true {\n            self.note_commit().map(', DOMAIN_ALL),
  (EXEC_SRC, '            if poisoned() {\n                stopped = true;', '            if poisoned() && false {\n                stopped = true;', PUMP_POISON_T),
  (EXEC_SRC, '            if poisoned() {\n                stopped = true;', '            if poisoned() && false {\n                stopped = true;', PUMP_POISON_T, INLINE_ENV),
  (EXEC_SRC, '        None if stopped => Pumped::Poisoned,', '        None if stopped && false => Pumped::Poisoned,', PUMP_POISON_T),
@@ -1637,8 +1637,8 @@ M = [
  (SUB_SRC, '                if inner.policy.dsync && !self.class.is_background() {\n', '                if inner.policy.dsync {\n', QOS_STORE_T),
  (SUB_SRC, '        if self.issuer.is_some() {\n            // Background work never holds more than half of a class (R5.4).', '        if self.issuer.is_some() && false {\n            // Background work never holds more than half of a class (R5.4).', QOS_STORE_T),
  ("crates/store-io-engine/src/flusher.rs", '        let class = if guard.batch.iter().any(|r| r.class.is_commit()) {', '        let class = if guard.batch.iter().any(|r| r.class.is_commit()) || true {', QOS_STORE_T),
- (IO_SRC, '            .barrier_classed(need, class, |slot, _k| {', '            .barrier_classed(need, if class.is_commit() || true { IoClass::Commit } else { class }, |slot, _k| {', QOS_STORE_T),
- ("crates/store-io-engine/src/submitter/durable.rs", '.is_some_and(|f| f.request(need, class, qtag, Arc::clone(inbox) as Arc<dyn Answer>))', '.is_some_and(|f| f.request(need, store_io_core::IoClass::Commit, qtag, Arc::clone(inbox) as Arc<dyn Answer>))', QOS_STORE_T),
+ (IO_SRC, '            .barrier_classed_from(need, class, entry, |slot, _k| {', '            .barrier_classed_from(need, if class.is_commit() || true { IoClass::Commit } else { class }, entry, |slot, _k| {', QOS_STORE_T),
+ ("crates/store-io-engine/src/submitter/durable.rs", '            need,\n            class,\n            arrived,', '            need,\n            store_io_core::IoClass::Commit,\n            arrived,', QOS_STORE_T),
  ("crates/store-io-engine/src/optable.rs", '        // admitted afresh.\n        live.charge = None;', '        // admitted afresh.\n        let _kept = &live.charge;', QOS_STORE_T),
  # QOS_SUB (V3c3, the review's): continuation pieces paced and parked
  # behind older parked ones; parked pieces poison-checked; a parked
@@ -1658,8 +1658,8 @@ M = [
  # most background_io under the pool's cap, from creation to clean close;
  # its barriers and dsync writes mark no activity; a power-safe slot commit
  # does; a caller's own provisioning unchanged.
- ("crates/store-io-engine/src/domain/mod.rs", '            if a.pace.is_none() {', '            if a.pace.is_none() || true {', QOS_STORE_T),
- ("crates/store-io-engine/src/store.rs", '    if policy.dsync {\n        domain.note_commit();\n    }', '    if policy.dsync && false {\n        domain.note_commit();\n    }', QOS_STORE_T),
+ ("crates/store-io-engine/src/domain/mod.rs", '.filter(|a| a.pace.is_none())?;', '.filter(|a| a.pace.is_none() || true)?;', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '    let entry = if policy.dsync {\n        domain.note_commit()', '    let entry = if policy.dsync && false {\n        domain.note_commit()', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace())', 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace().filter(|_| false))', PACE_T),
  ("crates/store-io-engine/src/slots.rs", '        Some(_) => pool.take_capped(at.size(), usize::MAX),', '        Some(_) => pool.take(at.size()),', PACE_T),
  ("crates/store-io-engine/src/slots.rs", '    let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '    let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
@@ -1759,6 +1759,13 @@ M = [
  (QOS_SRC, '            let _oldest = tuning.get_or_insert_with(|| Arc::clone(&e.tuning));', '            let _oldest = tuning.get_or_insert_with(|| Arc::new(Tuning::new(8)));', QOS_T),
  (TUNE_SRC, '        self.ceiling = self.ceiling.min(ceiling.max(FLOOR));', '        self.ceiling = self.ceiling.max(ceiling.max(FLOOR));', TUNE_T),
  (TUNE_SRC, '        self.budget = self.budget.min(self.ceiling);', '        self.budget = self.budget.min(self.ceiling.max(8));', TUNE_T),
+ (DOMAIN_SRC, '            self.note_commit().map(|now| from.unwrap_or(now))', '            self.note_commit().map(|now| from.map_or(now, |_| now))', DOMAIN_ALL),
+ (DOMAIN_SRC, '                    if need > issued {', '                    if need > issued || true {', DOMAIN_ALL),
+ (DOMAIN_SRC, '                self.earliest.swap(u64::MAX, Ordering::SeqCst)', '                self.earliest.load(Ordering::SeqCst)', DOMAIN_ALL),
+ (DOMAIN_SRC, '                    (e, w) => e.or(w),', '                    (e, w) => e.or(w.filter(|_| false)),', DOMAIN_ALL),
+ (DOMAIN_SRC, '            let waited = if self.earliest.load(Ordering::SeqCst) == u64::MAX {', '            let waited = if self.earliest.load(Ordering::SeqCst) == u64::MAX || true {', DOMAIN_ALL),
+ (IO_SRC, '        if matches!(outcome, Ok(Pumped::All)) {\n            self.inner.domain.sample_since(entry);', '        if matches!(outcome, Ok(Pumped::All)) {\n            self.inner.domain.sample_since(entry.filter(|_| false));', QOS_STORE_T, INLINE_ENV),
+ (IO_SRC, '        if matches!(outcome, Pumped::All) {\n            self.inner.domain.sample_since(entry);', '        if matches!(outcome, Pumped::All) {\n            self.inner.domain.sample_since(entry.filter(|_| false));', QOS_STORE_T),
 ]
 
 def kill_stuck_tests():

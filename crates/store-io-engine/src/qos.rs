@@ -256,6 +256,9 @@ pub(crate) struct Tuning {
     last_admit: AtomicU64,
     /// The budget the current window runs at.
     budget: AtomicU64,
+    /// The rule's budget: what windows not at the floor run at (the
+    /// current one's is the floor during a probe).
+    tuned: AtomicU64,
     /// The latest floor window's p99 and the latest other window's (0:
     /// none yet), for the report.
     floor_p99: AtomicU64,
@@ -294,6 +297,7 @@ impl Tuning {
             opened: AtomicU64::new(0),
             last_admit: AtomicU64::new(0),
             budget: AtomicU64::new(FLOOR),
+            tuned: AtomicU64::new(FLOOR),
             floor_p99: AtomicU64::new(0),
             loaded_p99: AtomicU64::new(0),
             windows: AtomicU64::new(0),
@@ -307,6 +311,7 @@ impl Tuning {
         let mut g = self.rule.lock().unwrap_or_else(PoisonError::into_inner);
         g.0.lower_ceiling(u64::from(ceiling));
         let _was = self.budget.fetch_min(g.0.current(), Ordering::SeqCst);
+        let _was = self.tuned.fetch_min(g.0.budget(), Ordering::SeqCst);
     }
 
     /// A leader's commit sample: `dur` nanoseconds from its entry to its
@@ -379,6 +384,7 @@ impl Tuning {
             };
             word.store(p99, Ordering::SeqCst);
             self.budget.store(next, Ordering::SeqCst);
+            self.tuned.store(rule.budget(), Ordering::SeqCst);
             let _w = self.windows.fetch_add(1, Ordering::SeqCst);
         }
         drop(g);
@@ -816,6 +822,11 @@ impl Qos {
     /// nanoseconds from its entry to its flush's completion. Nothing when
     /// auto-tuning is off. Whether it is on: [`Self::tuned`].
     pub(crate) fn sample(&self, dur: u64) {
+        // A store that did not ask is in no tuned group (the group rule is
+        // an AND): nothing to read.
+        if !self.opts.autotune {
+            return;
+        }
         self.with_record(|r| {
             if let Some(t) = r.and_then(Record::tuned) {
                 t.sample(dur);
@@ -823,10 +834,27 @@ impl Qos {
         });
     }
 
+    /// The samples written to the group's ring so far, in order (tests;
+    /// at most a ring's worth).
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn samples_written(&self) -> Vec<u64> {
+        self.with_record(|r| {
+            r.map_or_else(Vec::new, |r| {
+                let t = &r.tuning;
+                let n = t.next.load(Ordering::SeqCst).min(RING as u64);
+                (0..n)
+                    .map(|i| t.durs[i as usize].load(Ordering::SeqCst))
+                    .collect()
+            })
+        })
+    }
+
     /// Whether the group's auto-tuning is on (so a leader takes its second
     /// clock read).
     pub(crate) fn tuned(&self) -> bool {
-        self.with_record(|r| r.and_then(Record::tuned).is_some())
+        // Free when the store did not ask (no group of it is tuned); only
+        // a store that did reads its group's record.
+        self.opts.autotune && self.with_record(|r| r.and_then(Record::tuned).is_some())
     }
 
     /// Holds commits active until the hold drops (`Store::commit_hold`).
@@ -913,9 +941,13 @@ impl Qos {
                 .is_some_and(|r| r.opts.pacing && r.opts.autotune),
             depth_max: rec
                 .as_ref()
-                .map_or(self.opts.depth_max, |r| r.opts.depth_max),
+                .map_or(self.opts.ceiling(), |r| r.opts.ceiling()),
             active: self.active(now),
             budget: rec.as_ref().map_or(FLOOR, |r| r.budget()),
+            tuned_budget: rec
+                .as_ref()
+                .and_then(|r| r.tuned())
+                .map_or(FLOOR, |t| t.tuned.load(Ordering::SeqCst)),
             floor_p99_ns: rec
                 .as_ref()
                 .and_then(|r| r.tuned())
@@ -940,12 +972,10 @@ pub struct QosReport {
     /// Pacing is on for the store's device group.
     pub paced: bool,
     /// Auto-tuning is on for the group (every member asked for it, and
-    /// pacing is on). Not yet wired (V3f3): hidden until then.
-    #[doc(hidden)]
+    /// pacing is on).
     pub autotune: bool,
-    /// Auto-tuning's ceiling for the group (its members' smallest
-    /// `background_depth_max`). Not yet wired (V3f3).
-    #[doc(hidden)]
+    /// Auto-tuning's ceiling for the group: its members' smallest
+    /// `background_depth_max`, never above their `background_unpaced`.
     pub depth_max: u32,
     /// The group's commits are active now (a commit within `commit_quiet`,
     /// or a live [`CommitHold`]).
@@ -954,11 +984,14 @@ pub struct QosReport {
     /// call's own one while commits are active: the floor, 1, unless
     /// auto-tuning moves it.
     pub budget: u64,
-    /// Auto-tuning's latest floor window p99 and latest other window p99,
-    /// nanoseconds (0: none yet, or auto-tuning off). Not yet wired: hidden.
-    #[doc(hidden)]
+    /// Auto-tuning's budget for windows not at the floor (`budget` is the
+    /// current window's: the floor during a probe); 1 with auto-tuning off.
+    pub tuned_budget: u64,
+    /// Auto-tuning's latest floor window's commit p99, nanoseconds (0: none
+    /// yet, or auto-tuning off).
     pub floor_p99_ns: u64,
-    #[doc(hidden)]
+    /// Auto-tuning's latest window's commit p99 not at the floor,
+    /// nanoseconds (0: none yet, or auto-tuning off).
     pub loaded_p99_ns: u64,
     /// Background pieces in flight in the group now.
     pub in_flight: u64,

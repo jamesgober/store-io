@@ -430,6 +430,13 @@ pub struct Domain {
     /// every barrier's entry, leading or joining, marks the group's commits
     /// active. `None` for a domain no store owns (tests, models).
     activity: Option<Activity>,
+    /// Auto-tuning (V3f3): the entry of the earliest commit-class barrier
+    /// waiting for a flush not yet issued (`u64::MAX`: none). Set under
+    /// the lock by such a waiter, only while auto-tuning is on; taken (a
+    /// swap back to `u64::MAX`) by every leader as it issues, so the next
+    /// flush, the one that covers those waiters, is timed from the
+    /// earliest of them when a background barrier leads it.
+    earliest: AtomicU64,
 }
 
 /// What a barrier's entry stamps.
@@ -498,6 +505,7 @@ impl Domain {
             designate_word: CachePadded::new(WaitWord::new()),
             shared_word: CachePadded::new(WaitWord::new()),
             activity: None,
+            earliest: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -536,10 +544,41 @@ impl Domain {
     /// a compare; a store at most once a millisecond (R5.4). A background
     /// call's store marks nothing: its every barrier and write is the
     /// call's (so a copy's own metadata never marks its group active).
-    pub(crate) fn note_commit(&self) {
-        if let Some(a) = &self.activity {
-            if a.pace.is_none() {
-                a.qos.commit((a.clock)());
+    ///
+    /// Returns the clock it read (`None`: it read none), the entry of
+    /// auto-tuning's sample.
+    pub(crate) fn note_commit(&self) -> Option<u64> {
+        let a = self.activity.as_ref().filter(|a| a.pace.is_none())?;
+        let now = (a.clock)();
+        a.qos.commit(now);
+        Some(now)
+    }
+
+    /// Whether auto-tuning samples this store's commits: its device
+    /// group's auto-tuning is on, and the store is no background call's.
+    fn tuned(&self) -> bool {
+        self.activity
+            .as_ref()
+            .is_some_and(|a| a.pace.is_none() && a.qos.tuned())
+    }
+
+    /// A commit's arrival at the store's flush thread, for auto-tuning's
+    /// sample (`None` unless auto-tuning is on): the batch's barrier is
+    /// timed from its earliest commit's arrival, not from the batch.
+    pub(crate) fn arrival(&self) -> Option<u64> {
+        self.activity
+            .as_ref()
+            .filter(|_| self.tuned())
+            .map(|a| (a.clock)())
+    }
+
+    /// Auto-tuning's sample of a commit that entered at `entry` and is done
+    /// now (a power-safe store's `dsync` write, where no barrier flushes):
+    /// one more clock read, only when auto-tuning is on.
+    pub(crate) fn sample_since(&self, entry: Option<u64>) {
+        if let (Some(at), Some(a)) = (entry, self.activity.as_ref()) {
+            if self.tuned() {
+                a.qos.sample((a.clock)().saturating_sub(at));
             }
         }
     }
@@ -665,20 +704,34 @@ impl Domain {
         need: u64,
         flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
-        self.barrier_in(need, self.slots, IoClass::Commit, flush)
+        self.barrier_in(need, self.slots, IoClass::Commit, None, flush)
     }
 
     /// [`Self::barrier`] for a caller of `class` (PLANNING R5.4): the
     /// protocol is the same for every class (a background barrier joins a
     /// flush in flight or the designate's next, else leads); only a
     /// commit-class barrier's entry marks the device's commits active.
+    #[cfg(all(test, not(loom)))]
     pub(crate) fn barrier_classed(
         &self,
         need: u64,
         class: IoClass,
         flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
-        self.barrier_in(need, self.slots, class, flush)
+        self.barrier_in(need, self.slots, class, None, flush)
+    }
+
+    /// [`Self::barrier_classed`] timed, for auto-tuning, from `entry` (a
+    /// flush thread's batch: its earliest commit's arrival) instead of
+    /// this call's entry.
+    pub(crate) fn barrier_classed_from(
+        &self,
+        need: u64,
+        class: IoClass,
+        entry: Option<u64>,
+        flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
+    ) -> Result<(), Error> {
+        self.barrier_in(need, self.slots, class, entry, flush)
     }
 
     /// As [`Self::barrier`], leading only on slot 0 (the caller's main
@@ -692,7 +745,7 @@ impl Domain {
         need: u64,
         mut flush: impl FnMut() -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
-        self.barrier_in(need, 1, IoClass::Commit, |_slot, _k| flush())
+        self.barrier_in(need, 1, IoClass::Commit, None, |_slot, _k| flush())
     }
 
     fn barrier_in(
@@ -700,14 +753,20 @@ impl Domain {
         need: u64,
         usable: u32,
         class: IoClass,
+        from: Option<u64>,
         mut flush: impl FnMut(usize, u64) -> Result<(), Option<OsError>>,
     ) -> Result<(), Error> {
         // A commit-class barrier's entry marks commits active, whether it
         // leads or joins (so a commit joining a background-led flush counts);
-        // a background one's never does.
-        if class.is_commit() {
-            self.note_commit();
-        }
+        // a background one's never does. Its clock read is auto-tuning's
+        // entry (or the flush thread's batch's, `from`).
+        let entry = if class.is_commit() {
+            self.note_commit().map(|now| from.unwrap_or(now))
+        } else {
+            None
+        };
+        let tuned = self.tuned();
+        let mut waiting_noted = false;
         let mut led_flush = false;
         // The highest `done` this call has yielded for: one goal, one try.
         let mut yielded_to = 0;
@@ -742,6 +801,16 @@ impl Domain {
                 free &= !1;
             }
             if issued >= need || free == 0 || issued - done >= WINDOW {
+                // A commit waiting for a flush not yet issued is covered by
+                // the next one (its ticket is that flush's number): its
+                // entry is that flush's sample's start if a background
+                // barrier leads it.
+                if let (true, Some(at), false) = (tuned, entry, waiting_noted) {
+                    if need > issued {
+                        let _was = self.earliest.fetch_min(at, Ordering::SeqCst);
+                        waiting_noted = true;
+                    }
+                }
                 // Covered: until `need` is done. Needing the next flush:
                 // until the one before it is, and it may lead.
                 let goal = need.min(issued);
@@ -768,6 +837,14 @@ impl Domain {
             // k = issued + 1 >= need: issued only grows, and the ticket
             // read need - 1 before this.
             let k = self.issued.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
+            // Every leader takes the waiters' entry as it issues, tuned or
+            // not (a word set while auto-tuning was on is never left for a
+            // later flush): they are this flush's, never a later one's.
+            let waited = if self.earliest.load(Ordering::SeqCst) == u64::MAX {
+                u64::MAX
+            } else {
+                self.earliest.swap(u64::MAX, Ordering::SeqCst)
+            };
             drop(st);
             led_flush = true;
             // A flush that panics leaves the device's state unknown: the
@@ -776,6 +853,19 @@ impl Domain {
             let unwinding = LeaderGuard { domain: self, slot };
             let outcome = flush(slot as usize, k);
             core::mem::forget(unwinding);
+            // Auto-tuning's sample: from the earliest commit the flush
+            // covers, the leader's own entry or a waiter's (a commit that
+            // took a freed slot ahead of an earlier waiter is timed from
+            // that waiter: the queueing counts); a background leader with
+            // no commit waiting takes none.
+            if tuned && outcome.is_ok() {
+                let waited = (waited != u64::MAX).then_some(waited);
+                let start = match (entry, waited) {
+                    (Some(e), Some(w)) => Some(e.min(w)),
+                    (e, w) => e.or(w),
+                };
+                self.sample_since(start);
+            }
             let mut st = self.lock();
             st.busy &= !(1 << slot);
             let failed = outcome.err();

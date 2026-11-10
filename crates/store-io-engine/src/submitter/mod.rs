@@ -613,8 +613,12 @@ where
         let (op, write) = match req {
             Req::Write { offset, buf } => {
                 let bytes = buf.len() as u64;
+                // Marks commits active; its completion is collected later
+                // and elsewhere, so auto-tuning takes no sample of it
+                // (D-158: a device of async power-safe commits alone stays
+                // at the floor).
                 if inner.policy.dsync && !self.class.is_background() {
-                    inner.domain.note_commit();
+                    let _entry = inner.domain.note_commit();
                 }
                 let op = IoOp::Write {
                     file,

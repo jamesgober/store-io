@@ -20,6 +20,7 @@ COMMANDS:
     gates          the performance gate table (W1-W5, fio controls, extras;
                    G18 too with --devices, else NOT RUN)
     multi-gates    the gates that need several devices (G18), on --devices
+    g19            G19 (commits beside a background Submitter), on --g19-dir
     probe          create a store, print the device report and exit
     observe-cost   what the observer adds per durable write (build with
                    --features observe; without it, the compiled-out cost)
@@ -38,6 +39,12 @@ OPTIONS:
     --tier <T>       Linux I/O tier: auto (default), sync or uring
     --devices <D,..> a directory on each of two or more devices, comma-separated
                      (the multi-device gates: G18)
+    --g19-dir <D>    a directory on G19's device (CI's calibrated device, or
+                     the dev box's drive); `gates` runs G19 there too
+    --g19-ref-mbps <X>
+                     fio's MB/s at the paced shape alone on that device (256
+                     KiB, one in flight; the device script's); else G19
+                     measures its own writer at that shape
 ";
 
 /// A workload command.
@@ -61,6 +68,8 @@ pub enum Command {
     Gates,
     /// The gates that need several devices.
     MultiGates,
+    /// G19 alone.
+    G19,
     /// Device report only.
     Probe,
     /// The observer's cost per durable write.
@@ -83,6 +92,7 @@ impl Command {
             Self::Submitter => "submitter",
             Self::Gates => "gates",
             Self::MultiGates => "multi-gates",
+            Self::G19 => "g19",
             Self::Probe => "probe",
             Self::ObserveCost => "observe-cost",
             Self::Help => "help",
@@ -100,6 +110,7 @@ impl Command {
             Self::Submitter,
             Self::Gates,
             Self::MultiGates,
+            Self::G19,
             Self::Probe,
             Self::ObserveCost,
             Self::Help,
@@ -128,6 +139,10 @@ pub struct Args {
     pub tier: store_io_platform::LinuxTier,
     /// A directory on each device of the multi-device gates.
     pub devices: Vec<PathBuf>,
+    /// G19's device directory.
+    pub g19_dir: Option<PathBuf>,
+    /// fio's rate at G19's paced shape, MB/s.
+    pub g19_ref_mbps: Option<f64>,
 }
 
 fn default_dir() -> PathBuf {
@@ -155,6 +170,8 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         commit: None,
         tier: store_io_platform::LinuxTier::Auto,
         devices: Vec::new(),
+        g19_dir: None,
+        g19_ref_mbps: None,
     };
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("`{flag}` needs a value"));
@@ -199,11 +216,24 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     return Err(format!("bad --devices `{v}` (two or more directories)"));
                 }
             }
+            "--g19-dir" => a.g19_dir = Some(PathBuf::from(value()?)),
+            "--g19-ref-mbps" => {
+                let v = value()?;
+                a.g19_ref_mbps = Some(
+                    v.parse::<f64>()
+                        .ok()
+                        .filter(|x| x.is_finite() && *x > 0.0)
+                        .ok_or_else(|| format!("bad --g19-ref-mbps `{v}` (MB/s above 0)"))?,
+                );
+            }
             other => return Err(format!("unknown option `{other}`")),
         }
     }
     if a.command == Command::MultiGates && a.devices.is_empty() {
         return Err("`multi-gates` needs --devices (two or more directories)".to_owned());
+    }
+    if a.command == Command::G19 && a.g19_dir.is_none() {
+        return Err("`g19` needs --g19-dir (a directory on G19's device)".to_owned());
     }
     Ok(a)
 }
@@ -225,6 +255,18 @@ mod tests {
         assert!(args(&["multi-gates", "--devices", "/d0"]).is_err());
         assert!(args(&["multi-gates"]).is_err());
         assert!(args(&["gates"]).is_ok_and(|a| a.devices.is_empty()));
+    }
+
+    #[test]
+    fn test_parses_g19_and_its_device() {
+        let a = args(&["g19", "--g19-dir", "/mnt/g19", "--g19-ref-mbps", "61.5"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(a.command, Command::G19);
+        assert_eq!(a.g19_dir, Some(PathBuf::from("/mnt/g19")));
+        assert_eq!(a.g19_ref_mbps, Some(61.5));
+        assert!(args(&["g19"]).is_err());
+        assert!(args(&["g19", "--g19-dir", "/d", "--g19-ref-mbps", "0"]).is_err());
+        assert!(args(&["gates"]).is_ok_and(|a| a.g19_dir.is_none()));
     }
 
     #[test]

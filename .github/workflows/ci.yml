@@ -449,6 +449,61 @@ jobs:
           path: ${{ runner.temp }}/multi/
           if-no-files-found: ignore
 
+  # G19 (PLANNING R5.14 as D-157 amends it): a commit's latency beside one
+  # background Submitter, on a device calibrated to separate the paced
+  # shape from a deeper one: null_blk at depth 1 behind a FIFO
+  # mq-deadline, dm-delay holding flushes (harness/scripts/g19_device.sh,
+  # which fails if no N separates them). Then G19, paced and with pacing off
+  # (its negative control). Fails unless G19's row is a PASS; fails, never
+  # falls back, if the device cannot be made.
+  g19:
+    name: G19 (calibrated device)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: harness
+      - name: Build the harness
+        run: cargo build --release --manifest-path harness/Cargo.toml
+      - name: Tools and modules
+        run: |
+          bash dev/tools/apt-install.sh --update fio jq
+          if ! sudo modprobe null_blk nr_devices=0 || ! sudo modprobe dm-delay; then
+            bash dev/tools/apt-install.sh "linux-modules-extra-$(uname -r)"
+            sudo modprobe null_blk nr_devices=0
+            sudo modprobe dm-delay
+          fi
+      - name: Calibrate the device
+        run: |
+          sudo -E bash harness/scripts/g19_device.sh --out "$RUNNER_TEMP/g19" --mount /mnt/g19
+          cat "$RUNNER_TEMP/g19/g19_device.md"
+      - name: G19
+        run: |
+          set -eux
+          . "$RUNNER_TEMP/g19/g19_device.env"
+          mkdir -p "$RUNNER_TEMP/g19r"
+          # --dir: the probe (the options and the report's device) on
+          # G19's device, as G18's job does on its own.
+          harness/target/release/store-io-harness g19 --dir "$G19_MOUNT" --g19-dir "$G19_MOUNT" \
+            --g19-ref-mbps "$G19_REF_MBPS" --secs 4 --settle 0 --out "$RUNNER_TEMP/g19r"
+          f=$(ls "$RUNNER_TEMP"/g19r/*-g19.md)
+          sed -n '/^| gate |/,/^$/p' "$f"
+          grep -q "every measurement completed and every integrity check passed" "$f"
+          # G19 must have run and passed: NOT RUN, FAIL or a missing row
+          # fails the job.
+          grep -qE '^\| G19 \|.*\| PASS \|$' "$f"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: g19-report
+          path: |
+            ${{ runner.temp }}/g19/
+            ${{ runner.temp }}/g19r/
+          if-no-files-found: ignore
+
   # Fail-stop on a real kernel: the file system sits on a device-mapper
   # target that is switched, mid-run, to fail every I/O. No write may
   # succeed after the first failure, and every acknowledged record must

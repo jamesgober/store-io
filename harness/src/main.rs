@@ -51,7 +51,7 @@ struct Workload {
     settles: usize,
 }
 
-const WORKLOADS: [Workload; 8] = [
+const WORKLOADS: [Workload; 9] = [
     Workload {
         command: Command::Lone,
         run: workloads::lone::run,
@@ -105,6 +105,16 @@ const WORKLOADS: [Workload; 8] = [
         // bound for the hang watchdog (G18 takes a few seconds whatever
         // `--secs`).
         points: 80,
+        settles: 0,
+    },
+    Workload {
+        command: Command::G19,
+        run: workloads::gates_g19::run,
+        // Two configurations of 12 rounds of three phases of `--secs`, and
+        // the paced shape alone (73 phases): the watchdog's limit is
+        // 4 x 24 points + 300 s, about twice G19's own time at any
+        // `--secs`, and within the g19 job's 30 minutes at its 4 s.
+        points: 24,
         settles: 0,
     },
 ];
@@ -196,6 +206,8 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
         fsys,
     );
     ctx.devices.clone_from(&args.devices);
+    ctx.g19_dir.clone_from(&args.g19_dir);
+    ctx.g19_ref_mbps = args.g19_ref_mbps;
     let header = Header {
         device: device.clone(),
         backend: sio::BACKEND.to_owned(),
@@ -261,12 +273,13 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
 
     let selected: Vec<&Workload> = WORKLOADS
         .iter()
-        // `gates` reruns the workloads itself, and `multi-gates` needs
-        // devices: neither is part of `all`.
+        // `gates` reruns the workloads itself, and `multi-gates` and `g19`
+        // need devices: none is part of `all`.
         .filter(|w| {
             (args.command == Command::All
                 && w.command != Command::Gates
-                && w.command != Command::MultiGates)
+                && w.command != Command::MultiGates
+                && w.command != Command::G19)
                 || w.command == args.command
         })
         .collect();

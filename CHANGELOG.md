@@ -107,6 +107,22 @@
   are published beside it. The job fails unless G18's row is a PASS (or
   NOT RESOLVABLE). In the `gates` table G18 reads NOT RUN without
   `--devices`.
+- CI: the **g19** job and the harness's `g19` command (`--g19-dir`): a
+  commit's QD1 4 KiB durable-write p99 beside one background `Submitter`
+  on another store of the same device, 12 rounds of (idle, loaded, idle),
+  must stay within 2x idle while the writer keeps at least half the paced
+  shape's rate alone, and the same rounds with `background_pacing(false)`
+  on both stores must exceed 2x (the negative control). Its device is made
+  and calibrated by `harness/scripts/g19_device.sh`: `null_blk` at depth 1
+  behind a FIFO `mq-deadline` queue, `dm-delay` holding flushes at least
+  4 kernel ticks (4 ms on CI),
+  its request time chosen with fio so that a 256 KiB writer at depth 1
+  costs a commit at most 1.5x and at depth 8 at least 3x. The job fails
+  unless G19's row is a PASS. First runs: paced 1.39x and 1.46x, pacing
+  off 2.80x and 3.17x.
+- CI: every apt call goes through `dev/tools/apt-install.sh`, which bounds
+  and retries it, so a stalled mirror or a held dpkg lock fails its step in
+  minutes, saying which call stalled.
 - Engine: **`StoreSet`** (PLANNING R5.3, API-09's `barrier_set`): stores on
   several devices made durable together. `barrier` and `barrier_each`
   flush each store at most once per call, in parallel (the calling thread

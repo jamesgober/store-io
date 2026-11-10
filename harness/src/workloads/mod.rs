@@ -9,6 +9,7 @@ pub mod gates_extra;
 pub mod gates_g1;
 pub mod gates_g15;
 pub mod gates_g18;
+pub mod gates_g19;
 pub mod gates_g2;
 pub mod gates_scan;
 pub mod gates_seq;
@@ -53,6 +54,11 @@ pub struct Ctx {
     /// A directory on each device of the multi-device gates (`--devices`;
     /// empty: they are NOT RUN).
     pub devices: Vec<PathBuf>,
+    /// A directory on G19's device (`--g19-dir`; none: G19 is NOT RUN).
+    pub g19_dir: Option<PathBuf>,
+    /// fio's rate at the paced shape alone on G19's device, MB/s
+    /// (`--g19-ref-mbps`; none: G19 measures its writer's own).
+    pub g19_ref_mbps: Option<f64>,
     seq: AtomicU64,
 }
 
@@ -85,6 +91,8 @@ impl Ctx {
             pool: Pool::new(),
             fsys,
             devices: Vec::new(),
+            g19_dir: None,
+            g19_ref_mbps: None,
             seq: AtomicU64::new(0),
         }
     }

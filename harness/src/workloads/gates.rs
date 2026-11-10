@@ -16,7 +16,7 @@
 
 use super::{
     Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_g18,
-    gates_scan, gates_seq, lone, page_batch, remove, sequential,
+    gates_g19, gates_scan, gates_seq, lone, page_batch, remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -879,6 +879,9 @@ pub fn run(ctx: &Ctx) -> Section {
     // G18: several devices (`--devices`), else NOT RUN.
     let g18 = gates_g18::measure(ctx, &ctx.devices);
     rows.push(g18.row);
+    // G19: its device (`--g19-dir`), else NOT RUN.
+    let g19 = gates_g19::measure(ctx);
+    rows.push(g19.row);
 
     let mut t = Table::new("Gates:", &["gate", "requirement", "measured", "verdict"]);
     for r in &rows {
@@ -903,6 +906,7 @@ pub fn run(ctx: &Ctx) -> Section {
     pts.extend(g4);
     pts.extend(g15.points);
     pts.push(g18.point);
+    pts.extend(g19.points);
     sec.points = pts;
     for s in [&l1, &w2, &w3, &w4, &w5] {
         sec.anomalies.extend(s.anomalies.iter().cloned());

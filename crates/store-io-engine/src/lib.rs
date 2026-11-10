@@ -78,6 +78,10 @@ mod sync;
 pub mod test_hook;
 #[cfg(not(feature = "sim-hooks"))]
 mod test_hook;
+// The auto-tuning rule (V3f1): used by the group's tuning state from
+// V3f3, by its own tests until then (the expectation then fails, and goes).
+#[cfg_attr(not(test), expect(dead_code))]
+mod tune;
 mod v2;
 
 pub use batch::{AppendBatch, PageBatch};

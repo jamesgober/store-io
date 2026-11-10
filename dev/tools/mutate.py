@@ -184,6 +184,8 @@ QOS_SRC = "crates/store-io-engine/src/qos.rs"
 QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
 QOS_STORE_T = ["-p", "store-io-engine", "--test", "qos"]
 PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
+TUNE_SRC = "crates/store-io-engine/src/tune.rs"
+TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
 COPY_UNIT_T = ["-p", "store-io-engine", "--lib", "copy::tests"]
 PUMP_POISON_T = ["-p", "store-io-engine", "--test", "pump_poison"]
@@ -1709,6 +1711,21 @@ M = [
  (QOS_SRC, '                    mine + leave < cap || mine == 0', '                    mine + leave < cap', QOS_T),
  ("crates/store-io-engine/src/pace.rs", '            leave: 1,\n', '            leave: 0,\n', COPY_UNIT_T),
  ("crates/store-io-engine/src/pace.rs", '        self.issuer.admit_leaving((self.clock)(), self.leave)', '        self.issuer.admit_leaving((self.clock)(), self.leave * 0)', PACE_T),
+ (TUNE_SRC, '        self.at_floor = reprobe || self.closed % PROBE_EVERY == 0;', '        self.at_floor = reprobe || self.closed % (PROBE_EVERY + 1) == 0;', TUNE_T),
+ (TUNE_SRC, '        self.at_floor = reprobe || self.closed % PROBE_EVERY == 0;', '        self.at_floor = (reprobe && false) || self.closed % PROBE_EVERY == 0;', TUNE_T),
+ (TUNE_SRC, '                reprobe = prev.is_some_and(|f| over(p99, f, RISE_PCT));', '                reprobe = prev.is_some_and(|f| over(p99, f, RISE_PCT)) && false;', TUNE_T),
+ (TUNE_SRC, '                if over(p99, f, HALVE_PCT) {', '                if over(p99, f, HALVE_PCT + 1) {', TUNE_T),
+ (TUNE_SRC, '                    self.budget = (self.budget / 2).max(FLOOR);', '                    self.budget = self.budget.max(FLOOR);', TUNE_T),
+ (TUNE_SRC, '                } else if over(p99, f, RISE_PCT) {', '                } else if over(p99, f, RISE_PCT + 1) {', TUNE_T),
+ (TUNE_SRC, '                    if self.streak >= RISE_AFTER {', '                    if self.streak > RISE_AFTER {', TUNE_T),
+ (TUNE_SRC, '                        self.budget = (self.budget + 1).min(self.ceiling);', '                        self.budget = (self.budget + 1).max(self.ceiling * 0);', TUNE_T),
+ (TUNE_SRC, '            ceiling: ceiling.max(FLOOR),', '            ceiling: ceiling.max(FLOOR * 0),', TUNE_T),
+ (TUNE_SRC, '    u128::from(p99) * 100 > u128::from(of) * u128::from(pct)', '    u128::from(p99) * 100 >= u128::from(of) * u128::from(pct)', TUNE_T),
+ (TUNE_SRC, '        if self.at_floor { FLOOR } else { self.budget }', '        if self.at_floor && false { FLOOR } else { self.budget }', TUNE_T),
+ (TUNE_SRC, '                    self.streak = 0;\n                    reprobe = true;', '                    reprobe = true;', TUNE_T),
+ (TUNE_SRC, '(self.budget + 1).min(self.ceiling);\n                        self.streak = 0;', '(self.budget + 1).min(self.ceiling);', TUNE_T),
+ (TUNE_SRC, '                self.floor = Some(p99);', '                self.floor = Some(p99);\n                self.streak = 0;', TUNE_T),
+ (TUNE_SRC, '                self.floor = Some(p99);', '                self.floor = Some(p99);\n                if reprobe {\n                    self.budget = (self.budget / 2).max(FLOOR);\n                }', TUNE_T),
 ]
 
 def kill_stuck_tests():

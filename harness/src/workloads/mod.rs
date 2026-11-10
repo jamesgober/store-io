@@ -59,6 +59,8 @@ pub struct Ctx {
     /// fio's rate at the paced shape alone on G19's device, MB/s
     /// (`--g19-ref-mbps`; none: G19 measures its writer's own).
     pub g19_ref_mbps: Option<f64>,
+    /// What `g19` runs (`--g19-part`).
+    pub g19_part: crate::cli::G19Part,
     seq: AtomicU64,
 }
 
@@ -93,6 +95,7 @@ impl Ctx {
             devices: Vec::new(),
             g19_dir: None,
             g19_ref_mbps: None,
+            g19_part: crate::cli::G19Part::All,
             seq: AtomicU64::new(0),
         }
     }

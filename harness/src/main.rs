@@ -49,6 +49,9 @@ struct Workload {
     run: fn(&Ctx) -> Section,
     points: usize,
     settles: usize,
+    /// Seconds of the workload that do not scale with `--secs` (G19's
+    /// variants), doubled in the watchdog's limit.
+    fixed_secs: f64,
 }
 
 const WORKLOADS: [Workload; 9] = [
@@ -57,36 +60,42 @@ const WORKLOADS: [Workload; 9] = [
         run: workloads::lone::run,
         points: 8,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::Concurrent,
         run: workloads::concurrent::run,
         points: 28,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::CallerBatch,
         run: workloads::caller_batch::run,
         points: 72,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::PageBatch,
         run: workloads::page_batch::run,
         points: 16,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::Sequential,
         run: workloads::sequential::run,
         points: 11,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::Submitter,
         run: workloads::submitter::run,
         points: 16,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::Gates,
@@ -97,6 +106,7 @@ const WORKLOADS: [Workload; 9] = [
         // Before W2-W5 and the fio controls (5), and before each of G13's
         // reruns (at most 4, on Windows).
         settles: 9,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::MultiGates,
@@ -106,16 +116,21 @@ const WORKLOADS: [Workload; 9] = [
         // `--secs`).
         points: 80,
         settles: 0,
+        fixed_secs: 0.0,
     },
     Workload {
         command: Command::G19,
         run: workloads::gates_g19::run,
-        // Two configurations of 12 rounds of three phases of `--secs`, and
-        // the paced shape alone (73 phases): the watchdog's limit is
-        // 4 x 24 points + 300 s, about twice G19's own time at any
-        // `--secs`, and within the g19 job's 30 minutes at its 4 s.
-        points: 24,
+        // G19 and its variants: about 115 phases of `--secs` (G19's two
+        // configurations of 12 rounds of three, the paced shape alone, the
+        // variants' idle runs and G19b's rounds), counted as 40 points (4 x
+        // 40 = 160 phases' time in the limit), and about 610 s whatever
+        // `--secs` (G19s's 60 x 7 s, G19l's 180 s), doubled: a limit about
+        // 1.5x the run at any `--secs`, 32 minutes at the job's 4 s, within
+        // its 45.
+        points: 40,
         settles: 0,
+        fixed_secs: 650.0,
     },
 ];
 
@@ -208,6 +223,7 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
     ctx.devices.clone_from(&args.devices);
     ctx.g19_dir.clone_from(&args.g19_dir);
     ctx.g19_ref_mbps = args.g19_ref_mbps;
+    ctx.g19_part = args.g19_part;
     let header = Header {
         device: device.clone(),
         backend: sio::BACKEND.to_owned(),
@@ -305,7 +321,10 @@ fn run_in(args: &Args, base: &Path, started: Instant) -> Result<(), String> {
         // The settle before the workload runs outside the watch; those
         // inside it are added.
         let limit = Duration::from_secs_f64(
-            w.points as f64 * ctx.point_secs() * 4.0 + 300.0 + w.settles as f64 * args.settle,
+            w.points as f64 * ctx.point_secs() * 4.0
+                + 300.0
+                + w.settles as f64 * args.settle
+                + w.fixed_secs * 2.0,
         );
         ctx.settle(name);
         eprintln!("[{name}] running ...");

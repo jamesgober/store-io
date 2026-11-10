@@ -41,6 +41,9 @@ OPTIONS:
                      (the multi-device gates: G18)
     --g19-dir <D>    a directory on G19's device (CI's calibrated device, or
                      the dev box's drive); `gates` runs G19 there too
+    --g19-part <P>   what `g19` runs: main (G19 and its negative control),
+                     variants (G19s, G19b, G19l: about 13 minutes) or all
+                     (default)
     --g19-ref-mbps <X>
                      fio's MB/s at the paced shape alone on that device (256
                      KiB, one in flight; the device script's); else G19
@@ -120,6 +123,17 @@ impl Command {
     }
 }
 
+/// What `g19` runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum G19Part {
+    /// G19 and its negative control.
+    Main,
+    /// G19s, G19b and G19l.
+    Variants,
+    /// Both.
+    All,
+}
+
 /// Parsed arguments.
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -143,6 +157,8 @@ pub struct Args {
     pub g19_dir: Option<PathBuf>,
     /// fio's rate at G19's paced shape, MB/s.
     pub g19_ref_mbps: Option<f64>,
+    /// What `g19` runs.
+    pub g19_part: G19Part,
 }
 
 fn default_dir() -> PathBuf {
@@ -172,6 +188,7 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         devices: Vec::new(),
         g19_dir: None,
         g19_ref_mbps: None,
+        g19_part: G19Part::All,
     };
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or_else(|| format!("`{flag}` needs a value"));
@@ -217,6 +234,15 @@ pub fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 }
             }
             "--g19-dir" => a.g19_dir = Some(PathBuf::from(value()?)),
+            "--g19-part" => {
+                let v = value()?;
+                a.g19_part = match v.as_str() {
+                    "main" => G19Part::Main,
+                    "variants" => G19Part::Variants,
+                    "all" => G19Part::All,
+                    _ => return Err(format!("bad --g19-part `{v}` (main, variants or all)")),
+                };
+            }
             "--g19-ref-mbps" => {
                 let v = value()?;
                 a.g19_ref_mbps = Some(
@@ -266,6 +292,11 @@ mod tests {
         assert_eq!(a.g19_ref_mbps, Some(61.5));
         assert!(args(&["g19"]).is_err());
         assert!(args(&["g19", "--g19-dir", "/d", "--g19-ref-mbps", "0"]).is_err());
+        assert_eq!(a.g19_part, G19Part::All);
+        let v = args(&["g19", "--g19-dir", "/d", "--g19-part", "variants"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(v.g19_part, G19Part::Variants);
+        assert!(args(&["g19", "--g19-dir", "/d", "--g19-part", "some"]).is_err());
         assert!(args(&["gates"]).is_ok_and(|a| a.g19_dir.is_none()));
     }
 

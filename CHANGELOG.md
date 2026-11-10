@@ -112,13 +112,19 @@
   on another store of the same device, 12 rounds of (idle, loaded, idle),
   must stay within 2x idle while the writer keeps at least half the paced
   shape's rate alone, and the same rounds with `background_pacing(false)`
-  on both stores must exceed 2x (the negative control). Its device is made
+  on both stores must exceed 2x (the negative control). Its variants, in a
+  second leg of the job, all paced: G19s, 60 commits one every 7 s (beyond
+  `commit_quiet`) under a `CommitHold`, which must keep commits active
+  before each, at least 57 within 2x idle; G19b, the writer checkpointing
+  with a `barrier_all` every 8 MiB, its rounds within 2x; G19l, 3 minutes
+  of continuous background with commits, its p99 and every 15 s window's
+  within 2x and the writer at G19's rate floor. Its device is made
   and calibrated by `harness/scripts/g19_device.sh`: `null_blk` at depth 1
   behind a FIFO `mq-deadline` queue, `dm-delay` holding flushes at least
   4 kernel ticks (4 ms on CI),
   its request time chosen with fio so that a 256 KiB writer at depth 1
   costs a commit at most 1.5x and at depth 8 at least 3x. The job fails
-  unless G19's row is a PASS. First runs: paced 1.39x and 1.46x, pacing
+  unless each of its rows is a PASS. First runs: paced 1.39x and 1.46x, pacing
   off 2.80x and 3.17x.
 - CI: every apt call goes through `dev/tools/apt-install.sh`, which bounds
   and retries it, so a stalled mirror or a held dpkg lock fails its step in

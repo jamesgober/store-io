@@ -453,13 +453,25 @@ jobs:
   # background Submitter, on a device calibrated to separate the paced
   # shape from a deeper one: null_blk at depth 1 behind a FIFO
   # mq-deadline, dm-delay holding flushes (harness/scripts/g19_device.sh,
-  # which fails if no N separates them). Then G19, paced and with pacing off
-  # (its negative control). Fails unless G19's row is a PASS; fails, never
-  # falls back, if the device cannot be made.
+  # which fails if no N separates them). Then, each leg on its own runner
+  # and device: G19, paced and with pacing off (its negative control); its
+  # variants G19s (sporadic commits under a CommitHold), G19b (a background
+  # barrier every 8 MiB) and G19l (a long loaded round). Fails unless each
+  # of the leg's rows is a PASS; fails, never falls back, if the device
+  # cannot be made.
   g19:
-    name: G19 (calibrated device)
+    name: G19 (calibrated device, ${{ matrix.part }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The harness's watchdog stops a hung run after about 24 minutes.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: main
+            gates: G19
+          - part: variants
+            gates: G19s G19b G19l
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -488,17 +500,18 @@ jobs:
           # --dir: the probe (the options and the report's device) on
           # G19's device, as G18's job does on its own.
           harness/target/release/store-io-harness g19 --dir "$G19_MOUNT" --g19-dir "$G19_MOUNT" \
-            --g19-ref-mbps "$G19_REF_MBPS" --secs 4 --settle 0 --out "$RUNNER_TEMP/g19r"
+            --g19-part ${{ matrix.part }} --g19-ref-mbps "$G19_REF_MBPS" --secs 4 --settle 0 \
+            --out "$RUNNER_TEMP/g19r"
           f=$(ls "$RUNNER_TEMP"/g19r/*-g19.md)
           sed -n '/^| gate |/,/^$/p' "$f"
           grep -q "every measurement completed and every integrity check passed" "$f"
-          # G19 must have run and passed: NOT RUN, FAIL or a missing row
-          # fails the job.
-          grep -qE '^\| G19 \|.*\| PASS \|$' "$f"
+          # Each of the leg's gates must have run and passed: NOT RUN, FAIL
+          # or a missing row fails the job.
+          for g in ${{ matrix.gates }}; do grep -qE "^\\| $g \\|.*\\| PASS \\|\$" "$f"; done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: g19-report
+          name: g19-report-${{ matrix.part }}
           path: |
             ${{ runner.temp }}/g19/
             ${{ runner.temp }}/g19r/

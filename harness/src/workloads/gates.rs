@@ -880,8 +880,9 @@ pub fn run(ctx: &Ctx) -> Section {
     let g18 = gates_g18::measure(ctx, &ctx.devices);
     rows.push(g18.row);
     // G19: its device (`--g19-dir`), else NOT RUN.
+    // Its variants (minutes each) only in `g19`.
     let g19 = gates_g19::measure(ctx);
-    rows.push(g19.row);
+    rows.extend(g19.rows);
 
     let mut t = Table::new("Gates:", &["gate", "requirement", "measured", "verdict"]);
     for r in &rows {

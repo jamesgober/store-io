@@ -132,7 +132,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Mount a ${{ matrix.fs }} image
         run: |
-          if [ "${{ matrix.fs }}" = xfs ]; then sudo apt-get install -y -qq xfsprogs; fi
+          if [ "${{ matrix.fs }}" = xfs ]; then bash dev/tools/apt-install.sh xfsprogs; fi
           truncate -s 4G "$RUNNER_TEMP/fs.img"
           sudo mkfs.${{ matrix.fs }} -q "$RUNNER_TEMP/fs.img"
           sudo mkdir -p /mnt/sio
@@ -165,7 +165,7 @@ jobs:
           STORE_IO_EXPECT_URING: "1"
       - name: No io-wq workers (W6 on io_uring), fallbacks counted
         run: |
-          { sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"; } && sudo apt-get install -y -qq fio
+          bash dev/tools/apt-install.sh --update fio
           (cd harness && cargo build --release)
           echo "kernel $(uname -r), fs $(findmnt -no FSTYPE /mnt/sio)"
           bash dev/tools/iowq-gate.sh
@@ -173,7 +173,7 @@ jobs:
           STORE_IO_TEST_DIR: /mnt/sio
       - name: Hot path makes no futex call and no timed wait (strace)
         run: |
-          sudo apt-get install -y -qq strace
+          bash dev/tools/apt-install.sh strace
           cargo test --test hotpath --no-run
           strace -f -qq -o "$RUNNER_TEMP/hot.trace" \
             -e 'trace=/^futex,nanosleep,clock_nanosleep,timerfd_create,timerfd_settime,setitimer,statx,newfstatat,io_uring_enter' \
@@ -214,8 +214,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Install virtme-ng
         run: |
-          sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"
-          sudo apt-get install -y -qq qemu-system-x86 virtiofsd udev busybox-static
+          bash dev/tools/apt-install.sh --update qemu-system-x86 virtiofsd udev busybox-static
           pipx install virtme-ng
       - name: Build the tests on the host
         run: |
@@ -259,11 +258,10 @@ jobs:
           set -eux
           W="$RUNNER_TEMP"
           if [ "${{ matrix.fs }}" = xfs ]; then
-            { sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"; } && sudo apt-get install -y -qq xfsprogs
+            bash dev/tools/apt-install.sh --update xfsprogs
           fi
           sudo modprobe dm-log-writes || {
-            sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"
-            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            bash dev/tools/apt-install.sh --update "linux-modules-extra-$(uname -r)"
             sudo modprobe dm-log-writes
           }
           # mkfs.xfs refuses file systems under 300 MB.
@@ -344,8 +342,7 @@ jobs:
       - name: A memory-backed device with a write-back cache
         run: |
           set -eux
-          sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"
-          sudo apt-get install -y -qq fio
+          bash dev/tools/apt-install.sh --update fio
           # null_blk (memory-backed, volatile cache) where the kernel ships
           # it; the runner's Azure kernel does not, so else a loop device
           # over a file on tmpfs: memory-backed too, and flush-required
@@ -416,8 +413,7 @@ jobs:
           # null_blk itself, from the kernel's extra modules if it is not
           # built in: never another kind of device.
           if ! sudo modprobe null_blk $NULLB; then
-            sudo apt-get update -qq || echo "::warning::apt-get update failed for some source; installing from the lists it fetched"
-            sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)"
+            bash dev/tools/apt-install.sh --update "linux-modules-extra-$(uname -r)"
             sudo modprobe null_blk $NULLB
           fi
           for i in 0 1 2 3; do

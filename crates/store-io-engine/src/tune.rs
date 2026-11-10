@@ -93,6 +93,14 @@ impl Tuner {
         self.floor
     }
 
+    /// Lowers the ceiling to `ceiling` (a merge with a store asking for a
+    /// smaller one: the group takes the smallest), the budget with it;
+    /// never raises it, never below the floor.
+    pub(crate) fn lower_ceiling(&mut self, ceiling: u64) {
+        self.ceiling = self.ceiling.min(ceiling.max(FLOOR));
+        self.budget = self.budget.min(self.ceiling);
+    }
+
     /// Closes the current window, whose commits' p99 was `p99`: applies
     /// the rule and returns the budget the next window runs at.
     pub(crate) fn close(&mut self, p99: u64) -> u64 {
@@ -322,6 +330,21 @@ mod tests {
         let mut z = Tuner::new(0);
         good(&mut z, 11);
         assert_eq!(z.budget(), FLOOR);
+    }
+
+    #[test]
+    fn test_a_lowered_ceiling_takes_the_budget_down_and_is_never_raised() {
+        let mut t = Tuner::new(8);
+        let _ = t.close(1000);
+        good(&mut t, 6);
+        assert_eq!(t.budget(), 3);
+        t.lower_ceiling(2);
+        assert_eq!(t.budget(), 2);
+        t.lower_ceiling(5);
+        good(&mut t, 20);
+        assert_eq!(t.budget(), 2, "the ceiling stays the lowest asked for");
+        t.lower_ceiling(0);
+        assert_eq!(t.budget(), FLOOR);
     }
 
     #[test]

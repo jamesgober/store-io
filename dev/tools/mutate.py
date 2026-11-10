@@ -1560,8 +1560,8 @@ M = [
  # drop and its wake; a failed binding's end; poison read and woken; the
  # unknown count and its seed; the stamp's stride; the group rule; scopes
  # apart; a pruned member's commit kept.
- (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)', '                    rec.is_some_and(|r| r.in_flight() <= 1)', QOS_T),
- (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)', '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 2)', QOS_T),
+ (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget)', '                    rec.is_some_and(|r| r.in_flight() <= budget)', QOS_T),
+ (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget)', '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget + 1)', QOS_T),
  (QOS_SRC, '                } else {\n                    mine + leave < cap || mine == 0\n                };', '                } else {\n                    mine + leave <= cap || mine == 0\n                };', QOS_T),
  (QOS_SRC, '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));', '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now) && false);', QOS_T),
  (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);', '        let _m = i.in_flight.fetch_sub(0, Ordering::SeqCst);', QOS_T),
@@ -1733,6 +1733,32 @@ M = [
  ("crates/store-io-engine/src/store.rs", '        && (1..=8).contains(&opts.background_depth_max)', '        && (1..=9).contains(&opts.background_depth_max)', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '        autotune: opts.background_autotune,', '        autotune: opts.background_autotune && false,', QOS_STORE_T),
  ("crates/store-io-engine/src/store.rs", '        depth_max: opts.background_depth_max,', '        depth_max: opts.background_depth_max.max(8),', QOS_STORE_T),
+ (QOS_SRC, '        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS));', '        let due = !reopen && (n > WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS));', QOS_T),
+ (QOS_SRC, '        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS));', '        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS && false));', QOS_T),
+ (QOS_SRC, '        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS));', '        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS * 2));', QOS_T),
+ (QOS_SRC, '        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS));', '        let due = n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS);', QOS_T),
+ (QOS_SRC, '        let reopen = opened == 0 || gap || age >= STALE_NS;', '        let reopen = opened == 0 || gap || (age >= STALE_NS && false);', QOS_T),
+ (QOS_SRC, '        let reopen = opened == 0 || gap || age >= STALE_NS;', '        let reopen = (opened == 0 && false) || gap || age >= STALE_NS;', QOS_T),
+ (QOS_SRC, '        let reopen = opened == 0 || gap || age >= STALE_NS;', '        let reopen = opened == 0 || (gap && false) || age >= STALE_NS;', QOS_T),
+ (QOS_SRC, '        let gap = last != 0 && now.saturating_sub(last) >= GAP_NS;', '        let gap = last != 0 && now.saturating_sub(last) >= GAP_NS * 3;', QOS_T),
+ (QOS_SRC, '            let v = self.durs[(i % RING as u64) as usize].swap(0, Ordering::SeqCst);', '            let v = self.durs[(i % RING as u64) as usize].load(Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '            if v != 0 {\n                scratch.push(v);', '            if v != 0 || true {\n                scratch.push(v);', QOS_T),
+ (QOS_SRC, '        if due && !scratch.is_empty() {', '        if due {', QOS_T),
+ (QOS_SRC, '            let p99 = scratch[(scratch.len() * 99).div_ceil(100).max(1) - 1];', '            let p99 = scratch[(scratch.len() * 98).div_ceil(100).max(1) - 1];', QOS_T),
+ (QOS_SRC, '            let word = if at_floor {', '            let word = if !at_floor {', QOS_T),
+ (QOS_SRC, '        self.start.store(end, Ordering::SeqCst);', '        self.start.store(end * 0, Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '        self.t.seq.store(self.s + 2, Ordering::SeqCst);', '        self.t.seq.store(self.s + 1, Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '        let _was = self.budget.fetch_min(g.0.current(), Ordering::SeqCst);', '        let _was = self.budget.fetch_min(g.0.current().max(u64::MAX), Ordering::SeqCst);', QOS_T),
+ (QOS_SRC, '        (self.opts.pacing && self.opts.autotune).then(|| &*self.tuning)', '        self.opts.autotune.then(|| &*self.tuning)', QOS_T),
+ (QOS_SRC, '        self.tuned().map_or(FLOOR, Tuning::budget)', '        self.tuning.budget()', QOS_T),
+ (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget)', '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget.min(FLOOR))', QOS_T),
+ (QOS_SRC, '        self.depth_max.min(self.background_unpaced).max(1)', '        self.depth_max.max(1)', QOS_T),
+ (QOS_SRC, '        tuning.lower_ceiling(merged_opts.ceiling());', '        tuning.lower_ceiling(merged_opts.ceiling().max(8));', QOS_T),
+ (QOS_SRC, '        e.tuning.lower_ceiling(merged.ceiling());', '        e.tuning.lower_ceiling(merged.ceiling().max(8));', QOS_T),
+ (QOS_SRC, '            if paced {\n                if let Some(t) = rec.and_then(Record::tuned) {', '            if paced && false {\n                if let Some(t) = rec.and_then(Record::tuned) {', QOS_T),
+ (QOS_SRC, '            let _oldest = tuning.get_or_insert_with(|| Arc::clone(&e.tuning));', '            let _oldest = tuning.get_or_insert_with(|| Arc::new(Tuning::new(8)));', QOS_T),
+ (TUNE_SRC, '        self.ceiling = self.ceiling.min(ceiling.max(FLOOR));', '        self.ceiling = self.ceiling.max(ceiling.max(FLOOR));', TUNE_T),
+ (TUNE_SRC, '        self.budget = self.budget.min(self.ceiling);', '        self.budget = self.budget.min(self.ceiling.max(8));', TUNE_T),
 ]
 
 def kill_stuck_tests():

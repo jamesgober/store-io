@@ -36,6 +36,8 @@ use loom::sync::{Condvar, Mutex, RwLock};
 use std::sync::{Condvar, Mutex, RwLock};
 
 use store_io_buf::CachePadded;
+
+use crate::tune::{FLOOR, Tuner};
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 
 use crate::sync::{AtomicBool, AtomicU64, Ordering};
@@ -86,6 +88,13 @@ impl Default for QosOptions {
 }
 
 impl QosOptions {
+    /// Auto-tuning's ceiling: `depth_max`, and never above
+    /// `background_unpaced` (paced, a call never keeps more pieces than it
+    /// may unpaced).
+    fn ceiling(&self) -> u32 {
+        self.depth_max.min(self.background_unpaced).max(1)
+    }
+
     /// The group rule for stores that disagree (D-153): pacing on if any
     /// member asks for it, the largest quiet, the smallest caps, auto-tuning
     /// only if every member asks for it. `background_io` stays each
@@ -192,6 +201,192 @@ fn stamp(word: &AtomicU64, now: u64) {
     }
 }
 
+// ---------------------------------------------------------------- tuning
+
+/// Leader samples a window holds before it closes (R5.4).
+#[cfg(not(loom))]
+const WINDOW_SAMPLES: u64 = 200;
+#[cfg(loom)]
+const WINDOW_SAMPLES: u64 = 2;
+/// A window open [`WINDOW_NS`] closes once it holds this many.
+#[cfg(not(loom))]
+const WINDOW_MIN: u64 = 50;
+#[cfg(loom)]
+const WINDOW_MIN: u64 = 1;
+const WINDOW_NS: u64 = 2_000_000_000;
+/// A window open this long without closing is opened again, its samples
+/// dropped: commits too sparse to fill one (under 50 in 30 s) say nothing
+/// of a budget, and samples from before the background began would read
+/// as a fast window.
+const STALE_NS: u64 = 30_000_000_000;
+/// A background admission this long after the previous one opens the
+/// window again: the samples since were taken with no background work to
+/// judge (a window must never fill while the background is quiet and close
+/// as a loaded one at the next burst).
+const GAP_NS: u64 = 1_000_000_000;
+/// Slots of the sample ring: at least a full window.
+#[cfg(not(loom))]
+const RING: usize = 256;
+#[cfg(loom)]
+const RING: usize = 4;
+
+/// A device group's opt-in auto-tuning (PLANNING R5.4, V3f3): the leaders'
+/// commit samples, the current window and the rule ([`Tuner`]). One per
+/// group, carried through prunes, and the oldest group's through a merge.
+///
+/// Leaders write samples into a ring through an atomic index; a window's
+/// samples are the indices from its `start` to `next`, so opening a window
+/// drops every sample before it. A background issuer closes a window at
+/// admission: the one that wins a compare-and-swap of `seq` from even (a
+/// window open) to odd (closing) takes each slot with a swap to 0 (so no
+/// sample counts twice, and a slot reserved but not yet written counts
+/// in no window), computes the p99 into its preallocated scratch, runs the
+/// rule and publishes the budget, then reopens the window.
+pub(crate) struct Tuning {
+    durs: Box<[AtomicU64]>,
+    /// The next sample's index: written at every sampled commit, so on a
+    /// line of its own (admissions read the words below).
+    next: CachePadded<AtomicU64>,
+    seq: AtomicU64,
+    start: AtomicU64,
+    /// The clock when the current window opened (0: none opened yet).
+    opened: AtomicU64,
+    /// The clock at the latest background admission (stamped at most once
+    /// a millisecond; 0: none yet).
+    last_admit: AtomicU64,
+    /// The budget the current window runs at.
+    budget: AtomicU64,
+    /// The latest floor window's p99 and the latest other window's (0:
+    /// none yet), for the report.
+    floor_p99: AtomicU64,
+    loaded_p99: AtomicU64,
+    /// Windows closed, and samples taken out of the ring (judged or
+    /// dropped by a reopen).
+    windows: AtomicU64,
+    taken: AtomicU64,
+    rule: Mutex<(Tuner, Vec<u64>)>,
+}
+
+/// Ends a close or a reopen: the window open again (`seq` even) however
+/// the closer leaves, and a closer that panicked leaves the budget at the
+/// floor (the safe direction), never a window stuck closing.
+struct Closing<'a> {
+    t: &'a Tuning,
+    s: u64,
+}
+
+impl Drop for Closing<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.t.budget.store(FLOOR, Ordering::SeqCst);
+        }
+        self.t.seq.store(self.s + 2, Ordering::SeqCst);
+    }
+}
+
+impl Tuning {
+    fn new(ceiling: u32) -> Self {
+        Self {
+            durs: (0..RING).map(|_| AtomicU64::new(0)).collect(),
+            next: CachePadded::new(AtomicU64::new(0)),
+            seq: AtomicU64::new(0),
+            start: AtomicU64::new(0),
+            opened: AtomicU64::new(0),
+            last_admit: AtomicU64::new(0),
+            budget: AtomicU64::new(FLOOR),
+            floor_p99: AtomicU64::new(0),
+            loaded_p99: AtomicU64::new(0),
+            windows: AtomicU64::new(0),
+            taken: AtomicU64::new(0),
+            rule: Mutex::new((Tuner::new(u64::from(ceiling)), Vec::with_capacity(RING))),
+        }
+    }
+
+    /// Lowers the rule's ceiling (a merge with a smaller one).
+    fn lower_ceiling(&self, ceiling: u32) {
+        let mut g = self.rule.lock().unwrap_or_else(PoisonError::into_inner);
+        g.0.lower_ceiling(u64::from(ceiling));
+        let _was = self.budget.fetch_min(g.0.current(), Ordering::SeqCst);
+    }
+
+    /// A leader's commit sample: `dur` nanoseconds from its entry to its
+    /// flush's completion. Two atomic operations; never blocks.
+    pub(crate) fn sample(&self, dur: u64) {
+        let i = self.next.fetch_add(1, Ordering::SeqCst);
+        self.durs[(i % RING as u64) as usize].store(dur.max(1), Ordering::SeqCst);
+    }
+
+    /// The budget the current window runs at.
+    pub(crate) fn budget(&self) -> u64 {
+        self.budget.load(Ordering::SeqCst)
+    }
+
+    /// At a background admission: opens the first window, opens it again
+    /// after a gap in background admissions or when it went stale, or
+    /// closes it if it is due (200 samples, or 2 s with at least 50). Only
+    /// one caller does any of it at a time (the compare-and-swap of `seq`);
+    /// the others return at once. A reopen takes the window's samples out
+    /// of the ring too, unjudged.
+    pub(crate) fn try_close(&self, now: u64) {
+        let last = self.last_admit.load(Ordering::SeqCst);
+        stamp(&self.last_admit, now);
+        let s = self.seq.load(Ordering::SeqCst);
+        if s % 2 == 1 {
+            return;
+        }
+        let opened = self.opened.load(Ordering::SeqCst);
+        let n = self
+            .next
+            .load(Ordering::SeqCst)
+            .saturating_sub(self.start.load(Ordering::SeqCst));
+        let age = now.saturating_sub(opened);
+        let gap = last != 0 && now.saturating_sub(last) >= GAP_NS;
+        let reopen = opened == 0 || gap || age >= STALE_NS;
+        let due = !reopen && (n >= WINDOW_SAMPLES || (n >= WINDOW_MIN && age >= WINDOW_NS));
+        if !(due || reopen)
+            || self
+                .seq
+                .compare_exchange(s, s + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let _closing = Closing { t: self, s };
+        let end = self.next.load(Ordering::SeqCst);
+        let mut g = self.rule.lock().unwrap_or_else(PoisonError::into_inner);
+        let (rule, scratch) = &mut *g;
+        scratch.clear();
+        let from = self
+            .start
+            .load(Ordering::SeqCst)
+            .max(end.saturating_sub(RING as u64));
+        for i in from..end {
+            let v = self.durs[(i % RING as u64) as usize].swap(0, Ordering::SeqCst);
+            if v != 0 {
+                scratch.push(v);
+            }
+        }
+        let _t = self.taken.fetch_add(scratch.len() as u64, Ordering::SeqCst);
+        if due && !scratch.is_empty() {
+            scratch.sort_unstable();
+            let p99 = scratch[(scratch.len() * 99).div_ceil(100).max(1) - 1];
+            let at_floor = rule.at_floor();
+            let next = rule.close(p99);
+            let word = if at_floor {
+                &self.floor_p99
+            } else {
+                &self.loaded_p99
+            };
+            word.store(p99, Ordering::SeqCst);
+            self.budget.store(next, Ordering::SeqCst);
+            let _w = self.windows.fetch_add(1, Ordering::SeqCst);
+        }
+        drop(g);
+        self.start.store(end, Ordering::SeqCst);
+        self.opened.store(now.max(1), Ordering::SeqCst);
+    }
+}
+
 /// A group's members and options, immutable once published: a merge or a
 /// join publishes a new one to every member.
 pub(crate) struct Record {
@@ -200,9 +395,23 @@ pub(crate) struct Record {
     /// The latest commit of members pruned from the record (closed stores):
     /// still activity within the quiet.
     retired: Arc<AtomicU64>,
+    /// The group's auto-tuning (read only when `opts` asks for it).
+    tuning: Arc<Tuning>,
 }
 
 impl Record {
+    /// The group's tuning, when auto-tuning is on (pacing on and every
+    /// member asking for it).
+    fn tuned(&self) -> Option<&Tuning> {
+        (self.opts.pacing && self.opts.autotune).then(|| &*self.tuning)
+    }
+
+    /// The pieces beyond each call's own one the group admits while its
+    /// commits are active: the tuned budget, else the floor.
+    fn budget(&self) -> u64 {
+        self.tuned().map_or(FLOOR, Tuning::budget)
+    }
+
     fn in_flight(&self) -> u64 {
         self.counters
             .iter()
@@ -267,6 +476,9 @@ struct Entry {
     /// The group's current record (also reachable through the cells).
     record: Weak<Record>,
     retired: Arc<AtomicU64>,
+    /// The group's auto-tuning, kept across prunes and (the oldest
+    /// group's) merges.
+    tuning: Arc<Tuning>,
 }
 
 #[derive(Default)]
@@ -412,6 +624,7 @@ impl Groups {
                     counters,
                     opts: rec.opts,
                     retired: Arc::clone(&e.retired),
+                    tuning: Arc::clone(&e.tuning),
                 });
                 publish(e, &next);
             }
@@ -458,6 +671,7 @@ impl Groups {
         let mut merged_opts = opts;
         let mut retired_at = 0;
         let mut seq = None;
+        let mut tuning = None;
         // Oldest first: the merge keeps the oldest group's place.
         let mut met: Vec<Entry> = met
             .into_iter()
@@ -467,6 +681,7 @@ impl Groups {
         met.sort_by_key(|e| e.seq);
         for e in met {
             let _first = seq.get_or_insert(e.seq);
+            let _oldest = tuning.get_or_insert_with(|| Arc::clone(&e.tuning));
             merged_keys.extend(e.keys);
             cells.extend(e.cells);
             retired_at = retired_at.max(e.retired.load(Ordering::Relaxed));
@@ -483,10 +698,13 @@ impl Groups {
             self.next
         });
         let retired = Arc::new(AtomicU64::new(retired_at));
+        let tuning = tuning.unwrap_or_else(|| Arc::new(Tuning::new(merged_opts.ceiling())));
+        tuning.lower_ceiling(merged_opts.ceiling());
         let record = Arc::new(Record {
             counters: members,
             opts: merged_opts,
             retired: Arc::clone(&retired),
+            tuning: Arc::clone(&tuning),
         });
         let mine = Arc::new(RwLock::new(Arc::clone(&record)));
         cells.push(Arc::downgrade(&mine));
@@ -497,6 +715,7 @@ impl Groups {
             cells,
             record: Arc::downgrade(&record),
             retired,
+            tuning,
         };
         publish(&mut e, &record);
         self.entries.push(e);
@@ -516,16 +735,19 @@ impl Groups {
             cells: Vec::new(),
             record: Weak::new(),
             retired: Arc::new(AtomicU64::new(0)),
+            tuning: Arc::new(Tuning::new(opts.ceiling())),
         });
         let (mut members, merged) = match e.record.upgrade() {
             Some(r) => (r.counters.clone(), r.opts.merge(opts)),
             None => (Vec::new(), opts),
         };
         members.push(Arc::clone(counters));
+        e.tuning.lower_ceiling(merged.ceiling());
         let record = Arc::new(Record {
             counters: members,
             opts: merged,
             retired: Arc::clone(&e.retired),
+            tuning: Arc::clone(&e.tuning),
         });
         let mine = Arc::new(RwLock::new(Arc::clone(&record)));
         e.cells.push(Arc::downgrade(&mine));
@@ -588,6 +810,23 @@ impl Qos {
                 }
             }
         }
+    }
+
+    /// A leader's commit sample for the group's auto-tuning: `dur`
+    /// nanoseconds from its entry to its flush's completion. Nothing when
+    /// auto-tuning is off. Whether it is on: [`Self::tuned`].
+    pub(crate) fn sample(&self, dur: u64) {
+        self.with_record(|r| {
+            if let Some(t) = r.and_then(Record::tuned) {
+                t.sample(dur);
+            }
+        });
+    }
+
+    /// Whether the group's auto-tuning is on (so a leader takes its second
+    /// clock read).
+    pub(crate) fn tuned(&self) -> bool {
+        self.with_record(|r| r.and_then(Record::tuned).is_some())
     }
 
     /// Holds commits active until the hold drops (`Store::commit_hold`).
@@ -676,7 +915,15 @@ impl Qos {
                 .as_ref()
                 .map_or(self.opts.depth_max, |r| r.opts.depth_max),
             active: self.active(now),
-            budget: 1,
+            budget: rec.as_ref().map_or(FLOOR, |r| r.budget()),
+            floor_p99_ns: rec
+                .as_ref()
+                .and_then(|r| r.tuned())
+                .map_or(0, |t| t.floor_p99.load(Ordering::SeqCst)),
+            loaded_p99_ns: rec
+                .as_ref()
+                .and_then(|r| r.tuned())
+                .map_or(0, |t| t.loaded_p99.load(Ordering::SeqCst)),
             in_flight: rec.as_ref().map_or(0, |r| r.in_flight()),
             members: rec.as_ref().map_or(1, |r| r.counters.len()),
             unknown: self.kind == Kind::Unknown,
@@ -704,8 +951,15 @@ pub struct QosReport {
     /// or a live [`CommitHold`]).
     pub active: bool,
     /// Background pieces in flight the group admits beyond each background
-    /// call's own one while commits are active (the floor, 1).
+    /// call's own one while commits are active: the floor, 1, unless
+    /// auto-tuning moves it.
     pub budget: u64,
+    /// Auto-tuning's latest floor window p99 and latest other window p99,
+    /// nanoseconds (0: none yet, or auto-tuning off). Not yet wired: hidden.
+    #[doc(hidden)]
+    pub floor_p99_ns: u64,
+    #[doc(hidden)]
+    pub loaded_p99_ns: u64,
     /// Background pieces in flight in the group now.
     pub in_flight: u64,
     /// Stores in the group (closed ones pruned at the next join).
@@ -859,7 +1113,10 @@ impl Issuer {
     /// its other threads (a copy's reader leaves one to the fill sharing
     /// its record, so the reader's read-ahead never refuses the fill).
     /// With nothing of the call in flight a piece is admitted whatever
-    /// `leave`; paced, `leave` changes nothing (the call has one piece).
+    /// `leave`; paced, `leave` changes nothing (the call's paced pieces are
+    /// the group's budget's: one at the floor; under a tuned budget a
+    /// copy's reader may take them all, a fairness matter only, since its
+    /// drain rule still lets the fill progress).
     pub(crate) fn admit_leaving(self: &Arc<Self>, now: u64, leave: u64) -> Option<Charge> {
         let admitted = self.qos.with_record(|rec| {
             let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));
@@ -875,11 +1132,20 @@ impl Issuer {
             // charge: hence `<=` the budget); then a compare-and-swap on the
             // call's count, so two threads of one call never both take its
             // one paced piece. A refusal undoes the charge.
+            // Auto-tuning: a due window closes here, at a background
+            // admission (never on the commit path), before the budget is
+            // read.
+            if paced {
+                if let Some(t) = rec.and_then(Record::tuned) {
+                    t.try_close(now);
+                }
+            }
+            let budget = rec.map_or(FLOOR, Record::budget);
             let _t = self.qos.counters.in_flight.fetch_add(1, Ordering::SeqCst);
             let mut mine = self.in_flight.load(Ordering::SeqCst);
             loop {
                 let ok = if paced {
-                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= 1)
+                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget)
                 } else {
                     mine + leave < cap || mine == 0
                 };
@@ -1504,6 +1770,320 @@ mod tests {
         assert!(!z.report(c()).autotune, "nothing to tune without pacing");
     }
 
+    /// `n` samples of `dur` into `t`.
+    fn samples(t: &Tuning, n: usize, dur: u64) {
+        for _ in 0..n {
+            t.sample(dur);
+        }
+    }
+
+    /// The group tuning of `q`'s record.
+    fn tuning_of(q: &Qos) -> Arc<Tuning> {
+        q.with_record(|r| Arc::clone(&r.expect("a paced store").tuning))
+    }
+
+    fn tuned() -> QosOptions {
+        QosOptions {
+            autotune: true,
+            ..QosOptions::default()
+        }
+    }
+
+    #[test]
+    fn test_a_window_closes_at_200_samples_or_at_2_s_with_50() {
+        let t = Tuning::new(8);
+        t.try_close(1);
+        samples(&t, 199, 1000);
+        t.try_close(2);
+        assert_eq!(
+            t.windows.load(Ordering::SeqCst),
+            0,
+            "199 samples: still open"
+        );
+        samples(&t, 1, 1000);
+        t.try_close(3);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            t.floor_p99.load(Ordering::SeqCst),
+            1000,
+            "window 1 is the floor's"
+        );
+        assert_eq!(t.budget(), 1);
+        // 49 samples, 3 s on (the background admitting throughout): not
+        // yet; the 50th closes it.
+        samples(&t, 49, 1100);
+        let at = admit_until(&t, 3, 3 + 3_000 * MS);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 1);
+        samples(&t, 1, 1100);
+        t.try_close(at);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 2);
+        assert_eq!(t.loaded_p99.load(Ordering::SeqCst), 1100);
+        // 100 samples within 2 s: not due.
+        samples(&t, 100, 1000);
+        let _at = admit_until(&t, at, at + 1_500 * MS);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_a_window_s_p99_is_its_own_samples_nearest_rank() {
+        let t = Tuning::new(8);
+        t.try_close(1);
+        // The p99 of 200 by nearest rank is the 198th: 3 slow reach it.
+        samples(&t, 197, 1000);
+        samples(&t, 3, 9000);
+        t.try_close(2);
+        assert_eq!(t.floor_p99.load(Ordering::SeqCst), 9000);
+        let u = Tuning::new(8);
+        u.try_close(1);
+        samples(&u, 198, 1000);
+        samples(&u, 2, 9000);
+        u.try_close(2);
+        assert_eq!(
+            u.floor_p99.load(Ordering::SeqCst),
+            1000,
+            "2 slow in 200 are over the p99"
+        );
+    }
+
+    /// Background admissions every half second from `from` to `to`
+    /// (closing whatever falls due); returns the last one's time.
+    fn admit_until(t: &Tuning, from: u64, to: u64) -> u64 {
+        let mut at = from;
+        while at < to {
+            at = (at + 500 * MS).min(to);
+            t.try_close(at);
+        }
+        at
+    }
+
+    #[test]
+    fn test_a_gap_in_background_admissions_opens_the_window_again() {
+        let t = Tuning::new(8);
+        t.try_close(1);
+        // Commits sampled while the background is quiet (no admission for
+        // 2 s): never judged as a loaded window.
+        samples(&t, 200, 1000);
+        t.try_close(1 + 2_000 * MS);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 0);
+        assert_eq!(t.taken.load(Ordering::SeqCst), 200);
+        samples(&t, 200, 3000);
+        t.try_close(1 + 2_100 * MS);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 1);
+        assert_eq!(t.floor_p99.load(Ordering::SeqCst), 3000);
+        // Admissions under the gap apart: no reopen.
+        samples(&t, 200, 1000);
+        t.try_close(1 + 2_900 * MS);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_the_ceiling_is_never_above_background_unpaced() {
+        let o = QosOptions {
+            autotune: true,
+            depth_max: 8,
+            background_unpaced: 3,
+            ..QosOptions::default()
+        };
+        assert_eq!(o.ceiling(), 3);
+        let (r, _t, c) = fixture();
+        let a = r.join(0, &on(1), o, c());
+        let t = tuning_of(&a);
+        t.try_close(c());
+        for _ in 0..30 {
+            samples(&t, 200, 1000);
+            t.try_close(c());
+        }
+        assert_eq!(t.budget(), 3, "the unpaced cap, not depth_max's 8");
+    }
+
+    #[test]
+    fn test_samples_before_a_window_opens_are_dropped() {
+        let t = Tuning::new(8);
+        samples(&t, 300, 9000);
+        t.try_close(1);
+        assert_eq!(
+            t.windows.load(Ordering::SeqCst),
+            0,
+            "the first call opens a window"
+        );
+        samples(&t, 200, 1000);
+        t.try_close(2);
+        assert_eq!(t.floor_p99.load(Ordering::SeqCst), 1000);
+    }
+
+    #[test]
+    fn test_a_stale_window_is_opened_again_without_closing() {
+        let t = Tuning::new(8);
+        t.try_close(1);
+        samples(&t, 40, 9000);
+        // 31 s of steady admissions, under 50 samples: stale, reopened.
+        let at = admit_until(&t, 1, 1 + 31_000 * MS);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 0);
+        assert_eq!(t.taken.load(Ordering::SeqCst), 40, "taken out, unjudged");
+        samples(&t, 200, 1000);
+        t.try_close(at);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            t.floor_p99.load(Ordering::SeqCst),
+            1000,
+            "the stale samples were dropped"
+        );
+    }
+
+    #[test]
+    fn test_a_slot_reserved_and_not_yet_written_counts_in_no_window() {
+        let t = Tuning::new(8);
+        t.try_close(1);
+        samples(&t, 200, 9000);
+        t.try_close(2);
+        assert_eq!(t.floor_p99.load(Ordering::SeqCst), 9000);
+        // Window 2: 56 samples written, then 144 indices reserved but not
+        // written (their slots last held window 1's 9000s, taken by its
+        // close): only the written ones count.
+        samples(&t, 56, 1000);
+        let _r = t.next.fetch_add(144, Ordering::SeqCst);
+        t.try_close(3);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 2);
+        assert_eq!(t.loaded_p99.load(Ordering::SeqCst), 1000);
+        // A window of reservations alone: nothing to judge, so no window
+        // closes, but it opens again.
+        let _r = t.next.fetch_add(200, Ordering::SeqCst);
+        t.try_close(4);
+        assert_eq!(t.windows.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            t.start.load(Ordering::SeqCst),
+            t.next.load(Ordering::SeqCst)
+        );
+    }
+
+    #[test]
+    fn test_the_tuned_budget_reaches_admission() {
+        let (r, _t, c) = fixture();
+        let a = r.join(0, &on(1), tuned(), c());
+        a.commit(c());
+        let i = Issuer::new(&a);
+        let first = i.admit(c()).expect("the call's own piece");
+        assert!(
+            i.admit(c()).is_none(),
+            "the floor: one piece beyond it is refused"
+        );
+        drop(first);
+        // A floor window then three at the budget, all as fast: 2.
+        let t = tuning_of(&a);
+        for _ in 0..4 {
+            samples(&t, 200, 1000);
+            t.try_close(c());
+        }
+        assert_eq!(t.budget(), 2);
+        assert_eq!(a.report(c()).budget, 2);
+        let held: Vec<_> = (0..2).map(|_| i.admit(c()).expect("admitted")).collect();
+        assert!(i.admit(c()).is_none(), "the budget's two, no more");
+        drop(held);
+    }
+
+    #[test]
+    fn test_a_window_is_closed_at_a_background_admission() {
+        let (r, _t, c) = fixture();
+        let a = r.join(0, &on(1), tuned(), c());
+        a.commit(c());
+        let i = Issuer::new(&a);
+        let t = tuning_of(&a);
+        drop(i.admit(c()).expect("admitted: the first window opens"));
+        samples(&t, 200, 1000);
+        drop(i.admit(c()).expect("admitted: the window closes"));
+        assert_eq!(t.windows.load(Ordering::SeqCst), 1);
+        assert_eq!(a.report(c()).floor_p99_ns, 1000);
+    }
+
+    #[test]
+    fn test_off_keeps_no_samples_and_admits_at_the_floor() {
+        let (r, _t, c) = fixture();
+        let a = join(r, &on(1), &c);
+        a.commit(c());
+        a.sample(1000);
+        assert!(!a.tuned());
+        let t = tuning_of(&a);
+        assert_eq!(t.next.load(Ordering::SeqCst), 0, "no sample kept");
+        // A tuning state driven up by hand changes nothing while off.
+        t.budget.store(5, Ordering::SeqCst);
+        let i = Issuer::new(&a);
+        let first = i.admit(c()).expect("admitted");
+        assert!(i.admit(c()).is_none());
+        drop(first);
+        assert_eq!(a.report(c()).budget, 1);
+        let b = r.join(0, &on(2), tuned(), c());
+        assert!(b.tuned());
+        b.sample(1000);
+        assert_eq!(tuning_of(&b).next.load(Ordering::SeqCst), 1);
+        // Auto-tuning asked for with pacing off: nothing to tune.
+        let quiet = QosOptions {
+            pacing: false,
+            ..tuned()
+        };
+        let z = r.join(0, &on(3), quiet, c());
+        z.sample(1000);
+        assert!(!z.tuned());
+        assert_eq!(tuning_of(&z).next.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_an_unknown_group_s_tuning_takes_its_smallest_ceiling() {
+        let (r, _t, c) = fixture();
+        let a = r.join(0, &unknown(None), tuned(), c());
+        let t = tuning_of(&a);
+        t.try_close(c());
+        for _ in 0..4 {
+            samples(&t, 200, 1000);
+            t.try_close(c());
+        }
+        assert_eq!(t.budget(), 2);
+        let small = QosOptions {
+            depth_max: 1,
+            ..tuned()
+        };
+        let b = r.join(0, &unknown(None), small, c());
+        assert!(Arc::ptr_eq(&tuning_of(&b), &t), "one unknown group");
+        assert_eq!(t.budget(), 1);
+    }
+
+    #[test]
+    fn test_a_merge_keeps_the_oldest_group_s_tuning_with_the_smallest_ceiling() {
+        let (r, _t, c) = fixture();
+        let a = r.join(0, &on(1), tuned(), c());
+        let ta = tuning_of(&a);
+        // The first call opens the first window.
+        ta.try_close(c());
+        for _ in 0..4 {
+            samples(&ta, 200, 1000);
+            ta.try_close(c());
+        }
+        assert_eq!(ta.budget(), 2);
+        let small = QosOptions {
+            depth_max: 1,
+            ..tuned()
+        };
+        let b = r.join(0, &on(2), small, c());
+        let both = Placement::Keyed {
+            identity: DeviceIdentity {
+                devices: vec![
+                    DeviceId::node(DeviceNode::Sim { device: 1 }),
+                    DeviceId::node(DeviceNode::Sim { device: 2 }),
+                ],
+                complete: true,
+            },
+            members: Vec::new(),
+            fs_device: None,
+        };
+        let s = r.join(0, &both, tuned(), c());
+        assert!(
+            Arc::ptr_eq(&tuning_of(&s), &ta),
+            "the oldest group's tuning"
+        );
+        assert!(Arc::ptr_eq(&tuning_of(&b), &ta));
+        assert_eq!(ta.budget(), 1, "the merged ceiling, 1");
+        assert_eq!(s.report(c()).depth_max, 1);
+    }
+
     #[test]
     fn test_a_closed_store_s_last_commit_still_counts_after_pruning() {
         let (r, t, c) = fixture();
@@ -1710,6 +2290,69 @@ mod loom_tests {
         );
         q.commit(c());
         q
+    }
+
+    /// Two background admissions race to close a due window: exactly one
+    /// closes it (the compare-and-swap of `seq`), and the window is open
+    /// again after.
+    #[test]
+    fn loom_one_closer_per_window() {
+        loom::model(|| {
+            let t = Arc::new(Tuning::new(8));
+            t.try_close(c());
+            for _ in 0..WINDOW_SAMPLES {
+                t.sample(1000);
+            }
+            let other = {
+                let t = Arc::clone(&t);
+                loom::thread::spawn(move || t.try_close(c()))
+            };
+            t.try_close(c());
+            other.join().unwrap();
+            assert_eq!(t.windows.load(Ordering::SeqCst), 1);
+            assert_eq!(t.seq.load(Ordering::SeqCst) % 2, 0, "open again");
+            assert_eq!(t.floor_p99.load(Ordering::SeqCst), 1000);
+        });
+    }
+
+    /// A leader's sample races a close: the window closes on samples
+    /// actually written, never on an empty or a reused slot, and a sample
+    /// counts in at most one window.
+    #[test]
+    fn loom_a_sample_racing_a_close_counts_once() {
+        loom::model(|| {
+            let t = Arc::new(Tuning::new(8));
+            t.try_close(c());
+            for _ in 0..WINDOW_SAMPLES - 1 {
+                t.sample(1000);
+            }
+            let leader = {
+                let t = Arc::clone(&t);
+                loom::thread::spawn(move || t.sample(2000))
+            };
+            t.try_close(c());
+            leader.join().unwrap();
+            // Whatever closed, closed on written samples; what is left is
+            // in the next window, or in no window if its slot was taken.
+            t.try_close(c());
+            let taken = t.taken.load(Ordering::SeqCst);
+            assert!(
+                taken <= WINDOW_SAMPLES,
+                "{taken} taken of {WINDOW_SAMPLES} written"
+            );
+            let windows = t.windows.load(Ordering::SeqCst);
+            assert!(
+                windows <= 1,
+                "{windows} windows from {} samples",
+                WINDOW_SAMPLES
+            );
+            let p99 = t.floor_p99.load(Ordering::SeqCst);
+            assert!(
+                (windows == 0 && p99 == 0) || p99 == 1000 || p99 == 2000,
+                "{windows} windows, p99 {p99}"
+            );
+            assert_eq!(t.seq.load(Ordering::SeqCst) % 2, 0);
+        });
     }
 
     /// Two threads of one paced call race for its one piece: exactly one

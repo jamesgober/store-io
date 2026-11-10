@@ -101,6 +101,7 @@ const CHECKPOINT_TAG: u64 = u64::MAX - 1;
 const LAST_TAG: u64 = u64::MAX;
 
 const GATE: &str = "Commit-class 4 KiB durable p99 beside one paced background Submitter (two stores, one device) at most 2x idle p99: median of the counted rounds of 12 (idle, loaded, idle), at least 6 counted; background rate at least half the paced shape's alone; pacing off on both stores (the negative control) above 2x";
+const GATE_T: &str = "G19 with auto-tuning on (published, not gated): the same rounds, both stores asking for background_autotune; its tuned budget per round and commit p99 beside the default's";
 const GATE_S: &str = "G19 sporadic: 60 commits one every 7 s (beyond commit_quiet) under a CommitHold beside the paced background writer, the hold keeping commits active before each; at least 57 within 2x idle p99";
 const GATE_B: &str = "G19 background barrier: the background writer's writes made durable by a barrier_all after every 8 MiB; commit p99 at most 2x idle (median of the counted rounds of 12, at least 6 counted)";
 const GATE_L: &str = "G19 long round: 3 minutes of continuous paced background with commits; the round's commit p99 and every 15 s window's at most 2x idle; background rate at least half the paced shape's alone";
@@ -449,18 +450,21 @@ struct Seen {
 
 /// Runs `f` on two fresh stores under `base` (the commit side, the
 /// background writer's controls and the commit store), pacing on or off,
-/// the writer's barriers every `checkpoint` bytes (0: none). The writer
+/// auto-tuning on or off, the writer's barriers every `checkpoint` bytes
+/// (0: none). The writer
 /// starts idle and is stopped, drained and read back after `f`; with the
 /// commit side's read-back, the outcome's `Verify`.
 fn with_pair<T>(
     ctx: &Ctx,
     base: &Path,
     paced: bool,
+    autotune: bool,
     checkpoint: u64,
     f: impl FnOnce(&mut Commits, &Bg, &SioStore) -> Result<T, String>,
 ) -> Result<(T, Verify, Seen), String> {
     let opts = StoreOptions {
         background_pacing: paced,
+        background_autotune: autotune,
         ..ctx.opts.clone()
     };
     std::fs::create_dir_all(base).map_err(|e| super::ioerr("creating G19's directory", &e))?;
@@ -481,6 +485,11 @@ fn with_pair<T>(
         return Err(format!(
             "the group's pacing is {} (background store) and {} (commit store), not {paced}",
             q.paced, qc.paced
+        ));
+    } else if q.autotune != autotune || qc.autotune != autotune {
+        return Err(format!(
+            "the group's auto-tuning is {} (background store) and {} (commit store), not {autotune}",
+            q.autotune, qc.autotune
         ));
     } else if q.background_io as usize != PIECE {
         return Err(format!(
@@ -543,16 +552,29 @@ struct Rounds {
     idle: f64,
     loaded: f64,
     notes: String,
+    /// The tuned budget after each loaded phase (auto-tuning's runs).
+    trace: Vec<u64>,
 }
 
-/// [`ROUNDS`] rounds of (idle, loaded, idle), `phase` each.
-fn rounds(ctx: &Ctx, c: &mut Commits, bg: &Bg, phase: Duration) -> Result<Rounds, String> {
+/// [`ROUNDS`] rounds of (idle, loaded, idle), `phase` each; with `trace`,
+/// its store's tuned budget after each loaded phase.
+fn rounds(
+    ctx: &Ctx,
+    c: &mut Commits,
+    bg: &Bg,
+    phase: Duration,
+    trace: Option<&SioStore>,
+) -> Result<Rounds, String> {
     let (mut ratios, mut notes) = (Vec::new(), Vec::new());
+    let mut budgets = Vec::new();
     let (mut idles, mut loads) = (Vec::new(), Vec::new());
     for _ in 0..ROUNDS {
         let i0 = p99_us(&mut c.burst(ctx, bg, phase)?);
         bg.run();
         let l = p99_us(&mut c.burst(ctx, bg, phase)?);
+        if let Some(s) = trace {
+            budgets.push(s.qos().tuned_budget);
+        }
         bg.idle()?;
         let i1 = p99_us(&mut c.burst(ctx, bg, phase)?);
         let anchor = (i0 + i1) / 2.0;
@@ -577,6 +599,7 @@ fn rounds(ctx: &Ctx, c: &mut Commits, bg: &Bg, phase: Duration) -> Result<Rounds
         idle: median(&mut idles),
         loaded: median(&mut loads),
         notes: notes.join(", "),
+        trace: budgets,
     })
 }
 
@@ -643,30 +666,46 @@ struct Config {
     integrity: bool,
 }
 
-/// G19's rounds on two fresh stores under `base`, pacing on or off.
-fn configuration(ctx: &Ctx, base: &Path, paced: bool) -> Result<Config, String> {
+/// G19's rounds on two fresh stores under `base`, pacing on or off,
+/// auto-tuning on or off.
+fn configuration(ctx: &Ctx, base: &Path, paced: bool, autotune: bool) -> Result<Config, String> {
     let ph = phase(ctx);
     let ((rounds, mbps, alone_mbps), verify, seen) =
-        with_pair(ctx, base, paced, 0, |c, bg, _store| {
+        with_pair(ctx, base, paced, autotune, 0, |c, bg, store| {
             // The paced shape alone (one in flight, no commits): the
             // throughput criterion's reference when fio's is not given.
             let alone_mbps = if paced { Some(alone(bg, ph)?) } else { None };
             warm(ctx, c, bg)?;
             let (b0, t0) = bg.totals();
-            let r = rounds(ctx, c, bg, ph)?;
+            let r = rounds(ctx, c, bg, ph, autotune.then_some(store))?;
             let (b1, t1) = bg.totals();
             Ok((r, (b1 - b0) as f64 / (t1 - t0) / 1e6, alone_mbps))
         })?;
     let integrity = matches!(verify, Verify::Passed(_));
-    let label = if paced { "paced" } else { "pacing off" };
+    let label = match (paced, autotune) {
+        (true, true) => "paced, auto-tuned",
+        (true, false) => "paced",
+        (false, _) => "pacing off",
+    };
     let mut point = rounds_point(
-        &format!("{}, {label}", point_name("G19")),
+        &format!(
+            "{}, {label}",
+            point_name(if autotune { "G19t" } else { "G19" })
+        ),
         &rounds,
         &seen,
         verify,
         ctx,
     )
-    .param("pacing", Json::Bool(paced));
+    .param("pacing", Json::Bool(paced))
+    .param("autotune", Json::Bool(autotune));
+    if autotune {
+        point.notes.push(format!(
+            "tuned budget after each loaded phase: {:?}",
+            rounds.trace
+        ));
+        point.metric("tuned_budget_last", rounds.trace.last().map(|b| *b as f64));
+    }
     point.metric("background_mb_per_s", Some(mbps));
     point.metric("alone_mb_per_s", alone_mbps);
     Ok(Config {
@@ -688,6 +727,7 @@ pub struct G19 {
 fn point_name(id: &str) -> &'static str {
     match id {
         "G19" => "G19 commits beside a background Submitter",
+        "G19t" => "G19t commits beside an auto-tuned background Submitter",
         "G19s" => "G19s sporadic commits under a CommitHold",
         "G19b" => "G19b commits beside a background writer with barriers",
         _ => "G19l a long loaded round",
@@ -721,33 +761,35 @@ const NO_DIR: &str =
 
 /// G19 on `ctx.g19_dir`; NOT RUN without one.
 pub fn measure(ctx: &Ctx) -> G19 {
-    let (row, points) = measure_main(ctx);
-    G19 {
-        rows: vec![row],
-        points,
-    }
+    let (rows, points) = measure_main(ctx);
+    G19 { rows, points }
 }
 
-fn measure_main(ctx: &Ctx) -> (Row, Vec<Point>) {
+fn measure_main(ctx: &Ctx) -> (Vec<Row>, Vec<Point>) {
     let Some(dir) = ctx.g19_dir.as_ref() else {
         let (r, p) = not_run("G19", GATE, NO_DIR);
-        return (r, vec![p]);
+        let (rt, pt) = not_run("G19t", GATE_T, NO_DIR);
+        return (vec![r, rt], vec![p, pt]);
     };
     let base = dir.join(format!("store-io-g19-{}", std::process::id()));
     // The control runs only after the paced run succeeded: an error in
     // either fails the gate at once.
-    let both = configuration(ctx, &base.join("paced"), true).and_then(|p| {
+    let both = configuration(ctx, &base.join("paced"), true, false).and_then(|p| {
         let _gone = remove(&base.join("paced"));
-        configuration(ctx, &base.join("control"), false).map(|c| (p, c))
+        configuration(ctx, &base.join("control"), false, false).map(|c| (p, c))
     });
-    let _gone = remove(&base);
+    let _gone = remove(&base.join("control"));
     let (paced, control) = match both {
         Ok(pc) => pc,
         Err(e) => {
+            let _gone = remove(&base);
             let (r, p) = failed("G19", GATE, e);
-            return (r, vec![p]);
+            return (vec![r], vec![p]);
         }
     };
+    // Auto-tuning on (published, never gated): the same rounds.
+    let tuned = configuration(ctx, &base.join("tuned"), true, true);
+    let _gone = remove(&base);
     let (reference, source) = reference(ctx, paced.alone_mbps);
     let integrity = paced.integrity && control.integrity;
     let holds = paced.rounds.counted >= COUNTED && paced.rounds.ratio <= LIMIT;
@@ -773,15 +815,46 @@ fn measure_main(ctx: &Ctx) -> (Row, Vec<Point>) {
         if control_fails { "yes" } else { "NO" },
         if integrity { "ok" } else { "FAILED" },
     );
-    (
-        Row {
-            id: "G19",
-            gate: GATE,
-            measured,
-            verdict,
-        },
-        vec![paced.point, control.point],
-    )
+    let mut rows = vec![Row {
+        id: "G19",
+        gate: GATE,
+        measured,
+        verdict,
+    }];
+    let mut points = vec![paced.point, control.point];
+    match tuned {
+        Ok(t) => {
+            rows.push(Row {
+                id: "G19t",
+                gate: GATE_T,
+                measured: format!(
+                    "auto-tuned: loaded/idle p99 {}x over {} counted rounds of {ROUNDS} (the default's {}x), loaded commit p99 {} us (the default's {} us); tuned budget after each loaded phase {:?}; background {} MB/s (the default's {}); integrity {}",
+                    f(Some(t.rounds.ratio), 2),
+                    t.rounds.counted,
+                    f(Some(paced.rounds.ratio), 2),
+                    f(Some(t.rounds.loaded), 0),
+                    f(Some(paced.rounds.loaded), 0),
+                    t.rounds.trace,
+                    f(Some(t.mbps), 1),
+                    f(Some(paced.mbps), 1),
+                    if t.integrity { "ok" } else { "FAILED" },
+                ),
+                // Published, never gated; an integrity failure fails it.
+                verdict: if t.integrity {
+                    Verdict::Reported
+                } else {
+                    Verdict::Fail
+                },
+            });
+            points.push(t.point);
+        }
+        Err(e) => {
+            let (r, p) = failed("G19t", GATE_T, e);
+            rows.push(r);
+            points.push(p);
+        }
+    }
+    (rows, points)
 }
 
 /// G19s: sporadic commits under a `CommitHold`.
@@ -794,7 +867,7 @@ fn sporadic(ctx: &Ctx, base: &Path) -> Result<(Row, Point), String> {
     }
     let ph = phase(ctx);
     let ((i0, i1, lat, held, mbps), verify, seen) =
-        with_pair(ctx, base, true, 0, |c, bg, store| {
+        with_pair(ctx, base, true, false, 0, |c, bg, store| {
             warm(ctx, c, bg)?;
             let i0 = p99_us(&mut c.burst(ctx, bg, ph)?);
             let hold = store.commit_hold();
@@ -873,13 +946,14 @@ fn sporadic(ctx: &Ctx, base: &Path) -> Result<(Row, Point), String> {
 /// G19b: the background writer durable, barriers every [`CHECKPOINT`].
 fn barrier(ctx: &Ctx, base: &Path) -> Result<(Row, Point), String> {
     let ph = phase(ctx);
-    let ((r, mbps), verify, seen) = with_pair(ctx, base, true, CHECKPOINT, |c, bg, _store| {
-        warm(ctx, c, bg)?;
-        let (b0, t0) = bg.totals();
-        let r = rounds(ctx, c, bg, ph)?;
-        let (b1, t1) = bg.totals();
-        Ok((r, (b1 - b0) as f64 / (t1 - t0) / 1e6))
-    })?;
+    let ((r, mbps), verify, seen) =
+        with_pair(ctx, base, true, false, CHECKPOINT, |c, bg, _store| {
+            warm(ctx, c, bg)?;
+            let (b0, t0) = bg.totals();
+            let r = rounds(ctx, c, bg, ph, None)?;
+            let (b1, t1) = bg.totals();
+            Ok((r, (b1 - b0) as f64 / (t1 - t0) / 1e6))
+        })?;
     let integrity = matches!(verify, Verify::Passed(_));
     // A checkpoint after every 8 MiB but the last (the final barrier
     // covers the tail).
@@ -920,7 +994,7 @@ fn barrier(ctx: &Ctx, base: &Path) -> Result<(Row, Point), String> {
 fn long(ctx: &Ctx, base: &Path) -> Result<(Row, Point), String> {
     let ph = phase(ctx);
     let ((i0, i1, all, windows, mbps, own), verify, seen) =
-        with_pair(ctx, base, true, 0, |c, bg, _store| {
+        with_pair(ctx, base, true, false, 0, |c, bg, _store| {
             let own = alone(bg, ph)?;
             warm(ctx, c, bg)?;
             let i0 = p99_us(&mut c.burst(ctx, bg, ph)?);
@@ -1046,7 +1120,7 @@ pub fn run(ctx: &Ctx) -> Section {
     );
     sec.method = vec![
         format!(
-            "Two stores on the --g19-dir device: one makes QD1 4 KiB `write_durable` commits, the other runs one background Submitter (IoClass::Background, depth {DEPTH}) writing {} KiB pieces over a {} MiB page region. G19: per configuration, {ROUNDS} rounds of (idle, loaded, idle), {:.1} s each, the writer drained before each idle phase; a round counts when its idle p99s are within {AGREE}x, its ratio the loaded p99 over their mean. Paced (the default options) must have at least {COUNTED} counted rounds, a median ratio of at most {LIMIT}x and a background rate while loaded of at least {:.0}% of the paced shape's alone (256 KiB, one in flight; fio's from the device script when given, else the writer at depth 1 with no commits); the same rounds with background_pacing(false) on both stores must exceed {LIMIT}x.",
+            "Two stores on the --g19-dir device: one makes QD1 4 KiB `write_durable` commits, the other runs one background Submitter (IoClass::Background, depth {DEPTH}) writing {} KiB pieces over a {} MiB page region. G19: per configuration, {ROUNDS} rounds of (idle, loaded, idle), {:.1} s each, the writer drained before each idle phase; a round counts when its idle p99s are within {AGREE}x, its ratio the loaded p99 over their mean. Paced (the default options) must have at least {COUNTED} counted rounds, a median ratio of at most {LIMIT}x and a background rate while loaded of at least {:.0}% of the paced shape's alone (256 KiB, one in flight; fio's from the device script when given, else the writer at depth 1 with no commits); the same rounds with background_pacing(false) on both stores must exceed {LIMIT}x. G19t, published and never gated: the same rounds with background_autotune on both stores, the tuned budget after each loaded phase beside its commit p99 and the default's.",
             PIECE >> 10,
             BG_SPAN >> 20,
             phase(ctx).as_secs_f64(),

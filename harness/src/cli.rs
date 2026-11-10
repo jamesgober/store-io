@@ -41,7 +41,8 @@ OPTIONS:
                      (the multi-device gates: G18)
     --g19-dir <D>    a directory on G19's device (CI's calibrated device, or
                      the dev box's drive); `gates` runs G19 there too
-    --g19-part <P>   what `g19` runs: main (G19 and its negative control),
+    --g19-part <P>   what `g19` runs: main (G19, its negative control and
+                     G19t, auto-tuning's run, published),
                      variants (G19s, G19b, G19l: about 13 minutes) or all
                      (default)
     --g19-ref-mbps <X>

@@ -121,14 +121,15 @@ const WORKLOADS: [Workload; 9] = [
     Workload {
         command: Command::G19,
         run: workloads::gates_g19::run,
-        // G19 and its variants: about 115 phases of `--secs` (G19's two
-        // configurations of 12 rounds of three, the paced shape alone, the
-        // variants' idle runs and G19b's rounds), counted as 40 points (4 x
-        // 40 = 160 phases' time in the limit), and about 610 s whatever
-        // `--secs` (G19s's 60 x 7 s, G19l's 180 s), doubled: a limit about
-        // 1.5x the run at any `--secs`, 32 minutes at the job's 4 s, within
-        // its 45.
-        points: 40,
+        // G19 and its variants: about 150 phases of `--secs` (G19's three
+        // configurations, the default, its control and auto-tuning's, of 12
+        // rounds of three; the paced shape alone; the variants' idle runs
+        // and G19b's rounds), counted as 50 points (4 x 50 = 200 phases'
+        // time in the limit), and about 610 s whatever `--secs` (G19s's
+        // 60 x 7 s, G19l's 180 s), doubled: a limit at least 1.3x the run
+        // at any `--secs` (the phases' share falls toward 200/150 as
+        // `--secs` grows), 41 minutes at the job's 4 s, within its 50.
+        points: 50,
         settles: 0,
         fixed_secs: 650.0,
     },

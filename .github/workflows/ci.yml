@@ -457,13 +457,14 @@ jobs:
   # and device: G19, paced and with pacing off (its negative control); its
   # variants G19s (sporadic commits under a CommitHold), G19b (a background
   # barrier every 8 MiB) and G19l (a long loaded round). Fails unless each
-  # of the leg's rows is a PASS; fails, never falls back, if the device
-  # cannot be made.
+  # of the leg's gated rows is a PASS (and the main leg's G19t, auto-tuning
+  # published, is REPORTED); fails, never falls back, if the device cannot
+  # be made.
   g19:
     name: G19 (calibrated device, ${{ matrix.part }})
     runs-on: ubuntu-latest
-    # The harness's watchdog stops a hung run after about 24 minutes.
-    timeout-minutes: 45
+    # The harness's watchdog stops a hung run after about 41 minutes.
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -508,6 +509,8 @@ jobs:
           # Each of the leg's gates must have run and passed: NOT RUN, FAIL
           # or a missing row fails the job.
           for g in ${{ matrix.gates }}; do grep -qE "^\\| $g \\|.*\\| PASS \\|\$" "$f"; done
+          # Auto-tuning's run, published: it must have run.
+          if [ "${{ matrix.part }}" = main ]; then grep -qE '^\| G19t \|.*\| REPORTED \|$' "$f"; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

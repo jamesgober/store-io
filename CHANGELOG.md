@@ -133,7 +133,10 @@
   on another store of the same device, 12 rounds of (idle, loaded, idle),
   must stay within 2x idle while the writer keeps at least half the paced
   shape's rate alone, and the same rounds with `background_pacing(false)`
-  on both stores must exceed 2x (the negative control). Its variants, in a
+  on both stores must exceed 2x (the negative control); published beside
+  it, never gated, the same rounds with `background_autotune` on both
+  stores (G19t: its tuned budget after each loaded phase, its loaded
+  commit p99 and ratio beside the default's). Its variants, in a
   second leg of the job, all paced: G19s, 60 commits one every 7 s (beyond
   `commit_quiet`) under a `CommitHold`, which must keep commits active
   before each, at least 57 within 2x idle; G19b, the writer checkpointing
@@ -145,7 +148,7 @@
   4 kernel ticks (4 ms on CI),
   its request time chosen with fio so that a 256 KiB writer at depth 1
   costs a commit at most 1.5x and at depth 8 at least 3x. The job fails
-  unless each of its rows is a PASS. First runs: paced 1.39x and 1.46x, pacing
+  unless each of its gated rows is a PASS (G19t is published: REPORTED). First runs: paced 1.39x and 1.46x, pacing
   off 2.80x and 3.17x.
 - Harness: G1's and G3's rows publish the clock read each commit barrier
   now makes (it marks the device's commits active for pacing): the

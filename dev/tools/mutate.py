@@ -1726,6 +1726,13 @@ M = [
  (TUNE_SRC, '(self.budget + 1).min(self.ceiling);\n                        self.streak = 0;', '(self.budget + 1).min(self.ceiling);', TUNE_T),
  (TUNE_SRC, '                self.floor = Some(p99);', '                self.floor = Some(p99);\n                self.streak = 0;', TUNE_T),
  (TUNE_SRC, '                self.floor = Some(p99);', '                self.floor = Some(p99);\n                if reprobe {\n                    self.budget = (self.budget / 2).max(FLOOR);\n                }', TUNE_T),
+ (QOS_SRC, '            autotune: self.autotune && other.autotune,', '            autotune: self.autotune || other.autotune,', QOS_T),
+ (QOS_SRC, '            depth_max: self.depth_max.min(other.depth_max),', '            depth_max: self.depth_max.max(other.depth_max),', QOS_T),
+ (QOS_SRC, '                .is_some_and(|r| r.opts.pacing && r.opts.autotune),', '                .is_some_and(|r| r.opts.autotune),', QOS_T),
+ ("crates/store-io-engine/src/store.rs", '        && (1..=8).contains(&opts.background_depth_max)', '        && (0..=8).contains(&opts.background_depth_max)', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        && (1..=8).contains(&opts.background_depth_max)', '        && (1..=9).contains(&opts.background_depth_max)', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        autotune: opts.background_autotune,', '        autotune: opts.background_autotune && false,', QOS_STORE_T),
+ ("crates/store-io-engine/src/store.rs", '        depth_max: opts.background_depth_max,', '        depth_max: opts.background_depth_max.max(8),', QOS_STORE_T),
 ]
 
 def kill_stuck_tests():

@@ -65,6 +65,11 @@ pub(crate) struct QosOptions {
     /// Pieces per issuer while commits are not active (`background_unpaced`,
     /// default 8).
     pub(crate) background_unpaced: u32,
+    /// Auto-tuning of the group's budget (`background_autotune`, default
+    /// off; V3f).
+    pub(crate) autotune: bool,
+    /// Auto-tuning's ceiling (`background_depth_max`, default 8).
+    pub(crate) depth_max: u32,
 }
 
 impl Default for QosOptions {
@@ -74,20 +79,25 @@ impl Default for QosOptions {
             commit_quiet_ns: 5_000_000_000,
             background_io: 256 << 10,
             background_unpaced: 8,
+            autotune: false,
+            depth_max: 8,
         }
     }
 }
 
 impl QosOptions {
     /// The group rule for stores that disagree (D-153): pacing on if any
-    /// member asks for it, the largest quiet, the smallest cap.
-    /// `background_io` stays each issuer's own store's.
+    /// member asks for it, the largest quiet, the smallest caps, auto-tuning
+    /// only if every member asks for it. `background_io` stays each
+    /// issuer's own store's.
     fn merge(self, other: Self) -> Self {
         Self {
             pacing: self.pacing || other.pacing,
             commit_quiet_ns: self.commit_quiet_ns.max(other.commit_quiet_ns),
             background_io: self.background_io,
             background_unpaced: self.background_unpaced.min(other.background_unpaced),
+            autotune: self.autotune && other.autotune,
+            depth_max: self.depth_max.min(other.depth_max),
         }
     }
 }
@@ -659,6 +669,12 @@ impl Qos {
         let rec = self.record();
         QosReport {
             paced: rec.as_ref().is_some_and(|r| r.opts.pacing),
+            autotune: rec
+                .as_ref()
+                .is_some_and(|r| r.opts.pacing && r.opts.autotune),
+            depth_max: rec
+                .as_ref()
+                .map_or(self.opts.depth_max, |r| r.opts.depth_max),
             active: self.active(now),
             budget: 1,
             in_flight: rec.as_ref().map_or(0, |r| r.in_flight()),
@@ -676,6 +692,14 @@ impl Qos {
 pub struct QosReport {
     /// Pacing is on for the store's device group.
     pub paced: bool,
+    /// Auto-tuning is on for the group (every member asked for it, and
+    /// pacing is on). Not yet wired (V3f3): hidden until then.
+    #[doc(hidden)]
+    pub autotune: bool,
+    /// Auto-tuning's ceiling for the group (its members' smallest
+    /// `background_depth_max`). Not yet wired (V3f3).
+    #[doc(hidden)]
+    pub depth_max: u32,
     /// The group's commits are active now (a commit within `commit_quiet`,
     /// or a live [`CommitHold`]).
     pub active: bool,
@@ -1449,6 +1473,35 @@ mod tests {
         let held: Vec<_> = (0..2).map(|_| i.admit(c()).expect("admitted")).collect();
         assert!(i.admit(c()).is_none(), "the smallest cap is the group's");
         drop(held);
+    }
+
+    #[test]
+    fn test_auto_tuning_is_the_group_s_only_if_every_member_asks_for_it() {
+        let tuned = QosOptions {
+            autotune: true,
+            depth_max: 4,
+            ..QosOptions::default()
+        };
+        let off = QosOptions::default();
+        assert!(tuned.merge(tuned).autotune);
+        assert!(!tuned.merge(off).autotune && !off.merge(tuned).autotune);
+        assert_eq!(tuned.merge(off).depth_max, 4, "the smallest ceiling");
+        assert_eq!(off.merge(tuned).depth_max, 4);
+        let (r, _t, c) = fixture();
+        let a = r.join(0, &on(1), tuned, c());
+        assert!(a.report(c()).autotune);
+        let b = r.join(0, &on(1), off, c());
+        assert!(
+            !a.report(c()).autotune && !b.report(c()).autotune,
+            "merged off"
+        );
+        assert_eq!(b.report(c()).depth_max, 4, "the group's smallest ceiling");
+        let quiet = QosOptions {
+            pacing: false,
+            ..tuned
+        };
+        let z = r.join(0, &on(2), quiet, c());
+        assert!(!z.report(c()).autotune, "nothing to tune without pacing");
     }
 
     #[test]

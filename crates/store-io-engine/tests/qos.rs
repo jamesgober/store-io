@@ -254,6 +254,14 @@ fn test_pacing_options_out_of_range_are_refused() {
             commit_quiet: Duration::from_micros(999),
             ..StoreOptions::default()
         },
+        StoreOptions {
+            background_depth_max: 0,
+            ..StoreOptions::default()
+        },
+        StoreOptions {
+            background_depth_max: 9,
+            ..StoreOptions::default()
+        },
     ];
     for opts in bad {
         let e = Store::create(p.clone(), Path::new("/x"), opts.clone()).map(|_| ());
@@ -273,10 +281,26 @@ fn test_pacing_options_out_of_range_are_refused() {
         background_unpaced: 64,
         commit_quiet: Duration::from_millis(1),
         background_pacing: false,
+        background_depth_max: 1,
         ..StoreOptions::default()
     };
     let s = Store::create(p.clone(), Path::new("/y"), ok.clone()).unwrap();
     assert!(!s.qos().paced);
+    assert_eq!(s.qos().depth_max, 1);
+    // Auto-tuning asked for reaches the store's group (its own device).
+    let q = SimPlatform::new(SimConfig::volatile(8));
+    let tuned = StoreOptions {
+        background_autotune: true,
+        background_depth_max: 3,
+        ..StoreOptions::default()
+    };
+    let t = Store::create(q.clone(), Path::new("/t"), tuned).unwrap();
+    assert!(t.qos().autotune && t.qos().depth_max == 3, "{:?}", t.qos());
+    let d = Store::create(q, Path::new("/d"), StoreOptions::default()).unwrap();
+    assert!(!d.qos().autotune, "the default is off");
+    // One device, one group: a member not asking for it turns it off for
+    // every member, the smallest ceiling the group's.
+    assert!(!t.qos().autotune && t.qos().depth_max == 3, "{:?}", t.qos());
     // A store whose largest I/O is under the default piece is not refused:
     // it splits at its largest I/O.
     let small = StoreOptions {

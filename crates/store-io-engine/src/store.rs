@@ -173,6 +173,20 @@ pub struct StoreOptions {
     /// How long after a commit the device's commits count as active: at
     /// least 1 ms; default 5 s. Stores of one device take the largest.
     pub commit_quiet: std::time::Duration,
+    /// Opt-in auto-tuning of the device's background budget (PLANNING
+    /// R5.4; default `false`). Not yet wired, so hidden: from V3f3, while
+    /// commits are active, the budget will follow windows of commit latency
+    /// compared with the budget's floor measured in the same conditions,
+    /// from 1 up to `background_depth_max`. On only if every store of the
+    /// device asks for it.
+    #[doc(hidden)]
+    pub background_autotune: bool,
+    /// Auto-tuning's ceiling (1 to 8; default 8). Not yet wired, so
+    /// hidden: from V3f3, the background pieces in flight the device group
+    /// may reach while commits are active. Stores of one device take the
+    /// smallest.
+    #[doc(hidden)]
+    pub background_depth_max: u32,
 }
 
 impl Default for StoreOptions {
@@ -198,6 +212,8 @@ impl Default for StoreOptions {
             region_defaults: None,
             background_io: 256 << 10,
             background_unpaced: 8,
+            background_autotune: false,
+            background_depth_max: 8,
             background_pacing: true,
             commit_quiet: std::time::Duration::from_secs(5),
         }
@@ -206,14 +222,15 @@ impl Default for StoreOptions {
 
 /// Checks the pacing options (PLANNING R5.4): `NotWritten(InvalidOptions)`
 /// for a `background_io` that is not a multiple of 4096 from 4096 to
-/// 256 KiB, a `background_unpaced` outside 1 to 64, or a `commit_quiet`
-/// under 1 ms.
+/// 256 KiB, a `background_unpaced` outside 1 to 64, a
+/// `background_depth_max` outside 1 to 8, or a `commit_quiet` under 1 ms.
 pub(crate) fn check_pacing(opts: &StoreOptions) -> Result<(), Error> {
     let io = opts.background_io as usize;
     let ok = io >= 4096
         && io % 4096 == 0
         && io <= 256 << 10
         && (1..=64).contains(&opts.background_unpaced)
+        && (1..=8).contains(&opts.background_depth_max)
         && opts.commit_quiet >= std::time::Duration::from_millis(1);
     if ok {
         Ok(())
@@ -238,6 +255,8 @@ pub(crate) fn qos_options(opts: &StoreOptions, block: u64) -> crate::qos::QosOpt
         commit_quiet_ns: u64::try_from(opts.commit_quiet.as_nanos()).unwrap_or(u64::MAX),
         background_io: (piece / block * block).max(block),
         background_unpaced: opts.background_unpaced,
+        autotune: opts.background_autotune,
+        depth_max: opts.background_depth_max,
     }
 }
 

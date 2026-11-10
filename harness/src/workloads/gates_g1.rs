@@ -230,3 +230,158 @@ fn alternated_into(ctx: &Ctx, rounds: &mut Vec<f64>) -> Point {
     }
     out
 }
+
+/// Reads timed per batch for the commit's clock read.
+const CLOCK_BATCH: u32 = 10_000;
+/// Batches timed.
+const CLOCK_BATCHES: usize = 200;
+
+/// Linux clock sources whose `CLOCK_MONOTONIC` read the vDSO can serve
+/// (kvm-clock and xen only when the host marks the clock stable, arm64's
+/// counter not on parts whose timer errata turn it off, none under
+/// `vdso=0`): a name is not proof, so the label also judges the measured
+/// cost.
+#[cfg(target_os = "linux")]
+const VDSO_SOURCES: [&str; 5] = [
+    "tsc",
+    "kvm-clock",
+    "hyperv_clocksource_tsc_page",
+    "arch_sys_counter",
+    "xen",
+];
+
+/// A read slower than this is taken for a kernel transition (a system
+/// call, or a slow timer such as HPET), whatever the clock's name: a
+/// user-space read of a TSC or arch counter is tens of nanoseconds.
+const SLOW_NS: f64 = 100.0;
+
+/// The verdict on the measured cost.
+fn cost(ns: f64) -> String {
+    if ns > SLOW_NS {
+        format!("**{ns:.0} ns a read: slow, likely a system call per commit**")
+    } else if ns.is_finite() {
+        format!("{ns:.0} ns a read: a user-space read")
+    } else {
+        "not measured".to_owned()
+    }
+}
+
+fn clock_label(ns: f64) -> String {
+    #[cfg(target_os = "linux")]
+    let clock = {
+        let path = "/sys/devices/system/clocksource/clocksource0/current_clocksource";
+        match std::fs::read_to_string(path) {
+            Ok(s) => {
+                let src = s.trim();
+                let kind = if VDSO_SOURCES.contains(&src) {
+                    "vDSO-capable"
+                } else {
+                    "no vDSO read"
+                };
+                format!("CLOCK_MONOTONIC, clock source {src} ({kind})")
+            }
+            Err(e) => format!("CLOCK_MONOTONIC, clock source unknown ({path}: {e})"),
+        }
+    };
+    #[cfg(windows)]
+    let clock = "QueryPerformanceCounter".to_owned();
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let clock = "the platform's monotonic clock".to_owned();
+    format!(
+        "{clock}; {} (a hot-loop figure: a lower bound on a commit's)",
+        cost(ns)
+    )
+}
+
+/// Times `batches` batches of `batch` reads of `clock`: the nanoseconds
+/// per read of each batch, and how many reads went backwards.
+fn time_clock(clock: &dyn Fn() -> u64, batches: usize, batch: u32) -> (Vec<f64>, u32) {
+    let mut per = Vec::with_capacity(batches);
+    let mut last = 0u64;
+    let mut backwards = 0u32;
+    for _ in 0..batches {
+        let t = Instant::now();
+        for _ in 0..batch {
+            let now = std::hint::black_box(clock());
+            if now < last {
+                backwards += 1;
+            }
+            last = now;
+        }
+        per.push(t.elapsed().as_secs_f64() * 1e9 / f64::from(batch));
+    }
+    (per, backwards)
+}
+
+/// Times the platform's own clock (`Platform::clock`, the closure the
+/// domain reads at each commit): [`CLOCK_BATCHES`] batches of
+/// [`CLOCK_BATCH`] reads, the median per read.
+/// The clock read every commit barrier adds (V3: `Domain::note_commit`
+/// marks the device's commits active with the platform's `monotonic_ns`):
+/// its label (the clock, its cost and the verdict on it) and its point.
+pub fn clock_read(ctx: &Ctx) -> (String, Point) {
+    use store_io_platform::Platform;
+    let mut p = Point::new(System::StoreIo, "the commit barrier's clock read");
+    let clock = match crate::sio::platform(&ctx.opts) {
+        Ok(plat) => plat.clock(),
+        Err(e) => {
+            p.error = Some(e.clone());
+            return (e, p);
+        }
+    };
+    let (mut per, backwards) = time_clock(&*clock, CLOCK_BATCHES, CLOCK_BATCH);
+    let ns = median(&mut per);
+    let label = clock_label(ns);
+    p.metric("ns_per_read", Some(ns));
+    // `median` sorted `per`.
+    p.metric("p90_ns", per.get(CLOCK_BATCHES * 9 / 10).copied());
+    p.notes.push(label.clone());
+    p.verify = if backwards == 0 {
+        Verify::Passed(format!(
+            "{} reads, never backwards",
+            CLOCK_BATCHES as u64 * u64::from(CLOCK_BATCH)
+        ))
+    } else {
+        Verify::Failed(format!("the clock went backwards {backwards} times"))
+    };
+    (label, p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_time_clock_counts_reads_that_go_backwards() {
+        let n = std::sync::atomic::AtomicU64::new(0);
+        // 10, 9, 8, ...: every read after the first goes backwards.
+        let down = || 10 - n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (per, backwards) = time_clock(&down, 2, 5);
+        assert_eq!(per.len(), 2);
+        assert_eq!(backwards, 9);
+        let up = || n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(time_clock(&up, 3, 4).1, 0);
+    }
+
+    #[test]
+    fn test_the_platform_clock_reads_and_never_goes_backwards() {
+        use store_io_platform::Platform;
+        let plat = crate::sio::platform(&store_io_engine::StoreOptions::default())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let clock = plat.clock();
+        let (mut per, backwards) = time_clock(&*clock, 20, 1000);
+        assert_eq!(backwards, 0);
+        let ns = median(&mut per);
+        // A slow clock source (HPET, an emulated guest) is still a clock:
+        // only an absurd cost fails.
+        assert!(ns > 0.0 && ns < 50_000.0, "{ns} ns per read");
+        assert!(!clock_label(ns).is_empty());
+    }
+
+    #[test]
+    fn test_a_slow_read_is_flagged_whatever_the_clock_is_called() {
+        assert!(cost(30.0).contains("a user-space read"));
+        assert!(cost(SLOW_NS + 1.0).contains("likely a system call"));
+        assert_eq!(cost(f64::NAN), "not measured");
+    }
+}

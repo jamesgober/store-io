@@ -126,6 +126,11 @@
   costs a commit at most 1.5x and at depth 8 at least 3x. The job fails
   unless each of its rows is a PASS. First runs: paced 1.39x and 1.46x, pacing
   off 2.80x and 3.17x.
+- Harness: G1's and G3's rows publish the clock read each commit barrier
+  now makes (it marks the device's commits active for pacing): the
+  platform's own clock timed per read, named (on Linux with its clock
+  source and whether it can be read through the vDSO), and flagged as
+  likely a system call per commit when a read costs over 100 ns.
 - CI: every apt call goes through `dev/tools/apt-install.sh`, which bounds
   and retries it, so a stalled mirror or a held dpkg lock fails its step in
   minutes, saying which call stalled.

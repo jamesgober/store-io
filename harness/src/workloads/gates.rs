@@ -365,6 +365,11 @@ pub fn run(ctx: &Ctx) -> Section {
     let g8b = gates_extra::blocking_allocs(ctx);
     let g10 = gates_extra::qos(ctx);
     let (g1, g1_rounds) = gates_g1::alternated(ctx);
+    // The clock read each commit barrier adds (V3), published in G1's and
+    // G3's rows: part of what they measure, labelled where it is a system
+    // call.
+    let (clock, clock_point) = gates_g1::clock_read(ctx);
+    let clock_note = format!("; the commit barrier's clock read: {clock}");
     let g2 = gates_g2::alternated(ctx);
     // Registration is io_uring's (Linux).
     let g3d = if cfg!(target_os = "linux") {
@@ -413,7 +418,7 @@ pub fn run(ctx: &Ctx) -> Section {
             f(Some(g1margin), 2),
             f(g1r, 1),
             g1_rounds.len()
-        ),
+        ) + &clock_note,
         verdict: match (g1d, g1lo, g1r) {
             (Some(d), Some(_), Some(r)) if r > 0.0 && d <= g1margin => Verdict::Pass,
             (Some(_), Some(lo), Some(r)) if r > 0.0 && lo <= g1margin => Verdict::NotResolvable,
@@ -500,7 +505,7 @@ pub fn run(ctx: &Ctx) -> Section {
             f(qp, 3),
             f(w1_store, 0),
             f(w1_raw, 0)
-        ),
+        ) + &clock_note,
         verdict: if ours3.len() == 3 && fio3.len() == 3 {
             worse(against_fio, against_raw)
         } else {
@@ -898,7 +903,7 @@ pub fn run(ctx: &Ctx) -> Section {
         sec.findings
             .push(format!("{} FAIL: {} ({})", r.id, r.gate, r.measured));
     }
-    let mut pts = vec![g1, g2, g7, g8w, g8b, g10];
+    let mut pts = vec![g1, clock_point, g2, g7, g8w, g8b, g10];
     pts.extend(g3d);
     pts.extend(g3s);
     pts.extend(g5);

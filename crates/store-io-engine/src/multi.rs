@@ -983,7 +983,8 @@ where
             }
             None => patience.yield_until(all_posted),
         };
-        if !reached {
+        // Yields a poison ended still wait for the stores not poisoned.
+        if !reached || answers.posted.load(Ordering::SeqCst) < want {
             // The poison is read after the registration (in `hand_off`) and
             // under the mutex the poison waker takes: a poison before it is
             // seen here, one after it wakes the wait.

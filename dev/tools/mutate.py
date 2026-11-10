@@ -1515,6 +1515,7 @@ M = [
  (MULTI_SRC, '        self.fallbacks += 1;', '        self.fallbacks += 0;', MULTI_T),
  # D-155: the call yields for its answers as long as its own flush took
  (MULTI_SRC, '            budget = (end, end.saturating_sub(start));', '            budget = (end, end.saturating_sub(start) * 0);', MULTI_T),
+ (MULTI_SRC, '        if !reached || answers.posted.load(Ordering::SeqCst) < want {', '        if !reached || answers.posted.load(Ordering::SeqCst) < want && false {', MULTI_T),
  ('crates/store-io-engine/src/flusher.rs', '        if !crate::test_hook::flush_threads() {', '        if !crate::test_hook::flush_threads() && false {', MULTI_T),
  # MULTI (V2c): a ditto is refused before any write unless every pair of
  # its stores is distinct and every store is in the set; copies in set order.

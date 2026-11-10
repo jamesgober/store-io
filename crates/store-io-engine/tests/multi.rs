@@ -1158,6 +1158,7 @@ fn test_a_call_yields_for_its_answers_as_long_as_its_own_flush() {
 
 /// Parks the next step of `p`'s world until released, reporting when
 /// parked.
+#[derive(Clone)]
 struct Park {
     state: std::sync::Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>,
 }
@@ -1386,6 +1387,101 @@ fn test_a_handed_off_store_whose_flush_fails() {
         }
         other => panic!("{other:?}"),
     }
+    assert!(each[2].as_ref().unwrap().covers(&tickets[2]));
+    assert!(set[0].poisoned().is_none() && set[2].poisoned().is_none());
+}
+
+/// What [`test_a_poison_ends_the_yields_but_not_the_wait_for_the_others`]'s
+/// hook sees: the call's thread, the failing store's flush thread, whether
+/// that store's answer is posted, the healthy store's held flush.
+struct Poisoning {
+    caller: std::thread::ThreadId,
+    failing: Option<std::thread::ThreadId>,
+    posted: bool,
+    held: Park,
+}
+
+static POISONING: std::sync::Mutex<Option<Poisoning>> = std::sync::Mutex::new(None);
+static POISONING_CV: std::sync::Condvar = std::sync::Condvar::new();
+
+fn poisoning_hook(s: store_io_engine::test_hook::Step) {
+    use store_io_engine::test_hook::Step;
+    let me = std::thread::current().id();
+    let mut g = POISONING.lock().unwrap();
+    let Some(p) = g.as_mut() else { return };
+    match s {
+        Step::AnswerPosted if p.failing == Some(me) => {
+            p.posted = true;
+            POISONING_CV.notify_all();
+        }
+        // The call's first check of its answers: the failing store's
+        // answer (after its poison wake) comes first.
+        Step::AnswersYield if p.caller == me && !p.posted => {
+            let (_g, _timeout) = POISONING_CV
+                .wait_timeout_while(g, std::time::Duration::from_secs(10), |p| {
+                    p.as_ref().is_some_and(|p| !p.posted)
+                })
+                .unwrap();
+        }
+        // Asleep on its answers: the healthy store may answer now.
+        Step::AnswersWait if p.caller == me => p.held.release(),
+        _ => {}
+    }
+}
+
+/// A handed-off store's poison ends the call's yields, but the call still
+/// waits for its other handed-off stores: a healthy store whose flush
+/// thread has not answered yet is never taken for poisoned. Store 1's
+/// flush fails while store 0's is held, until the call sleeps on its
+/// answers.
+#[test]
+fn test_a_poison_ends_the_yields_but_not_the_wait_for_the_others() {
+    let _serial = HOOKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (ps, set, tickets) = three(124);
+    ps[1].with_world(|w| w.faults_mut().fail_flush = Some(w.flushes() + 1));
+    let held = Park::arm(&ps[0]);
+    ps[1].with_world(|w| {
+        w.set_step_probe(Some(std::sync::Arc::new(|| {
+            if let Some(p) = POISONING.lock().unwrap().as_mut() {
+                p.failing = Some(std::thread::current().id());
+            }
+            false
+        })));
+    });
+    *POISONING.lock().unwrap() = Some(Poisoning {
+        caller: std::thread::current().id(),
+        failing: None,
+        posted: false,
+        held: held.clone(),
+    });
+    // Undone however the call ends (the hook is process-wide).
+    struct Undo(Vec<SimPlatform>, Park);
+    impl Drop for Undo {
+        fn drop(&mut self) {
+            store_io_engine::test_hook::install(None);
+            self.1.release();
+            for p in &self.0 {
+                p.with_world(|w| w.set_step_probe(None));
+            }
+            let _ = POISONING
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
+    let undo = Undo(ps.clone(), held);
+    store_io_engine::test_hook::install(Some(poisoning_hook as fn(_)));
+    let refs: Vec<&WriteTicket> = tickets.iter().collect();
+    let each = set.barrier_each(&refs).unwrap();
+    drop(undo);
+    assert!(
+        each[0].as_ref().is_ok_and(|r| r.covers(&tickets[0])),
+        "the healthy handed-off store: {:?}",
+        each[0]
+    );
+    assert!(each[1].is_err(), "the failed store: {:?}", each[1]);
     assert!(each[2].as_ref().unwrap().covers(&tickets[2]));
     assert!(set[0].poisoned().is_none() && set[2].poisoned().is_none());
 }

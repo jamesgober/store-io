@@ -38,6 +38,13 @@ pub enum Step {
     /// its answers. It holds their lock: a poison waker's wake, which takes
     /// it, can only come once the call sleeps.
     AnswersWait,
+    /// A set barrier with stores handed off checking their answers while
+    /// it yields (once per check, before it reads them; the last check may
+    /// find them all posted).
+    AnswersYield,
+    /// A flush thread has posted a set barrier's answer and is about to
+    /// signal it.
+    AnswerPosted,
     /// The blocking pump at the top of its loop, before its poison check
     /// and its next write piece (once per piece, and once more before it
     /// finds its source done).

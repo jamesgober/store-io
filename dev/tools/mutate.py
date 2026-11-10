@@ -1361,6 +1361,14 @@ M = [
  ('crates/store-io-engine/src/domain/mod.rs', '                let goal = need.min(issued);', '                let goal = need;', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '                if goal > yielded_to && self.patience.try_yield() {', '                if goal > yielded_to {', DOMAIN),
  ('crates/store-io-engine/src/domain/mod.rs', '                    yielded_to = goal;\n', '                    yielded_to = 0;\n', DOMAIN),
+ # D-155: a wait with a budget (a set barrier's caller) yields past its
+ # count until the budget has passed, capped; no budget reads no clock; a
+ # still clock ends at YIELDS_MAX
+ ('crates/store-io-engine/src/domain/mod.rs', '            if n >= YIELDS {', '            if n >= YIELDS.min(1) {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                if budget == 0 || n >= YIELDS_MAX {', '                if n >= YIELDS_MAX {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                if budget == 0 || n >= YIELDS_MAX {', '                if budget == 0 || n >= YIELDS_MAX && false {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '                if now().saturating_sub(start) >= budget {', '                if now().saturating_sub(start) >= budget || true {', DOMAIN),
+ ('crates/store-io-engine/src/domain/mod.rs', '        let budget = budget_ns.min(BUDGET_MAX_NS);', '        let budget = budget_ns.max(BUDGET_MAX_NS * 0);', DOMAIN),
  ('crates/store-io-core/src/identity.rs', '        if !self.complete || !other.complete || self.devices.is_empty() || other.devices.is_empty()', '        if (!self.complete && false) || !other.complete || self.devices.is_empty() || other.devices.is_empty()', IDENT),
  ('crates/store-io-core/src/identity.rs', '        if !self.complete || !other.complete || self.devices.is_empty() || other.devices.is_empty()', '        if !self.complete || (!other.complete && false) || self.devices.is_empty() || other.devices.is_empty()', IDENT),
  ('crates/store-io-core/src/identity.rs', '        if !self.complete || !other.complete || self.devices.is_empty() || other.devices.is_empty()', '        if !self.complete || !other.complete || (self.devices.is_empty() && false) || (other.devices.is_empty() && false)', IDENT),
@@ -1505,6 +1513,8 @@ M = [
  (MULTI_SRC, '            let tag = (self.seq << INDEX_BITS) | i as u64;', '            let tag = (self.seq << INDEX_BITS) | (i as u64 & 0);', MULTI_T),
  (MULTI_SRC, '        if let Some(slot) = st.slots.get_mut(i) {', '        if let Some(slot) = st.slots.get_mut(i & 0) {', MULTI_T),
  (MULTI_SRC, '        self.fallbacks += 1;', '        self.fallbacks += 0;', MULTI_T),
+ # D-155: the call yields for its answers as long as its own flush took
+ (MULTI_SRC, '            budget = (end, end.saturating_sub(start));', '            budget = (end, end.saturating_sub(start) * 0);', MULTI_T),
  ('crates/store-io-engine/src/flusher.rs', '        if !crate::test_hook::flush_threads() {', '        if !crate::test_hook::flush_threads() && false {', MULTI_T),
  # MULTI (V2c): a ditto is refused before any write unless every pair of
  # its stores is distinct and every store is in the set; copies in set order.

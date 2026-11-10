@@ -1019,6 +1019,143 @@ fn test_a_store_whose_flush_thread_cannot_start_is_flushed_inline() {
     assert_eq!(stats.sleeps, 0, "an inline flush sleeps on no answer");
 }
 
+/// Tests installing a step hook (process-wide) run one at a time.
+static HOOKS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// What [`test_a_call_yields_for_its_answers_as_long_as_its_own_flush`]'s
+/// hook sees: the call's thread, the handed-off store's flush thread, the
+/// call's checks of its answers, whether that flush is released, whether
+/// its answer is posted, whether the call slept.
+#[derive(Default)]
+struct Yielding {
+    caller: Option<std::thread::ThreadId>,
+    flusher: Option<std::thread::ThreadId>,
+    checks: u32,
+    released: bool,
+    posted: bool,
+    slept: bool,
+}
+
+static YIELDING: std::sync::Mutex<Option<Yielding>> = std::sync::Mutex::new(None);
+static YIELDING_CV: std::sync::Condvar = std::sync::Condvar::new();
+
+/// The call's check after the count's 32 yields at which the handed-off
+/// store's flush is released.
+const RELEASE_AT: u32 = 64;
+
+fn yielding_wait(until: impl Fn(&Yielding) -> bool) {
+    let g = YIELDING.lock().unwrap();
+    let (_g, _timeout) = YIELDING_CV
+        .wait_timeout_while(g, std::time::Duration::from_secs(10), |y| {
+            !y.as_ref().is_some_and(&until)
+        })
+        .unwrap();
+}
+
+fn yielding_hook(s: store_io_engine::test_hook::Step) {
+    use store_io_engine::test_hook::Step;
+    let me = Some(std::thread::current().id());
+    let mut g = YIELDING.lock().unwrap();
+    let Some(y) = g.as_mut() else { return };
+    match s {
+        Step::AnswerPosted if y.flusher == me => {
+            y.posted = true;
+            YIELDING_CV.notify_all();
+        }
+        Step::AnswersYield if y.caller == me => {
+            y.checks += 1;
+            if y.checks == RELEASE_AT {
+                y.released = true;
+                YIELDING_CV.notify_all();
+                drop(g);
+                // The answer is checked only once posted.
+                yielding_wait(|y| y.posted);
+            }
+        }
+        Step::AnswersWait if y.caller == me => {
+            y.slept = true;
+            y.released = true;
+            YIELDING_CV.notify_all();
+        }
+        _ => {}
+    }
+}
+
+/// The call's own flush timed, the stores it handed off are yielded for
+/// about as long (D-155): an answer that comes after the count's 32
+/// yields, inside that time, is taken without sleeping. The led store's
+/// flush takes 100 us on its clock (the simulator's, advanced by its step
+/// probe; it does not move while the call yields); the handed-off store's
+/// flush is held until the call's 64th check of its answers, which waits
+/// for the answer.
+#[test]
+fn test_a_call_yields_for_its_answers_as_long_as_its_own_flush() {
+    let _serial = HOOKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (pa, pb) = (
+        SimPlatform::new(SimConfig::volatile(116)),
+        SimPlatform::new(SimConfig::volatile(117)),
+    );
+    let (a, b) = (create_in(&pa, "/a"), create_in(&pb, "/b"));
+    // b first: the caller leads a and hands b to its flush thread.
+    let set = StoreSet::new([b.clone(), a.clone()]).unwrap();
+    let (wa, wb) = (
+        a.provision_append_region("wal", MIB).unwrap(),
+        b.provision_append_region("wal", MIB).unwrap(),
+    );
+    let ta = wa.append(&[1u8; B]).unwrap();
+    let tb = wb.append(&[2u8; B]).unwrap();
+    *YIELDING.lock().unwrap() = Some(Yielding {
+        caller: Some(std::thread::current().id()),
+        ..Yielding::default()
+    });
+    let clock = pa.clone();
+    pa.with_world(|w| {
+        w.set_step_probe(Some(std::sync::Arc::new(move || {
+            clock.with_world(|w| w.advance_clock_ns(100_000));
+            false
+        })));
+    });
+    pb.with_world(|w| {
+        w.set_step_probe(Some(std::sync::Arc::new(|| {
+            if let Some(y) = YIELDING.lock().unwrap().as_mut() {
+                y.flusher = Some(std::thread::current().id());
+            }
+            yielding_wait(|y| y.released);
+            false
+        })));
+    });
+    // Undone however the call ends: the hook is process-wide, and pa's
+    // probe holds pa itself.
+    struct Undo(SimPlatform, SimPlatform);
+    impl Drop for Undo {
+        fn drop(&mut self) {
+            store_io_engine::test_hook::install(None);
+            self.0.with_world(|w| w.set_step_probe(None));
+            self.1.with_world(|w| w.set_step_probe(None));
+            let _ = YIELDING
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
+    let undo = Undo(pa.clone(), pb.clone());
+    store_io_engine::test_hook::install(Some(yielding_hook as fn(_)));
+    let r = set.barrier(&[&ta, &tb]);
+    let y = YIELDING.lock().unwrap().take().unwrap();
+    drop(undo);
+    let r = r.unwrap();
+    assert!(r[0].covers(&ta) && r[1].covers(&tb));
+    assert!(y.posted, "the handed-off store never answered");
+    assert!(
+        !y.slept && y.checks >= RELEASE_AT,
+        "slept after {} checks: the yields stopped at their count",
+        y.checks
+    );
+    assert_eq!(set.stats().sleeps, 0);
+}
+
 /// Parks the next step of `p`'s world until released, reporting when
 /// parked.
 struct Park {
@@ -1086,6 +1223,9 @@ fn note_asleep(s: store_io_engine::test_hook::Step) {
 /// answers, so only the poison's wake can end it.
 #[test]
 fn test_the_poison_of_a_handed_off_store_ends_the_call() {
+    let _serial = HOOKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (pa, pb) = (
         SimPlatform::new(SimConfig::volatile(112)),
         SimPlatform::new(SimConfig::volatile(113)),

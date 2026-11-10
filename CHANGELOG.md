@@ -108,7 +108,15 @@
   flushes one store, the others' flush threads the rest), answer each
   ticket by its store's kind (no flush for a power-safe store unless a
   region forces data sync), and keep a store's failure its own; a hung
-  handed-off store is released by its poison. `append_after` and
+  handed-off store is released by its poison. Having flushed its own
+  store, the calling thread yields for the others' answers about as long
+  as its own flush took (at most 200 us; D-155) before it sleeps: 32
+  yields take 11 to 28 us depending on the processor, and on CI's Xeon
+  runners 14 to 23 calls in 100 slept after them (a wake each, and eight
+  misses in a row put every call to sleep for the next 256: the G18
+  failure, 90 us against 65). With the time budget at most 1 call in 100
+  slept on each of 8 runners (four processor models), and the set's p50
+  was no worse on any. `append_after` and
   `write_after` on the set, and the `Submitter`'s `append_after_in` and
   `write_after_in`, check dependencies on any store of the set.
   `distinct(i, j)` reads two stores' device identities afresh. `ditto`

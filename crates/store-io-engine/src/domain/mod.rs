@@ -80,7 +80,12 @@
 //! nothing, so `Patience` stops yielding after `MISSES` waits in a row
 //! that ran out, and tries again after `SKIPS` more. Yielding changes
 //! only how a barrier waits: it holds nothing, and then re-takes the lock
-//! and decides as it would have.
+//! and decides as it would have. A wait that knows how long its answer
+//! should take (a set barrier's caller, its own flush timed: `multi.rs`,
+//! D-155) yields past its `YIELDS` for that long, at most `BUDGET_MAX_NS`;
+//! 32 yields take 11 to 28 us, depending on the processor, and on one of
+//! CI's processors the answers of a set's other stores came later than
+//! that in 14 to 23 calls of 100.
 //!
 //! A sleeper reads its word under the lock when it registers, and a waker
 //! bumps it under the lock when it deregisters: so a waker's bump always
@@ -134,6 +139,19 @@ const YIELDS: u32 = 1;
 
 /// Waits in a row that ran out of yields, after which waits stop yielding.
 const MISSES: u32 = 8;
+
+/// The longest a wait with a budget yields ([`Patience::yield_within`]):
+/// about ten thread wakes on a virtual machine, so a wait that outlasts it
+/// pays at most a tenth more for sleeping (D-155).
+const BUDGET_MAX_NS: u64 = 200_000;
+
+/// The most yields of a wait with a budget, whatever its clock says: a
+/// clock that does not move (the simulator's, between a test's advances)
+/// still ends the yields.
+#[cfg(not(loom))]
+const YIELDS_MAX: u32 = 4096;
+#[cfg(loom)]
+const YIELDS_MAX: u32 = 2;
 
 /// Waits that do not yield, after [`MISSES`] missed.
 const SKIPS: u32 = 256;
@@ -196,6 +214,38 @@ impl Patience {
         self.yields(reached)
     }
 
+    /// [`Self::yield_until`] for a wait whose goal should be reached within
+    /// `budget_ns` of `start` (D-155): past its [`YIELDS`] it yields on
+    /// until that has passed on `now` (at most [`BUDGET_MAX_NS`]; at most
+    /// [`YIELDS_MAX`] yields in all, whatever `now` says). A budget of 0
+    /// waits as [`Self::yield_until`], and reads no clock.
+    pub(crate) fn yield_within(
+        &self,
+        start: u64,
+        budget_ns: u64,
+        now: impl Fn() -> u64,
+        reached: impl Fn() -> bool,
+    ) -> bool {
+        if !self.try_yield() {
+            return false;
+        }
+        let budget = budget_ns.min(BUDGET_MAX_NS);
+        let mut n = 0u32;
+        while !reached() {
+            if n >= YIELDS {
+                if budget == 0 || n >= YIELDS_MAX {
+                    break;
+                }
+                if now().saturating_sub(start) >= budget {
+                    break;
+                }
+            }
+            yield_now();
+            n += 1;
+        }
+        self.note(reached())
+    }
+
     /// Yields until `reached`, at most [`YIELDS`] times, and notes whether
     /// that was enough.
     fn yields(&self, reached: impl Fn() -> bool) -> bool {
@@ -205,7 +255,11 @@ impl Patience {
             }
             yield_now();
         }
-        let enough = reached();
+        self.note(reached())
+    }
+
+    /// Notes whether a wait's yields were `enough`, and returns it.
+    fn note(&self, enough: bool) -> bool {
         if enough {
             self.reached();
         } else {

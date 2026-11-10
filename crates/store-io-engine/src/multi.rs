@@ -24,7 +24,8 @@
 //! 4. Every store needing a flush but the last is handed to its own flush
 //!    thread, the request answered into the call's [`Answers`]; the calling
 //!    thread leads the last store's flush itself, then yields for its
-//!    answers (under the set's `Patience`, D-139), then sleeps. A store whose
+//!    answers about as long as its own flush took (at most 200 us, D-155;
+//!    under the set's `Patience`, D-139), then sleeps. A store whose
 //!    flush thread cannot start is flushed on the calling thread, and a hung
 //!    flush the caller leads holds the call (no poison releases a system
 //!    call).
@@ -503,6 +504,11 @@ pub(crate) struct Answers {
     /// Outcomes of the current call posted: read without the lock while
     /// the call yields.
     posted: AtomicU64,
+    /// Poison wakes of the current call's handed-off stores: read without
+    /// the lock while the call yields, so a poison ends its yields (a late
+    /// wake of an earlier call's store at most sends one call to its
+    /// sleep, where the poison is read under the lock).
+    poisons: AtomicU64,
 }
 
 struct AnswerState {
@@ -545,6 +551,7 @@ impl Spare {
                     }),
                     ready: Condvar::new(),
                     posted: AtomicU64::new(0),
+                    poisons: AtomicU64::new(0),
                 }),
                 states: Vec::new(),
                 store_of: Vec::new(),
@@ -583,6 +590,7 @@ impl Answers {
         st.slots.clear();
         st.slots.resize_with(stores, || None);
         self.posted.store(0, Ordering::SeqCst);
+        self.poisons.store(0, Ordering::SeqCst);
     }
 }
 
@@ -616,6 +624,7 @@ impl Answer for Answers {
     }
 
     fn signal(&self) {
+        crate::test_hook::step(crate::test_hook::Step::AnswerPosted);
         // The slot was set under the mutex, which the caller holds while it
         // checks the slots: notified here, it is either waiting or has not
         // checked yet.
@@ -625,6 +634,7 @@ impl Answer for Answers {
 
 impl PoisonWaker for Answers {
     fn poisoned(&self) {
+        let _ = self.poisons.fetch_add(1, Ordering::SeqCst);
         // Under the mutex: the caller reads the poison under it before it
         // waits, so this wake is never missed.
         let _sync = lock_answers(self);
@@ -802,11 +812,28 @@ where
                 self.wait_ready(waiting);
             }
         }
+        // Its own flush timed on its store's clock: the stores handed off
+        // were asked first, so their answers are yielded for about as long
+        // (D-155).
+        // Timed only with answers to wait for.
+        let mut budget = (0, 0);
         if let Some(i) = lead {
             let need = self.parts[i].need;
-            self.parts[i].outcome = Some(self.set.stores[i].barrier_to(need).map(|()| need));
+            let store = &self.set.stores[i];
+            let timed = self.parts.iter().any(|p| p.handed.is_some());
+            let clock = || {
+                if timed {
+                    store.inner.platform.monotonic_ns()
+                } else {
+                    0
+                }
+            };
+            let start = clock();
+            self.parts[i].outcome = Some(store.barrier_to(need).map(|()| need));
+            let end = clock();
+            budget = (end, end.saturating_sub(start));
         }
-        self.collect();
+        self.collect(lead, budget);
     }
 
     /// Whether every append ticket of store `i` has completed through its
@@ -933,15 +960,30 @@ where
     }
 
     /// Waits for every handed-off store's answer, or its poison: yielding
-    /// first, then asleep on the answers.
-    fn collect(&mut self) {
+    /// first (for `budget`'s time from its start, on store `lead`'s clock,
+    /// when this call led a flush), then asleep on the answers.
+    fn collect(&mut self, lead: Option<usize>, (start, budget): (u64, u64)) {
         let want = self.parts.iter().filter(|p| p.handed.is_some()).count() as u64;
         if want == 0 {
             return;
         }
         let answers = Arc::clone(&self.answers);
-        let all_posted = || answers.posted.load(Ordering::SeqCst) >= want;
-        if !self.set.patience.yield_until(all_posted) {
+        // Every answer posted, or a handed-off store poisoned (settled
+        // below, under the lock).
+        let all_posted = || {
+            crate::test_hook::step(crate::test_hook::Step::AnswersYield);
+            answers.posted.load(Ordering::SeqCst) >= want
+                || answers.poisons.load(Ordering::SeqCst) > 0
+        };
+        let patience = &self.set.patience;
+        let reached = match lead {
+            Some(i) => {
+                let platform = &self.set.stores[i].inner.platform;
+                patience.yield_within(start, budget, || platform.monotonic_ns(), all_posted)
+            }
+            None => patience.yield_until(all_posted),
+        };
+        if !reached {
             // The poison is read after the registration (in `hand_off`) and
             // under the mutex the poison waker takes: a poison before it is
             // seen here, one after it wakes the wait.
@@ -1136,6 +1178,7 @@ mod loom_tests {
             }),
             ready: Condvar::new(),
             posted: AtomicU64::new(0),
+            poisons: AtomicU64::new(0),
         });
         a.reset(seq, 1);
         a

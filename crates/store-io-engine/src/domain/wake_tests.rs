@@ -331,6 +331,85 @@ fn test_a_wait_that_reached_its_goal_forgets_the_misses() {
     assert!(p.try_yield(), "misses that were not in a row stopped it");
 }
 
+/// A wait with a budget yields past its count until its budget has passed
+/// (D-155): its goal, reached on the clock's tenth read, is reached.
+#[test]
+fn test_a_wait_with_a_budget_yields_past_its_count() {
+    let p = Patience::default();
+    let (t, checks) = (core::cell::Cell::new(0u64), core::cell::Cell::new(0u32));
+    let now = || {
+        t.set(t.get() + 1000);
+        t.get()
+    };
+    let reached = || {
+        checks.set(checks.get() + 1);
+        t.get() >= 10_000
+    };
+    assert!(
+        p.yield_within(0, 50_000, now, reached),
+        "stopped at its count"
+    );
+    assert!(checks.get() > YIELDS, "never yielded past its count");
+    assert_eq!(p.missed.load(core::sync::atomic::Ordering::Relaxed), 0);
+}
+
+/// A budget is capped at `BUDGET_MAX_NS`: a goal never reached stops the
+/// yields there, a miss.
+#[test]
+fn test_a_wait_with_a_budget_stops_at_its_cap() {
+    let p = Patience::default();
+    let (t, checks) = (core::cell::Cell::new(0u64), core::cell::Cell::new(0u32));
+    let now = || {
+        t.set(t.get() + 1000);
+        t.get()
+    };
+    let reached = || {
+        checks.set(checks.get() + 1);
+        false
+    };
+    assert!(!p.yield_within(0, u64::MAX, now, reached));
+    let most = YIELDS + (BUDGET_MAX_NS / 1000) as u32 + 2;
+    assert!(
+        checks.get() <= most,
+        "{} checks: past the cap",
+        checks.get()
+    );
+    assert_eq!(p.missed.load(core::sync::atomic::Ordering::Relaxed), 1);
+}
+
+/// A clock that does not move still ends the yields, at `YIELDS_MAX`.
+#[test]
+fn test_a_wait_with_a_budget_on_a_still_clock_ends() {
+    let p = Patience::default();
+    let checks = core::cell::Cell::new(0u32);
+    let reached = || {
+        checks.set(checks.get() + 1);
+        assert!(checks.get() <= YIELDS_MAX + 8, "yielded past YIELDS_MAX");
+        false
+    };
+    assert!(!p.yield_within(0, 50_000, || 0, reached));
+    assert!(checks.get() > YIELDS_MAX, "stopped before YIELDS_MAX");
+}
+
+/// A budget of 0 waits as `yield_until`, its `YIELDS`, and reads no clock.
+#[test]
+fn test_a_wait_with_no_budget_reads_no_clock() {
+    let p = Patience::default();
+    let checks = core::cell::Cell::new(0u32);
+    let reached = || {
+        checks.set(checks.get() + 1);
+        false
+    };
+    let reads = core::cell::Cell::new(0u32);
+    let now = || {
+        reads.set(reads.get() + 1);
+        0
+    };
+    assert!(!p.yield_within(0, 0, now, reached));
+    assert_eq!(checks.get(), YIELDS + 2);
+    assert_eq!(reads.get(), 0, "read the clock with no budget");
+}
+
 fn missed(d: &Domain) -> u32 {
     d.patience
         .missed

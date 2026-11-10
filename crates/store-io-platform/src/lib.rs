@@ -388,6 +388,23 @@ pub trait Queue {
     /// refusal before any I/O); its buffer is returned.
     fn submit(&mut self, op: IoOp<'_, Self::File>, tag: u64) -> Result<(), Rejected>;
 
+    /// Submits as [`Self::submit`], except that the backend may hold the
+    /// operation until [`Self::submit_held`], [`Self::submit`],
+    /// [`Self::reap`] or [`Self::wait`], so that several enter the kernel in
+    /// one call. It counts as in flight at once. The default submits now.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::submit`].
+    fn submit_deferred(&mut self, op: IoOp<'_, Self::File>, tag: u64) -> Result<(), Rejected> {
+        self.submit(op, tag)
+    }
+
+    /// Sends every operation [`Self::submit_deferred`] held. A lasting
+    /// failure is reported by the next [`Self::wait`]. The default holds
+    /// none.
+    fn submit_held(&mut self) {}
+
     /// Moves finished completions into `out` without blocking; returns how
     /// many were added.
     fn reap(&mut self, out: &mut CompletionBuf) -> usize;

@@ -349,7 +349,9 @@ where
                     offset: r.map.locate(next, len as u64),
                     buf,
                 };
-                match lane.submit(op, submitted) {
+                // Held, and sent with the rest of this round's reads in one
+                // entry into the kernel (below).
+                match lane.submit_deferred(op, submitted) {
                     Ok(()) => {
                         ring[(submitted % depth as u64) as usize] = Some(Pending {
                             start: next,
@@ -372,6 +374,11 @@ where
                         }
                     }
                 }
+            }
+            // This round's reads go to the device together, before any is
+            // waited for or anything delivered.
+            if let Some(l) = &mut lane {
+                l.submit_held();
             }
             if deferred {
                 if let Some(l) = &mut lane {

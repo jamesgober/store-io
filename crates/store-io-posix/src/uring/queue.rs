@@ -196,6 +196,29 @@ impl UringQueue {
     }
 
     pub(crate) fn submit(&mut self, op: IoOp<'_, PosixFile>, tag: u64) -> Result<(), Rejected> {
+        self.submit_op(op, tag, true)
+    }
+
+    /// Enters every entry held by a deferred submit (`submit_op` with
+    /// `enter` false).
+    pub(crate) fn submit_held(&mut self) {
+        if self.ring.queued() > 0 {
+            if let Err(e) = self.ring.submit() {
+                if !transient(e) {
+                    self.failed = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Queues `op`; `enter`: enters the kernel now (else the entry waits
+    /// for the next entry into it: `submit_held`, a submit, a reap, a wait).
+    pub(crate) fn submit_op(
+        &mut self,
+        op: IoOp<'_, PosixFile>,
+        tag: u64,
+        enter: bool,
+    ) -> Result<(), Rejected> {
         let refuse = |buf: Option<IoBuf>, code: Option<libc::c_int>| Rejected {
             buf,
             raw: code.map(errno),
@@ -224,6 +247,8 @@ impl UringQueue {
                 if !file.is_writable() {
                     return Err(refuse(None, Some(libc::EBADF)));
                 }
+                // Entries held back go in first, as they would have.
+                self.submit_held();
                 let result = fdatasync(file.raw()).map(|()| 0);
                 self.ready.push_back(Completion {
                     tag,
@@ -298,12 +323,11 @@ impl UringQueue {
         }
         self.kernel += 1;
         // Taken now, or at the next entry into the kernel (a transient
-        // refusal keeps it queued); either way it may reach the device, so
-        // `submit` succeeds. A lasting failure is reported by `wait`.
-        if let Err(e) = self.ring.submit() {
-            if !transient(e) {
-                self.failed = Some(e);
-            }
+        // refusal, or a deferred submit, keeps it queued); either way it may
+        // reach the device, so `submit` succeeds. A lasting failure is
+        // reported by `wait`.
+        if enter {
+            self.submit_held();
         }
         Ok(())
     }
@@ -327,6 +351,8 @@ impl UringQueue {
     }
 
     pub(crate) fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
+        // Entries held back go in before any wait for them.
+        self.submit_held();
         let mut added = self.drain(out);
         loop {
             if self.kernel > 0 || self.armed {

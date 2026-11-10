@@ -99,6 +99,32 @@ impl<Q: Queue> Lane<Q> {
             .inspect_err(|_| self.core.table.abort(index))
     }
 
+    /// As [`Self::submit`], the queue free to hold the operation until
+    /// [`Self::submit_held`] (`Queue::submit_deferred`).
+    pub(crate) fn submit_deferred(
+        &mut self,
+        op: IoOp<'_, Q::File>,
+        tag: u64,
+    ) -> Result<(), Rejected> {
+        let Some((index, qtag)) = self.core.table.claim() else {
+            let buf = match op {
+                IoOp::Write { buf, .. } | IoOp::Read { buf, .. } => Some(buf),
+                IoOp::FlushData { .. } => None,
+            };
+            return Err(Rejected { buf, raw: None });
+        };
+        self.core.table.start(index, tag, Kind::Raw, None, false);
+        self.core
+            .queue
+            .submit_deferred(op, qtag)
+            .inspect_err(|_| self.core.table.abort(index))
+    }
+
+    /// Sends every operation [`Self::submit_deferred`] held.
+    pub(crate) fn submit_held(&mut self) {
+        self.core.queue.submit_held();
+    }
+
     /// Performs `op` at once when the lane holds nothing and its queue
     /// performs operations inside `submit` (`Queue::performs`: the inline
     /// synchronous queue): no row, no completion. Its busy mark is

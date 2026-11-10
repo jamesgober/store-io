@@ -433,6 +433,21 @@ impl Queue for PosixQueue {
         Ok(())
     }
 
+    fn submit_deferred(&mut self, op: IoOp<'_, PosixFile>, tag: u64) -> Result<(), Rejected> {
+        #[cfg(target_os = "linux")]
+        if let Some(u) = &mut self.uring {
+            return u.submit_op(op, tag, false);
+        }
+        self.submit(op, tag)
+    }
+
+    fn submit_held(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(u) = &mut self.uring {
+            u.submit_held();
+        }
+    }
+
     fn reap(&mut self, out: &mut CompletionBuf) -> usize {
         #[cfg(target_os = "linux")]
         if let Some(u) = &mut self.uring {

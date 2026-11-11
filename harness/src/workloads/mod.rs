@@ -8,6 +8,7 @@ pub mod gates;
 pub mod gates_extra;
 pub mod gates_g1;
 pub mod gates_g15;
+pub mod gates_g17;
 pub mod gates_g18;
 pub mod gates_g19;
 pub mod gates_g2;

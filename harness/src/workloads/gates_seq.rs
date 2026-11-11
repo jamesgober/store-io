@@ -6,6 +6,8 @@
 //! aligned buffer first; at memory speed that copy costs as much as the
 //! write, so it is reported (W5), not gated.
 
+use std::path::Path;
+use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
 use store_io_core::error::{Error, NotWrittenCause};
@@ -15,7 +17,7 @@ use store_io_engine::{AppendRegion, StoreOptions, SubmitterConfig, WriteMode};
 use super::stamp::{self, BLOCK};
 use super::{Ctx, sample, sioerr, with_store_using};
 use crate::report::{Point, System, Verify};
-use crate::sio::Plat;
+use crate::sio::{Plat, SioStore};
 
 /// The log, recycled each time it fills.
 const REGION: u64 = 1 << 30;
@@ -26,7 +28,7 @@ const CHECKS: usize = 256;
 /// the synchronous tier the pool completes appends out of order and the
 /// completed prefix can lag well behind the newest one; the depth is then
 /// never refused as too far ahead (as before the window was in bytes).
-const WINDOW: u64 = 256 << 20;
+pub(super) const WINDOW: u64 = 256 << 20;
 
 /// Fills the region with 1 MiB appends `qd` deep from pool buffers until the
 /// window ends, recycling it whenever it fills; MB/s over the measured
@@ -47,13 +49,72 @@ pub fn seq_write(ctx: &Ctx, qd: usize) -> Point {
         ..ctx.opts.clone()
     };
     with_store_using(ctx, "g6", &opts, p, |store, p| {
+        write_seq(ctx, store, &opts, qd, REGION, &mut Start(None), p)
+    })
+}
+
+/// A start shared by several writers (G17's): passed exactly once by each,
+/// at its measured window's start or, on an error before it, as it leaves,
+/// so no writer ever waits for one that failed.
+pub(super) struct Start<'a>(pub(super) Option<&'a Barrier>);
+
+impl Start<'_> {
+    fn pass(&mut self) {
+        if let Some(b) = self.0.take() {
+            let _leader = b.wait();
+        }
+    }
+}
+
+impl Drop for Start<'_> {
+    fn drop(&mut self) {
+        self.pass();
+    }
+}
+
+/// [`seq_write`]'s writer on a fresh store in `dir` (made with `opts`, and
+/// a `region`-byte log), its window starting when every writer sharing
+/// `start` is ready: G17's, one per device.
+pub(super) fn write_seq_on(
+    ctx: &Ctx,
+    dir: &Path,
+    opts: &StoreOptions,
+    qd: usize,
+    region: u64,
+    start: Option<&Barrier>,
+    mut p: Point,
+) -> Point {
+    let mut gate = Start(start);
+    match crate::sio::create(dir, opts) {
+        Ok(store) => {
+            if let Err(e) = write_seq(ctx, &store, opts, qd, region, &mut gate, &mut p) {
+                p.error = Some(e);
+            }
+        }
+        Err(e) => p.error = Some(e),
+    }
+    p
+}
+
+/// The writer itself (see [`seq_write`]).
+fn write_seq(
+    ctx: &Ctx,
+    store: &SioStore,
+    opts: &StoreOptions,
+    qd: usize,
+    region: u64,
+    start: &mut Start<'_>,
+    p: &mut Point,
+) -> Result<(), String> {
+    {
         let mut wal = store
-            .provision_append_region("g6", REGION)
+            .provision_append_region("g6", region)
             .map_err(|e| sioerr("provision", &e))?;
         let mut sub = store
             .submitter(SubmitterConfig::default().with_depth(qd as u32))
             .map_err(|e| sioerr("submitter", &e))?;
         let per = CHUNK / BLOCK as u64;
+        start.pass();
         let warm_end = Instant::now() + Duration::from_secs_f64(ctx.warmup);
         let stop = warm_end + Duration::from_secs_f64(ctx.secs);
         let (mut generation, mut k, mut live) = (1u64, 0u64, 0usize);
@@ -143,6 +204,9 @@ pub fn seq_write(ctx: &Ctx, qd: usize) -> Point {
         }
         let secs = t0.elapsed().as_secs_f64();
         p.metric("mb_per_s", (secs > 0.0).then(|| bytes as f64 / secs / 1e6));
+        // For a sum across writers (G17): their bytes over the longest window.
+        p.metric("bytes", Some(bytes as f64));
+        p.metric("secs", Some(secs));
         p.metric("generations", Some(generation as f64));
         if qd > 1 && opts.append_window != ctx.opts.append_window {
             p.notes.push(format!(
@@ -153,7 +217,7 @@ pub fn seq_write(ctx: &Ctx, qd: usize) -> Point {
         drop(sub);
         p.verify = check(&wal, k, generation, per);
         Ok(())
-    })
+    }
 }
 
 /// Reads back a sample of the last generation's `k` appends.

@@ -388,7 +388,7 @@ jobs:
   # memory-backed with a volatile write cache (so a flush is real) and about
   # 20 us per I/O, ext4 on each with one store: the root crate's
   # tests/multi_dev.rs (set barriers, a pointer across devices, ditto,
-  # concurrent callers) and the harness's multi-device gates (G18). Fails,
+  # concurrent callers) and the harness's multi-device gates (G17, G18). Fails,
   # never falls back, if the devices cannot be made.
   multi-device:
     name: Multi-device (four null_blk devices)
@@ -430,9 +430,11 @@ jobs:
           STORE_IO_MULTI_DEV: /mnt/d0,/mnt/d1,/mnt/d2,/mnt/d3
           STORE_IO_EXPECT_MULTI_DEV: "1"
         run: cargo test --release --test multi_dev
-      - name: G18
+      - name: G17 and G18
         run: |
           set -eux
+          # fio, G17's reference.
+          bash dev/tools/apt-install.sh --update fio
           mkdir -p "$RUNNER_TEMP/multi"
           harness/target/release/store-io-harness multi-gates --secs 1 --settle 0 --tier uring \
             --dir /mnt/d0 --devices /mnt/d0,/mnt/d1,/mnt/d2,/mnt/d3 --out "$RUNNER_TEMP/multi"
@@ -440,7 +442,8 @@ jobs:
           sed -n '/^| gate |/,/^$/p' "$f"
           grep -q "every measurement completed and every integrity check passed" "$f"
           if grep -E '^\| G[0-9a-z]+ \|.*\| FAIL \|$' "$f"; then exit 1; fi
-          # G18 must have run: a NOT RUN or missing row fails the job.
+          # G17 and G18 must have run: a NOT RUN or missing row fails the job.
+          grep -qE '^\| G17 \|.*\| (PASS|NOT RESOLVABLE) \|$' "$f"
           grep -qE '^\| G18 \|.*\| (PASS|NOT RESOLVABLE) \|$' "$f"
       - uses: actions/upload-artifact@v4
         if: always()

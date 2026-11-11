@@ -109,6 +109,41 @@ pub fn job(
     parse(&text, side).ok_or_else(|| "fio output not understood".to_owned())
 }
 
+/// Runs one time-based job per file in `files` at once (one fio process,
+/// `--group_reporting`), each with `args`, `warmup` seconds of ramp and
+/// `secs` measured, and returns the group's `side` (its rates summed).
+///
+/// # Errors
+///
+/// fio's failure or an output this reader does not understand, as text.
+pub fn jobs_together(
+    files: &[std::path::PathBuf],
+    bytes: u64,
+    args: &[&str],
+    side: &str,
+    secs: f64,
+    warmup: f64,
+) -> Result<Stats, String> {
+    let mut all = vec![
+        format!("--size={bytes}"),
+        "--direct=1".to_owned(),
+        "--randrepeat=0".to_owned(),
+        "--lat_percentiles=1".to_owned(),
+        "--time_based".to_owned(),
+        format!("--runtime={}ms", (secs * 1000.0) as u64),
+        format!("--ramp_time={}ms", (warmup * 1000.0) as u64),
+        "--group_reporting".to_owned(),
+        "--output-format=json".to_owned(),
+    ];
+    all.extend(args.iter().map(|a| (*a).to_owned()));
+    for (i, f) in files.iter().enumerate() {
+        all.push(format!("--name=job{i}"));
+        all.push(format!("--filename={}", path_arg(f)));
+    }
+    let (text, _) = run_raw(&all)?;
+    parse(&text, side).ok_or_else(|| "fio output not understood".to_owned())
+}
+
 /// Runs one time-based job of `secs` (no ramp) on `file` and returns its
 /// `side` with `cpu_s` replaced by the CPU time of fio's whole process
 /// (every thread: on Windows, `windowsaio` reaps on a thread of its own)

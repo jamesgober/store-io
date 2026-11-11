@@ -18,8 +18,8 @@ COMMANDS:
     sequential     W5  1 MiB sequential writes, 1/8 MiB sequential reads
     submitter      W6  N in flight from one thread, random 4 KiB, vs fio
     gates          the performance gate table (W1-W5, fio controls, extras;
-                   G18 too with --devices, else NOT RUN)
-    multi-gates    the gates that need several devices (G18), on --devices
+                   G17 and G18 too with --devices, else NOT RUN)
+    multi-gates    the gates that need several devices (G17, G18), on --devices
     g19            G19 (commits beside a background Submitter), on --g19-dir
     probe          create a store, print the device report and exit
     observe-cost   what the observer adds per durable write (build with
@@ -38,7 +38,7 @@ OPTIONS:
     --commit <SHA>   store-io commit to record (default: git rev-parse HEAD)
     --tier <T>       Linux I/O tier: auto (default), sync or uring
     --devices <D,..> a directory on each of two or more devices, comma-separated
-                     (the multi-device gates: G18)
+                     (the multi-device gates: G17, G18)
     --g19-dir <D>    a directory on G19's device (CI's calibrated device, or
                      the dev box's drive); `gates` runs G19 there too
     --g19-part <P>   what `g19` runs: main (G19, its negative control and

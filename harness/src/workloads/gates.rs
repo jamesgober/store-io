@@ -15,8 +15,8 @@
 //! - ELSEWHERE: measured by another check (cited).
 
 use super::{
-    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_g18,
-    gates_g19, gates_scan, gates_seq, lone, page_batch, remove, sequential,
+    Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_g17,
+    gates_g18, gates_g19, gates_scan, gates_seq, lone, page_batch, remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -69,7 +69,7 @@ fn margin(us: f64, base: Option<f64>) -> f64 {
 
 /// `store` against `min x base` (higher is better); `spread` is the
 /// baseline's relative run-to-run spread.
-fn at_least(store: Option<f64>, base: Option<f64>, min: f64, spread: f64) -> Verdict {
+pub(super) fn at_least(store: Option<f64>, base: Option<f64>, min: f64, spread: f64) -> Verdict {
     // A baseline that swings by more than half is no baseline: the band
     // stops there, so a result below half the gate always fails.
     let spread = if spread.is_finite() {
@@ -118,7 +118,7 @@ fn val(p: &Point, k: &str) -> Option<f64> {
 }
 
 /// The worse of two PASS / NOT RESOLVABLE / FAIL verdicts.
-fn worse(a: Verdict, b: Verdict) -> Verdict {
+pub(super) fn worse(a: Verdict, b: Verdict) -> Verdict {
     let rank = |v: Verdict| match v {
         Verdict::Pass => 0,
         Verdict::NotResolvable => 1,
@@ -128,7 +128,7 @@ fn worse(a: Verdict, b: Verdict) -> Verdict {
 }
 
 /// The range of `v` relative to `m` (0 when `m` is not positive).
-fn range(v: &[f64], m: Option<f64>) -> f64 {
+pub(super) fn range(v: &[f64], m: Option<f64>) -> f64 {
     let (lo, hi) = v
         .iter()
         .fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
@@ -878,10 +878,12 @@ pub fn run(ctx: &Ctx) -> Section {
     rows.push(Row {
         id: "G12",
         gate: "Multi-device",
-        measured: "G18 (with --devices) and the multi-device CI job".to_owned(),
+        measured: "G17 and G18 (with --devices) and the multi-device CI job".to_owned(),
         verdict: Verdict::Elsewhere,
     });
-    // G18: several devices (`--devices`), else NOT RUN.
+    // G17 and G18: several devices (`--devices`), else NOT RUN.
+    let g17 = gates_g17::measure(ctx, &ctx.devices);
+    rows.push(g17.row);
     let g18 = gates_g18::measure(ctx, &ctx.devices);
     rows.push(g18.row);
     // G19: its device (`--g19-dir`), else NOT RUN.
@@ -911,6 +913,7 @@ pub fn run(ctx: &Ctx) -> Section {
     pts.extend(g6q1);
     pts.extend(g4);
     pts.extend(g15.points);
+    pts.extend(g17.points);
     pts.push(g18.point);
     pts.extend(g19.points);
     sec.points = pts;

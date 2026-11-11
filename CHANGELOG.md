@@ -128,6 +128,17 @@
   are published beside it. The job fails unless G18's row is a PASS (or
   NOT RESOLVABLE). In the `gates` table G18 reads NOT RUN without
   `--devices`.
+- CI: **G17** (exit criterion 1) in the multi-device job and the harness's
+  `multi-gates`: summed sequential write over 1, 2 and 4 stores, one per
+  `null_blk` device, each its own `Submitter` appending 1 MiB 8 deep, all
+  started together, against fio's QD8 sequential write on the same
+  devices together (one job per device, group reporting; store-io's
+  bytes summed over its longest window, as fio's group sums them); three
+  alternated runs per N, each N's median at least 90% of fio's, labelled
+  with the CPU count; directories sharing a device are refused (on
+  Unix). The job installs fio
+  and fails unless G17's row is a PASS (or NOT RESOLVABLE). First runs, 4
+  vCPUs: 98-110% of fio at every N (four devices: 13.3-15.5 GB/s).
 - CI: the **g19** job and the harness's `g19` command (`--g19-dir`): a
   commit's QD1 4 KiB durable-write p99 beside one background `Submitter`
   on another store of the same device, 12 rounds of (idle, loaded, idle),

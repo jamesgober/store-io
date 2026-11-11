@@ -171,27 +171,33 @@ pub fn run(ctx: &Ctx) -> Section {
     sec.method = vec![
         "G18: one durable 4 KiB append on each device's store, then `StoreSet::barrier` over the tickets, against the raw parallel barrier: the same appends made durable at once, each by its store's own `sync_through`, N-1 on helper threads asleep on their own condvars and woken in turn, the caller making store 0's and spin-waiting for the rest, 5 untimed iterations first (published beside it: the same appends' lone barriers, the slowest per iteration and their sum; the parallel barrier with its helpers spinning; 200 timed thread wakes); 20 alternated rounds of 200 each after a warm-up. PASS when the median per-round difference (set p50 - raw parallel p50 - (2 us + 3% of it)) is at most 0; NOT RESOLVABLE when it is not but the 6th smallest of the 20 is; FAIL otherwise, or when a set barrier did not cost exactly one flush per device, a store's flush fell back to the calling thread, the set's median round was nearer the sum of the lone barriers than their maximum (not in parallel), a receipt did not cover its ticket, or a record did not read back.".to_owned(),
     ];
+    sec.method.push("G17: for N = 1, 2 and 4 (at most the devices given), one store on each of the first N devices, each its own Submitter appending 1 MiB from pool buffers 8 deep on its own thread, all started together, their MB/s summed; against fio on the same N devices together (one QD8 1 MiB sequential-write job per device in one process, group reporting); three alternated runs per N; PASS when every N's median is at least 90% of fio's (NOT RESOLVABLE when only within fio's spread of it); labelled with the CPU count; each writer's appends read back.".to_owned());
+    let g17 = super::gates_g17::measure(ctx, &ctx.devices);
     let g18 = measure(ctx, &ctx.devices);
     let mut t = Table::new("Gates:", &["gate", "requirement", "measured", "verdict"]);
-    t.row(vec![
-        g18.row.id.to_owned(),
-        g18.row.gate.to_owned(),
-        g18.row.measured.clone(),
-        g18.row.verdict.name().to_owned(),
-    ]);
-    sec.tables.push(t);
-    if g18.row.verdict == Verdict::Fail {
-        sec.findings
-            .push(format!("G18 FAIL: {} ({})", g18.row.gate, g18.row.measured));
+    for row in [&g17.row, &g18.row] {
+        t.row(vec![
+            row.id.to_owned(),
+            row.gate.to_owned(),
+            row.measured.clone(),
+            row.verdict.name().to_owned(),
+        ]);
+        if row.verdict == Verdict::Fail {
+            sec.findings
+                .push(format!("{} FAIL: {} ({})", row.id, row.gate, row.measured));
+        }
     }
-    sec.points = vec![g18.point];
+    sec.tables.push(t);
+    let mut points = g17.points;
+    points.push(g18.point);
+    sec.points = points;
     sec.collect_point_anomalies();
     sec
 }
 
 /// Refuses two directories on one file system (Linux: the same device
 /// number): G18 would measure one device several times.
-fn distinct_devices(dirs: &[PathBuf]) -> Result<(), String> {
+pub(super) fn distinct_devices(dirs: &[PathBuf]) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

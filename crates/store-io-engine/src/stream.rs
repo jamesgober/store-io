@@ -158,6 +158,7 @@ pub struct Chunk {
     at: usize,
     len: usize,
     offset: u64,
+    range: usize,
     home: Arc<Mutex<FreeList<IoBuf>>>,
 }
 
@@ -166,6 +167,15 @@ impl Chunk {
     #[must_use]
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Which of the stream's ranges it is of: its index in
+    /// [`Store::prefetch`](crate::Store::prefetch)'s `ranges` (0 for a
+    /// region's own stream), so overlapping ranges read twice are told
+    /// apart.
+    #[must_use]
+    pub fn range(&self) -> usize {
+        self.range
     }
 
     /// The bytes.
@@ -183,6 +193,7 @@ impl core::fmt::Debug for Chunk {
         f.debug_struct("Chunk")
             .field("offset", &self.offset)
             .field("len", &self.len)
+            .field("range", &self.range)
             .finish_non_exhaustive()
     }
 }
@@ -200,6 +211,8 @@ impl Drop for Chunk {
 
 /// A read in flight, and its completion once it arrives.
 struct Read {
+    /// Its part (an index into the stream's parts).
+    part: usize,
     start: u64,
     len: usize,
     done: Option<(RawResult<usize>, Option<IoBuf>)>,
@@ -215,13 +228,22 @@ enum Item {
     /// `len` bytes of the piece's buffer from `at`, region offset `start`;
     /// `last`: the piece's buffer itself is lent with it.
     Run {
+        part: usize,
         start: u64,
         at: usize,
         len: usize,
         last: bool,
     },
     /// `[start, end)` could not be read.
-    Bad { start: u64, end: u64 },
+    Bad { part: usize, start: u64, end: u64 },
+}
+
+/// One range of a stream: its region (owned, no pass), the bytes asked for,
+/// and its index in the caller's ranges.
+struct Part {
+    r: Arc<LiveRegion>,
+    want: Range<u64>,
+    index: usize,
 }
 
 /// A region's bytes in order, as owned [`Chunk`]s, with an exact
@@ -260,7 +282,9 @@ where
     /// `None`: an empty stream (no queue, no buffers).
     lane: Option<Lane<P::Queue>>,
     store: Store<P>,
-    r: Arc<LiveRegion>,
+    /// Its ranges, in order (none empty), and the one being read.
+    parts: Vec<Part>,
+    cur: usize,
     /// Its busy mark's id among the store's submitters.
     mark: Option<u64>,
     ring: Vec<Option<Read>>,
@@ -273,8 +297,7 @@ where
     scratch: Option<IoBuf>,
     home: Arc<Mutex<FreeList<IoBuf>>>,
     lend: usize,
-    /// The bytes asked for, and the block-aligned span read for them.
-    want: Range<u64>,
+    /// The current part's next read, and the block-aligned end of its span.
     next: u64,
     end: u64,
     req: usize,
@@ -294,8 +317,8 @@ where
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ReadStream")
-            .field("region", &self.r.id)
-            .field("want", &self.want)
+            .field("parts", &self.parts.len())
+            .field("cur", &self.cur)
             .field("next", &self.next)
             .field("ended", &self.ended)
             .finish_non_exhaustive()
@@ -306,16 +329,88 @@ where
 /// after.
 type Next = Option<Result<Chunk, Error>>;
 
+/// One range for [`Store::prefetch`]: a region's bytes, checked when made
+/// by [`AppendRegion::stream_range`](crate::AppendRegion::stream_range) or
+/// [`PageRegion::stream_range`](crate::PageRegion::stream_range) (in
+/// bounds, an append region's clamped to its durable prefix then).
+pub struct StreamRange<'a, P: Platform> {
+    store: &'a Store<P>,
+    r: Arc<LiveRegion>,
+    want: Range<u64>,
+}
+
+impl<'a, P: Platform> StreamRange<'a, P> {
+    pub(crate) fn new(store: &'a Store<P>, r: &Arc<LiveRegion>, want: Range<u64>) -> Self {
+        Self {
+            store,
+            r: Arc::clone(r),
+            want,
+        }
+    }
+}
+
+impl<P: Platform> core::fmt::Debug for StreamRange<'_, P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StreamRange")
+            .field("region", &self.r.id)
+            .field("want", &self.want)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
-    /// A stream over `want` of `r` (checked by the caller: in bounds, an
+    /// The bytes of several ranges, of this store's regions, as one
+    /// [`ReadStream`] on one queue: each range in the order given, each in
+    /// offset order ([`Chunk::range`] says which; overlapping ranges are
+    /// read twice; no range, an empty stream). An append region's range was
+    /// clamped to its durable prefix when it was made. Each region's gate is
+    /// checked again here and as the stream reads it: a retire of a region
+    /// ends the stream before any more of that region's reads are
+    /// delivered. An error tied to no read (`TooManyInFlight`, a failed
+    /// wait, `Interrupted`) names the range being read ahead.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten`: `ForeignPosition` (a range of another store, or of
+    /// another open of this one), `StaleGeneration` or `NotReady` (a region
+    /// recycled or released), `PoolExhausted`, `InvalidOptions`; `Io` if
+    /// its queue could not be made.
+    pub fn prefetch(
+        &self,
+        ranges: &[StreamRange<'_, P>],
+        opts: StreamOptions,
+    ) -> Result<ReadStream<P>, Error> {
+        for sr in ranges {
+            if !Arc::ptr_eq(&sr.store.inner, &self.inner) {
+                return Err(not_written(
+                    NotWrittenCause::ForeignPosition,
+                    ctx_range(&sr.r, sr.want.start, sr.want.end),
+                ));
+            }
+            sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;
+        }
+        let parts = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, sr)| (Arc::clone(&sr.r), sr.want.clone(), i))
+            .collect();
+        self.read_stream_of(parts, opts)
+    }
+}
+
+impl<P: Platform> Store<P>
+where
+    P::Queue: Send,
+{
+    /// A stream over `parts`, each a region, the bytes asked of it and its
+    /// index in the caller's ranges (checked by the caller: in bounds, an
     /// append region's clamped to its durable prefix, the gate live).
     pub(crate) fn read_stream_of(
         &self,
-        r: &Arc<LiveRegion>,
-        want: Range<u64>,
+        parts: Vec<(Arc<LiveRegion>, Range<u64>, usize)>,
         opts: StreamOptions,
     ) -> Result<ReadStream<P>, Error> {
         let none = ErrorContext::default();
@@ -335,10 +430,26 @@ where
         };
         let home = Arc::new(Mutex::new(FreeList::new(Vec::new())));
         let block = self.block();
+        // The error context of a refusal at the call: the first range's.
+        let c = parts
+            .first()
+            .map_or(none, |(r, w, _)| ctx_range(r, w.start, w.end));
+        let parts: Vec<Part> = parts
+            .into_iter()
+            .filter(|(_, want, _)| !want.is_empty())
+            .map(|(r, want, index)| Part { r, want, index })
+            .collect();
+        let (next, end) = parts.first().map_or((0, 0), |p| {
+            (
+                p.want.start / block * block,
+                p.want.end.div_ceil(block) * block,
+            )
+        });
         let mut s = ReadStream {
             lane: None,
             store: self.clone(),
-            r: Arc::clone(r),
+            parts,
+            cur: 0,
             mark: None,
             ring: Vec::new(),
             submitted: 0,
@@ -349,9 +460,8 @@ where
             scratch: None,
             home,
             lend: 0,
-            next: want.start / block * block,
-            end: want.end.div_ceil(block) * block,
-            want,
+            next,
+            end,
             req: 0,
             pace: None,
             ended: false,
@@ -378,7 +488,6 @@ where
             .iter()
             .find(|(size, _, _)| *size == class)
             .map_or(0, |&(_, _, cap)| cap as usize);
-        let c = ctx_range(r, s.want.start, s.want.end);
         let exhausted = || not_written(NotWrittenCause::PoolExhausted, c);
         // Explicit options over the cap are refused, an empty range's too.
         let explicit = match explicit {
@@ -388,7 +497,7 @@ where
             },
             None => None,
         };
-        if s.want.is_empty() {
+        if s.parts.is_empty() {
             // No queue, no buffers.
             s.ended = true;
             s.finished = true;
@@ -450,24 +559,53 @@ where
         }
     }
 
-    fn ctx(&self) -> ErrorContext {
-        ctx_range(&self.r, self.want.start, self.want.end)
-    }
-
-    fn read_error(&self, raw: OsError) -> Error {
-        Error::Io {
-            op: Op::Read,
-            raw,
-            ctx: self.ctx(),
+    /// Part `i`'s range as an error's context.
+    fn ctx_of(&self, i: usize) -> ErrorContext {
+        match self.parts.get(i) {
+            Some(p) => ctx_range(&p.r, p.want.start, p.want.end),
+            None => ErrorContext::default(),
         }
     }
 
-    /// The region's gate, checked without a pass (`Gate::live`).
-    fn live(&self) -> Result<(), Error> {
-        self.r
-            .gate
-            .live()
-            .map_err(|why| retired_error(why, &self.r))
+    /// The current part's.
+    fn ctx(&self) -> ErrorContext {
+        self.ctx_of(self.cur)
+    }
+
+    fn read_error_of(&self, i: usize, raw: OsError) -> Error {
+        Error::Io {
+            op: Op::Read,
+            raw,
+            ctx: self.ctx_of(i),
+        }
+    }
+
+    fn read_error(&self, raw: OsError) -> Error {
+        self.read_error_of(self.cur, raw)
+    }
+
+    /// Part `i`'s region's gate, checked without a pass (`Gate::live`).
+    fn live_of(&self, i: usize) -> Result<(), Error> {
+        match self.parts.get(i) {
+            Some(p) => p.r.gate.live().map_err(|why| retired_error(why, &p.r)),
+            None => Err(not_written(NotWrittenCause::Interrupted, self.ctx())),
+        }
+    }
+
+    /// Whether data is left to read: moves to the next part once the
+    /// current one is all submitted.
+    fn more(&mut self) -> bool {
+        while self.next >= self.end {
+            if self.cur + 1 >= self.parts.len() {
+                return false;
+            }
+            self.cur += 1;
+            let block = self.store.block();
+            let p = &self.parts[self.cur];
+            self.next = p.want.start / block * block;
+            self.end = p.want.end.div_ceil(block) * block;
+        }
+        true
     }
 
     /// A bisected piece's run waits to be copied out of its buffer: no read
@@ -486,8 +624,9 @@ where
     /// left, each read cut where its extent ends.
     fn refill(&mut self) -> Result<(), Error> {
         let depth = self.depth() as u64;
-        while !self.copying() && self.submitted - self.delivered < depth && self.next < self.end {
-            self.live()?;
+        while !self.copying() && self.submitted - self.delivered < depth && self.more() {
+            let part = self.cur;
+            self.live_of(part)?;
             test_hook::step(Step::StreamSubmit);
             let Some(mut buf) = lock(&self.home).bufs.pop() else {
                 break;
@@ -496,7 +635,7 @@ where
             // Never across a run's end (one device operation each).
             let len = (self.end - next)
                 .min(self.req as u64)
-                .min(self.r.map.run_left(next)) as usize;
+                .min(self.parts[part].r.map.run_left(next)) as usize;
             // A background read is admitted before it is submitted; refused
             // with reads of its own in flight, the stream collects them.
             let charge = match &self.pace {
@@ -520,7 +659,7 @@ where
             let _fits = buf.set_len(len);
             let op = IoOp::Read {
                 file: &self.store.inner.file,
-                offset: self.r.map.locate(next, len as u64),
+                offset: self.parts[part].r.map.locate(next, len as u64),
                 buf,
             };
             let Some(lane) = self.lane.as_mut() else {
@@ -530,6 +669,7 @@ where
                 Ok(()) => {
                     let slot = (self.submitted % depth) as usize;
                     self.ring[slot] = Some(Read {
+                        part,
                         start: next,
                         len,
                         done: None,
@@ -598,37 +738,43 @@ where
         Ok(())
     }
 
-    /// A chunk of `len` bytes of `buf` from `at`, region offset `offset`:
-    /// one more lent.
-    fn lend_chunk(&mut self, buf: IoBuf, at: usize, len: usize, offset: u64) -> Chunk {
+    /// A chunk of part `part`, `len` bytes of `buf` from `at`, region
+    /// offset `offset`: one more lent.
+    fn lend_chunk(&mut self, part: usize, buf: IoBuf, at: usize, len: usize, offset: u64) -> Chunk {
         lock(&self.home).lent += 1;
         Chunk {
             buf: Some(buf),
             at,
             len,
             offset,
+            range: self.parts.get(part).map_or(0, |p| p.index),
             home: Arc::clone(&self.home),
         }
     }
 
-    /// A range that could not be read, as its item.
-    fn bad(&self, start: u64, end: u64) -> Error {
+    /// A range of part `part` that could not be read, as its item.
+    fn bad(&self, part: usize, start: u64, end: u64) -> Error {
         Error::Corruption {
             kind: CorruptionKind::MediaError,
-            ctx: ctx_range(&self.r, start, end),
+            ctx: match self.parts.get(part) {
+                Some(p) => ctx_range(&p.r, start, end),
+                None => ErrorContext::default(),
+            },
         }
     }
 
-    /// Queues `[start, end)` as unreadable, counted once as a media error
-    /// (after its check).
-    fn queue_bad(&mut self, start: u64, end: u64) {
+    /// Queues `[start, end)` of part `part` as unreadable, counted once as
+    /// a media error (after its check).
+    fn queue_bad(&mut self, part: usize, start: u64, end: u64) {
         self.store.inner.observer.add(Counter::MediaErrors, 1);
-        self.pending.push_back(Item::Bad { start, end });
+        self.pending.push_back(Item::Bad { part, start, end });
     }
 
-    /// `[start, end)` clamped to the bytes asked for (empty: `None`).
-    fn clamp(&self, start: u64, end: u64) -> Option<(u64, u64)> {
-        let (s, e) = (start.max(self.want.start), end.min(self.want.end));
+    /// `[start, end)` clamped to part `part`'s bytes asked for (empty:
+    /// `None`).
+    fn clamp(&self, part: usize, start: u64, end: u64) -> Option<(u64, u64)> {
+        let want = &self.parts.get(part)?.want;
+        let (s, e) = (start.max(want.start), end.min(want.end));
         (s < e).then_some((s, e))
     }
 
@@ -651,7 +797,7 @@ where
                 return Ok(Some(self.deliver_item(item)));
             }
             if self.delivered == self.submitted {
-                if self.next >= self.end {
+                if !self.more() {
                     return Ok(None);
                 }
                 // Nothing in flight and nothing submitted: nothing ever
@@ -660,12 +806,14 @@ where
             }
             let depth = self.depth() as u64;
             let slot = (self.delivered % depth) as usize;
+            let waiting = self.ring[slot].as_ref().map_or(self.cur, |p| p.part);
             while self.ring[slot].as_ref().is_some_and(|p| p.done.is_none()) {
                 if let Err(raw) = self.wait_one() {
-                    return Err(self.read_error(raw));
+                    return Err(self.read_error_of(waiting, raw));
                 }
             }
             let Some(Read {
+                part,
                 start,
                 len,
                 done: Some((result, buf)),
@@ -677,8 +825,8 @@ where
             self.delivered += 1;
             test_hook::step(Step::StreamCompleted);
             // Before anything of the read is delivered, counted or
-            // classified (an error's too).
-            if let Err(e) = self.live() {
+            // classified (an error's too): its own part's gate.
+            if let Err(e) = self.live_of(part) {
                 if let Some(b) = buf {
                     lock(&self.home).bufs.push(b);
                 }
@@ -691,26 +839,26 @@ where
                     obs.add(Counter::Reads, 1);
                     obs.add(Counter::ReadBytes, n as u64);
                     // A short read: the rest could not be read.
-                    if let Some((s, e)) = self.clamp(start + n as u64, start + len as u64) {
-                        self.queue_bad(s, e);
+                    if let Some((s, e)) = self.clamp(part, start + n as u64, start + len as u64) {
+                        self.queue_bad(part, s, e);
                     }
-                    match self.clamp(start, start + n as u64) {
+                    match self.clamp(part, start, start + n as u64) {
                         Some((s, e)) => {
                             let at = (s - start) as usize;
-                            let chunk = self.lend_chunk(b, at, (e - s) as usize, s);
+                            let chunk = self.lend_chunk(part, b, at, (e - s) as usize, s);
                             return Ok(Some(Ok(chunk)));
                         }
                         None => lock(&self.home).bufs.push(b),
                     }
                 }
                 (Err(raw), Some(b)) if is_media_error(raw) => {
-                    self.bisect(start, len as u64, b)?;
+                    self.bisect(part, start, len as u64, b)?;
                 }
                 (Err(raw), b) => {
                     if let Some(b) = b {
                         lock(&self.home).bufs.push(b);
                     }
-                    return Err(self.read_error(raw));
+                    return Err(self.read_error_of(part, raw));
                 }
                 // No buffer came back (a backend breaking platform contract
                 // 1): the stream stops, never reporting the range as bad.
@@ -724,17 +872,24 @@ where
     /// A bisected piece's next item.
     fn deliver_item(&mut self, item: Item) -> Result<Chunk, Error> {
         match item {
-            Item::Bad { start, end } => Err(self.bad(start, end)),
+            Item::Bad { part, start, end } => Err(self.bad(part, start, end)),
             Item::Run {
+                part,
                 start,
                 at,
                 len,
                 last: true,
             } => match self.piece.take() {
-                Some(b) => Ok(self.lend_chunk(b, at, len, start)),
+                Some(b) => Ok(self.lend_chunk(part, b, at, len, start)),
                 None => Err(not_written(NotWrittenCause::Interrupted, self.ctx())),
             },
-            Item::Run { start, at, len, .. } => {
+            Item::Run {
+                part,
+                start,
+                at,
+                len,
+                ..
+            } => {
                 let free = lock(&self.home).bufs.pop();
                 let (Some(mut buf), Some(piece)) = (free, self.piece.as_ref()) else {
                     // No free buffer while fewer than `lend` are lent cannot
@@ -745,7 +900,7 @@ where
                 };
                 let _fits = buf.set_len(len);
                 buf.as_mut_capacity()[..len].copy_from_slice(&piece.as_slice()[at..at + len]);
-                Ok(self.lend_chunk(buf, 0, len, start))
+                Ok(self.lend_chunk(part, buf, 0, len, start))
             }
         }
     }
@@ -753,16 +908,24 @@ where
     /// Bisects the piece `[start, start + len)`, whose read failed with a
     /// media error, on the stream's idle queue; its items are queued only
     /// after the gate holds once all its reads have completed.
-    fn bisect(&mut self, start: u64, len: u64, mut piece: IoBuf) -> Result<(), Error> {
+    fn bisect(&mut self, part: usize, start: u64, len: u64, mut piece: IoBuf) -> Result<(), Error> {
         // An idle queue: every read in flight collected first (delivered
         // later, in order, after this piece).
         if let Err(raw) = self.collect_all() {
             lock(&self.home).bufs.push(piece);
-            return Err(self.read_error(raw));
+            return Err(self.read_error_of(part, raw));
         }
         let mut scratch = self.scratch.take();
         let mut found: Vec<(u64, u64, bool)> = Vec::new();
-        let halves = self.halves(start, start, len, &mut piece, &mut scratch, &mut found);
+        let halves = self.halves(
+            part,
+            start,
+            start,
+            len,
+            &mut piece,
+            &mut scratch,
+            &mut found,
+        );
         self.scratch = scratch;
         if let Err(e) = halves {
             self.bisected = (0, 0);
@@ -771,7 +934,7 @@ where
         }
         test_hook::step(Step::StreamBisected);
         let (reads, bytes) = std::mem::take(&mut self.bisected);
-        if let Err(e) = self.live() {
+        if let Err(e) = self.live_of(part) {
             lock(&self.home).bufs.push(piece);
             return Err(e);
         }
@@ -790,29 +953,41 @@ where
         let items: Vec<Item> = merged
             .into_iter()
             .filter_map(|(s, e, good)| {
-                let (s, e) = self.clamp(s, e)?;
+                let (s, e) = self.clamp(part, s, e)?;
                 Some(if good {
                     Item::Run {
+                        part,
                         start: s,
                         at: (s - start) as usize,
                         len: (e - s) as usize,
                         last: false,
                     }
                 } else {
-                    Item::Bad { start: s, end: e }
+                    Item::Bad {
+                        part,
+                        start: s,
+                        end: e,
+                    }
                 })
             })
             .collect();
         let last_run = items.iter().rposition(|i| matches!(i, Item::Run { .. }));
         for (i, item) in items.into_iter().enumerate() {
             match item {
-                Item::Run { start, at, len, .. } => self.pending.push_back(Item::Run {
+                Item::Run {
+                    part,
+                    start,
+                    at,
+                    len,
+                    ..
+                } => self.pending.push_back(Item::Run {
+                    part,
                     start,
                     at,
                     len,
                     last: Some(i) == last_run,
                 }),
-                Item::Bad { start, end } => self.queue_bad(start, end),
+                Item::Bad { part, start, end } => self.queue_bad(part, start, end),
             }
         }
         match last_run {
@@ -828,8 +1003,10 @@ where
     /// result copied to its place in `piece` (which starts at `base`),
     /// down to one sector: `found` gets `(start, end, good)` in order.
     /// `scratch` is left `None` if the queue kept it (lost).
+    #[allow(clippy::too_many_arguments)]
     fn halves(
         &mut self,
+        part: usize,
         base: u64,
         at: u64,
         len: u64,
@@ -840,7 +1017,7 @@ where
         let sector = self.store.sector();
         let block = self.store.block();
         let Some(mut buf) = scratch.take() else {
-            return Err(not_written(NotWrittenCause::Interrupted, self.ctx()));
+            return Err(not_written(NotWrittenCause::Interrupted, self.ctx_of(part)));
         };
         // `len ≤ req ≤ capacity`.
         let _fits = buf.set_len(len as usize);
@@ -850,31 +1027,31 @@ where
         };
         let op = IoOp::Read {
             file: &self.store.inner.file,
-            offset: self.r.map.locate(at, len),
+            offset: self.parts[part].r.map.locate(at, len),
             buf,
         };
         let Some(lane) = self.lane.as_mut() else {
-            return Err(not_written(NotWrittenCause::Interrupted, self.ctx()));
+            return Err(not_written(NotWrittenCause::Interrupted, self.ctx_of(part)));
         };
         let done = run(lane, op);
         // Completed (or abandoned): its charge goes with it.
         drop(admitted);
         let (result, back) = match done {
             Ok(Ran::Done { buf, result }) => (result, buf),
-            Ok(Ran::Abandoned(raw)) => return Err(self.read_error(raw)),
+            Ok(Ran::Abandoned(raw)) => return Err(self.read_error_of(part, raw)),
             Err((buf, Some(raw))) => {
                 *scratch = buf;
-                return Err(self.read_error(raw));
+                return Err(self.read_error_of(part, raw));
             }
             Err((buf, None)) => {
                 *scratch = buf;
-                return Err(not_written(NotWrittenCause::QueueFull, self.ctx()));
+                return Err(not_written(NotWrittenCause::QueueFull, self.ctx_of(part)));
             }
         };
         let Some(b) = back else {
             return Err(match result {
-                Err(raw) => self.read_error(raw),
-                Ok(_) => not_written(NotWrittenCause::Interrupted, self.ctx()),
+                Err(raw) => self.read_error_of(part, raw),
+                Ok(_) => not_written(NotWrittenCause::Interrupted, self.ctx_of(part)),
             });
         };
         match result {
@@ -905,8 +1082,8 @@ where
                 // inside one block (as the scan's bisection).
                 let unit = if len > block { block } else { sector };
                 let half = (len / unit).div_ceil(2) * unit;
-                self.halves(base, at, half, piece, scratch, found)?;
-                self.halves(base, at + half, len - half, piece, scratch, found)
+                self.halves(part, base, at, half, piece, scratch, found)?;
+                self.halves(part, base, at + half, len - half, piece, scratch, found)
             }
             // Below the store block the device refused the smaller read
             // (alignment): it lies in a block that failed on the media.
@@ -917,7 +1094,7 @@ where
             }
             Err(raw) => {
                 *scratch = Some(b);
-                Err(self.read_error(raw))
+                Err(self.read_error_of(part, raw))
             }
         }
     }

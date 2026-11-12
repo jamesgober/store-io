@@ -33,6 +33,15 @@
   every lent chunk held returns `NotWritten(TooManyInFlight)`. `cancel`
   and drop wait for the reads in flight. The facade exports `ReadStream`,
   `Chunk` and `StreamOptions`.
+- Engine: **prefetch** (R5.5): `Store::prefetch(ranges, opts)` streams
+  several ranges of the store's regions on one queue, in the order given,
+  each in offset order (`Chunk::range` is its index in
+  `ranges`; overlapping ranges are read twice). A range is made by
+  `stream_range` on an append or page region, checked then as
+  `read_stream` checks it; a range of another store or open is refused
+  `NotWritten(ForeignPosition)`, and each region's gate is checked again
+  at the call and as each of its reads is delivered. The facade exports
+  `StreamRange`.
 - Engine: **device pacing joins every store** (PLANNING R5.4): each store,
   read-only ones included, joins its device's group when it opens (by its
   device's identity, btrfs's member disks or the file system's device;

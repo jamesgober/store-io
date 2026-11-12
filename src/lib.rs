@@ -162,7 +162,7 @@ mod native;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use native::{
     AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, ReadStream, Reservation, Slot,
-    Store, StoreSet, Submitter, copy_store, probe,
+    Store, StoreSet, StreamRange, Submitter, copy_store, probe,
 };
 
 /// What [`probe`] found out about a directory's device.

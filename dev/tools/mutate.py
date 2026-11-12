@@ -1802,12 +1802,12 @@ M = [
  ('crates/store-io-engine/src/submitter/mod.rs', '        self.away\n            .leave(&self.store.inner.domain, self.core.table.entries);\n        Ok(Completions {', '        if false {\n            self.away\n                .leave(&self.store.inner.domain, self.core.table.entries);\n        }\n        Ok(Completions {', QOS_STORE_T),
  (SCAN_SRC, '        let class = self.inner.pool.class_len(chunk).unwrap_or(chunk);', '        let class = self.inner.pool.class_len(chunk).filter(|_| false).unwrap_or(chunk);', QOS_STORE_T),
 # STREAM (V5a): read streams
- (STREAM_SRC, '            self.live()?;\n            test_hook::step(Step::StreamSubmit);', '            if false {\n                self.live()?;\n            }\n            test_hook::step(Step::StreamSubmit);', STREAM_RACE_T),
- (STREAM_SRC, "            // classified (an error's too).\n            if let Err(e) = self.live() {", "            // classified (an error's too).\n            if let Err(e) = self.live().or(Ok(())) {", STREAM_RACE_T),
- (STREAM_SRC, '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live() {', '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live().or(Ok(())) {', STREAM_RACE_T),
+ (STREAM_SRC, '            self.live_of(part)?;\n            test_hook::step(Step::StreamSubmit);', '            if false {\n                self.live_of(part)?;\n            }\n            test_hook::step(Step::StreamSubmit);', STREAM_RACE_T),
+ (STREAM_SRC, "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(part) {", "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(part).or(Ok(())) {", STREAM_RACE_T),
+ (STREAM_SRC, '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live_of(part) {', '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live_of(part).or(Ok(())) {', STREAM_RACE_T),
  (STREAM_SRC, '                let place = (at - base) as usize;', '                let place = (at - base).min(0) as usize;', STREAM_T),
- (STREAM_SRC, '        while !self.copying() && self.submitted - self.delivered < depth && self.next < self.end {', '        while (!self.copying() || true) && self.submitted - self.delivered < depth && self.next < self.end {', STREAM_T),
- (STREAM_SRC, '                .min(self.r.map.run_left(next)) as usize;', '                .min(self.r.map.run_left(next).max(u64::MAX)) as usize;', STREAM_T),
+ (STREAM_SRC, '        while !self.copying() && self.submitted - self.delivered < depth && self.more() {', '        while (!self.copying() || true) && self.submitted - self.delivered < depth && self.more() {', STREAM_T),
+ (STREAM_SRC, '                .min(self.parts[part].r.map.run_left(next)) as usize;', '                .min(self.parts[part].r.map.run_left(next).max(u64::MAX)) as usize;', STREAM_T),
  ('crates/store-io-engine/src/region.rs', '        let end = range.end.min(self.durable_through());', '        let end = range.end.max(range.end.min(self.durable_through()));', STREAM_T),
  ('crates/store-io-engine/src/region.rs', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) {', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) && false {', STREAM_T),
  (STREAM_SRC, '                let bufs: Vec<IoBuf> = (0..n)\n                    .map_while(|_| pool.take_capped(req, class).ok())', '                let bufs: Vec<IoBuf> = (0..n)\n                    .map_while(|_| pool.take_within(req, class).ok())', STREAM_T),
@@ -1819,6 +1819,11 @@ M = [
  (STREAM_SRC, '            if lock(&self.home).lent >= self.lend {', '            if lock(&self.home).lent >= self.lend && false {', STREAM_T),
  (STREAM_SRC, '        if self.finished {\n            return;\n        }', '        if self.finished && false {\n            return;\n        }', STREAM_T),
  (STREAM_SRC, '            Some((depth, lend)) => match depth.checked_add(lend).and_then(|n| n.checked_add(1)) {', '            Some((depth, lend)) => match Some(depth.wrapping_add(lend).wrapping_add(1)) {', STREAM_T),
+ (STREAM_SRC, "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(part) {", "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(self.cur) {", STREAM_T),
+ (STREAM_SRC, '            if !Arc::ptr_eq(&sr.store.inner, &self.inner) {', '            if !Arc::ptr_eq(&sr.store.inner, &self.inner) && false {', STREAM_T),
+ (STREAM_SRC, '            sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;', '            if false {\n                sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;\n            }', STREAM_T),
+ (STREAM_SRC, '            offset: self.parts[part].r.map.locate(at, len),', '            offset: self.parts[self.cur].r.map.locate(at, len),', STREAM_T),
+ (STREAM_SRC, '                    Item::Bad {\n                        part,\n                        start: s,\n                        end: e,\n                    }', '                    Item::Bad {\n                        part: self.cur,\n                        start: s,\n                        end: e,\n                    }', STREAM_T),
 ]
 
 def kill_stuck_tests():

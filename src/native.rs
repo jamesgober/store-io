@@ -50,6 +50,9 @@ pub type StoreSet = store_io_engine::StoreSet<NativePlatform>;
 /// A region's bytes in order as owned chunks (`read_stream` on a region).
 pub type ReadStream = store_io_engine::ReadStream<NativePlatform>;
 
+/// One range for `Store::prefetch` (`stream_range` on a region).
+pub type StreamRange<'a> = store_io_engine::StreamRange<'a, NativePlatform>;
+
 /// A store: one container file in a directory of its own, on one device.
 ///
 /// Every method of [`store_io_engine::Store`] is available through `Deref`:

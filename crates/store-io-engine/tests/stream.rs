@@ -492,3 +492,217 @@ fn test_a_stream_read_in_flight_is_outstanding() {
     stream.cancel().unwrap();
     assert!(s.oldest_outstanding().is_none());
 }
+
+/// Every item of a prefetch: per range index, its bytes (bad ranges filled
+/// with 0xEE), checked in order within each range.
+fn drain_ranges(stream: ReadStream<SimPlatform>, n: usize) -> Vec<Vec<u8>> {
+    let mut out = vec![Vec::new(); n];
+    let mut last = 0;
+    for item in stream {
+        let c = item.unwrap();
+        assert!(c.range() >= last, "ranges out of order");
+        last = c.range();
+        out[c.range()].extend_from_slice(c.bytes());
+    }
+    out
+}
+
+#[test]
+fn test_a_prefetch_reads_its_ranges_in_the_order_given() {
+    let (_p, s) = store(16, opts());
+    let pages = page_region(&s, "pages", 4 * CHUNK as u64);
+    let log = append_region(&s, "log", 3 * CHUNK as u64);
+    let ranges = [
+        log.stream_range(1000..2 * CHUNK as u64).unwrap(),
+        pages.stream_range(5..CHUNK as u64 + 7).unwrap(),
+        // Overlapping the one before: read twice.
+        pages.stream_range(4096..8192).unwrap(),
+        // Empty: no chunk, the next keeps its index.
+        pages.stream_range(10..10).unwrap(),
+        log.stream_range(0..4096).unwrap(),
+    ];
+    for class in [IoClass::Background, IoClass::Read] {
+        let o = StreamOptions::default().class(class);
+        let got = drain_ranges(s.prefetch(&ranges, o).unwrap(), ranges.len());
+        assert!(
+            got[0] == stamped(1000, 2 * CHUNK - 1000),
+            "{class:?}: range 0"
+        );
+        assert!(got[1] == stamped(5, CHUNK + 2), "{class:?}: range 1");
+        assert!(
+            got[2] == stamped(4096, 4096),
+            "{class:?}: range 2, read twice"
+        );
+        assert!(got[3].is_empty());
+        assert!(got[4] == stamped(0, 4096), "{class:?}: range 4");
+    }
+}
+
+#[test]
+fn test_a_prefetch_refuses_another_store_s_range() {
+    let (_p, a) = store(17, opts());
+    let p2 = SimPlatform::new(SimConfig::volatile(18));
+    let b = Store::create(p2, Path::new(DIR), opts()).unwrap();
+    let theirs = page_region(&b, "pages", CHUNK as u64);
+    let ours = page_region(&a, "pages", CHUNK as u64);
+    let ranges = [
+        ours.stream_range(0..4096).unwrap(),
+        theirs.stream_range(0..4096).unwrap(),
+    ];
+    let e = a.prefetch(&ranges, StreamOptions::default()).unwrap_err();
+    assert_eq!(cause(&e), Some(NotWrittenCause::ForeignPosition));
+}
+
+/// A read is checked against its own range's region: one of the first
+/// range, delivered after the stream moved on to the second, sees the
+/// first region's recycle.
+#[test]
+fn test_a_prefetch_checks_each_read_against_its_own_region() {
+    let (_p, s) = store(19, opts());
+    let first = page_region(&s, "first", 2 * CHUNK as u64);
+    let second = page_region(&s, "second", 16 * CHUNK as u64);
+    let ranges = [
+        first.stream_range(0..2 * CHUNK as u64).unwrap(),
+        second.stream_range(0..16 * CHUNK as u64).unwrap(),
+    ];
+    let read = StreamOptions::default().class(IoClass::Read).depth(8);
+    let mut stream = s.prefetch(&ranges, read).unwrap();
+    // The first call submits both of the first range's reads and some of
+    // the second's.
+    let c = stream.next().unwrap().unwrap();
+    assert_eq!((c.range(), c.offset()), (0, 0));
+    drop(c);
+    let id = first.pos(0).unwrap().region();
+    let _first = first.recycle().unwrap();
+    let e = stream.next().unwrap().unwrap_err();
+    assert_eq!(cause(&e), Some(NotWrittenCause::StaleGeneration));
+    assert_eq!(e_region(&e), Some(id));
+}
+
+fn e_region(e: &Error) -> Option<store_io_core::id::RegionId> {
+    match e {
+        Error::NotWritten { ctx, .. } | Error::Corruption { ctx, .. } => ctx.region,
+        _ => None,
+    }
+}
+
+/// A media error in the second range: its item names the second region.
+#[test]
+fn test_a_prefetch_s_media_error_names_its_own_region() {
+    let (p, s) = store(20, opts());
+    let first = page_region(&s, "first", CHUNK as u64);
+    let second = s.provision_page_region("second", CHUNK as u64).unwrap();
+    let mark = vec![0x5Au8; CHUNK];
+    second.write_durable(second.pos(0).unwrap(), &mark).unwrap();
+    p.with_world(|w| {
+        let media = w.media_of(&PathBuf::from(DIR), CONTAINER).unwrap();
+        let base = media
+            .windows(64)
+            .position(|win| win == &mark[..64])
+            .unwrap() as u64;
+        let file = w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap();
+        w.faults_mut().bad_ranges = vec![(file, base + 4096, base + 8192)];
+    });
+    let ranges = [
+        first.stream_range(0..CHUNK as u64).unwrap(),
+        second.stream_range(0..CHUNK as u64).unwrap(),
+    ];
+    let mut bad = Vec::new();
+    for item in s.prefetch(&ranges, StreamOptions::default()).unwrap() {
+        if let Err(e) = item {
+            bad.push(e_region(&e));
+        }
+    }
+    let id = Some(second.pos(0).unwrap().region());
+    assert_eq!(bad, vec![id]);
+}
+
+/// A range made, then its region recycled: the prefetch is refused at the
+/// call.
+#[test]
+fn test_a_prefetch_checks_each_region_at_the_call() {
+    let (_p, s) = store(21, opts());
+    let pages = page_region(&s, "pages", CHUNK as u64);
+    let ranges = [pages.stream_range(0..4096).unwrap()];
+    let _new = pages.recycle().unwrap();
+    let e = s.prefetch(&ranges, StreamOptions::default()).unwrap_err();
+    assert_eq!(cause(&e), Some(NotWrittenCause::StaleGeneration));
+}
+
+/// [`stamped`] for region `seed`: each word also holds the seed, so bytes
+/// read from another region show.
+fn seeded(seed: u8, from: u64, len: usize) -> Vec<u8> {
+    let mut v = stamped(from, len);
+    let phase = (from % 8) as usize;
+    for (i, b) in v.iter_mut().enumerate() {
+        if (i + phase) % 8 == 7 {
+            *b ^= seed;
+        }
+    }
+    v
+}
+
+/// A page region of `len` bytes written [`seeded`] and made durable.
+fn seeded_region(
+    s: &Store<SimPlatform>,
+    name: &str,
+    len: u64,
+    seed: u8,
+) -> PageRegion<SimPlatform> {
+    let r = s.provision_page_region(name, len).unwrap();
+    let data = seeded(seed, 0, len as usize);
+    for (i, c) in data.chunks(CHUNK).enumerate() {
+        r.write_durable(r.pos((i * CHUNK) as u64).unwrap(), c)
+            .unwrap();
+    }
+    r
+}
+
+/// A media error in the first range, bisected while the stream reads the
+/// second range ahead: every byte of the first comes from its own region
+/// (each region seeded apart), and the bad range names it.
+#[test]
+fn test_a_prefetch_bisects_a_range_while_reading_the_next() {
+    let (p, s) = store(22, opts());
+    let first = seeded_region(&s, "first", 2 * CHUNK as u64, 0x11);
+    let second = seeded_region(&s, "second", 16 * CHUNK as u64, 0x22);
+    let needle = seeded(0x11, 0, 64);
+    p.with_world(|w| {
+        let media = w.media_of(&PathBuf::from(DIR), CONTAINER).unwrap();
+        let base = media
+            .windows(64)
+            .position(|win| win == &needle[..])
+            .unwrap() as u64;
+        let file = w.file_id(&PathBuf::from(DIR), CONTAINER).unwrap();
+        w.faults_mut().bad_ranges = vec![(file, base + 8192, base + 12288)];
+    });
+    let ranges = [
+        first.stream_range(0..2 * CHUNK as u64).unwrap(),
+        second.stream_range(0..4 * CHUNK as u64).unwrap(),
+    ];
+    // The first call submits the first range's two reads and the second's
+    // ahead, so the first range is bisected with the second current.
+    let read = StreamOptions::default().class(IoClass::Read).depth(8);
+    let mut got = [Vec::new(), Vec::new()];
+    let mut bad = Vec::new();
+    for item in s.prefetch(&ranges, read).unwrap() {
+        match item {
+            Ok(c) => got[c.range()].extend_from_slice(c.bytes()),
+            Err(Error::Corruption { ctx, .. }) => {
+                let r = ctx.range.unwrap();
+                bad.push((ctx.region, r.start..r.end));
+                got[0].resize(r.end as usize, 0xEE);
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    let id = first.pos(0).unwrap().region();
+    assert_eq!(bad, vec![(Some(id), 8192..12288)]);
+    let mut want = seeded(0x11, 0, 2 * CHUNK);
+    want[8192..12288].fill(0xEE);
+    assert!(
+        got[0] == want,
+        "the first range's bytes, from its own region"
+    );
+    assert!(got[1] == seeded(0x22, 0, 4 * CHUNK), "the second range's");
+}

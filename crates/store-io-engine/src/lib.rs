@@ -104,5 +104,5 @@ pub use store::{
     StoreReport, Unavailable, UnavailableRegion,
 };
 pub use store_io_format::meta::RegionKind;
-pub use stream::{Chunk, ReadStream, StreamOptions};
+pub use stream::{Chunk, ReadStream, StreamOptions, StreamRange};
 pub use submitter::{MAX_DEPTH, Submitter};

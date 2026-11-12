@@ -624,6 +624,22 @@ where
         range: std::ops::Range<u64>,
         opts: crate::StreamOptions,
     ) -> Result<crate::ReadStream<P>, Error> {
+        let sr = self.stream_range(range)?;
+        self.store.prefetch(&[sr], opts)
+    }
+
+    /// `range` as one range for [`Store::prefetch`](crate::Store::prefetch),
+    /// checked now as [`Self::read_stream`] checks it (and clamped to the
+    /// durable prefix as of this call).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_stream`]: `OutOfBounds`, `NotPositioned`,
+    /// `StaleGeneration`, `NotReady`.
+    pub fn stream_range(
+        &self,
+        range: std::ops::Range<u64>,
+    ) -> Result<crate::StreamRange<'_, P>, Error> {
         self.state
             .gate
             .live()
@@ -643,7 +659,11 @@ where
         // The durable prefix as of the call (R5.5).
         let end = range.end.min(self.durable_through());
         let start = range.start.min(end);
-        self.store.read_stream_of(&self.state, start..end, opts)
+        Ok(crate::StreamRange::new(
+            &self.store,
+            &self.state,
+            start..end,
+        ))
     }
 
     /// Every byte before this offset is durable.
@@ -1000,6 +1020,21 @@ where
         range: std::ops::Range<u64>,
         opts: crate::StreamOptions,
     ) -> Result<crate::ReadStream<P>, Error> {
+        let sr = self.stream_range(range)?;
+        self.store.prefetch(&[sr], opts)
+    }
+
+    /// `range` as one range for [`Store::prefetch`](crate::Store::prefetch),
+    /// checked now as [`Self::read_stream`] checks it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_stream`]: `OutOfBounds`, `StaleGeneration`,
+    /// `NotReady`.
+    pub fn stream_range(
+        &self,
+        range: std::ops::Range<u64>,
+    ) -> Result<crate::StreamRange<'_, P>, Error> {
         self.state
             .gate
             .live()
@@ -1010,7 +1045,7 @@ where
                 crate::io::ctx_range(&self.state, range.start, range.end),
             ));
         }
-        self.store.read_stream_of(&self.state, range, opts)
+        Ok(crate::StreamRange::new(&self.store, &self.state, range))
     }
 
     /// Block size: writes must be whole blocks.

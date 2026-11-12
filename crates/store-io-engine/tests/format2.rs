@@ -1,5 +1,5 @@
 //! Container format 2 in the engine, the open (E2a,
-//! `.dev/design/format2-draft.md`): it judges every metadata pair, heals
+//! `docs/FORMAT.md`): it judges every metadata pair, heals
 //! the one torn write, reports stale and lost pages, refuses a newer
 //! format, retries a failed read, and a clean close is recorded. Regions in
 //! format 2 arrive with E3. Create is in `format2_create.rs`.

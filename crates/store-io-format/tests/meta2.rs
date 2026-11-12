@@ -1,6 +1,6 @@
 //! Format-2 payload codecs (`meta2`): the volume record, table pages and
 //! entries, and region headers, against the specification's layouts and
-//! rules (`.dev/design/format2-draft.md` §5, §6, §8).
+//! rules (`docs/FORMAT.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

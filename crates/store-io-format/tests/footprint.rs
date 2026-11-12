@@ -1,6 +1,6 @@
 //! A region's footprint (`footprint::check_region`): the rules of spec §9
 //! step 3 between an entry, its region header and the container
-//! (`.dev/design/format2-draft.md`), each on its own, then every bit of a
+//! (`docs/FORMAT.md`), each on its own, then every bit of a
 //! valid header flipped.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

@@ -1,5 +1,5 @@
-//! Payload codecs of container format 2 (`.dev/design/format2-draft.md`,
-//! §5, §6, §8): the 64-byte volume record, the table pages with their
+//! Payload codecs of container format 2 (`docs/FORMAT.md`):
+//! the 64-byte volume record, the table pages with their
 //! 96-byte entries, and the region header with its extent list.
 //!
 //! Decoders never allocate and never panic. They check the layout and every

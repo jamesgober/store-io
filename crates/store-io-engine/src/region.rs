@@ -390,7 +390,11 @@ where
         // Until the pump returns the guard poisons on any exit (a panic
         // included); then the settle step completes the reservation, or
         // poisons: past it every failure leaves a hole.
-        let outcome = s.pump(&mut lane, &mut Mapped::new(&self.state.map, &mut stream));
+        let outcome = s.pump(
+            &self.state,
+            &mut lane,
+            &mut Mapped::new(&self.state.map, &mut stream),
+        );
         let r = reserved.disarm();
         settle_pumped(s, &self.state, Wrote::Append(r), outcome)
     }
@@ -403,6 +407,16 @@ where
     /// region or generation; `Poisoned`; `DurabilityUnknown` if the flush
     /// failed.
     pub fn sync_through(&self, ticket: &WriteTicket) -> Result<DurableReceipt, Error> {
+        self.sync_through_from(ticket, None)
+    }
+
+    /// [`Self::sync_through`] for a commit that entered at `entry`
+    /// (`Store::write_entry`, read before its write).
+    pub(crate) fn sync_through_from(
+        &self,
+        ticket: &WriteTicket,
+        entry: Option<u64>,
+    ) -> Result<DurableReceipt, Error> {
         let s = &self.store;
         let f = self.frontier()?;
         let c = ctx(&self.state);
@@ -443,7 +457,7 @@ where
         }
         // Snapshot the completed prefix BEFORE the barrier takes its ticket.
         let through = f.completed();
-        let (need, synced) = s.barrier_for(&self.state)?;
+        let (need, synced) = s.barrier_for(&self.state, entry)?;
         Ok(sync_tail(s, &self.state, through, need, synced))
     }
 
@@ -453,9 +467,11 @@ where
     ///
     /// As [`Self::append`] and [`Self::sync_through`].
     pub fn append_durable(&self, data: &[u8]) -> Result<(RegionPos, DurableReceipt), Error> {
+        // Timed for auto-tuning from before the write (D-160).
+        let entry = self.store.write_entry(&self.state);
         let t = self.append(data)?;
         let pos = t.pos();
-        let r = self.sync_through(&t)?;
+        let r = self.sync_through_from(&t, entry)?;
         Ok((pos, r))
     }
 
@@ -801,6 +817,16 @@ where
     /// `NotWritten(ForeignPosition | StaleGeneration)`, `Poisoned`, or
     /// `DurabilityUnknown`.
     pub fn sync_through(&self, ticket: &WriteTicket) -> Result<DurableReceipt, Error> {
+        self.sync_through_from(ticket, None)
+    }
+
+    /// [`Self::sync_through`] for a commit that entered at `entry`
+    /// (`Store::write_entry`, read before its write).
+    fn sync_through_from(
+        &self,
+        ticket: &WriteTicket,
+        entry: Option<u64>,
+    ) -> Result<DurableReceipt, Error> {
         let s = &self.store;
         let c = ctx(&self.state);
         if ticket.epoch != s.inner.epoch
@@ -816,7 +842,7 @@ where
             .gate
             .check()
             .map_err(|why| retired_error(why, &self.state))?;
-        let (need, synced) = s.barrier_for(&self.state)?;
+        let (need, synced) = s.barrier_for(&self.state, entry)?;
         Ok(s.receipt(&self.state, ticket.start, ticket.end, need, false, synced))
     }
 
@@ -826,8 +852,10 @@ where
     ///
     /// As [`Self::write`] and [`Self::sync_through`].
     pub fn write_durable(&self, pos: RegionPos, data: &[u8]) -> Result<DurableReceipt, Error> {
+        // Timed for auto-tuning from before the write (D-160).
+        let entry = self.store.write_entry(&self.state);
         let t = self.write(pos, data)?;
-        self.sync_through(&t)
+        self.sync_through_from(&t, entry)
     }
 
     /// A batch: many page writes submitted together and made durable with

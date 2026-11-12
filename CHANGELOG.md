@@ -86,7 +86,9 @@
   above `background_unpaced`. Commits may then run at up to 1.4x the
   floor's own latency (documented; G19 gates the default). The samples:
   a commit leading its flush, from its entry (through a flush thread,
-  from its earliest arrival) to the flush's completion; a flush a
+  from its earliest arrival; for `write_durable`, `append_durable` and a
+  batch's `commit`, from before its write, so the write's queueing is
+  in it) to the flush's completion; a flush a
   background barrier leads while a commit waits, from that commit's
   entry; a power-safe store's blocking `dsync` commit writes. A window
   closes at a background admission, never on the commit path; samples

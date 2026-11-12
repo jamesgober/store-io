@@ -412,7 +412,7 @@ where
             stream.at(offset);
             let mut lane = self.lane(r, Op::Write)?;
             drop(before_issue()?);
-            return Ok(self.pump(&mut lane, &mut Mapped::new(&r.map, &mut stream)));
+            return Ok(self.pump(r, &mut lane, &mut Mapped::new(&r.map, &mut stream)));
         }
         // As `stage` fills its first buffer, and in the same order: the
         // buffer, then the lane.
@@ -433,8 +433,9 @@ where
         };
         let outcome = self.write_one(&mut lane, r, offset, buf, padded, data, block, chunk);
         // Only a commit that went out whole is a sample (a refusal is not a
-        // commit's latency).
-        if matches!(outcome, Ok(Pumped::All)) {
+        // commit's latency), and only where no forced flush follows it
+        // (`write_entry`).
+        if matches!(outcome, Ok(Pumped::All)) && !r.forced() {
             self.inner.domain.sample_since(entry);
         }
         outcome
@@ -509,7 +510,12 @@ where
     }
 
     /// Submits a staged write on `lane`.
-    pub(crate) fn pump(&self, lane: &mut Lane<P::Queue>, src: &mut impl Source) -> Pumped {
+    pub(crate) fn pump(
+        &self,
+        r: &LiveRegion,
+        lane: &mut Lane<P::Queue>,
+        src: &mut impl Source,
+    ) -> Pumped {
         // A power-safe commit: timed for auto-tuning to its outcome.
         let entry = if self.inner.policy.dsync {
             self.inner.domain.note_commit()
@@ -531,7 +537,8 @@ where
         } else if src.is_split() {
             obs.add(Counter::Splits, 1);
         }
-        if matches!(outcome, Pumped::All) {
+        // A sample where no forced flush follows (`write_entry`).
+        if matches!(outcome, Pumped::All) && !r.forced() {
             self.inner.domain.sample_since(entry);
         }
         outcome
@@ -678,13 +685,37 @@ where
     /// The barrier for a sync on `r`: a data flush when the store needs one
     /// or the region forces it (D-102). Returns the flush waited for and
     /// whether a flush backs it.
-    pub(crate) fn barrier_for(&self, r: &LiveRegion) -> Result<(u64, bool), Error> {
+    ///
+    /// A commit that entered at `entry` ([`Self::write_entry`]) is timed for
+    /// auto-tuning from there; `None` times it from the barrier.
+    pub(crate) fn barrier_for(
+        &self,
+        r: &LiveRegion,
+        entry: Option<u64>,
+    ) -> Result<(u64, bool), Error> {
         if !self.inner.policy.flush && !r.forced() {
             return self.barrier().map(|need| (need, false));
         }
         let need = self.inner.domain.ticket();
-        self.barrier_to(need)?;
+        self.barrier_to_classed_from(need, IoClass::Commit, entry)?;
         Ok((need, true))
+    }
+
+    /// The entry of a commit to `r` that writes and then waits for its
+    /// barrier (`write_durable`, `append_durable`, a batch's `commit`),
+    /// read before its write: auto-tuning's sample then holds the write's
+    /// queueing behind the background as well as the barrier's (D-160).
+    /// `None` unless auto-tuning is on, and on a `dsync` store unless `r`
+    /// is forced: there the write is the commit, sampled by itself
+    /// (`write_staged_with`, `pump`), and no barrier flushes. A forced
+    /// region's flush (D-102) is timed from before its write, and its
+    /// write is then no sample of its own: one sample per commit.
+    pub(crate) fn write_entry(&self, r: &LiveRegion) -> Option<u64> {
+        if self.inner.policy.dsync && !r.forced() {
+            None
+        } else {
+            self.inner.domain.arrival()
+        }
     }
 
     /// The domain barrier for a ticket taken earlier (after the writes it
@@ -700,8 +731,9 @@ where
         self.barrier_to_classed_from(need, class, None)
     }
 
-    /// [`Self::barrier_to_classed`] timed for auto-tuning from `entry` (a
-    /// flush thread's batch: its earliest commit's arrival).
+    /// [`Self::barrier_to_classed`] timed for auto-tuning from `entry`: a
+    /// flush thread's batch's earliest commit's arrival, or a commit's
+    /// entry before its write ([`Self::write_entry`]).
     pub(crate) fn barrier_to_classed_from(
         &self,
         need: u64,

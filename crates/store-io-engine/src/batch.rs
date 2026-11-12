@@ -269,7 +269,7 @@ where
             bufs: self.chunks.drain(..),
             offset: r.start,
         };
-        let outcome = s.pump(&mut lane, &mut Mapped::new(&state.map, &mut src));
+        let outcome = s.pump(state, &mut lane, &mut Mapped::new(&state.map, &mut src));
         drop(src);
         self.bytes = 0;
         self.records = 0;
@@ -287,8 +287,10 @@ where
     ///
     /// As [`Self::write`] and [`AppendRegion::sync_through`].
     pub fn commit(&mut self) -> Result<(RegionPos, DurableReceipt), Error> {
+        // Timed for auto-tuning from before the write (D-160).
+        let entry = self.region.store().write_entry(self.region.state());
         let (pos, ticket) = self.write()?;
-        let receipt = self.region.sync_through(&ticket)?;
+        let receipt = self.region.sync_through_from(&ticket, entry)?;
         Ok((pos, receipt))
     }
 }
@@ -436,6 +438,8 @@ where
         }
         let start = self.writes.first().map_or(0, |(at, _)| *at);
         let end = self.writes.last().map_or(0, |(at, b)| at + b.len() as u64);
+        // Timed for auto-tuning from before the writes (D-160).
+        let entry = s.write_entry(state);
         // Several writes run concurrently on a parallel lane; one stays on
         // the caller's thread (D-096).
         let mut lane = if self.writes.len() > 1 {
@@ -446,13 +450,13 @@ where
         let mut src = Placed {
             writes: self.writes.drain(..),
         };
-        let outcome = s.pump(&mut lane, &mut Mapped::new(&state.map, &mut src));
+        let outcome = s.pump(state, &mut lane, &mut Mapped::new(&state.map, &mut src));
         drop(src);
         // The whole span settles as one write; its receipt follows the
         // barrier below.
         let _span = settle_pumped(s, state, Wrote::Page { start, end }, outcome)?;
         drop(lane);
-        let (need, synced) = s.barrier_for(state)?;
+        let (need, synced) = s.barrier_for(state, entry)?;
         Ok(s.receipt(state, start, end, need, false, synced))
     }
 }

@@ -431,7 +431,8 @@ pub struct Domain {
     /// active. `None` for a domain no store owns (tests, models).
     activity: Option<Activity>,
     /// Auto-tuning (V3f3): the entry of the earliest commit-class barrier
-    /// waiting for a flush not yet issued (`u64::MAX`: none). Set under
+    /// waiting for a flush not yet issued (`u64::MAX`: none), its `from`
+    /// when it has one (D-160). Set under
     /// the lock by such a waiter, only while auto-tuning is on; taken (a
     /// swap back to `u64::MAX`) by every leader as it issues, so the next
     /// flush, the one that covers those waiters, is timed from the
@@ -562,9 +563,10 @@ impl Domain {
             .is_some_and(|a| a.pace.is_none() && a.qos.tuned())
     }
 
-    /// A commit's arrival at the store's flush thread, for auto-tuning's
-    /// sample (`None` unless auto-tuning is on): the batch's barrier is
-    /// timed from its earliest commit's arrival, not from the batch.
+    /// The clock, for the entry of auto-tuning's sample (`None` unless
+    /// auto-tuning is on): a commit's arrival at the store's flush thread,
+    /// whose batch is timed from its earliest commit's arrival, or a
+    /// commit's entry before its write (`Store::write_entry`).
     pub(crate) fn arrival(&self) -> Option<u64> {
         self.activity
             .as_ref()
@@ -722,8 +724,9 @@ impl Domain {
     }
 
     /// [`Self::barrier_classed`] timed, for auto-tuning, from `entry` (a
-    /// flush thread's batch: its earliest commit's arrival) instead of
-    /// this call's entry.
+    /// flush thread's batch's earliest commit's arrival, or a commit's
+    /// entry before its write: `Store::write_entry`) instead of this
+    /// call's entry.
     pub(crate) fn barrier_classed_from(
         &self,
         need: u64,

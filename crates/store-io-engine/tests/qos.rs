@@ -1398,3 +1398,191 @@ fn test_auto_tuning_samples_a_power_safe_store_s_large_commits() {
         );
     });
 }
+
+/// The floor p99 auto-tuning finds for commits made by `commit` (its
+/// argument the round) on a store whose every submission costs 1 ms and
+/// nothing else moves the clock (the background's append is submitted
+/// before the commit's entry: never in its sample).
+fn floor_with_write_time(
+    seed: u64,
+    make: impl FnOnce(&Store<SimPlatform>) -> Box<dyn FnMut(u64)>,
+) -> u64 {
+    let p = two_devices(seed, DeviceKind::VolatileCache);
+    let a = Store::create(p.clone(), Path::new("/a"), tuned()).unwrap();
+    advance(&p, SECOND);
+    let log = a.provision_append_region("tune-log", 16 << 20).unwrap();
+    let mut commit = make(&a);
+    let mut sub = background(&a);
+    let clock = p.clone();
+    p.with_world(|w| {
+        w.set_submit_probe(Some(Arc::new(move || {
+            clock.with_world(|w| w.advance_clock_ns(1_000_000));
+        })))
+    });
+    for i in 0..1200u64 {
+        // Its submission comes before the commit's entry: not the
+        // commit's.
+        let _maybe = sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, i);
+        commit(i);
+        let _done = drain(&mut sub);
+    }
+    p.with_world(|w| w.set_submit_probe(None));
+    let q = a.qos();
+    assert!(q.floor_p99_ns > 0, "floor windows closed: {q:?}");
+    q.floor_p99_ns
+}
+
+/// A commit's write is part of its sample (D-160): the `writes`
+/// submissions' 1 ms each and its flush's, and nothing more
+/// ([`floor_with_write_time`]).
+fn holds_the_write(floor: u64, writes: u64) {
+    let ms = (writes + 1) * 1_000_000;
+    assert!(
+        (ms..ms + 1_000_000).contains(&floor),
+        "the commit's {writes} writes and flush are its sample: floor p99 {floor} ns"
+    );
+}
+
+#[test]
+fn test_auto_tuning_times_a_durable_page_write_from_its_write() {
+    within("write_durable", || {
+        holds_the_write(
+            floor_with_write_time(65, |a| {
+                let pages = a.provision_page_region("commits", 64 << 10).unwrap();
+                Box::new(move |i| {
+                    let pos = pages.pos((i % 16) * 4096).unwrap();
+                    let _rc = pages.write_durable(pos, &[i as u8; 4096]).unwrap();
+                })
+            }),
+            1,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_times_a_durable_append_from_its_write() {
+    within("append_durable", || {
+        holds_the_write(
+            floor_with_write_time(66, |a| {
+                let r = a.provision_append_region("commits", 16 << 20).unwrap();
+                Box::new(move |i| {
+                    let _rc = r.append_durable(&[i as u8; 512]).unwrap();
+                })
+            }),
+            1,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_times_a_page_batch_from_its_writes() {
+    within("page batch", || {
+        holds_the_write(
+            floor_with_write_time(67, |a| {
+                let pages = a.provision_page_region("commits", 64 << 10).unwrap();
+                Box::new(move |i| {
+                    let mut b = pages.batch();
+                    b.write(pages.pos((i % 8) * 8192).unwrap(), &[i as u8; 4096])
+                        .unwrap();
+                    b.write(pages.pos((i % 8) * 8192 + 4096).unwrap(), &[1; 4096])
+                        .unwrap();
+                    let _rc = b.commit().unwrap();
+                })
+            }),
+            2,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_times_an_append_batch_from_its_write() {
+    within("append batch", || {
+        holds_the_write(
+            floor_with_write_time(68, |a| {
+                let r = a.provision_append_region("commits", 16 << 20).unwrap();
+                Box::new(move |i| {
+                    let mut b = r.batch();
+                    b.append(&[i as u8; 100]).unwrap();
+                    b.append(&[2; 100]).unwrap();
+                    let _rc = b.commit().unwrap();
+                })
+            }),
+            1,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_times_a_separate_sync_from_its_barrier() {
+    within("sync_through", || {
+        // A sync after an append made earlier has no entry before the
+        // write: timed from its barrier, only the flush's 1 ms is in it.
+        let floor = floor_with_write_time(69, |a| {
+            let r = a.provision_append_region("commits", 16 << 20).unwrap();
+            Box::new(move |i| {
+                let t = r.append(&[i as u8; 512]).unwrap();
+                let _rc = r.sync_through(&t).unwrap();
+            })
+        });
+        assert!(
+            (1_000_000..2_000_000).contains(&floor),
+            "floor p99 {floor} ns"
+        );
+    });
+}
+
+/// A power-safe store's forced region (D-102), its commits `len` bytes
+/// written in `writes` submissions of 1 ms each and then flushed (1 ms):
+/// each commit is one sample, from before its write (D-160).
+fn forced_commits(seed: u64, opts: StoreOptions, len: usize, writes: u64) {
+    let p = two_devices(seed, DeviceKind::PowerSafe);
+    let a = Store::create(p.clone(), Path::new("/a"), opts).unwrap();
+    advance(&p, SECOND);
+    let log = a.provision_append_region("tune-log", 16 << 20).unwrap();
+    let pages = a.provision_page_region("commits", 1 << 20).unwrap();
+    pages.set_force_data_sync(true);
+    let mut sub = background(&a);
+    let clock = p.clone();
+    p.with_world(|w| {
+        w.set_submit_probe(Some(Arc::new(move || {
+            clock.with_world(|w| w.advance_clock_ns(1_000_000));
+        })))
+    });
+    let data = vec![3u8; len];
+    let mut round = |i: u64| {
+        let _maybe = sub.append(&log, sub.take_buf(4096).unwrap(), WriteMode::Plain, i);
+        let pos = pages.pos((i % 4) * (256 << 10)).unwrap();
+        let _rc = pages.write_durable(pos, &data).unwrap();
+        let _done = drain(&mut sub);
+    };
+    // One sample per commit: 150 commits (well inside 2 s) close no
+    // window of 200 samples; two each (the write's own as well) would.
+    (0..150).for_each(&mut round);
+    let early = a.qos().floor_p99_ns;
+    assert_eq!(early, 0, "a window closed after 150 commits: {early} ns");
+    (150..1200).for_each(&mut round);
+    p.with_world(|w| w.set_submit_probe(None));
+    let ms = (writes + 1) * 1_000_000;
+    let floor = a.qos().floor_p99_ns;
+    assert!(
+        (ms..ms + 1_000_000).contains(&floor),
+        "floor p99 {floor} ns"
+    );
+}
+
+#[test]
+fn test_auto_tuning_times_a_dsync_store_s_forced_flush_from_its_write() {
+    within("dsync, forced", || forced_commits(70, tuned(), 4096, 1));
+}
+
+#[test]
+fn test_auto_tuning_times_a_dsync_store_s_forced_large_commit_once() {
+    within("dsync, forced, large", || {
+        // Two 128 KiB pieces, past the store's largest I/O: the pump.
+        let opts = StoreOptions {
+            max_io: 128 << 10,
+            ..tuned()
+        };
+        forced_commits(71, opts, 256 << 10, 2);
+    });
+}

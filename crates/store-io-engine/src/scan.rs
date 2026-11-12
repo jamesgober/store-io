@@ -263,9 +263,12 @@ where
         // their buffers under the pool's background cap: with fewer than
         // `DEPTH` it runs shallower, as with fewer buffers of any kind.
         let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));
+        // From the class that holds a piece: a piece is any multiple of
+        // 4 KiB (`background_io`), a class a power of two.
+        let class = self.inner.pool.class_len(chunk).unwrap_or(chunk);
         let mut free: Vec<IoBuf> = (0..DEPTH)
             .map_while(|_| match pace {
-                Some(_) => self.inner.pool.take_capped(chunk, chunk).ok(),
+                Some(_) => self.inner.pool.take_capped(chunk, class).ok(),
                 None => self.inner.pool.take_within(chunk, chunk).ok(),
             })
             .collect();

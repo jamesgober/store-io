@@ -326,6 +326,14 @@
 
 ### Fixed
 
+- Engine: **a caller's scan on a store whose `background_io` is no power
+  of two** (any multiple of 4 KiB up to 256 KiB is valid, 12 KiB say)
+  failed at its start with `NotWritten(PoolExhausted)`, and so did a
+  `copy_store` whose target asked for such a piece (its reader is paced at
+  the target's piece on the source's device): the reads' buffers were
+  asked for at exactly the piece's size, and the pool's classes are powers
+  of two. They now come from the class that holds the piece.
+
 - Engine: **a blocking write split into pieces, and a region's
   provisioning fill, stop at a poison** set by another operation
   (fail-stop, FAIL-01): each checks the store before every piece, submits

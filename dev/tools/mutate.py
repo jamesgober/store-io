@@ -1690,7 +1690,7 @@ M = [
  ('crates/store-io-engine/src/domain/mod.rs', '            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))', '            .filter(|_| false)\n            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))', QOS_STORE_T),
  (SCAN_SRC, '        let pace = self.inner.domain.new_pace();', '        let pace = self.inner.domain.new_pace().filter(|_| false);', QOS_STORE_T),
  (SCAN_SRC, '        let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));', '        let chunk = pace.map_or(self.chunk(), |p| p.piece().max(self.chunk()));', QOS_STORE_T),
- (SCAN_SRC, '                Some(_) => self.inner.pool.take_capped(chunk, chunk).ok(),', '                Some(_) => self.inner.pool.take_within(chunk, chunk).ok(),', PACE_T),
+ (SCAN_SRC, '                Some(_) => self.inner.pool.take_capped(chunk, class).ok(),', '                Some(_) => self.inner.pool.take_within(chunk, class).ok(),', PACE_T),
  (SCAN_SRC, '                let charge = match pace {', '                let charge = match pace.filter(|_| false) {', QOS_STORE_T),
  (SCAN_SRC, '                    Some(p) => match p.try_charge() {', '                    Some(p) => match p.try_charge().filter(|_| false) {', QOS_STORE_T),
  (SCAN_SRC, '                        None if in_flight > 0 => {', '                        None if in_flight > 0 && false => {', QOS_STORE_T),
@@ -1797,6 +1797,7 @@ M = [
  ('crates/store-io-engine/src/submitter/mod.rs', '        self.process();\n        self.away\n            .leave(&self.store.inner.domain, self.core.table.entries);\n        Completions {', '        self.process();\n        if false {\n            self.away\n                .leave(&self.store.inner.domain, self.core.table.entries);\n        }\n        Completions {', QOS_STORE_T),
  ('crates/store-io-engine/src/submitter/mod.rs', '                    self.away\n                        .leave(&self.store.inner.domain, self.core.table.entries);\n                    return Err(', '                    if false {\n                        self.away\n                            .leave(&self.store.inner.domain, self.core.table.entries);\n                    }\n                    return Err(', QOS_STORE_T),
  ('crates/store-io-engine/src/submitter/mod.rs', '        self.away\n            .leave(&self.store.inner.domain, self.core.table.entries);\n        Ok(Completions {', '        if false {\n            self.away\n                .leave(&self.store.inner.domain, self.core.table.entries);\n        }\n        Ok(Completions {', QOS_STORE_T),
+ (SCAN_SRC, '        let class = self.inner.pool.class_len(chunk).unwrap_or(chunk);', '        let class = self.inner.pool.class_len(chunk).filter(|_| false).unwrap_or(chunk);', QOS_STORE_T),
 ]
 
 def kill_stuck_tests():

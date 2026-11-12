@@ -1073,6 +1073,58 @@ fn scan_sampled(
     (seen, reads_since(p, "/a", from), sum.unreadable)
 }
 
+/// A background piece that is no pool class's size (any multiple of 4 KiB
+/// up to 256 KiB is valid, the classes are powers of two): a caller's
+/// scan takes its buffers from the class that holds the piece, never
+/// refusing them all.
+#[test]
+fn test_a_scan_with_a_piece_of_no_class_s_size_still_reads() {
+    let p = two_devices(80, DeviceKind::VolatileCache);
+    let opts = StoreOptions {
+        background_io: 12 << 10,
+        ..StoreOptions::default()
+    };
+    let a = Store::create(p.clone(), Path::new("/a"), opts).unwrap();
+    let log = a.provision_append_region("log", 4 << 20).unwrap();
+    let mut data = vec![0u8; 1 << 20];
+    pattern(&mut data, 0x51);
+    let t = log.append(&data).unwrap();
+    let _receipt = log.sync_through(&t).unwrap();
+    let mut back = vec![0u8; 4 << 20];
+    let sum = log
+        .scan(0, |item| {
+            if let ScanItem::Data { offset, bytes } = item {
+                back[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    assert_eq!(sum.unreadable, 0);
+    assert!(back[..1 << 20] == data[..], "the scan's bytes");
+}
+
+/// A copy to a store whose `background_io` is no class's size: the copy's
+/// reader, paced at the target's piece on the source's device, takes its
+/// buffers from the class that holds it.
+#[test]
+fn test_a_copy_with_a_piece_of_no_class_s_size_still_copies() {
+    let p = two_devices(81, DeviceKind::VolatileCache);
+    copy_source(&p);
+    let opts = CopyOptions {
+        store: StoreOptions {
+            background_io: 12 << 10,
+            ..StoreOptions::default()
+        },
+        ..CopyOptions::default()
+    };
+    copy_store(p.clone(), Path::new("/a"), Path::new("/c"), opts).unwrap();
+    let c = Store::open(p.clone(), Path::new("/c"), StoreOptions::default()).unwrap();
+    let log = c.append_region("log").unwrap();
+    let mut back = vec![0u8; 4 << 20];
+    log.read(0, &mut back).unwrap();
+    assert!(is_pattern(&back, 0x40), "the copy is whole");
+}
+
 /// A caller's scan is a background call (R5.4): while commits are active
 /// it reads one `background_io` piece at a time, each admitted (charged to
 /// the device group) before it is submitted.

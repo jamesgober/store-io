@@ -86,9 +86,11 @@
   above `background_unpaced`. Commits may then run at up to 1.4x the
   floor's own latency (documented; G19 gates the default). The samples:
   a commit leading its flush, from its entry (through a flush thread,
-  from its earliest arrival; for `write_durable`, `append_durable` and a
-  batch's `commit`, from before its write, so the write's queueing is
-  in it) to the flush's completion; a flush a
+  from its earliest arrival; for `write_durable`, `append_durable`, a
+  batch's `commit` and a `WriteMode::Durable` write of a `Submitter` not
+  of `IoClass::Background`, from before its write, so the write's
+  queueing is in it, a `Submitter`'s leaving out the time its caller
+  spent between its calls) to the flush's completion; a flush a
   background barrier leads while a commit waits, from that commit's
   entry; a power-safe store's blocking `dsync` commit writes. A window
   closes at a background admission, never on the commit path; samples
@@ -210,7 +212,10 @@
   store relying on another file's flush is caught. `TraceEvent::Read`
   carries the read's length (`len`, not part of `trace_hash`, so recorded
   hashes are unchanged): a field added to a public variant, so exhaustive
-  patterns must add it (`..` keeps working).
+  patterns must add it (`..` keeps working). `World::hold_reaps(n)`: the
+  next `n` `Queue::reap` calls, over every queue, complete nothing
+  (`Queue::wait` is unaffected), so a test can look while an operation is
+  still in flight.
 - Engine: **dependent writes** (PLANNING R5.3, API-09's `write_after`):
   `AppendRegion::append_after(&deps, bytes)`,
   `PageRegion::write_after(&deps, pos, bytes)`, and the `Submitter`'s

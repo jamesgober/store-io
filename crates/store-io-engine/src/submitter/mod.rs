@@ -105,6 +105,8 @@ where
     /// The largest piece of one of its operations (`background_io` for a
     /// background submitter; else unbounded).
     piece_max: usize,
+    /// Its caller's time away from its calls, for auto-tuning (D-161).
+    away: Away,
     _thread: PhantomData<*const ()>,
 }
 
@@ -217,6 +219,10 @@ where
                 inner.qos.background_io() as usize
             } else {
                 usize::MAX
+            },
+            away: Away {
+                left: None,
+                total: 0,
             },
             _thread: PhantomData,
         })
@@ -630,16 +636,34 @@ where
             }
             Req::Read { offset, buf } => (IoOp::Read { file, offset, buf }, None),
         };
+        // A durable commit's flush is timed for auto-tuning from before its
+        // write, as a blocking one's (D-160), read before the submission,
+        // with its caller's time away kept beside it (D-161). `None` where
+        // the write is the commit (`write_entry`: a `dsync` store's region
+        // not forced); a durable write that needs no flush asks for none,
+        // and its entry goes unused. A background submitter's flushes are
+        // never samples.
+        self.away.enter(&inner.domain);
+        let entry = if durable && !self.class.is_background() {
+            self.store
+                .write_entry(pass.get())
+                .map(|at| (at, self.away.total))
+        } else {
+            None
+        };
         // Recorded (and the busy mark published) before the submission: a
         // queue may do the I/O inside `submit`.
         self.core.table.start(index, tag, kind, Some(pass), durable);
+        self.core.table.set_entry(index, entry);
         if let Some(s) = split {
             self.core.table.set_split(index, s);
         }
         // Held by the row: released when the piece completes, or with the
         // row (a refused submission below aborts it).
         self.core.table.set_charge(qtag, charge);
-        if let Err(r) = self.core.queue.submit(op, qtag) {
+        let submitted = self.core.queue.submit(op, qtag);
+        self.away.leave(&inner.domain, self.core.table.entries);
+        if let Err(r) = submitted {
             self.core.table.abort(index);
             if r.raw.is_none() {
                 inner.observer.add(Counter::Refused, 1);
@@ -656,8 +680,11 @@ where
     /// Hands back every completion that has arrived, without blocking.
     #[must_use = "completions not taken stay with the submitter and count against its depth"]
     pub fn reap(&mut self) -> Completions<'_> {
+        self.away.enter(&self.store.inner.domain);
         let _added = self.core.queue.reap(&mut self.core.raw);
         self.process();
+        self.away
+            .leave(&self.store.inner.domain, self.core.table.entries);
         Completions {
             ready: &mut self.core.table.ready,
         }
@@ -674,6 +701,7 @@ where
     /// verdict on the media, D-097).
     #[must_use = "completions not taken stay with the submitter and count against its depth"]
     pub fn wait(&mut self, min: usize) -> Result<Completions<'_>, Error> {
+        self.away.enter(&self.store.inner.domain);
         let want = min.min(self.core.table.live + self.core.table.ready.len());
         if self.core.table.ready.len() >= want {
             let _added = self.core.queue.reap(&mut self.core.raw);
@@ -699,6 +727,8 @@ where
                 // Whatever arrived is processed, even if the wait then failed.
                 self.process();
                 if let Err(raw) = waited {
+                    self.away
+                        .leave(&self.store.inner.domain, self.core.table.entries);
                     return Err(Error::Io {
                         op: if self.core.table.writes_live() {
                             Op::Write
@@ -721,6 +751,8 @@ where
                 break;
             }
         }
+        self.away
+            .leave(&self.store.inner.domain, self.core.table.entries);
         Ok(Completions {
             ready: &mut self.core.table.ready,
         })
@@ -743,6 +775,7 @@ where
             inbox,
             store,
             issuer,
+            away,
             ..
         } = self;
         let _unwind = PoisonOnUnwind::new(store);
@@ -752,6 +785,7 @@ where
             store,
             issuer: issuer.as_ref(),
             issue,
+            away: away.total,
         };
         for c in core.raw.drain() {
             // Only a write needing a flush asks (see `Table::finish`).
@@ -773,6 +807,7 @@ where
             inbox,
             store,
             issuer,
+            away,
             ..
         } = self;
         let _unwind = PoisonOnUnwind::new(store);
@@ -782,6 +817,7 @@ where
             store,
             issuer: issuer.as_ref(),
             issue: true,
+            away: away.total,
         };
         pieces.unpark(true);
         pieces.ask_and_take(inbox, class);
@@ -811,6 +847,41 @@ where
     }
 }
 
+/// A submitter's caller's time away from its calls, for auto-tuning
+/// (D-161): a durable write's flush is asked for only when a later `reap`,
+/// `wait` or the drop processes its completion, so its sample, timed from
+/// before the write, leaves out the time the caller spent elsewhere
+/// meanwhile (its own work between calls is no commit's latency). Its
+/// time in the calls (a blocking wait, other submissions) stays in. Kept
+/// only while a row holds an entry (`Table::entries`): no clock read, and
+/// no check of the group's tuning, otherwise (a background submitter's
+/// rows never hold one).
+struct Away {
+    /// When the caller last left a call, while an entry waits (`None`
+    /// otherwise, or with auto-tuning off).
+    left: Option<u64>,
+    /// The time away in all.
+    total: u64,
+}
+
+impl Away {
+    /// The caller is back in a call: the time since it last left one is
+    /// added up.
+    fn enter(&mut self, domain: &crate::domain::Domain) {
+        if let Some(left) = self.left.take() {
+            if let Some(now) = domain.arrival() {
+                self.total = self.total.saturating_add(now.saturating_sub(left));
+            }
+        }
+    }
+
+    /// The caller leaves a call: when, if `entries` rows hold an entry
+    /// (then a check of the group's tuning and one clock read).
+    fn leave(&mut self, domain: &crate::domain::Domain, entries: usize) {
+        self.left = if entries > 0 { domain.arrival() } else { None };
+    }
+}
+
 /// What processing a pass's pieces needs of a submitter, borrowed field by
 /// field (so the raw completions can be drained beside it).
 struct Pieces<'a, P: Platform>
@@ -823,6 +894,8 @@ where
     issuer: Option<&'a Arc<crate::qos::Issuer>>,
     /// Pieces may be submitted (false: every next piece is parked).
     issue: bool,
+    /// The submitter's caller's time away in all (`Away::total`).
+    away: u64,
 }
 
 impl<P: Platform> Pieces<'_, P>
@@ -841,8 +914,10 @@ where
         {
             finished = self.next_piece(qtag, offset, buf, write);
         }
-        if let Finish::Flush(qtag, need) = finished {
-            self.table.asks.push((qtag, need));
+        if let Finish::Flush(qtag, need, entry) = finished {
+            // Later by the time its caller spent away since its entry.
+            let entry = entry.map(|(at, away)| at.saturating_add(self.away.saturating_sub(away)));
+            self.table.asks.push((qtag, need, entry));
         }
     }
 
@@ -983,8 +1058,10 @@ where
         // Asked once every completion of the pass is finished, the largest
         // need first, so one flush can cover them all. Taken one at a time:
         // after a panic the rest stay to be asked for, in the same buffer.
-        while let Some((qtag, need)) = self.table.asks.pop() {
-            durable::ask(self.table, self.store, inbox, qtag, need, true, class);
+        while let Some((qtag, need, entry)) = self.table.asks.pop() {
+            durable::ask(
+                self.table, self.store, inbox, qtag, need, true, class, entry,
+            );
         }
         // Flush outcomes too, under the same guard.
         while self.table.asked > 0 {
@@ -1050,6 +1127,7 @@ where
     /// The same if a panic interrupted the processing of a completion (an
     /// operation left unaccounted may have been an append).
     fn drop(&mut self) {
+        self.away.enter(&self.store.inner.domain);
         let mut failed = None;
         // First every I/O (a durable write's completion may ask for a
         // flush), parked pieces submitted as pacing admits them (a parked

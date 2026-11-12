@@ -76,8 +76,9 @@ pub(crate) enum Finish {
     /// Handed back (or matched nothing).
     Done,
     /// A durable write that completed in full, waiting for this flush:
-    /// `(qtag, need)`.
-    Flush(u64, u64),
+    /// `(qtag, need, entry)`, `entry` its auto-tuning entry (see
+    /// [`Table::set_entry`]).
+    Flush(u64, u64, Option<(u64, u64)>),
     /// A piece of an operation across runs completed in full: the next one,
     /// to submit under the same tag.
     Next {
@@ -107,6 +108,11 @@ struct Live {
     /// The pacing charge of the piece in flight (a background submitter's):
     /// released when the piece completes, or with the row, however it ends.
     charge: Option<crate::qos::Charge>,
+    /// A durable commit-class write's entry for auto-tuning, read before
+    /// its first piece was submitted, and its submitter's caller's time
+    /// away then (D-161): its flush's sample starts there, later by the
+    /// time its caller spent away since.
+    entry: Option<(u64, u64)>,
 }
 
 /// One row. `generation` changes each time the row is freed, so a queue tag
@@ -133,10 +139,14 @@ pub(crate) struct Table {
     /// Of those, requests the flush thread accepted and has not answered
     /// (or whose answer is not taken yet): the ones worth waiting for.
     pub(crate) asked: usize,
-    /// Flushes wanted by the completions of one pass, `(qtag, need)`, asked
-    /// for once the whole pass is finished (one row each, so never more
-    /// than the depth: no allocation after creation).
-    pub(crate) asks: Vec<(u64, u64)>,
+    /// Flushes wanted by the completions of one pass, `(qtag, need,
+    /// entry)`, asked for once the whole pass is finished (one row each, so
+    /// never more than the depth: no allocation after creation).
+    pub(crate) asks: Vec<(u64, u64, Option<u64>)>,
+    /// Rows holding an auto-tuning entry not yet asked for its flush
+    /// (D-161): while none does, a submitter reads no clock for its
+    /// caller's time away.
+    pub(crate) entries: usize,
     /// Pieces not submitted yet (see [`Parked`]), oldest first (never more
     /// than the depth: one per live row at most).
     pub(crate) parked: VecDeque<Parked>,
@@ -162,6 +172,7 @@ impl Table {
             flushing: 0,
             asked: 0,
             asks: Vec::with_capacity(depth),
+            entries: 0,
             parked: VecDeque::with_capacity(depth),
             next_seq: 0,
             mark,
@@ -197,6 +208,7 @@ impl Table {
             matches!(live.kind, Kind::Raw),
             "a settled row freed unsettled"
         );
+        debug_assert!(live.entry.is_none(), "a lane operation with an entry");
         self.free.push(index as u32);
         self.live -= 1;
         while let Some(&(i, s)) = self.order.front() {
@@ -213,7 +225,8 @@ impl Table {
     /// holds nothing in flight can never see their completions.
     pub(crate) fn forget(&mut self) {
         for (i, row) in self.rows.iter_mut().enumerate() {
-            if row.live.take().is_some() {
+            if let Some(live) = row.live.take() {
+                debug_assert!(live.entry.is_none(), "a lane operation with an entry");
                 row.generation = row.generation.wrapping_add(1);
                 self.free.push(i as u32);
                 self.live -= 1;
@@ -233,6 +246,9 @@ impl Table {
         let Some(live) = row.live.take() else { return };
         if matches!(live.kind, Kind::Sync(_) | Kind::All) {
             self.flushing -= 1;
+        }
+        if live.entry.is_some() {
+            self.entries -= 1;
         }
         drop(live);
         self.free.push(index);
@@ -279,6 +295,7 @@ impl Table {
             held: None,
             split: None,
             charge: None,
+            entry: None,
         });
         self.live += 1;
         self.publish();
@@ -289,6 +306,19 @@ impl Table {
     pub(crate) fn set_split(&mut self, index: u32, split: Split) {
         if let Some(live) = self.rows[index as usize].live.as_mut() {
             live.split = Some(split);
+        }
+    }
+
+    /// Gives the durable write just started in row `index` its entry for
+    /// auto-tuning (`Store::write_entry`, read before its submission) and
+    /// its submitter's caller's time away then.
+    pub(crate) fn set_entry(&mut self, index: u32, entry: Option<(u64, u64)>) {
+        if let Some(live) = self.rows[index as usize].live.as_mut() {
+            debug_assert!(live.entry.is_none(), "an entry set twice");
+            if entry.is_some() {
+                self.entries += 1;
+            }
+            live.entry = entry;
         }
     }
 
@@ -517,8 +547,12 @@ impl Table {
                 // had been observed: a flush that far covers it (D-047).
                 let need = w.ticket.need;
                 live.held = Some((buf, w.ticket, prefix));
+                let entry = live.entry.take();
                 self.flushing += 1;
-                return Finish::Flush(qtag, need);
+                if entry.is_some() {
+                    self.entries -= 1;
+                }
+                return Finish::Flush(qtag, need, entry);
             }
         } else if live.durable {
             if let Ok(Done::Written(w)) = &mut outcome {
@@ -592,7 +626,12 @@ impl Table {
         let Some(row) = self.row(qtag) else { return };
         let Some(live) = row.live.take() else { return };
         row.generation = row.generation.wrapping_add(1);
-        let Live { tag, pass, .. } = live;
+        let Live {
+            tag, pass, entry, ..
+        } = live;
+        if entry.is_some() {
+            self.entries -= 1;
+        }
         drop(pass);
         self.free.push(index as u32);
         self.live -= 1;

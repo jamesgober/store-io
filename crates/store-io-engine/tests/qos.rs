@@ -1407,11 +1407,20 @@ fn floor_with_write_time(
     seed: u64,
     make: impl FnOnce(&Store<SimPlatform>) -> Box<dyn FnMut(u64)>,
 ) -> u64 {
+    floor_with_write_time_on(seed, |a, _| make(a))
+}
+
+/// [`floor_with_write_time`], `make` also given the platform (to move its
+/// clock).
+fn floor_with_write_time_on(
+    seed: u64,
+    make: impl FnOnce(&Store<SimPlatform>, &SimPlatform) -> Box<dyn FnMut(u64)>,
+) -> u64 {
     let p = two_devices(seed, DeviceKind::VolatileCache);
     let a = Store::create(p.clone(), Path::new("/a"), tuned()).unwrap();
     advance(&p, SECOND);
     let log = a.provision_append_region("tune-log", 16 << 20).unwrap();
-    let mut commit = make(&a);
+    let mut commit = make(&a, &p);
     let mut sub = background(&a);
     let clock = p.clone();
     p.with_world(|w| {
@@ -1522,6 +1531,191 @@ fn test_auto_tuning_times_a_separate_sync_from_its_barrier() {
             Box::new(move |i| {
                 let t = r.append(&[i as u8; 512]).unwrap();
                 let _rc = r.sync_through(&t).unwrap();
+            })
+        });
+        assert!(
+            (1_000_000..2_000_000).contains(&floor),
+            "floor p99 {floor} ns"
+        );
+    });
+}
+
+/// Every completion of a commit-class `sub` (one operation), each a
+/// success.
+fn settle(sub: &mut store_io_engine::Submitter<SimPlatform>) {
+    let done = drain(sub);
+    assert!(
+        !done.is_empty() && done.iter().all(|c| c.outcome.is_ok()),
+        "{done:?}"
+    );
+}
+
+#[test]
+fn test_auto_tuning_times_a_submitter_s_durable_append_from_its_write() {
+    within("Submitter durable append", || {
+        holds_the_write(
+            floor_with_write_time(72, |a| {
+                let r = a.provision_append_region("commits", 16 << 20).unwrap();
+                let mut sub = a.submitter(SubmitterConfig::default()).unwrap();
+                Box::new(move |i| {
+                    let buf = sub.take_buf(512).unwrap();
+                    let _pos = sub.append(&r, buf, WriteMode::Durable, i).unwrap();
+                    settle(&mut sub);
+                })
+            }),
+            1,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_times_a_submitter_s_durable_page_write_from_its_write() {
+    within("Submitter durable write", || {
+        holds_the_write(
+            floor_with_write_time(73, |a| {
+                let pages = a.provision_page_region("commits", 64 << 10).unwrap();
+                let mut sub = a.submitter(SubmitterConfig::default()).unwrap();
+                Box::new(move |i| {
+                    let pos = pages.pos((i % 16) * 4096).unwrap();
+                    let buf = sub.take_buf(4096).unwrap();
+                    sub.write(&pages, pos, buf, WriteMode::Durable, i).unwrap();
+                    settle(&mut sub);
+                })
+            }),
+            1,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_leaves_a_submitter_s_caller_s_time_away_out() {
+    within("Submitter caller away", || {
+        // The caller works 5 ms after submitting its durable write, submits
+        // a plain one, and works 5 ms more before collecting both: its work
+        // is no commit's latency, so the sample is the two writes' and the
+        // flush's 3 ms (D-161), never 13.
+        holds_the_write(
+            floor_with_write_time_on(75, |a, p| {
+                let r = a.provision_append_region("commits", 16 << 20).unwrap();
+                let mut sub = a.submitter(SubmitterConfig::default()).unwrap();
+                let p = p.clone();
+                Box::new(move |i| {
+                    let away = || p.with_world(|w| w.advance_clock_ns(5_000_000));
+                    let buf = sub.take_buf(512).unwrap();
+                    let _pos = sub.append(&r, buf, WriteMode::Durable, i).unwrap();
+                    away();
+                    let buf = sub.take_buf(512).unwrap();
+                    let _pos = sub.append(&r, buf, WriteMode::Plain, i).unwrap();
+                    away();
+                    settle(&mut sub);
+                })
+            }),
+            2,
+        );
+    });
+}
+
+#[test]
+fn test_auto_tuning_leaves_a_polling_caller_s_time_away_out() {
+    within("Submitter caller away, reaping", || {
+        // As above, the caller collecting by `reap` alone.
+        holds_the_write(
+            floor_with_write_time_on(76, |a, p| {
+                let r = a.provision_append_region("commits", 16 << 20).unwrap();
+                let mut sub = a.submitter(SubmitterConfig::default()).unwrap();
+                let p = p.clone();
+                Box::new(move |i| {
+                    let buf = sub.take_buf(512).unwrap();
+                    let _pos = sub.append(&r, buf, WriteMode::Durable, i).unwrap();
+                    p.with_world(|w| w.advance_clock_ns(5_000_000));
+                    let start = std::time::Instant::now();
+                    let mut done = Vec::new();
+                    while done.is_empty() {
+                        assert!(
+                            start.elapsed() < std::time::Duration::from_secs(10),
+                            "never completed"
+                        );
+                        done.extend(sub.reap());
+                        std::thread::yield_now();
+                    }
+                    assert!(done.iter().all(|c| c.outcome.is_ok()), "{done:?}");
+                })
+            }),
+            1,
+        );
+    });
+}
+
+/// A caller that looks once while its durable write is still in flight
+/// (`look`, the write's completion held back from it), then works 5 ms
+/// before collecting it: the 5 ms are no commit's latency (D-161), so the
+/// sample is the write's and the flush's 2 ms, never 7.
+fn away_after_a_look(
+    seed: u64,
+    look: fn(&mut store_io_engine::Submitter<SimPlatform>, &SimPlatform),
+) {
+    holds_the_write(
+        floor_with_write_time_on(seed, move |a, p| {
+            let r = a.provision_append_region("commits", 16 << 20).unwrap();
+            let mut sub = a.submitter(SubmitterConfig::default()).unwrap();
+            let p = p.clone();
+            Box::new(move |i| {
+                let buf = sub.take_buf(512).unwrap();
+                let _pos = sub.append(&r, buf, WriteMode::Durable, i).unwrap();
+                look(&mut sub, &p);
+                p.with_world(|w| w.advance_clock_ns(5_000_000));
+                settle(&mut sub);
+            })
+        }),
+        1,
+    );
+}
+
+#[test]
+fn test_auto_tuning_leaves_the_time_away_after_a_reap_out() {
+    within("away after a reap", || {
+        away_after_a_look(77, |sub, p| {
+            p.with_world(|w| w.hold_reaps(1));
+            let _none = sub.reap().count();
+        });
+    });
+}
+
+#[test]
+fn test_auto_tuning_leaves_the_time_away_after_a_wait_out() {
+    within("away after a wait", || {
+        away_after_a_look(78, |sub, p| {
+            p.with_world(|w| w.hold_reaps(1));
+            let _none = sub.wait(0).unwrap().count();
+        });
+    });
+}
+
+#[test]
+fn test_auto_tuning_leaves_the_time_away_after_a_failed_wait_out() {
+    within("away after a failed wait", || {
+        away_after_a_look(79, |sub, p| {
+            p.with_world(|w| {
+                let next = w.waits() + 1;
+                w.faults_mut().fail_wait = Some((next, 5));
+            });
+            assert!(sub.wait(1).is_err(), "the wait was to fail");
+        });
+    });
+}
+
+#[test]
+fn test_auto_tuning_times_a_submitter_s_barrier_from_its_call() {
+    within("Submitter barrier", || {
+        // A barrier for a write made earlier: no entry before the write,
+        // so only the flush's 1 ms is in its sample.
+        let floor = floor_with_write_time(74, |a| {
+            let r = a.provision_append_region("commits", 16 << 20).unwrap();
+            let mut sub = a.submitter(SubmitterConfig::default()).unwrap();
+            Box::new(move |i| {
+                let t = r.append(&[i as u8; 512]).unwrap();
+                sub.barrier(&t, i).unwrap();
+                settle(&mut sub);
             })
         });
         assert!(

@@ -22,6 +22,11 @@ use super::Submitter;
 /// or a flush already covers it (no thread hop), or when the flush thread is
 /// unavailable (then the flush runs on this thread); else by the flush
 /// thread, through `inbox`.
+///
+/// `entry`: a durable write's entry for auto-tuning, read before the write
+/// (D-160) and made later by its caller's time away since (D-161); a
+/// commit-class request without one (a barrier) is timed from here.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn ask<P: Platform>(
     table: &mut Table,
     store: &Store<P>,
@@ -30,10 +35,17 @@ pub(super) fn ask<P: Platform>(
     need: u64,
     flush: bool,
     class: store_io_core::IoClass,
+    entry: Option<u64>,
 ) where
     P::Queue: Send,
 {
     let domain = &store.inner.domain;
+    let arrival = || {
+        class
+            .is_commit()
+            .then(|| entry.or_else(|| domain.arrival()))
+            .flatten()
+    };
     let now: Option<Flushed> = if !flush {
         Some(match domain.poisoned() {
             Some(first) => Err(Error::Poisoned { first }),
@@ -44,11 +56,10 @@ pub(super) fn ask<P: Platform>(
     } else if let Some(first) = domain.poisoned() {
         Some(Err(Error::Poisoned { first }))
     } else if store.flusher().is_some_and(|f| {
-        let arrived = class.is_commit().then(|| domain.arrival()).flatten();
         f.request(
             need,
             class,
-            arrived,
+            arrival(),
             qtag,
             Arc::clone(inbox) as Arc<dyn Answer>,
         )
@@ -58,7 +69,11 @@ pub(super) fn ask<P: Platform>(
     } else {
         // No flush thread (the OS refused it): the flush runs here, the one
         // case where a submitter call blocks.
-        Some(store.barrier_to_classed(need, class).map(|()| need))
+        Some(
+            store
+                .barrier_to_classed_from(need, class, arrival())
+                .map(|()| need),
+        )
     };
     if let Some(outcome) = now {
         table.flushed(store, qtag, outcome);
@@ -175,6 +190,7 @@ where
             need,
             flush,
             class,
+            None,
         );
         Ok(())
     }

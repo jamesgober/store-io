@@ -428,6 +428,8 @@ pub struct World {
     misaligned_reads: u64,
     clock_ns: u64,
     waits: u64,
+    /// `Queue::reap` calls still to complete nothing ([`World::hold_reaps`]).
+    held_reaps: u64,
     write_submits: u64,
     lock_calls: u64,
     pub(crate) submit_probe: SubmitProbe,
@@ -473,6 +475,7 @@ impl World {
             misaligned_reads: 0,
             clock_ns: 0,
             waits: 0,
+            held_reaps: 0,
             write_submits: 0,
             lock_calls: 0,
             submit_probe: SubmitProbe::default(),
@@ -668,6 +671,22 @@ impl World {
     #[must_use]
     pub fn powered_off(&self) -> bool {
         self.powered_off
+    }
+
+    /// The next `n` `Queue::reap` calls, over every queue, complete nothing
+    /// (`Queue::wait` is unaffected, though a caller's own non-blocking
+    /// reaps inside its wait are held): an operation still in flight past
+    /// a look that does not block, as on a real device. Replaces any count
+    /// still held; 0 clears it.
+    pub fn hold_reaps(&mut self, n: u64) {
+        self.held_reaps = n;
+    }
+
+    /// Whether this `Queue::reap` is held back (and one fewer is).
+    pub(crate) fn reap_held(&mut self) -> bool {
+        let held = self.held_reaps > 0;
+        self.held_reaps = self.held_reaps.saturating_sub(1);
+        held
     }
 
     /// Sets (or clears) the hook every `Platform::release_range` runs first,

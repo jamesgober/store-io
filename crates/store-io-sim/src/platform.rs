@@ -162,6 +162,37 @@ impl Wake for SimWaker {
 }
 
 impl SimQueue {
+    /// Every completion ready now ([`Queue::reap`] when not held back,
+    /// and `wait`'s).
+    fn reap_now(&mut self, out: &mut CompletionBuf) -> usize {
+        let mut w = lock(&self.world);
+        let reorder = w.config().reorder;
+        let mut added = 0;
+        let mut i = 0;
+        while i < self.in_flight.len() && out.room() > 0 {
+            let pick = if reorder {
+                if !w.rng().chance(500_000) {
+                    i += 1;
+                    continue;
+                }
+                i
+            } else {
+                0
+            };
+            let (tag, p) = self.in_flight.remove(pick);
+            // The loop checked room() > 0 before completing, so the push
+            // cannot be refused.
+            if out.push(complete(&mut w, tag, p)).is_err() {
+                break;
+            }
+            added += 1;
+            if !reorder {
+                i = 0;
+            }
+        }
+        added
+    }
+
     /// The checks `submit` makes (the submit probe first, then room, the
     /// injected submission fault, the file): the operation as it will
     /// complete, or its refusal.
@@ -281,32 +312,10 @@ impl Queue for SimQueue {
     }
 
     fn reap(&mut self, out: &mut CompletionBuf) -> usize {
-        let mut w = lock(&self.world);
-        let reorder = w.config().reorder;
-        let mut added = 0;
-        let mut i = 0;
-        while i < self.in_flight.len() && out.room() > 0 {
-            let pick = if reorder {
-                if !w.rng().chance(500_000) {
-                    i += 1;
-                    continue;
-                }
-                i
-            } else {
-                0
-            };
-            let (tag, p) = self.in_flight.remove(pick);
-            // The loop checked room() > 0 before completing, so the push
-            // cannot be refused.
-            if out.push(complete(&mut w, tag, p)).is_err() {
-                break;
-            }
-            added += 1;
-            if !reorder {
-                i = 0;
-            }
+        if lock(&self.world).reap_held() {
+            return 0;
         }
-        added
+        self.reap_now(out)
     }
 
     fn wait(&mut self, min: usize, out: &mut CompletionBuf) -> RawResult<usize> {
@@ -314,9 +323,9 @@ impl Queue for SimQueue {
             return Err(raw);
         }
         if self.woken.swap(false, Ordering::AcqRel) {
-            return Ok(self.reap(out));
+            return Ok(self.reap_now(out));
         }
-        let mut added = self.reap(out);
+        let mut added = self.reap_now(out);
         let mut w = lock(&self.world);
         while added < min && !self.in_flight.is_empty() && out.room() > 0 {
             let pick = if w.config().reorder {

@@ -1143,7 +1143,7 @@ M = [
  # Windows mutation job.
  ('crates/store-io-win/src/dir.rs', '    if sys::file_id(&d)? != sys::file_id(h)? {', '    if sys::file_id(&d)? != sys::file_id(h)? && false {', WIN_LIB),
  ('crates/store-io-win/src/dir.rs', '    match sys::set_file_info(&d, FileDispositionInfoEx, &flags.to_le_bytes()) {', '    match sys::set_file_info(&d, FileDispositionInfo, &[u8::from(flags != 0)]) {', WIN_LIB),
- # v0.5 audit (.dev/design/v05-guard-audit.md): guards without an entry.
+ # v0.5 audit: guards without an entry.
  # G1: a read-only region refuses writes.
  ('crates/store-io-engine/src/io.rs', '        if r.is_read_only() {\n            return Err(not_written(NotWrittenCause::ReadOnly, ctx(r)));', '        if r.is_read_only() && false {\n            return Err(not_written(NotWrittenCause::ReadOnly, ctx(r)));', AUD_RO),
  # G2: the open's free space leaves out everything allocated.

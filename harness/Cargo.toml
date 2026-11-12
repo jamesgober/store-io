@@ -33,8 +33,7 @@ store-io-platform = { path = "../crates/store-io-platform" }
 # Only for the W5 diagnostic that runs the raw primitive on a buffer from
 # store-io's own pool (separates pool-memory cost from engine-path cost).
 store-io-buf    = { path = "../crates/store-io-buf" }
-# The comparison baseline, pinned to the version Phase 0 measured
-# (.dev/research/baseline-02-fsys-devbox.md).
+# The comparison baseline, pinned to the version Phase 0 measured.
 fsys = "=1.1.3"
 
 [target.'cfg(windows)'.dependencies]

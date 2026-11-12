@@ -1,4 +1,4 @@
-//! Container format 2 (`.dev/design/format2-draft.md`): the paged region
+//! Container format 2 (`docs/FORMAT.md`, Part I): the paged region
 //! table's metadata, create, the open's tear judgement, region checks
 //! (`open2`) and healing, and the clean close. Built beside format 1 (D-116
 //! makes format 1 read-only once creation switches, v0.5 E5).

@@ -1125,6 +1125,59 @@ fn test_a_copy_with_a_piece_of_no_class_s_size_still_copies() {
     assert!(is_pattern(&back, 0x40), "the copy is whole");
 }
 
+/// [`scan_sampled`] for a read stream over the same 4 MiB: the samples,
+/// the stream's reads (offset, length); its bytes read back as the pattern.
+fn stream_sampled(
+    p: &SimPlatform,
+    s: &Store<SimPlatform>,
+    log: &AppendRegion<SimPlatform>,
+) -> (Vec<u64>, Vec<(u64, u64)>) {
+    let from = p.with_world(|w| w.trace().len());
+    let seen = sample_in_flight(p, s);
+    let mut back = Vec::new();
+    for chunk in log.read_stream(0..4 << 20).unwrap() {
+        back.extend_from_slice(chunk.unwrap().bytes());
+    }
+    p.with_world(|w| w.set_submit_probe(None));
+    assert!(is_pattern(&back, 0x50), "the stream's bytes");
+    let seen = seen.lock().unwrap().clone();
+    (seen, reads_since(p, "/a", from))
+}
+
+/// A read stream is a background call of its own (R5.4): while commits
+/// are active it reads one admitted `background_io` piece at a time.
+#[test]
+fn test_a_stream_reads_one_admitted_piece_at_a_time_while_commits_are_active() {
+    let p = two_devices(82, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    let _hold = s.commit_hold();
+    let (seen, reads) = stream_sampled(&p, &s, &log);
+    assert_eq!(seen.len(), reads.len(), "only the stream's reads: {seen:?}");
+    assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
+    assert_eq!(
+        reads.iter().map(|r| r.1).collect::<Vec<_>>(),
+        vec![256 << 10; 16]
+    );
+}
+
+/// While commits are quiet a stream runs at its depth, still in
+/// `background_io` pieces, each admitted.
+#[test]
+fn test_a_stream_runs_at_its_depth_while_commits_are_quiet() {
+    let p = two_devices(83, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    advance(&p, 10 * SECOND);
+    assert!(!s.qos().active);
+    let (seen, reads) = stream_sampled(&p, &s, &log);
+    assert_eq!(seen.len(), reads.len());
+    assert!(seen.iter().all(|&n| (1..=8).contains(&n)), "{seen:?}");
+    assert!(seen.iter().any(|&n| n > 1), "several in flight: {seen:?}");
+    assert_eq!(
+        reads.iter().map(|r| r.1).collect::<Vec<_>>(),
+        vec![256 << 10; 16]
+    );
+}
+
 /// A caller's scan is a background call (R5.4): while commits are active
 /// it reads one `background_io` piece at a time, each admitted (charged to
 /// the device group) before it is submitted.
@@ -1220,6 +1273,42 @@ fn test_a_scan_beside_a_submitter_holding_the_cap_reads_one_piece_at_a_time() {
     assert_eq!(reads.len(), 16);
     let _done = drain(&mut sub);
     assert_eq!(s.qos().in_flight, 0);
+}
+
+/// A stream's bisection is paced too: every read of it is admitted, one at
+/// a time while commits are active.
+#[test]
+fn test_a_stream_s_bisection_reads_are_admitted_pieces() {
+    let p = two_devices(84, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    let from = p.with_world(|w| w.trace().len());
+    let _sum = log.scan(0, |_| ControlFlow::Continue(())).unwrap();
+    let first = reads_since(&p, "/a", from)[0].0;
+    let file = p.with_world(|w| w.file_id(&PathBuf::from("/a"), CONTAINER).unwrap());
+    let bad = first + 3 * 4096;
+    p.with_world(|w| w.faults_mut().bad_ranges = vec![(file, bad, bad + 4096)]);
+    let _hold = s.commit_hold();
+    let from = p.with_world(|w| w.trace().len());
+    let seen = sample_in_flight(&p, &s);
+    let mut unreadable = 0;
+    for item in log.read_stream(0..4 << 20).unwrap() {
+        match item {
+            Ok(_) => {}
+            Err(Error::Corruption { ctx, .. }) => {
+                let r = ctx.range.unwrap();
+                unreadable += r.end - r.start;
+            }
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    p.with_world(|w| w.set_submit_probe(None));
+    p.with_world(|w| w.faults_mut().bad_ranges.clear());
+    let reads = reads_since(&p, "/a", from);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(unreadable, 4096, "the one block");
+    assert!(reads.len() > 16, "the failed piece bisected: {reads:?}");
+    assert_eq!(seen.len(), reads.len());
+    assert!(seen.iter().all(|&n| n == 1), "{seen:?}");
 }
 
 /// A scan's bisection of a read the device cannot complete is paced too:

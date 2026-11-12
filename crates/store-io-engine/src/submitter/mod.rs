@@ -176,14 +176,9 @@ impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
-    /// A [`Submitter`] for this thread, with its own queue of
-    /// `cfg.depth` operations (1 to [`MAX_DEPTH`]).
-    ///
-    /// # Errors
-    ///
-    /// `Io` if the platform could not create the queue.
-    pub fn submitter(&self, cfg: SubmitterConfig) -> Result<Submitter<P>, Error> {
-        let depth = cfg.depth.clamp(1, MAX_DEPTH);
+    /// A queue of `depth` operations for one thread alone (a `Submitter`'s,
+    /// a read stream's).
+    pub(crate) fn thread_queue(&self, depth: u32) -> Result<P::Queue, Error> {
         let qcfg = QueueConfig {
             depth,
             parallel: true,
@@ -198,11 +193,23 @@ where
         } else {
             inner.platform.queue(qcfg)
         };
-        let queue = queue.map_err(|raw| Error::Io {
+        queue.map_err(|raw| Error::Io {
             op: Op::Queue,
             raw,
             ctx: ErrorContext::default(),
-        })?;
+        })
+    }
+
+    /// A [`Submitter`] for this thread, with its own queue of
+    /// `cfg.depth` operations (1 to [`MAX_DEPTH`]).
+    ///
+    /// # Errors
+    ///
+    /// `Io` if the platform could not create the queue.
+    pub fn submitter(&self, cfg: SubmitterConfig) -> Result<Submitter<P>, Error> {
+        let depth = cfg.depth.clamp(1, MAX_DEPTH);
+        let queue = self.thread_queue(depth)?;
+        let inner = &*self.inner;
         let n = depth as usize;
         let mark = Arc::new(LaneMark::new());
         let inbox = Arc::new(Inbox::new(n, queue.waker()));

@@ -64,7 +64,8 @@ where
     /// parallel and flush) and its submitters, or `None` when they are all
     /// idle. O(queues + submitters), no I/O; reads the platform's coarse
     /// clock once. A submitter's operation counts until its completion is
-    /// processed by `reap` or `wait`.
+    /// processed by `reap` or `wait`, a read stream's until `next()`
+    /// collects it.
     ///
     /// The age counts from the first call that saw the operation, so a
     /// watchdog calling this every second learns of a hung device within a

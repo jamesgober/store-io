@@ -71,6 +71,7 @@ mod slots;
 mod space;
 mod stats;
 mod store;
+mod stream;
 mod submitter;
 mod sync;
 #[cfg(feature = "sim-hooks")]
@@ -103,4 +104,5 @@ pub use store::{
     StoreReport, Unavailable, UnavailableRegion,
 };
 pub use store_io_format::meta::RegionKind;
+pub use stream::{Chunk, ReadStream, StreamOptions};
 pub use submitter::{MAX_DEPTH, Submitter};

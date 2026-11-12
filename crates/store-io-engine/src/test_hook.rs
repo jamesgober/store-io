@@ -54,6 +54,15 @@ pub enum Step {
     /// A copy's reader, its feed full and its scan's reads drained, about
     /// to block on its send.
     FeedBlocking,
+    /// A read stream, its gate checked, about to take a buffer and submit a
+    /// read (once per try: also when no buffer is free or pacing refuses).
+    StreamSubmit,
+    /// A read stream has seen a read's completion and is about to check its
+    /// gate before delivering anything of it.
+    StreamCompleted,
+    /// A read stream's bisection has completed its reads and is about to
+    /// check the gate before queueing its items.
+    StreamBisected,
 }
 
 #[cfg(feature = "sim-hooks")]

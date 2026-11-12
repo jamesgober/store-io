@@ -123,6 +123,8 @@ pub use store_io_engine::{
     Repair, ScanItem, ScanSummary, SetStats, SpaceReport, StoreOptions, StoreReport, TagSpace,
     Unavailable, UnavailableRegion, WriteTicket,
 };
+/// A read stream's items and options ([`ReadStream`]).
+pub use store_io_engine::{Chunk, StreamOptions};
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 
 /// The [`Submitter`]'s types: its configuration, buffers, completions and
@@ -159,8 +161,8 @@ mod native;
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use native::{
-    AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, Reservation, Slot, Store,
-    StoreSet, Submitter, copy_store, probe,
+    AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, ReadStream, Reservation, Slot,
+    Store, StoreSet, Submitter, copy_store, probe,
 };
 
 /// What [`probe`] found out about a directory's device.

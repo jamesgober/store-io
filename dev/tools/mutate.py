@@ -183,6 +183,9 @@ ROOT_CONFORMANCE = ["-p", "store-io", "--test", "conformance"]
 QOS_SRC = "crates/store-io-engine/src/qos.rs"
 QOS_T = ["-p", "store-io-engine", "--lib", "qos::"]
 QOS_STORE_T = ["-p", "store-io-engine", "--test", "qos"]
+STREAM_SRC = "crates/store-io-engine/src/stream.rs"
+STREAM_T = ["-p", "store-io-engine", "--test", "stream"]
+STREAM_RACE_T = ["-p", "store-io-engine", "--test", "stream_race"]
 PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
@@ -1798,6 +1801,24 @@ M = [
  ('crates/store-io-engine/src/submitter/mod.rs', '                    self.away\n                        .leave(&self.store.inner.domain, self.core.table.entries);\n                    return Err(', '                    if false {\n                        self.away\n                            .leave(&self.store.inner.domain, self.core.table.entries);\n                    }\n                    return Err(', QOS_STORE_T),
  ('crates/store-io-engine/src/submitter/mod.rs', '        self.away\n            .leave(&self.store.inner.domain, self.core.table.entries);\n        Ok(Completions {', '        if false {\n            self.away\n                .leave(&self.store.inner.domain, self.core.table.entries);\n        }\n        Ok(Completions {', QOS_STORE_T),
  (SCAN_SRC, '        let class = self.inner.pool.class_len(chunk).unwrap_or(chunk);', '        let class = self.inner.pool.class_len(chunk).filter(|_| false).unwrap_or(chunk);', QOS_STORE_T),
+# STREAM (V5a): read streams
+ (STREAM_SRC, '            self.live()?;\n            test_hook::step(Step::StreamSubmit);', '            if false {\n                self.live()?;\n            }\n            test_hook::step(Step::StreamSubmit);', STREAM_RACE_T),
+ (STREAM_SRC, "            // classified (an error's too).\n            if let Err(e) = self.live() {", "            // classified (an error's too).\n            if let Err(e) = self.live().or(Ok(())) {", STREAM_RACE_T),
+ (STREAM_SRC, '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live() {', '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live().or(Ok(())) {', STREAM_RACE_T),
+ (STREAM_SRC, '                let place = (at - base) as usize;', '                let place = (at - base).min(0) as usize;', STREAM_T),
+ (STREAM_SRC, '        while !self.copying() && self.submitted - self.delivered < depth && self.next < self.end {', '        while (!self.copying() || true) && self.submitted - self.delivered < depth && self.next < self.end {', STREAM_T),
+ (STREAM_SRC, '                .min(self.r.map.run_left(next)) as usize;', '                .min(self.r.map.run_left(next).max(u64::MAX)) as usize;', STREAM_T),
+ ('crates/store-io-engine/src/region.rs', '        let end = range.end.min(self.durable_through());', '        let end = range.end.max(range.end.min(self.durable_through()));', STREAM_T),
+ ('crates/store-io-engine/src/region.rs', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) {', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) && false {', STREAM_T),
+ (STREAM_SRC, '                let bufs: Vec<IoBuf> = (0..n)\n                    .map_while(|_| pool.take_capped(req, class).ok())', '                let bufs: Vec<IoBuf> = (0..n)\n                    .map_while(|_| pool.take_within(req, class).ok())', STREAM_T),
+ (STREAM_SRC, '        if self.closed {\n            Some(b)', '        if self.closed && false {\n            Some(b)', STREAM_T),
+ (STREAM_SRC, '                Some(p) => match p.try_charge() {', '                Some(p) => match p.try_charge().filter(|_| false) {', QOS_STORE_T),
+ ('crates/store-io-engine/src/gate.rs', '    pub(crate) fn live(&self) -> Result<(), Retired> {\n        match self.state.fetch_add(0, Ordering::AcqRel) {', '    pub(crate) fn live(&self) -> Result<(), Retired> {\n        match self.state.load(Ordering::Relaxed) {', LOOM_ENGINE, LOOM),
+ (STREAM_SRC, '            Some(p) => Some(p.admit()?),', '            Some(p) => Some(p.admit()?).filter(|_| false),', QOS_STORE_T),
+ (STREAM_SRC, '                let bufs: Vec<IoBuf> = (0..most)\n                    .map_while(|_| pool.take_capped(req, class).ok())', '                let bufs: Vec<IoBuf> = (0..most)\n                    .map_while(|_| pool.take_within(req, class).ok())', STREAM_T),
+ (STREAM_SRC, '            if lock(&self.home).lent >= self.lend {', '            if lock(&self.home).lent >= self.lend && false {', STREAM_T),
+ (STREAM_SRC, '        if self.finished {\n            return;\n        }', '        if self.finished && false {\n            return;\n        }', STREAM_T),
+ (STREAM_SRC, '            Some((depth, lend)) => match depth.checked_add(lend).and_then(|n| n.checked_add(1)) {', '            Some((depth, lend)) => match Some(depth.wrapping_add(lend).wrapping_add(1)) {', STREAM_T),
 ]
 
 def kill_stuck_tests():

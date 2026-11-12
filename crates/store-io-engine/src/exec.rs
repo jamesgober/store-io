@@ -145,6 +145,13 @@ impl<Q: Queue> Lane<Q> {
         self.core.table.live
     }
 
+    /// Moves every completion that has arrived into `done`, without
+    /// waiting. Returns how many arrived.
+    pub(crate) fn reap(&mut self) -> usize {
+        let _added = self.core.queue.reap(&mut self.core.raw);
+        self.collect()
+    }
+
     fn collect(&mut self) -> usize {
         let mut n = 0;
         for c in self.core.raw.drain() {
@@ -460,7 +467,14 @@ impl<Q: Queue> QueueSet<Q> {
 /// A lane over `queue` for one caller alone, outside any set (its busy
 /// mark read by no one): the format-2 open's region header reads.
 pub(crate) fn solo_lane<Q>(queue: Q, depth: usize) -> Lane<Q> {
-    lane(queue, &Arc::new(LaneMark::new()), depth)
+    owned_lane(queue, &Arc::new(LaneMark::new()), depth)
+}
+
+/// A lane over a queue one owner alone uses, outside any set, its busy
+/// mark `mark` (a read stream's: registered by the owner, so
+/// `Store::oldest_outstanding` sees a read held on it).
+pub(crate) fn owned_lane<Q>(queue: Q, mark: &Arc<LaneMark>, depth: usize) -> Lane<Q> {
+    lane(queue, mark, depth)
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner)
 }

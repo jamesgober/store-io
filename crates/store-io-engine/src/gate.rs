@@ -158,6 +158,18 @@ impl Gate {
         }
     }
 
+    /// Whether the region is retired, checked without a pass by a caller
+    /// whose I/O holds none (a read stream's, R5.5): a read-modify-write of
+    /// the state word, ordered with `retire`'s write as a load would not be,
+    /// so a check that passes after a read completed proves no retire began
+    /// before it (or one was restored before anything changed on disk).
+    pub(crate) fn live(&self) -> Result<(), Retired> {
+        match self.state.fetch_add(0, Ordering::AcqRel) {
+            LIVE => Ok(()),
+            s => Err(retired(s)),
+        }
+    }
+
     fn leave(&self) {
         if self.active.fetch_sub(1, Ordering::AcqRel) == 1
             && self.state.fetch_add(0, Ordering::AcqRel) != LIVE
@@ -291,6 +303,34 @@ mod loom_tests {
                 retired.store(true, Ordering::SeqCst);
             }
             let _joined = op.join();
+        });
+    }
+
+    /// A check without a pass (`Gate::live`, a read stream's) after its read
+    /// completed: if the read could have seen a change made after a retire
+    /// completed, the check sees the retire. A load in its place could
+    /// read the state as it was before the retire.
+    #[test]
+    fn loom_a_live_check_never_passes_a_completed_retire() {
+        loom::model(|| {
+            let gate = std::sync::Arc::new(Gate::new());
+            let changed = Arc::new(AtomicBool::new(false));
+            let reader = {
+                let gate = std::sync::Arc::clone(&gate);
+                let changed = Arc::clone(&changed);
+                loom::thread::spawn(move || {
+                    // The read completes, seeing the media as it is.
+                    let saw_new = changed.load(Ordering::Relaxed);
+                    if gate.live().is_ok() {
+                        assert!(!saw_new, "a live check passed a completed retire");
+                    }
+                })
+            };
+            if gate.retire(Retire::Recycle).is_ok() {
+                // Something on disk changes only after the retire completes.
+                changed.store(true, Ordering::Relaxed);
+            }
+            let _joined = reader.join();
         });
     }
 

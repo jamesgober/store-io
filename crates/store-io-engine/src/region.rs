@@ -596,6 +596,56 @@ where
             .map_or(0, crate::frontier::AppendFrontier::tail)
     }
 
+    /// The bytes of `range` (region offsets, any start and end) as a
+    /// [`ReadStream`](crate::ReadStream) of owned chunks in order, with the
+    /// default [`StreamOptions`](crate::StreamOptions): a background
+    /// stream. Only the durable prefix as of the call is read (`range` is
+    /// clamped to [`Self::durable_through`]; empty: an empty stream).
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten`: `OutOfBounds` (`range` reversed or past [`Self::len`]),
+    /// `NotPositioned` (after a reopen, before `resume_at`: so never on a
+    /// read-only open, which refuses `resume_at`; scan it instead),
+    /// `StaleGeneration` or `NotReady` (recycled or released),
+    /// `PoolExhausted` (too few buffers free under the pool's background
+    /// cap), `InvalidOptions`; `Io` if its queue could not be made.
+    pub fn read_stream(&self, range: std::ops::Range<u64>) -> Result<crate::ReadStream<P>, Error> {
+        self.read_stream_with(range, crate::StreamOptions::default())
+    }
+
+    /// [`Self::read_stream`] with `opts`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_stream`].
+    pub fn read_stream_with(
+        &self,
+        range: std::ops::Range<u64>,
+        opts: crate::StreamOptions,
+    ) -> Result<crate::ReadStream<P>, Error> {
+        self.state
+            .gate
+            .live()
+            .map_err(|why| retired_error(why, &self.state))?;
+        if !self.state.positioned.load(Ordering::Acquire) {
+            return Err(not_written(
+                NotWrittenCause::NotPositioned,
+                ctx(&self.state),
+            ));
+        }
+        if range.start > range.end || range.end > self.state.map.len() {
+            return Err(not_written(
+                NotWrittenCause::OutOfBounds,
+                crate::io::ctx_range(&self.state, range.start, range.end),
+            ));
+        }
+        // The durable prefix as of the call (R5.5).
+        let end = range.end.min(self.durable_through());
+        let start = range.start.min(end);
+        self.store.read_stream_of(&self.state, start..end, opts)
+    }
+
     /// Every byte before this offset is durable.
     #[must_use]
     pub fn durable_through(&self) -> u64 {
@@ -923,6 +973,44 @@ where
         let _pass = self.pass()?;
         self.store
             .scan_reported(&self.state, from, self.state.map.len(), visit)
+    }
+
+    /// The bytes of `range` (region offsets, any start and end) as a
+    /// [`ReadStream`](crate::ReadStream) of owned chunks in order, with the
+    /// default [`StreamOptions`](crate::StreamOptions): a background stream.
+    /// Not a snapshot: a write made while streaming may show in it.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten`: `OutOfBounds` (`range` reversed or past [`Self::len`]),
+    /// `StaleGeneration` or `NotReady` (recycled or released),
+    /// `PoolExhausted` (too few buffers free under the pool's background
+    /// cap), `InvalidOptions`; `Io` if its queue could not be made.
+    pub fn read_stream(&self, range: std::ops::Range<u64>) -> Result<crate::ReadStream<P>, Error> {
+        self.read_stream_with(range, crate::StreamOptions::default())
+    }
+
+    /// [`Self::read_stream`] with `opts`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_stream`].
+    pub fn read_stream_with(
+        &self,
+        range: std::ops::Range<u64>,
+        opts: crate::StreamOptions,
+    ) -> Result<crate::ReadStream<P>, Error> {
+        self.state
+            .gate
+            .live()
+            .map_err(|why| retired_error(why, &self.state))?;
+        if range.start > range.end || range.end > self.state.map.len() {
+            return Err(not_written(
+                NotWrittenCause::OutOfBounds,
+                crate::io::ctx_range(&self.state, range.start, range.end),
+            ));
+        }
+        self.store.read_stream_of(&self.state, range, opts)
     }
 
     /// Block size: writes must be whole blocks.

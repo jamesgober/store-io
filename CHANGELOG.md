@@ -13,6 +13,26 @@
 
 ### Added
 
+- Engine: **read streams** (PLANNING R5.5): `AppendRegion::read_stream`
+  and `PageRegion::read_stream` (`read_stream_with` taking
+  `StreamOptions`) return a `ReadStream`, an iterator of owned `Chunk`s
+  in offset order over any byte range (an append region's clamped to its
+  durable prefix as of the call, and refused `NotPositioned` after a
+  reopen until `resume_at`). A stream reads on a queue of its own,
+  so it holds no lane a commit needs and the caller may use the store
+  between chunks; it is not `Send`, its chunks are. A range the device
+  cannot read is an exact `Corruption { MediaError, range }` item and the
+  stream goes on. It holds no pass on its region: a recycle or release
+  never waits on it and ends it (`StaleGeneration`, `NotReady`), its gate
+  checked before each read and again before anything of a completed read
+  is delivered, so no chunk holds bytes of a newer generation. A
+  `Background` stream (the default) reads `background_io` pieces, paced
+  while commits are active; a `Read` stream reads `max_io` requests,
+  unpaced. A stream takes `depth + lend + 1` buffers under the pool's
+  background cap (half of each class) when it is made; a `next()` with
+  every lent chunk held returns `NotWritten(TooManyInFlight)`. `cancel`
+  and drop wait for the reads in flight. The facade exports `ReadStream`,
+  `Chunk` and `StreamOptions`.
 - Engine: **device pacing joins every store** (PLANNING R5.4): each store,
   read-only ones included, joins its device's group when it opens (by its
   device's identity, btrfs's member disks or the file system's device;

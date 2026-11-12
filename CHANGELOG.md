@@ -11,6 +11,56 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-19
+
+A safe pre-alpha: 0.5.0 with the fixes an independent review of it found (one medium, four low). No format change.
+
+### Changed
+
+- Engine and facade: **directory mode has a largest object**,
+  `Directory::DEFAULT_MAX_OBJECT` (16 MiB), changed per handle with
+  `Directory::with_max_object`: a `replace` larger than it is refused
+  `NotWritten(TooLarge)` before anything is written, and `read` refuses a
+  file longer than it before allocating anything (an independent review).
+  **Compatibility:** an object over 16 MiB written by 0.5 is unreadable at
+  the default; open the handle with a larger limit to read it.
+
+### Fixed
+
+- Engine: **a volume record's table page count is bounded** (an
+  independent review): format 2 admits up to 2^30 pages, and the open
+  read and kept one record per page, so a damaged or hostile container
+  (a sparse file of any length costs nothing) drove an open's time and
+  memory far past any store store-io creates, up to an allocation that
+  aborts the process. A record claiming more pages than a create for the
+  largest capacity makes at its table slot size is now refused with
+  `Unsupported(FormatVersion)` before any page is read (a later version's
+  larger table, or a hostile one: never a store to recreate).
+- Engine: **damage to the newest copy of a header pair after a clean
+  close is reported**: a slot whose newest commit's header copy was
+  damaged served the previous value with nothing in the report. When the
+  volume record says the last writer closed cleanly, a written copy that
+  no longer verifies, and is not provably the served version's
+  predecessor (its stored header CRC is not the one the served version
+  records), is listed in `MetadataReport::lost_header_writes`: the served
+  value may not be the newest written. It may also be a torn write an
+  earlier crash left that no later write of the pair replaced, listed
+  until the region's next header write. Right after a crash it may be a
+  torn, never acknowledged commit, and is not reported (as before).
+- Engine: **`Directory::read` no longer allocates a file's whole length
+  unchecked**: a damaged, replaced or sparse object file could make it ask
+  for any amount of memory. See the largest object size under Changed.
+- Windows: **FAT and exFAT open past the attribute check**: their
+  directory and file opens failed with `Io` (`ERROR_INVALID_PARAMETER`,
+  87), since they do not answer `FileAttributeTagInfo`, so the probe
+  never reached them to class them `Unsafe` as documented. Their
+  attributes now come from the basic file information (they hold no
+  reparse points; the reparse-point refusal still applies). Not yet run
+  on a FAT or exFAT volume.
+- README: a writable open does change the container (it writes the
+  volume record and may heal one torn metadata write); only a read-only
+  open, a scan and a lock acquisition change nothing.
+
 ## [0.5.0] - 2026-11-09
 
 ### Added
@@ -2050,7 +2100,8 @@ The project scaffold. Reserves the crate name; no public API.
   `.gitattributes`, `.github/FUNDING.yml`.
 - `docs/API.md` and `docs/release/v0.1.0.md`.
 
-[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jamesgober/store-io/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jamesgober/store-io/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jamesgober/store-io/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jamesgober/store-io/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jamesgober/store-io/compare/v0.3.1...v0.4.0

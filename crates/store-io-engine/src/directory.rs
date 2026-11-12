@@ -207,6 +207,8 @@ pub struct Directory<P: Platform> {
     /// The directory flush probed at open failed: every change is refused
     /// before any write, since its rename could never be made durable.
     dir_flush: Option<OsError>,
+    /// The largest object written or read ([`Self::with_max_object`]).
+    max_object: u64,
 }
 
 impl<P: Platform> core::fmt::Debug for Directory<P> {
@@ -219,6 +221,10 @@ impl<P: Platform> core::fmt::Debug for Directory<P> {
 }
 
 impl<P: Platform> Directory<P> {
+    /// The largest object a handle writes or reads by default
+    /// ([`Self::with_max_object`]): 16 MiB.
+    pub const DEFAULT_MAX_OBJECT: u64 = 16 << 20;
+
     /// Opens the directory at `path`, creating it (and syncing its parent)
     /// when `create` is true. `trust` is applied when the device is probed.
     /// It also tries a directory flush: if that fails, the handle still
@@ -258,7 +264,25 @@ impl<P: Platform> Directory<P> {
             change: Mutex::new(()),
             lock_file: OnceLock::new(),
             dir_flush,
+            max_object: Self::DEFAULT_MAX_OBJECT,
         })
+    }
+
+    /// The handle with `max` as its largest object, written or read
+    /// (default [`Self::DEFAULT_MAX_OBJECT`]): a larger `replace` is refused
+    /// before anything is written, and a file found larger is refused by
+    /// `read` before anything is allocated (a damaged, replaced or sparse
+    /// file of any length costs its reader nothing then).
+    #[must_use]
+    pub fn with_max_object(mut self, max: u64) -> Self {
+        self.max_object = max;
+        self
+    }
+
+    /// The largest object this handle writes or reads.
+    #[must_use]
+    pub fn max_object(&self) -> u64 {
+        self.max_object
     }
 
     /// The durability class of the directory's device, once a file has been
@@ -338,6 +362,7 @@ impl<P: Platform> Directory<P> {
     /// directory's own `.sio-lock` or a name ending in `.sio-tmp`.
     /// `Unsupported(DirectoryFlush)` or `Io(SyncDir)` when the directory
     /// cannot be flushed (found at open; nothing is written).
+    /// `NotWritten(TooLarge)` for `data` longer than [`Self::max_object`].
     /// `NotWritten`, `UnsafeDevice`, `Unverified`, `NoSpace` or `Io` before
     /// anything reached the device (the target is untouched).
     /// `DurabilityUnknown` if a write, the length update or the flush of the
@@ -346,6 +371,12 @@ impl<P: Platform> Directory<P> {
     /// poisoned and later changes fail with `Poisoned`.
     pub fn replace(&self, name: &str, data: &[u8]) -> Result<(), Error> {
         self.writable()?;
+        if data.len() as u64 > self.max_object {
+            return Err(not_written(
+                NotWrittenCause::TooLarge,
+                ErrorContext::default(),
+            ));
+        }
         let target = object_name(name)?;
         let temp = name_of(&format!("{name}{TEMP_SUFFIX}"))?;
         let _one_at_a_time = self.change.lock().unwrap_or_else(PoisonError::into_inner);
@@ -490,7 +521,9 @@ impl<P: Platform> Directory<P> {
     /// # Errors
     ///
     /// `NotFound`; `Corruption(MediaError)` for an unreadable range;
-    /// `NotWritten(InvalidName)` as for [`Self::replace`]; `Io`.
+    /// `NotWritten(InvalidName)` as for [`Self::replace`];
+    /// `NotWritten(TooLarge)` for a file longer than [`Self::max_object`]
+    /// (nothing allocated); `Io`.
     pub fn read(&self, name: &str) -> Result<Vec<u8>, Error> {
         let c = ErrorContext::default();
         let file = self
@@ -504,6 +537,10 @@ impl<P: Platform> Directory<P> {
                 }
             })?;
         let len = self.platform.size(&file).map_err(|raw| io(Op::Open, raw))?;
+        // Before anything is allocated: the file's length is untrusted.
+        if len > self.max_object {
+            return Err(not_written(NotWrittenCause::TooLarge, c));
+        }
         let len = usize::try_from(len).map_err(|_| not_written(NotWrittenCause::TooLarge, c))?;
         let mut out = vec![0u8; len];
         let mut lane = self.queue.get(0);

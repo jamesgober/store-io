@@ -805,3 +805,30 @@ fn test_a_directory_replace_takes_the_lock_on_the_real_file_system() {
     d.replace("m", b"new").unwrap();
     assert_eq!(d.read("m").unwrap(), b"new");
 }
+
+/// A directory's largest object is set through the facade's handle too
+/// (independent review F-5): its default, and a smaller limit refusing a
+/// larger replace and leaving the object as it was.
+#[test]
+fn test_a_directory_s_largest_object_is_set_through_the_facade() {
+    let t = TempDir::new("dirmax");
+    let (opts, _) = options_for(t.path());
+    assert_eq!(Directory::DEFAULT_MAX_OBJECT, 16 << 20);
+    let d = Directory::open_with(t.path(), true, opts.trust)
+        .unwrap()
+        .with_max_object(4096);
+    assert_eq!(d.max_object(), 4096);
+    d.replace("m", &[1u8; 4096]).unwrap();
+    let r = d.replace("m", &[2u8; 4097]);
+    assert!(
+        matches!(
+            r,
+            Err(Error::NotWritten {
+                cause: store_io_core::error::NotWrittenCause::TooLarge,
+                ..
+            })
+        ),
+        "{r:?}"
+    );
+    assert_eq!(d.read("m").unwrap(), vec![1u8; 4096]);
+}

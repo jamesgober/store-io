@@ -183,3 +183,46 @@ fn test_a_durable_leftover_temporary_file_does_not_block_a_replace() {
     d.replace("m", b"two").unwrap();
     assert_eq!(d.read("m").unwrap(), b"two");
 }
+
+/// A handle's largest object (independent review F-5): a larger replace is
+/// refused and the old bytes stay; a file found larger (damaged, replaced,
+/// sparse) is refused by `read` before anything is allocated.
+#[test]
+fn test_objects_past_the_handle_s_largest_are_refused() {
+    use store_io_core::error::NotWrittenCause;
+    use store_io_platform::{FileMode, FileName, Platform};
+    let p = SimPlatform::new(SimConfig::volatile(62));
+    let d = open(&p).with_max_object(1 << 20);
+    assert_eq!(d.max_object(), 1 << 20);
+    assert_eq!(
+        open(&p).max_object(),
+        Directory::<SimPlatform>::DEFAULT_MAX_OBJECT
+    );
+    let old = bytes(1, 4096);
+    d.replace("manifest", &old).unwrap();
+    // Exactly the limit is written and read back.
+    d.replace("big", &bytes(2, 1 << 20)).unwrap();
+    assert_eq!(d.read("big").unwrap().len(), 1 << 20);
+    let too_big = |r: Result<_, Error>| {
+        matches!(
+            r,
+            Err(Error::NotWritten {
+                cause: NotWrittenCause::TooLarge,
+                ..
+            })
+        )
+    };
+    assert!(too_big(d.replace("manifest", &bytes(3, (1 << 20) + 1))));
+    assert_eq!(d.read("manifest").unwrap(), old, "the old bytes stay");
+    // The file grown past the limit behind the handle's back.
+    let dir = p.open_dir(Path::new(DIR), false).unwrap();
+    let file = p
+        .open_file(
+            &dir,
+            &FileName::new("manifest").unwrap(),
+            FileMode::ReadWrite,
+        )
+        .unwrap();
+    p.set_len(&file, 2 << 20).unwrap();
+    assert!(too_big(d.read("manifest").map(|_| ())));
+}

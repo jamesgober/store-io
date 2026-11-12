@@ -104,7 +104,14 @@ pub struct MetadataReport {
     pub stale_page_agreement: Vec<(u32, bool)>,
     /// Regions whose header pair shows a newer, unreadable version than the
     /// one the open uses (spec §8): a recycle, slot commit or growth's
-    /// header possibly lost to a crash. The older version is served.
+    /// header possibly lost to a crash. The older version is served. After
+    /// a clean close also a pair whose other copy was written and no longer
+    /// verifies, unless it is provably the served version's predecessor
+    /// (D-162): damage since, or a torn write an earlier crash left that no
+    /// later write of the pair replaced (listed until the region's next
+    /// header write). Either way the served version may not be the newest
+    /// written (a slot's last commit); a damaged older copy whose header CRC
+    /// cannot be read is listed too.
     pub lost_header_writes: Vec<RegionId>,
     /// A list above was cut at its limit (256 items).
     pub truncated: bool,
@@ -668,12 +675,29 @@ pub(crate) fn decode_volume(bytes: &[u8]) -> Result<VolumeMeta2, Error> {
             what: Capability::FormatVersion,
         });
     }
-    VolumeMeta2::decode(bytes).map_err(|e| match e {
+    let vm = VolumeMeta2::decode(bytes).map_err(|e| match e {
         store_io_format::meta::MetaError::Field("features" | "flags") => Error::Unsupported {
             what: Capability::FormatVersion,
         },
         _ => corrupt(),
-    })
+    })?;
+    // More pages than any store of this version can have: a later version's
+    // larger table, or a hostile record, refused before the open reads or
+    // holds anything per page (the format admits up to 2^30, and a sparse
+    // file of that length costs nothing). Unsupported, not corrupt: a
+    // caller must never be invited to recreate a store over it.
+    if vm.table_pages > max_table_pages(vm.base.log2_table_slot_size) {
+        return Err(Error::Unsupported {
+            what: Capability::FormatVersion,
+        });
+    }
+    Ok(vm)
+}
+
+/// The most table pages a store with table slots of `1 << log2_table` can
+/// have: what a create for [`MAX_REGION_CAPACITY`] makes.
+pub(crate) fn max_table_pages(log2_table: u8) -> u32 {
+    layout_for(12, log2_table, MAX_REGION_CAPACITY).pages
 }
 
 /// Reads a metadata pair, each slot whose read failed again once (spec
@@ -1165,5 +1189,57 @@ impl<P: Platform> Drop for Inner<P> {
             Err(_) => None,
         };
         crate::frontier::note_close(self.epoch, left);
+    }
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn record(log2_table: u8, table_pages: u32) -> Vec<u8> {
+        let vm = VolumeMeta2 {
+            base: VolumeMeta {
+                log2_block_size: 12,
+                log2_table_slot_size: log2_table,
+                device_index: 0,
+                owner_generation: 1,
+                table_offset: 2 << 12,
+                created_unix_s: 0,
+                features: 0,
+            },
+            table_pages,
+            entries_per_page: entries_per_page(log2_table),
+            clean_close: true,
+            flags: 0,
+        };
+        volume_payload(&vm).unwrap().to_vec()
+    }
+
+    /// A volume record claiming more table pages than a create for the
+    /// largest capacity makes is refused (`Unsupported`: a later version's
+    /// table, or hostile, never a store to recreate); the largest real one
+    /// opens (independent review F-1).
+    #[test]
+    fn test_a_volume_record_past_the_largest_table_is_corrupt() {
+        for log2_table in 12..=16u8 {
+            let max = max_table_pages(log2_table);
+            let real = layout_for(12, log2_table, MAX_REGION_CAPACITY).pages;
+            assert_eq!(max, real);
+            assert!(max > 1 && max < store_io_format::meta2::MAX_TABLE_PAGES - 1);
+            assert!(decode_volume(&record(log2_table, max)).is_ok());
+            for hostile in [max + 1, store_io_format::meta2::MAX_TABLE_PAGES - 1] {
+                assert!(
+                    matches!(
+                        decode_volume(&record(log2_table, hostile)),
+                        Err(Error::Unsupported {
+                            what: Capability::FormatVersion,
+                        })
+                    ),
+                    "{log2_table}: {hostile} pages"
+                );
+            }
+        }
     }
 }

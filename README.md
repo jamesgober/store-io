@@ -54,7 +54,7 @@ store-io replaces [fsys](https://github.com/jamesgober/fsys-rs) as the only code
 - **Durability classes from evidence.** Power-safe, flush-required, unverified or unsafe, decided per path and per device. Operating-system cache toggles and vendor tables never promote a device.
 - **Unforgeable receipts.** Positions, write tickets and receipts are distinct opaque types. A sequence number never type-checks as a byte position, and a barrier is never a silent no-op.
 - **Fail-stop.** A failed write or flush poisons the device's barrier domain. A flush is never retried, and success is never reported after a failed one.
-- **Opens modify nothing.** No open, scan or lock acquisition ever changes caller bytes, sizes, timestamps or directory entries.
+- **Opens never touch caller data.** A read-only open, a scan and a lock acquisition change nothing: no byte, size, timestamp or directory entry. A writable open writes the volume record (the next owner generation) and may heal one torn metadata write before it returns, so the container's bytes and modification time change; caller data is never modified.
 - **No hidden latency.** No timers, no polling threads, no group-commit windows, no idle wakeups.
 - **Measured, not claimed.** Every performance number names the device, durability class, filesystem, OS and kernel, and fsync status, and is gated against fio on the same box.
 

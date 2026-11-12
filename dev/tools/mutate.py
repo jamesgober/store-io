@@ -89,6 +89,9 @@ F2CC = ["-p", "store-io-engine", "--test", "format2_concurrent"]
 FRONTIER = ["-p", "store-io-engine", "--lib", "frontier::"]
 # The region map's unit tests; the format crate's footprint tests.
 REGIONMAP = ["-p", "store-io-engine", "--lib", "regionmap::"]
+V2_LIB = ["-p", "store-io-engine", "--lib", "v2::"]
+DIR_T = ["-p", "store-io-engine", "--test", "directory"]
+SLOT_DAMAGE_T = ["-p", "store-io-engine", "--test", "format2_slot_damage"]
 FOOTPRINT_FMT = ["-p", "store-io-format", "--test", "footprint"]
 V2 = "crates/store-io-engine/src/v2.rs"
 # copy_store.
@@ -776,7 +779,7 @@ M = [
  ('crates/store-io-engine/src/open.rs', 'platform.queue(cfg).ok().map(|q| (q, cfg.depth as usize))', '(cfg.depth == 0).then(|| platform.queue(cfg).ok()).flatten().map(|q| (q, cfg.depth as usize))', F2O),
  # E2b/E3 C7 review: a header version newer than the winner's that does
  # not read is reported as a possibly lost recycle or slot commit
- ('crates/store-io-engine/src/open2.rs', '                if newer {', '                if newer && false {', F2C),
+ ('crates/store-io-engine/src/open2.rs', '                if newer || damaged {', '                if (newer && false) || damaged {', SLOT_DAMAGE_T),
  # E2b/E3 C7: recycle in format 2 moves the region generation on and
  # writes the entry's extents only; a slot commit in format 2 carries
  # the object after the fixed part; neither takes format 1's path
@@ -1824,6 +1827,18 @@ M = [
  (STREAM_SRC, '            sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;', '            if false {\n                sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;\n            }', STREAM_T),
  (STREAM_SRC, '            offset: self.parts[part].r.map.locate(at, len),', '            offset: self.parts[self.cur].r.map.locate(at, len),', STREAM_T),
  (STREAM_SRC, '                    Item::Bad {\n                        part,\n                        start: s,\n                        end: e,\n                    }', '                    Item::Bad {\n                        part: self.cur,\n                        start: s,\n                        end: e,\n                    }', STREAM_T),
+# REVIEW (independent review of 0.5.0)
+# No entry: open2's predecessor test by generation (`n.generation < info.generation`): an older
+# copy whose header verifies stores the CRC the winner records as its predecessor, which the
+# CRC clause already accepts; the generation clause only covers a gapped or restored pair,
+# where it keeps a false report away (report-only, nothing decides on it).
+ ('crates/store-io-engine/src/v2.rs', '    if vm.table_pages > max_table_pages(vm.base.log2_table_slot_size) {', '    if vm.table_pages > max_table_pages(vm.base.log2_table_slot_size) && false {', V2_LIB),
+ ('crates/store-io-engine/src/directory.rs', '        if len > self.max_object {', '        if len > self.max_object && false {', DIR_T),
+ ('crates/store-io-engine/src/directory.rs', '        if data.len() as u64 > self.max_object {', '        if data.len() as u64 > self.max_object && false {', DIR_T),
+ ('crates/store-io-win/src/sys.rs', '        Err(e) if is_unsupported(e) => basic().map(|attrs| (attrs, 0)),', '        Err(e) if is_unsupported(e) && false => basic().map(|attrs| (attrs, 0)),', WIN_LIB),
+ ('crates/store-io-engine/src/open2.rs', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor;', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor && false;', SLOT_DAMAGE_T),
+ ('crates/store-io-engine/src/open2.rs', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor;', '                let damaged = report.clean_close && damaged_copy(status) && !(predecessor && false);', SLOT_DAMAGE_T),
+ ('crates/store-io-engine/src/open2.rs', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor;', '                let damaged = (report.clean_close || true) && damaged_copy(status) && !predecessor;', SLOT_DAMAGE_T),
 ]
 
 def kill_stuck_tests():

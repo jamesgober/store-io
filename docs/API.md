@@ -167,8 +167,9 @@ A batch holds at most what the buffer pool can lend (`buffers_per_class × max_i
 |---|---|
 | `Directory::open(path, create) -> Result<Directory>` | Opens (or creates) a directory with default trust, and tries a directory flush. If that fails, `replace` and `remove` are refused before any write (`Unsupported(DirectoryFlush)` or `Io(SyncDir)`); `read` still works. |
 | `Directory::open_with(path, create, Trust)` | With explicit trust inputs. |
+| `with_max_object(u64) -> Directory`, `max_object()`, `Directory::DEFAULT_MAX_OBJECT` | The largest object the handle writes or reads (default 16 MiB): a larger `replace` is refused `NotWritten(TooLarge)` before anything is written, a longer file by `read` before anything is allocated. |
 | `replace(name, &[u8]) -> Result<()>` | Temporary file, exact length, flush, rename over the target, directory flush. The file holds the old or the new bytes after any crash. One replace at a time in a directory, across handles and processes (the `.sio-lock` file): another fails `Locked` with nothing written; a file system that cannot lock gives `Io(Lock)`. Names that could resolve to another file are refused (`NotWritten(InvalidName)`, also in `read` and `remove`): longer than 247 bytes, ending in `.` or a space, shaped like a Windows short name, a Windows device name, or the directory's own `.sio-lock` or `*.sio-tmp` (compared as a case-insensitive file system compares names: case folded, ignorable code points dropped). |
-| `read(name) -> Result<Vec<u8>>` | Reads a whole file with direct I/O. |
+| `read(name) -> Result<Vec<u8>>` | Reads a whole file with direct I/O; `NotWritten(TooLarge)` for one longer than `max_object()`, nothing allocated. |
 | `remove(name) -> Result<()>` | Unlinks, then flushes the directory. |
 | `sync() -> Result<()>` | Flushes the directory. |
 | `class()`, `decision()` | The device's class, once a file has been opened through the handle. |

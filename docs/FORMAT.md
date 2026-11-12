@@ -325,7 +325,7 @@ Checks, in order; the first failure is the error:
 7. `entries_per_page` equals E for this T.
 8. `clean_close` is `0` or `1`.
 
-A failure in steps 3&ndash;8 fails the open with `Corruption(Metadata)`. The open also requires the table area to lie within the file, `2B + 2PT <=` the file's length, and fails with `Corruption(Metadata)` otherwise.
+A failure in steps 3&ndash;8 fails the open with `Corruption(Metadata)`. The open also requires the table area to lie within the file, `2B + 2PT <=` the file's length, and fails with `Corruption(Metadata)` otherwise. It refuses, with `Unsupported(FormatVersion)` and before reading any page, a P larger than this implementation's create can make at this T (a table for its largest region capacity, 2^22 regions: `ceil(2^22 / E)` pages): the format admits more, a later version may make more, and a sparse file of any length costs nothing, so P is not trusted to size the open's reads and memory. Unsupported rather than corrupt, so a caller is never invited to recreate a store over it.
 
 ### Fields that change
 
@@ -593,7 +593,7 @@ Regions that pass these rules are then settled against each other and against th
 
 ### Other findings, reported
 
-- **A possibly lost header write.** The winner's other slot passes checks 1&ndash;12 of section 5 (`BadPayloadCrc`) with a higher generation: a recycle, slot commit or growth's header may have been lost to a crash. The older version is served.
+- **A possibly lost header write.** The winner's other slot passes checks 1&ndash;12 of section 5 (`BadPayloadCrc`) with a higher generation: a recycle, slot commit or growth's header may have been lost to a crash. The older version is served. When the volume record says the last writer closed cleanly, also: the other slot was written (it is not blank, nor of a newer format) and does not verify, and it is not provably the winner's predecessor (its stored header CRC is not the winner's `prev_header_crc32c`, and its header shows no older generation). It is damage since the close, or a torn write an earlier crash left that no later write of the pair replaced (listed at every open until the region's next header write); either way the slot may have held the newest version (a slot's last commit), so the served version may not be the newest written. A damaged older slot whose stored header CRC cannot be read is listed too. Right after a crash the same slot may be a torn, never acknowledged write, and is not reported.
 - For each Unconfirmed page, whether every region header on it agrees with its entry (no rule above failed, and no header is one extent ahead). Agreement does not prove nothing was lost: a growth within capacity changes only the entry; a lost provisioning leaves no entry; a lost release whose Released header was never written leaves a Ready header over space that may since have held another region's bytes.
 
 ### 512-byte append blocks

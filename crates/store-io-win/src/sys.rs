@@ -219,10 +219,35 @@ pub fn attribute_tag(h: &Handle) -> RawResult<(u32, u32)> {
             size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
         )
     };
-    if ok != FALSE {
+    let tagged = if ok != FALSE {
         Ok((info.FileAttributes, info.ReparseTag))
     } else {
         Err(last_error())
+    };
+    with_basic_fallback(tagged, || {
+        let mut b = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `b` is a correctly sized, writable
+        // BY_HANDLE_FILE_INFORMATION; it holds only integers.
+        if unsafe { GetFileInformationByHandle(h.raw(), &mut b) } == FALSE {
+            Err(last_error())
+        } else {
+            Ok(b.dwFileAttributes)
+        }
+    })
+}
+
+/// `FileAttributeTagInfo`'s answer, or, where the file system does not
+/// answer that class (FAT and exFAT: `ERROR_INVALID_PARAMETER`), the
+/// attributes `basic` reads with no reparse tag: such a file system holds
+/// no reparse points. Any other error stays the error (independent review
+/// F-4: the probe then classes the volume instead of failing the open).
+fn with_basic_fallback(
+    tagged: RawResult<(u32, u32)>,
+    basic: impl FnOnce() -> RawResult<u32>,
+) -> RawResult<(u32, u32)> {
+    match tagged {
+        Err(e) if is_unsupported(e) => basic().map(|attrs| (attrs, 0)),
+        other => other,
     }
 }
 
@@ -1092,6 +1117,32 @@ mod tests {
         assert_eq!(LOCK_SENTINEL_OFFSET, 0x7FFF_FFFF_FFFF_FFFE);
         assert_eq!(LOCK_SENTINEL_OFFSET as u32, 0xFFFF_FFFE);
         assert_eq!((LOCK_SENTINEL_OFFSET >> 32) as u32, 0x7FFF_FFFF);
+    }
+
+    #[test]
+    fn test_a_file_system_without_attribute_tags_falls_back_to_its_attributes() {
+        use super::{nt, win32, with_basic_fallback};
+        // exFAT's answer to FileAttributeTagInfo: the basic attributes,
+        // no tag.
+        assert_eq!(
+            with_basic_fallback(Err(win32(87)), || Ok(0x10)),
+            Ok((0x10, 0))
+        );
+        assert_eq!(
+            with_basic_fallback(Err(win32(50)), || Ok(0x20)),
+            Ok((0x20, 0))
+        );
+        // The fallback's own failure is the error.
+        assert_eq!(
+            with_basic_fallback(Err(win32(87)), || Err(win32(5))),
+            Err(win32(5))
+        );
+        // Any other error stays, the fallback never read.
+        let never = || -> store_io_platform::RawResult<u32> { panic!("read the fallback") };
+        assert_eq!(with_basic_fallback(Err(win32(5)), never), Err(win32(5)));
+        assert_eq!(with_basic_fallback(Err(nt(87)), never), Err(nt(87)));
+        // An answer is kept, tag and all.
+        assert_eq!(with_basic_fallback(Ok((0x400, 7)), never), Ok((0x400, 7)));
     }
 
     #[test]

@@ -336,7 +336,22 @@ pub(crate) fn check_regions<Q: Queue>(
                 let newer = c.header.facts[other]
                     .and_then(|f| f.numbered)
                     .is_some_and(|n| n.generation > info.generation);
-                if newer {
+                // After a clean close a written copy that does not verify is
+                // damage, or a torn write an earlier crash left that no later
+                // write of the pair replaced; either way it may have held the
+                // newest version, unless it is provably the winner's
+                // predecessor (independent review F-2, D-162).
+                let status = if other == 0 {
+                    c.header.report.a
+                } else {
+                    c.header.report.b
+                };
+                let predecessor = c.header.facts[other].is_some_and(|f| {
+                    f.stored_header_crc32c == info.prev_header_crc32c
+                        || f.numbered.is_some_and(|n| n.generation < info.generation)
+                });
+                let damaged = report.clean_close && damaged_copy(status) && !predecessor;
+                if newer || damaged {
                     pushed(
                         &mut report.lost_header_writes,
                         RegionId::from_raw(id),
@@ -637,4 +652,22 @@ pub(crate) fn check_regions<Q: Queue>(
         holds,
         stale_extra,
     })
+}
+
+/// Whether a slot of a region header pair was written and no longer
+/// verifies: damage after a clean close (D-162). A blank slot was never
+/// written; a newer format's or a wrongly sized one is refused elsewhere.
+fn damaged_copy(status: store_io_format::slot::SlotStatus) -> bool {
+    use store_io_format::slot::SlotStatus as S;
+    matches!(
+        status,
+        S::ReadError
+            | S::BadMagic
+            | S::BadHeaderCrc
+            | S::Malformed
+            | S::Foreign
+            | S::WrongObject
+            | S::Misplaced
+            | S::BadPayloadCrc
+    )
 }

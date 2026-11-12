@@ -193,6 +193,20 @@ impl Directory {
         store_io_engine::Directory::open(platform(LinuxTier::Auto)?, path_of(&path), create, trust)
             .map(Self)
     }
+
+    /// The largest object a handle writes or reads by default (see
+    /// [`Self::with_max_object`]): 16 MiB.
+    pub const DEFAULT_MAX_OBJECT: u64 =
+        store_io_engine::Directory::<NativePlatform>::DEFAULT_MAX_OBJECT;
+
+    /// The handle with `max` as its largest object, written or read (see
+    /// [`store_io_engine::Directory::with_max_object`]): a larger `replace`
+    /// is refused before anything is written, and a larger file by `read`
+    /// before anything is allocated.
+    #[must_use]
+    pub fn with_max_object(self, max: u64) -> Self {
+        Self(self.0.with_max_object(max))
+    }
 }
 
 impl Deref for Directory {

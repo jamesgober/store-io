@@ -42,6 +42,15 @@
   `NotWritten(ForeignPosition)`, and each region's gate is checked again
   at the call and as each of its reads is delivered. The facade exports
   `StreamRange`.
+- Harness: **G20**, a `Read`-class read stream over a 256 MiB region at
+  least 90% of fio's best sequential read on the same file system (G7's
+  rule: the stream and fio's QD8 1 MiB read alternated three times each,
+  medians compared within the measured spread; fio's best is the faster
+  of that median and one QD1 run), every chunk's place and stamps
+  checked; a `Background` stream's figure published beside it (its wrong
+  bytes would fail the point, a refusal is only noted). The gates job
+  requires its row.
+  On the dev box (Windows, NVMe): 2,586 MB/s against fio's 2,543 (102%).
 - Engine: **device pacing joins every store** (PLANNING R5.4): each store,
   read-only ones included, joins its device's group when it opens (by its
   device's identity, btrfs's member disks or the file system's device;

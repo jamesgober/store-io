@@ -16,7 +16,7 @@
 
 use super::{
     Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_g17,
-    gates_g18, gates_g19, gates_scan, gates_seq, lone, page_batch, remove, sequential,
+    gates_g18, gates_g19, gates_g20, gates_scan, gates_seq, lone, page_batch, remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -296,6 +296,8 @@ pub fn run(ctx: &Ctx) -> Section {
     let mut q8 =
         || job(&[aio, "--rw=read", "--bs=1m", "--iodepth=8"], "read").map(|s| s.bytes_per_s / 1e6);
     let g7 = gates_scan::scan(ctx, &mut q8);
+    // G20: a `Read`-class read stream, alternated with the same fio read.
+    let g20 = gates_g20::stream(ctx, &mut q8);
     // G5: the submitter's QD128 reads alternate with fio's, three times each
     // (CPU accounting on a virtual machine swings between runs). Both sides
     // count their whole process's CPU time (`fio::cpu_job`).
@@ -638,6 +640,32 @@ pub fn run(ctx: &Ctx) -> Section {
             Verdict::Fail
         },
     });
+    // G20: a `Read`-class read stream, at least 90% of fio's best
+    // sequential read (G7's rule: the stream and fio's QD8 read alternated,
+    // medians; fio's QD1 read for reference); the `Background` stream's
+    // figure published beside it.
+    let stream_mb = val(&g20, "mb_per_s");
+    let s8 = val(&g20, "fio_mb_per_s");
+    let sspread = val(&g20, "spread").unwrap_or(0.0);
+    let best_fio20 = s8.zip(q1).map(|(a, b)| a.max(b));
+    rows.push(Row {
+        id: "G20",
+        gate: "Read stream (Read class) at least 90% of fio's best sequential read",
+        measured: format!(
+            "store-io Read stream {} MB/s, fio QD8 {} MB/s (medians of {} alternated runs, spread {:.0}%); fio QD1 {} MB/s; Background stream {} MB/s (published)",
+            f(stream_mb, 0),
+            f(s8, 0),
+            gates_g20::REPS,
+            sspread * 100.0,
+            f(q1, 0),
+            f(val(&g20, "background_mb_per_s"), 0)
+        ),
+        verdict: if best_fio20.is_some() {
+            at_least(stream_mb, best_fio20, 0.9, sspread)
+        } else {
+            Verdict::Fail
+        },
+    });
     // G8: allocations on the hot paths after init.
     // The read loop's count: the largest of its three runs.
     let read_allocs = g5
@@ -905,7 +933,7 @@ pub fn run(ctx: &Ctx) -> Section {
         sec.findings
             .push(format!("{} FAIL: {} ({})", r.id, r.gate, r.measured));
     }
-    let mut pts = vec![g1, clock_point, g2, g7, g8w, g8b, g10];
+    let mut pts = vec![g1, clock_point, g2, g7, g20, g8w, g8b, g10];
     pts.extend(g3d);
     pts.extend(g3s);
     pts.extend(g5);

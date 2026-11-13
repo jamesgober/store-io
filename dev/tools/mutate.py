@@ -190,6 +190,8 @@ STREAM_SRC = "crates/store-io-engine/src/stream.rs"
 STREAM_T = ["-p", "store-io-engine", "--test", "stream"]
 STREAM_RACE_T = ["-p", "store-io-engine", "--test", "stream_race"]
 PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
+# The stream's own unit tests (a stream as one part of a call, V6).
+STREAM_UNIT_T = ["-p", "store-io-engine", "--lib", "stream::"]
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
@@ -1569,7 +1571,7 @@ M = [
  (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget)', '                    rec.is_some_and(|r| r.in_flight() <= budget)', QOS_T),
  (QOS_SRC, '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget)', '                    mine == 0 || rec.is_some_and(|r| r.in_flight() <= budget + 1)', QOS_T),
  (QOS_SRC, '                } else {\n                    mine + leave < cap || mine == 0\n                };', '                } else {\n                    mine + leave <= cap || mine == 0\n                };', QOS_T),
- (QOS_SRC, '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));', '            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now) && false);', QOS_T),
+ (QOS_SRC, '        let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));', '        let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now) && false);', QOS_T),
  (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);', '        let _m = i.in_flight.fetch_sub(0, Ordering::SeqCst);', QOS_T),
  (QOS_SRC, '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);\n        i.wake();', '        let _m = i.in_flight.fetch_sub(1, Ordering::SeqCst);\n        if false {\n            i.wake();\n        }', QOS_T),
  (QOS_SRC, '        if !self.done {\n            self.issuer.end();\n        }', '        if !self.done && false {\n            self.issuer.end();\n        }', QOS_T),
@@ -1716,7 +1718,7 @@ M = [
  (QOS_SRC, '                    mine + leave < cap || mine == 0', '                    mine + leave * 0 < cap || mine == 0', QOS_T),
  (QOS_SRC, '                    mine + leave < cap || mine == 0', '                    mine + leave < cap', QOS_T),
  ("crates/store-io-engine/src/pace.rs", '            leave: 1,\n', '            leave: 0,\n', COPY_UNIT_T),
- ("crates/store-io-engine/src/pace.rs", '        self.issuer.admit_leaving((self.clock)(), self.leave)', '        self.issuer.admit_leaving((self.clock)(), self.leave * 0)', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '            .admit_leaving((self.clock)(), self.leave)', '            .admit_leaving((self.clock)(), self.leave * 0)', PACE_T),
  (TUNE_SRC, '        self.at_floor = reprobe || self.closed % PROBE_EVERY == 0;', '        self.at_floor = reprobe || self.closed % (PROBE_EVERY + 1) == 0;', TUNE_T),
  (TUNE_SRC, '        self.at_floor = reprobe || self.closed % PROBE_EVERY == 0;', '        self.at_floor = (reprobe && false) || self.closed % PROBE_EVERY == 0;', TUNE_T),
  (TUNE_SRC, '                reprobe = prev.is_some_and(|f| over(p99, f, RISE_PCT));', '                reprobe = prev.is_some_and(|f| over(p99, f, RISE_PCT)) && false;', TUNE_T),
@@ -1839,6 +1841,29 @@ M = [
  ('crates/store-io-engine/src/open2.rs', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor;', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor && false;', SLOT_DAMAGE_T),
  ('crates/store-io-engine/src/open2.rs', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor;', '                let damaged = report.clean_close && damaged_copy(status) && !(predecessor && false);', SLOT_DAMAGE_T),
  ('crates/store-io-engine/src/open2.rs', '                let damaged = report.clean_close && damaged_copy(status) && !predecessor;', '                let damaged = (report.clean_close || true) && damaged_copy(status) && !predecessor;', SLOT_DAMAGE_T),
+ ("crates/store-io-engine/src/pace.rs", '        let parts = parts_of(self.key());', '        let parts: Vec<Rc<dyn Collect>> = parts_of(self.key()).into_iter().filter(|_| false).collect();', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '                        if self.issuer.would_admit((self.clock)(), self.leave) {', '                        if self.issuer.would_admit((self.clock)(), self.leave) && false {', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '            if !self.issuer.pacing((self.clock)()).0 {', '            if false {', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '            for p in &parts {\n                p.collect_all()', '            for p in parts.iter().filter(|_| false) {\n                p.collect_all()', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '        if held_of(self.key()) != 0 {', '        if held_of(self.key()) != 0 && false {', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '                        any |= p.collect_one().map_err(|_| ())?;', '                        any |= p.collect_one().unwrap_or(false);', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '        Arc::as_ptr(&self.issuer).cast::<()>() as usize', '        Arc::as_ptr(&self.issuer).cast::<()>() as usize & 0', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '                Some((_, n)) => *n += 1,', '                Some((_, n)) => *n += 0,', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '                h[i].1 = h[i].1.saturating_sub(1);', '                h[i].1 = h[i].1.saturating_sub(0);', PACE_T),
+ ("crates/store-io-engine/src/pace.rs", '        let _c = PARTS.try_with(|p| p.borrow_mut().retain(|(_, i, _)| *i != id));', '        let _c = PARTS.try_with(|p| p.borrow_mut().retain(|(_, i, _)| *i != id || true));', PACE_T),
+ (QOS_SRC, '                mine == 0 || rec.is_some_and(|r| r.in_flight() < r.budget())', '                mine == 0 || rec.is_some_and(|r| r.in_flight() <= r.budget())', PACE_T),
+ (QOS_SRC, '                mine + leave < cap || mine == 0\n            }\n        })', '                mine + leave <= cap || mine == 0\n            }\n        })', PACE_T),
+ (STREAM_SRC, '        match self.try_borrow_mut() {\n            Ok(mut c) => c.collect_for_another(false),\n            Err(_) => Ok(false),\n        }', '        self.borrow_mut().collect_for_another(false)', STREAM_UNIT_T),
+ (STREAM_SRC, '                self.collect_failed = Some((raw, lost));', '                self.collect_failed = Some((raw, lost)).filter(|_| false);', STREAM_UNIT_T),
+ (STREAM_SRC, '                self.wait_failed = Some(raw);\n                for r in', '                self.wait_failed = Some(raw).filter(|_| false);\n                for r in', STREAM_UNIT_T),
+ (STREAM_SRC, '                for r in self.ring.iter_mut().flatten() {\n                    r.charge = None;', '                for r in self.ring.iter_mut().flatten().filter(|_| false) {\n                    r.charge = None;', STREAM_UNIT_T),
+ (STREAM_SRC, '        if let Some((raw, _)) = self.collect_failed {\n            self.finish();', '        if let Some((raw, _)) = self.collect_failed.filter(|_| false) {\n            self.finish();', STREAM_UNIT_T),
+ (STREAM_SRC, '        let _part = pace.map(|p| {', '        let _part = pace.filter(|_| false).map(|p| {', STREAM_UNIT_T),
+ (STREAM_SRC, '        match self.try_borrow_mut() {\n            Ok(mut c) => c.collect_for_another(true).map(|_| ()),', '        match Ok::<_, ()>(self.borrow_mut()) {\n            Ok(mut c) => c.collect_for_another(true).map(|_| ()),', STREAM_UNIT_T),
+ (STREAM_SRC, '        if self.in_flight == 0 {\n            return Ok(false);\n        }\n        let waited', '        if self.in_flight == 0 && false {\n            return Ok(false);\n        }\n        let waited', STREAM_UNIT_T),
+ (STREAM_SRC, '        if let Some((raw, _)) = self.collect_failed {\n            return Err(raw);', '        if let Some((raw, _)) = self.collect_failed.filter(|_| false) {\n            return Err(raw);', STREAM_UNIT_T),
+ (STREAM_SRC, '        if self.finished {\n            return Ok(false);\n        }\n        if let Some', '        if self.finished && false {\n            return Ok(false);\n        }\n        if let Some', STREAM_UNIT_T),
+ ("crates/store-io-engine/src/pace.rs", '                        if self.issuer.would_admit((self.clock)(), self.leave) {', '                        if self.issuer.would_admit((self.clock)(), self.leave * 0) {', PACE_T),
 ]
 
 def kill_stuck_tests():

@@ -38,6 +38,7 @@ use std::sync::{Condvar, Mutex, RwLock};
 use store_io_buf::CachePadded;
 
 use crate::tune::{FLOOR, Tuner};
+use store_io_core::error::OsError;
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 
 use crate::sync::{AtomicBool, AtomicU64, Ordering};
@@ -1062,6 +1063,31 @@ pub(crate) enum Ended {
     Poisoned,
 }
 
+/// A part of a background call that keeps pieces in flight on this thread
+/// (a read stream; V6's file sink): registered under the call's record
+/// ([`Pace::register`](crate::pace::Pace::register)), so another part of
+/// the call on this thread, refused admission because this part holds the
+/// call's pieces, collects them instead of waiting on itself. Each part
+/// keeps its whole collection state in one `RefCell`: a part already
+/// borrowed (the part asking) collects nothing here, having collected its
+/// own before it asked. A part's pieces must be ones its collector can
+/// collect and counted for the record ([`Held`](crate::pace::Held), never
+/// a raw [`Charge`]): the wait is entered only with this thread's count at
+/// zero, so a piece held uncounted would be waited on by its own thread.
+pub(crate) trait Collect {
+    /// Waits for at least one completion of this part's pieces in flight
+    /// (their charges released); whether it had any. A failed wait is
+    /// recorded for the part (sticky: every later call of it fails), its
+    /// pieces' charges dropped.
+    fn collect_one(&self) -> Result<bool, OsError>;
+
+    /// Waits for every piece of this part in flight, as `collect_one`.
+    fn collect_all(&self) -> Result<(), OsError>;
+
+    /// The part's recorded failure and the offset of its first piece lost.
+    fn failed(&self) -> Option<(OsError, u64)>;
+}
+
 /// One background call's record (R5.4: an issuer is a call, not a thread or
 /// a queue): its pieces in flight, shared by every thread of the call.
 pub(crate) struct Issuer {
@@ -1142,6 +1168,37 @@ impl Issuer {
         })
     }
 
+    /// What an admission reads under the group's guard: whether the group
+    /// paces at `now` (pacing on and its commits active), and the call's
+    /// unpaced cap (`background_unpaced`, at least one).
+    fn terms(&self, rec: Option<&Record>, now: u64) -> (bool, u64) {
+        let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));
+        let cap = u64::from(
+            rec.map_or(self.qos.opts.background_unpaced, |r| {
+                r.opts.background_unpaced
+            })
+            .max(1),
+        );
+        (paced, cap)
+    }
+
+    /// Whether [`Self::admit_leaving`] would admit a piece at `now`, taking
+    /// no charge: a part collecting its call's pieces stops once it would
+    /// (a hint: activity may begin before the piece is asked for, which
+    /// is then refused and collects the rest).
+    pub(crate) fn would_admit(self: &Arc<Self>, now: u64, leave: u64) -> bool {
+        self.qos.with_record(|rec| {
+            let (paced, cap) = self.terms(rec, now);
+            let mine = self.in_flight.load(Ordering::SeqCst);
+            if paced {
+                // `admit_leaving`'s `<=` counts its tentative charge.
+                mine == 0 || rec.is_some_and(|r| r.in_flight() < r.budget())
+            } else {
+                mine + leave < cap || mine == 0
+            }
+        })
+    }
+
     /// As [`Self::admit`], leaving `leave` of the call's unpaced pieces to
     /// its other threads (a copy's reader leaves one to the fill sharing
     /// its record, so the reader's read-ahead never refuses the fill).
@@ -1152,13 +1209,7 @@ impl Issuer {
     /// drain rule still lets the fill progress).
     pub(crate) fn admit_leaving(self: &Arc<Self>, now: u64, leave: u64) -> Option<Charge> {
         let admitted = self.qos.with_record(|rec| {
-            let paced = rec.is_some_and(|r| r.opts.pacing && self.qos.active_in(r, now));
-            let cap = u64::from(
-                rec.map_or(self.qos.opts.background_unpaced, |r| {
-                    r.opts.background_unpaced
-                })
-                .max(1),
-            );
+            let (paced, cap) = self.terms(rec, now);
             // The piece is charged to the member first, tentatively, so a
             // thread that sees another's compare-and-swap below also sees its
             // charge in the group's sum (the sum counts this tentative

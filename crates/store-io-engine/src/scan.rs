@@ -45,7 +45,6 @@ use store_io_platform::{IoBuf, IoOp, Platform, Queue, RawResult};
 use crate::exec::{Lane, LaneGuard, Ran, run};
 use crate::io::{ctx_range, not_written};
 use crate::pace::Pace;
-use crate::qos::Charge;
 use crate::store::{LiveRegion, Store};
 
 /// Reads kept in flight by a scan.
@@ -182,7 +181,7 @@ struct Pending {
     done: Option<(RawResult<usize>, Option<IoBuf>)>,
     /// A background scan's charge for the read: released when its
     /// completion is collected (or the scan is abandoned).
-    charge: Option<Charge>,
+    charge: Option<crate::pace::Held>,
 }
 
 fn read_error(raw: OsError, c: ErrorContext) -> Error {

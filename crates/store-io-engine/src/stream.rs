@@ -28,9 +28,11 @@
 //! scratch. A dropped [`Chunk`] gives its buffer back to the stream, or to
 //! the pool once the stream has ended, from any thread.
 
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::ops::Range;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, PoisonError};
 
 #[cfg(loom)]
@@ -47,8 +49,8 @@ use store_io_platform::{IoBuf, IoOp, Platform, RawResult};
 use crate::exec::{Lane, LaneMark, Ran, owned_lane, run};
 use crate::io::{ctx_range, not_written};
 use crate::lifecycle::retired_error;
-use crate::pace::Pace;
-use crate::qos::Charge;
+use crate::pace::{Held, Pace, Registered};
+use crate::qos::Collect;
 use crate::store::{LiveRegion, Store};
 use crate::submitter::MAX_DEPTH;
 use crate::test_hook::{self, Step};
@@ -218,7 +220,7 @@ struct Read {
     done: Option<(RawResult<usize>, Option<IoBuf>)>,
     /// A `Background` stream's charge for the read: released when its
     /// completion is collected (or the stream ends).
-    charge: Option<Charge>,
+    charge: Option<Held>,
 }
 
 /// What a bisected piece comes to, in order: runs of its buffer and the
@@ -277,6 +279,21 @@ pub struct ReadStream<P: Platform>
 where
     P::Queue: Send,
 {
+    /// Its whole state, shared (weakly) with its registration as a
+    /// collector of its call's record: a `Background` stream's reads hold
+    /// the call's charges between `next()` calls, which another part of
+    /// the call on this thread collects instead of waiting on them.
+    core: Rc<RefCell<Core<P>>>,
+    _part: Option<Registered>,
+}
+
+/// A read stream's state, in one cell: a collector borrows it whole, so a
+/// collection leaves its lane, its ring and its count of reads in flight
+/// consistent.
+struct Core<P: Platform>
+where
+    P::Queue: Send,
+{
     // Declared first, so its queue drops (after `Drop::drop` ended the
     // stream) before the store clone, as a `Submitter`'s does.
     /// `None`: an empty stream (no queue, no buffers).
@@ -308,6 +325,9 @@ where
     wait_failed: Option<OsError>,
     /// A bisection's reads, counted once its check holds.
     bisected: (u64, u64),
+    /// A collection for another part failed (sticky): its error and the
+    /// stream offset of the oldest read lost.
+    collect_failed: Option<(OsError, u64)>,
     _thread: PhantomData<*const ()>,
 }
 
@@ -316,12 +336,15 @@ where
     P::Queue: Send,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ReadStream")
-            .field("parts", &self.parts.len())
-            .field("cur", &self.cur)
-            .field("next", &self.next)
-            .field("ended", &self.ended)
-            .finish_non_exhaustive()
+        let mut d = f.debug_struct("ReadStream");
+        if let Ok(c) = self.core.try_borrow() {
+            let _d = d
+                .field("parts", &c.parts.len())
+                .field("cur", &c.cur)
+                .field("next", &c.next)
+                .field("ended", &c.ended);
+        }
+        d.finish_non_exhaustive()
     }
 }
 
@@ -445,7 +468,7 @@ where
                 p.want.end.div_ceil(block) * block,
             )
         });
-        let mut s = ReadStream {
+        let mut s = Core {
             lane: None,
             store: self.clone(),
             parts,
@@ -468,6 +491,7 @@ where
             finished: false,
             wait_failed: None,
             bisected: (0, 0),
+            collect_failed: None,
             _thread: PhantomData,
         };
         // A `Background` stream is a call of its own (R5.4).
@@ -501,7 +525,7 @@ where
             // No queue, no buffers.
             s.ended = true;
             s.finished = true;
-            return Ok(s);
+            return Ok(ReadStream::new(s));
         }
         let (depth, lend, mut bufs) = match explicit {
             Some((depth, lend, n)) => {
@@ -535,7 +559,7 @@ where
         s.lend = lend;
         s.req = req;
         s.pace = pace;
-        Ok(s)
+        Ok(ReadStream::new(s))
     }
 }
 
@@ -543,6 +567,18 @@ impl<P: Platform> ReadStream<P>
 where
     P::Queue: Send,
 {
+    /// The handle over `core`, registered as a collector of its call's
+    /// record when it is paced.
+    fn new(core: Core<P>) -> Self {
+        let pace = core.pace.clone();
+        let core = Rc::new(RefCell::new(core));
+        let _part = pace.map(|p| {
+            let weak: Weak<RefCell<Core<P>>> = Rc::downgrade(&core);
+            p.register(weak)
+        });
+        Self { core, _part }
+    }
+
     /// Stops the stream: nothing more is submitted, the reads in flight are
     /// waited for, and every buffer not lent goes back to the pool at once
     /// (chunks still held go back as they drop).
@@ -551,11 +587,90 @@ where
     ///
     /// `Io` if waiting for the reads in flight failed: their buffers stay
     /// with the queue, dropped with it.
-    pub fn cancel(mut self) -> Result<(), Error> {
-        self.finish();
-        match self.wait_failed.take() {
-            Some(raw) => Err(self.read_error(raw)),
+    pub fn cancel(self) -> Result<(), Error> {
+        let mut c = self.core.borrow_mut();
+        c.finish();
+        match c.wait_failed.take() {
+            Some(raw) => Err(c.read_error(raw)),
             None => Ok(()),
+        }
+    }
+
+    /// The stream's pacing (a `Background` stream's call).
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn pace(&self) -> Option<Pace> {
+        self.core.borrow().pace.clone()
+    }
+}
+
+impl<P: Platform> Collect for RefCell<Core<P>>
+where
+    P::Queue: Send,
+{
+    fn collect_one(&self) -> Result<bool, OsError> {
+        // Borrowed: this stream is the part asking, which collected its
+        // own reads first.
+        match self.try_borrow_mut() {
+            Ok(mut c) => c.collect_for_another(false),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn collect_all(&self) -> Result<(), OsError> {
+        match self.try_borrow_mut() {
+            Ok(mut c) => c.collect_for_another(true).map(|_| ()),
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn failed(&self) -> Option<(OsError, u64)> {
+        self.try_borrow().ok()?.collect_failed
+    }
+}
+
+impl<P: Platform> Core<P>
+where
+    P::Queue: Send,
+{
+    /// Collects reads in flight for another part of the call (one at
+    /// least, or all): whether there were any. A failed wait is recorded
+    /// (sticky: the next `next()` ends the stream with it) and every read's
+    /// charge dropped (the reads stay with the queue, which is never waited
+    /// on again).
+    fn collect_for_another(&mut self, all: bool) -> Result<bool, OsError> {
+        // Ended: it holds nothing (a failure already reported is its own).
+        if self.finished {
+            return Ok(false);
+        }
+        if let Some((raw, _)) = self.collect_failed {
+            return Err(raw);
+        }
+        if self.in_flight == 0 {
+            return Ok(false);
+        }
+        let waited = if all {
+            self.collect_all()
+        } else {
+            self.wait_one()
+        };
+        match waited {
+            Ok(()) => Ok(true),
+            Err(raw) => {
+                let lost = self
+                    .ring
+                    .iter()
+                    .flatten()
+                    .filter(|r| r.done.is_none())
+                    .map(|r| r.start)
+                    .min()
+                    .unwrap_or(self.next);
+                self.collect_failed = Some((raw, lost));
+                self.wait_failed = Some(raw);
+                for r in self.ring.iter_mut().flatten() {
+                    r.charge = None;
+                }
+                Err(raw)
+            }
         }
     }
 
@@ -1131,8 +1246,24 @@ where
     type Item = Result<Chunk, Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.core.borrow_mut().next_item()
+    }
+}
+
+impl<P: Platform> Core<P>
+where
+    P::Queue: Send,
+{
+    /// `Iterator::next`, under the cell's one borrow.
+    fn next_item(&mut self) -> Option<Result<Chunk, Error>> {
         if self.ended {
             return None;
+        }
+        // A collection for another part failed: the reads it lost end the
+        // stream.
+        if let Some((raw, _)) = self.collect_failed {
+            self.finish();
+            return Some(Err(self.read_error(raw)));
         }
         match self.advance() {
             Ok(Some(item)) => Some(item),
@@ -1148,7 +1279,7 @@ where
     }
 }
 
-impl<P: Platform> Drop for ReadStream<P>
+impl<P: Platform> Drop for Core<P>
 where
     P::Queue: Send,
 {
@@ -1179,6 +1310,226 @@ mod tests {
         l.lent = 1;
         assert_eq!(l.give_back(4), Some(4));
         assert_eq!(l.lent, 0);
+    }
+}
+
+/// A stream as one part of a call (V6): another part on its thread
+/// collects its reads, and its own admission skips it while it asks.
+#[cfg(all(test, not(loom)))]
+mod collect_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, unused_results)]
+
+    use std::cell::RefCell;
+    use std::path::Path;
+    use std::rc::Rc;
+
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use super::*;
+    use crate::{AppendRegion, StoreOptions};
+
+    const LEN: usize = 4 << 20;
+
+    /// A store whose commits are quiet and whose calls keep at most four
+    /// pieces in flight unpaced, and a region of `LEN` stamped bytes,
+    /// durable.
+    fn setup(
+        seed: u64,
+    ) -> (
+        SimPlatform,
+        Store<SimPlatform>,
+        AppendRegion<SimPlatform>,
+        Vec<u8>,
+    ) {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let opts = StoreOptions {
+            background_unpaced: 4,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p.clone(), Path::new("/s"), opts).unwrap();
+        let log = s.provision_append_region("log", LEN as u64).unwrap();
+        let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        let t = log.append(&data).unwrap();
+        let _receipt = log.sync_through(&t).unwrap();
+        p.with_world(|w| w.advance_clock_ns(10_000_000_000));
+        assert!(!s.qos().active);
+        (p, s, log, data)
+    }
+
+    /// The stream's next chunk, appended to `out` (checked in order).
+    fn take(stream: &mut ReadStream<SimPlatform>, out: &mut Vec<u8>) {
+        let c = stream.next().unwrap().unwrap();
+        assert_eq!(c.offset() as usize, out.len());
+        out.extend_from_slice(c.bytes());
+    }
+
+    /// Two chunks read, the second's refill left in flight: the stream
+    /// then holds the call's four unpaced pieces.
+    fn holding_the_cap(p: &SimPlatform, stream: &mut ReadStream<SimPlatform>, out: &mut Vec<u8>) {
+        take(stream, out);
+        p.with_world(|w| w.hold_reaps(1));
+        take(stream, out);
+        assert_eq!(stream.pace().unwrap().held_here(), 4, "the call's cap");
+    }
+
+    /// Another part of a stream's call, refused because the stream's reads
+    /// hold the call's cap, collects them on this thread and is admitted;
+    /// the stream then delivers every byte in order.
+    #[test]
+    fn test_another_part_collects_a_stream_s_reads() {
+        let (p, _s, log, data) = setup(70);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let mut out = Vec::new();
+        holding_the_cap(&p, &mut stream, &mut out);
+        let pace = stream.pace().unwrap();
+        let piece = pace.admit().unwrap();
+        assert_eq!(pace.held_here(), 1, "the stream's reads collected");
+        drop(piece);
+        while out.len() < LEN {
+            take(&mut stream, &mut out);
+        }
+        assert!(stream.next().is_none());
+        assert!(out == data);
+    }
+
+    /// Paced, another part refused collects all of the stream's reads.
+    #[test]
+    fn test_a_paced_part_collects_all_of_a_stream_s_reads() {
+        let (p, s, log, data) = setup(73);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let mut out = Vec::new();
+        holding_the_cap(&p, &mut stream, &mut out);
+        let hold = s.commit_hold();
+        let pace = stream.pace().unwrap();
+        let piece = pace.admit().unwrap();
+        assert_eq!(pace.held_here(), 1);
+        drop(piece);
+        drop(hold);
+        p.with_world(|w| w.advance_clock_ns(10_000_000_000));
+        while out.len() < LEN {
+            take(&mut stream, &mut out);
+        }
+        assert!(out == data);
+    }
+
+    /// A stream with nothing in flight is never waited on for another part.
+    #[test]
+    fn test_a_stream_with_nothing_in_flight_is_not_waited_on() {
+        let (p, _s, log, _data) = setup(74);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let mut out = Vec::new();
+        take(&mut stream, &mut out);
+        let pace = stream.pace().unwrap();
+        assert_eq!(pace.held_here(), 0, "the sim's wait completed every read");
+        let held = (0..4).map(|_| pace.try_charge().unwrap()).collect();
+        let other = Rc::new(Other(RefCell::new(held)));
+        let weak: Weak<Other> = Rc::downgrade(&other);
+        let _reg = pace.register(weak);
+        let waits = p.with_world(|w| w.waits());
+        let _piece = pace.admit().unwrap();
+        assert_eq!(p.with_world(|w| w.waits()), waits);
+        assert_eq!(other.0.borrow().len(), 3);
+    }
+
+    /// Another part of a call holding its pieces.
+    struct Other(RefCell<Vec<Held>>);
+
+    impl Collect for Other {
+        fn collect_one(&self) -> Result<bool, OsError> {
+            Ok(self.0.borrow_mut().pop().is_some())
+        }
+
+        fn collect_all(&self) -> Result<(), OsError> {
+            self.0.borrow_mut().clear();
+            Ok(())
+        }
+
+        fn failed(&self) -> Option<(OsError, u64)> {
+            None
+        }
+    }
+
+    /// A stream refused because another part on its thread holds the
+    /// call's cap collects that part's pieces, skipping its own collector
+    /// (its cell is borrowed: it is the part asking), and reads on.
+    #[test]
+    fn test_a_stream_asking_skips_itself_and_collects_the_other_part() {
+        let (_p, _s, log, data) = setup(71);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let pace = stream.pace().unwrap();
+        let held = (0..4).map(|_| pace.try_charge().unwrap()).collect();
+        let other = Rc::new(Other(RefCell::new(held)));
+        let weak: Weak<Other> = Rc::downgrade(&other);
+        let _reg = pace.register(weak);
+        let mut out = Vec::new();
+        while out.len() < LEN {
+            take(&mut stream, &mut out);
+        }
+        assert!(stream.next().is_none());
+        assert!(out == data);
+        assert!(
+            other.0.borrow().len() < 4,
+            "the other part's pieces collected"
+        );
+    }
+
+    /// Paced, a stream asking while another part holds the call's pieces
+    /// collects them all, skipping its own collector, and reads on.
+    #[test]
+    fn test_a_paced_stream_asking_skips_itself_and_collects_the_other_part() {
+        let (_p, s, log, data) = setup(75);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let pace = stream.pace().unwrap();
+        let held = (0..2).map(|_| pace.try_charge().unwrap()).collect();
+        let other = Rc::new(Other(RefCell::new(held)));
+        let weak: Weak<Other> = Rc::downgrade(&other);
+        let _reg = pace.register(weak);
+        let _hold = s.commit_hold();
+        let mut out = Vec::new();
+        while out.len() < LEN {
+            take(&mut stream, &mut out);
+        }
+        assert!(out == data);
+        assert!(other.0.borrow().is_empty());
+    }
+
+    /// A collection for another part whose wait fails: the admission ends,
+    /// the stream's charges are dropped (the reads stay with its queue,
+    /// never waited on again), the failure is recorded, and the stream's
+    /// next call ends it with the error.
+    #[test]
+    fn test_a_failed_collection_ends_the_stream_with_its_error() {
+        let (p, _s, log, _data) = setup(72);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let mut out = Vec::new();
+        holding_the_cap(&p, &mut stream, &mut out);
+        let pace = stream.pace().unwrap();
+        p.with_world(|w| {
+            let next = w.waits() + 1;
+            w.faults_mut().fail_wait = Some((next, 5));
+        });
+        assert!(pace.admit().is_err());
+        assert_eq!(pace.held_here(), 0, "its charges dropped");
+        // Two chunks delivered, two more read: the oldest lost is the fifth.
+        let lost = stream.core.failed().map(|(_, at)| at);
+        assert_eq!(lost, Some(4 * (out.len() as u64 / 2)));
+        let waits = p.with_world(|w| w.waits());
+        // Sticky: another admission fails without waiting again.
+        let again = pace.try_charge().unwrap();
+        let more: Vec<_> = (0..3).map(|_| pace.try_charge().unwrap()).collect();
+        assert!(pace.admit().is_err());
+        assert_eq!(p.with_world(|w| w.waits()), waits);
+        drop((again, more));
+        assert!(matches!(stream.next(), Some(Err(Error::Io { .. }))));
+        assert!(stream.next().is_none());
+        // Ended, it holds nothing: never a failure for the call's others.
+        let held = (0..4).map(|_| pace.try_charge().unwrap()).collect();
+        let other = Rc::new(Other(RefCell::new(held)));
+        let weak: Weak<Other> = Rc::downgrade(&other);
+        let _reg = pace.register(weak);
+        let _piece = pace.admit().unwrap();
+        drop(stream);
+        assert_eq!(p.with_world(|w| w.waits()), waits, "never waited on again");
     }
 }
 

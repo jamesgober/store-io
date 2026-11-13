@@ -63,6 +63,10 @@ pub enum Step {
     /// A read stream's bisection has completed its reads and is about to
     /// check the gate before queueing its items.
     StreamBisected,
+    /// A refused background piece's admission, its call's collectors run
+    /// one completion at a time until a piece would be admitted, about to
+    /// try it again.
+    CollectRetry,
 }
 
 #[cfg(feature = "sim-hooks")]

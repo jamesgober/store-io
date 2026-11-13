@@ -380,6 +380,13 @@
 
 ### Changed
 
+- Platform: **`Platform::free_space` and `Platform::dir_is_empty`**
+  (required methods; a backend outside this repository must add them):
+  the bytes this process may still write to a directory's file system
+  (`fstatvfs` on Linux and macOS, `GetDiskFreeSpaceExW` on Windows, the
+  simulator's capacity less what its files took), and whether a
+  directory holds no entry, for an import's checks before it writes. A
+  conformance scenario covers both on every backend.
 - Engine and facade: **directory mode has a largest object**,
   `Directory::DEFAULT_MAX_OBJECT` (16 MiB), changed per handle with
   `Directory::with_max_object`: a `replace` larger than it is refused

@@ -542,6 +542,20 @@ impl Platform for SimPlatform {
         w.sync_dir(&dir.path)
     }
 
+    // Queries, as `open_dir` without `create`: no step of a power-cut
+    // schedule.
+    fn free_space(&self, dir: &SimDir) -> RawResult<u64> {
+        let w = lock(&self.world);
+        dir.check(&w)?;
+        Ok(w.free_space())
+    }
+
+    fn dir_is_empty(&self, dir: &SimDir) -> RawResult<bool> {
+        let w = lock(&self.world);
+        dir.check(&w)?;
+        w.dir_is_empty(&dir.path)
+    }
+
     fn lock_exclusive(&self, file: &SimFile) -> RawResult<SimLock> {
         // As on Linux, a write lock needs a handle open for writing.
         let mut w = lock(&self.world);

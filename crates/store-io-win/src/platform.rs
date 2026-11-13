@@ -102,6 +102,14 @@ impl Platform for WinPlatform {
         dir.sync()
     }
 
+    fn free_space(&self, dir: &WinDir) -> RawResult<u64> {
+        dir.free_space()
+    }
+
+    fn dir_is_empty(&self, dir: &WinDir) -> RawResult<bool> {
+        dir.is_empty()
+    }
+
     fn lock_exclusive(&self, file: &WinFile) -> RawResult<WinLock> {
         WinLock::take(file, false)
     }

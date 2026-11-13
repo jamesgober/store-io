@@ -29,6 +29,109 @@ pub(crate) fn last_errno() -> OsError {
     errno(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
 }
 
+/// Clears the calling thread's `errno` (a call that reports its end and its
+/// failure both by a null return tells them apart by it).
+fn clear_errno() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: __errno_location returns this thread's errno slot, valid for
+    // the thread's life.
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    #[cfg(target_os = "macos")]
+    // SAFETY: __error returns this thread's errno slot, valid for the
+    // thread's life.
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+/// Bytes free to an unprivileged writer on the file system holding `fd`
+/// (`fstatvfs(2)`: `f_bavail * f_frsize`, saturating).
+#[cfg(target_os = "linux")]
+pub(crate) fn free_space(fd: RawFd) -> RawResult<u64> {
+    let mut st = MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: fstatvfs(2): `fd` is open for the call and `st` is writable
+    // memory of the structure's size, filled on success.
+    if unsafe { libc::fstatvfs(fd, st.as_mut_ptr()) } != 0 {
+        return Err(last_errno());
+    }
+    // SAFETY: the call succeeded, so it filled `st` (and it was zeroed).
+    let st = unsafe { st.assume_init() };
+    Ok(st.f_bavail.saturating_mul(st.f_frsize))
+}
+
+/// Bytes free to an unprivileged writer on the file system holding `fd`
+/// (`fstatfs(2)`: `f_bavail * f_bsize`, saturating; its counts are 64 bits
+/// wide, where `statvfs`'s are truncated to 32 on Darwin).
+#[cfg(target_os = "macos")]
+pub(crate) fn free_space(fd: RawFd) -> RawResult<u64> {
+    let mut st = MaybeUninit::<libc::statfs>::zeroed();
+    // SAFETY: fstatfs(2): `fd` is open for the call and `st` is writable
+    // memory of the structure's size, filled on success.
+    if unsafe { libc::fstatfs(fd, st.as_mut_ptr()) } != 0 {
+        return Err(last_errno());
+    }
+    // SAFETY: the call succeeded, so it filled `st` (and it was zeroed).
+    let st = unsafe { st.assume_init() };
+    Ok(st.f_bavail.saturating_mul(u64::from(st.f_bsize)))
+}
+
+/// Whether the directory `fd` holds no entry but `.` and `..`, read on a
+/// descriptor of its own (`openat(fd, ".")`, closed with its stream), so
+/// `fd`'s offset and life are untouched.
+pub(crate) fn dir_is_empty(fd: RawFd) -> RawResult<bool> {
+    // An open interrupted by a signal is tried again (as the backends' opens
+    // are, a bounded number of times).
+    let mut tries = 0;
+    let own = loop {
+        // SAFETY: openat(2): `fd` is an open directory for the call and the
+        // name is a NUL-terminated literal.
+        let own = unsafe {
+            libc::openat(
+                fd,
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        if own >= 0 {
+            break own;
+        }
+        let e = last_errno();
+        tries += 1;
+        if e.code != libc::EINTR || tries >= 64 {
+            return Err(e);
+        }
+    };
+    // SAFETY: fdopendir(3): `own` is an open directory descriptor nothing
+    // else owns; on success the stream owns it (closedir closes it).
+    let d = unsafe { libc::fdopendir(own) };
+    if d.is_null() {
+        let e = last_errno();
+        // SAFETY: the stream did not take `own`; it is closed once here.
+        let _closed = unsafe { libc::close(own) };
+        return Err(e);
+    }
+    let result = loop {
+        clear_errno();
+        // SAFETY: readdir(3) on the open stream `d`, used by this thread only.
+        let e = unsafe { libc::readdir(d) };
+        if e.is_null() {
+            let raw = last_errno();
+            break if raw.code == 0 { Ok(true) } else { Err(raw) };
+        }
+        // SAFETY: a non-null entry from readdir holds a NUL-terminated
+        // name, valid until the next readdir or closedir on `d`.
+        let name = unsafe { CStr::from_ptr((*e).d_name.as_ptr()) };
+        if name != c"." && name != c".." {
+            break Ok(false);
+        }
+    };
+    // SAFETY: closedir(3) on the stream opened above, once; it closes `own`.
+    let _closed = unsafe { libc::closedir(d) };
+    result
+}
+
 /// Converts a descriptor-returning result into an owned descriptor.
 pub(crate) fn owned(fd: c_long) -> RawResult<OwnedFd> {
     if fd < 0 {

@@ -1106,3 +1106,34 @@ fn test_each_world_is_its_own_identity_scope_and_the_probe_names_its_volume() {
     assert_eq!(ev.fs.device, Some(a.file_identity(&afile).unwrap().volume));
     assert_eq!(ev.fs.device.map(|v| v >> 16), Some(a.identity_scope()));
 }
+
+/// Free space is the capacity less the files a directory entry still
+/// names: it falls as a file grows, and comes back once an unlink is
+/// durable (until the directory is synced, a crash could bring the file
+/// back, so its space still counts).
+#[test]
+fn test_free_space_is_capacity_less_the_files_still_named() {
+    let p = SimPlatform::new(SimConfig::volatile(91));
+    let cap = 1u64 << 20;
+    p.with_world(|w| w.faults_mut().capacity = Some(cap));
+    let dir = p.open_dir(Path::new("/free"), true).unwrap();
+    assert_eq!(p.free_space(&dir).unwrap(), cap);
+    assert!(p.dir_is_empty(&dir).unwrap());
+    let a = FileName::new("a").unwrap();
+    let f = p.create_file(&dir, &a).unwrap();
+    p.allocate(&f, 4096).unwrap();
+    assert_eq!(p.free_space(&dir).unwrap(), cap - 4096);
+    p.sync_dir(&dir).unwrap();
+    p.unlink(&dir, &a).unwrap();
+    assert_eq!(
+        p.free_space(&dir).unwrap(),
+        cap - 4096,
+        "named by the durable entry"
+    );
+    p.sync_dir(&dir).unwrap();
+    assert_eq!(p.free_space(&dir).unwrap(), cap);
+    assert!(p.dir_is_empty(&dir).unwrap());
+    // Without a capacity: unbounded.
+    p.with_world(|w| w.faults_mut().capacity = None);
+    assert_eq!(p.free_space(&dir).unwrap(), u64::MAX);
+}

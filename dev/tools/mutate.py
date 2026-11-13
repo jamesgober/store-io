@@ -197,6 +197,10 @@ PLAN_T = ["-p", "store-io-engine", "--lib", "copy::plan_tests"]
 # The export record's codec (V6b).
 EXPORTINFO = "crates/store-io-format/src/exportinfo.rs"
 EXPORTINFO_T = ["-p", "store-io-format", "--lib", "exportinfo"]
+# The platform conformance suite on the simulator, and on this system (V6c0).
+CONF_SIM_T = ["-p", "store-io-conformance"]
+CONF_NATIVE_T = ["-p", "store-io", "--test", "conformance"]
+SIM_MODEL_T = ["-p", "store-io-sim", "--test", "model"]
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
@@ -1911,6 +1915,15 @@ M = [
  (EXPORTINFO, '    if bytes[8..10] != VERSION.to_le_bytes() {', '    if bytes[8..10] != VERSION.to_le_bytes() && false {', EXPORTINFO_T),
  (EXPORTINFO, '    if len as u64 > max {', '    if len as u64 > max && false {', EXPORTINFO_T),
  (EXPORTINFO, '    check_log2(header.block_log2)?;\n    check_lists(', '    check_lists(', EXPORTINFO_T),
+ ("crates/store-io-sim/src/world.rs", '        Ok(d.entries.is_empty() && !child)', '        Ok(d.entries.is_empty() && !child.then_some(()).is_some_and(|()| false))', CONF_SIM_T),
+ ("crates/store-io-sim/src/world.rs", '        cap.saturating_sub(used)', '        cap.saturating_sub(used.min(0))', SIM_MODEL_T),
+ ("crates/store-io-posix/src/posix.rs", '        if name != c"." && name != c".." {', '        if name != c"." {', CONF_NATIVE_T),
+ ("crates/store-io-posix/src/posix.rs", '            break if raw.code == 0 { Ok(true) } else { Err(raw) };', '            break if raw.code == 0 { Ok(false) } else { Err(raw) };', CONF_NATIVE_T),
+ ("crates/store-io-posix/src/posix.rs", '    Ok(st.f_bavail.saturating_mul(st.f_frsize))', '    Ok(st.f_bavail.saturating_mul(st.f_frsize).min(0))', CONF_NATIVE_T),
+ ("crates/store-io-win/src/dir.rs", "            if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {", "            if name != [u16::from(b'.')] {", CONF_NATIVE_T),
+ ("crates/store-io-win/src/dir.rs", '        Ok(avail)\n    }', '        Ok(avail.min(0))\n    }', CONF_NATIVE_T),
+ ("crates/store-io-sim/src/world.rs", '            .flat_map(|d| d.entries.values().chain(d.durable.values()))', '            .flat_map(|d| d.entries.values().chain(d.durable.values().filter(|_| false)))', SIM_MODEL_T),
+ ("crates/store-io-sim/src/world.rs", '        let Some(cap) = self.cfg.faults.capacity else {\n            return u64::MAX;', '        let Some(cap) = self.cfg.faults.capacity else {\n            return 0;', SIM_MODEL_T),
 ]
 
 def kill_stuck_tests():
@@ -1950,7 +1963,9 @@ def platform_of(f, pkgs):
         return "darwin"
     if f.startswith("crates/store-io-win/"):
         return "win32"
-    if any(k in LINUX_ONLY for k in pkgs):
+    # The POSIX backend's sources compile only there, whichever package's
+    # tests an entry runs (a native suite of the root crate, say).
+    if f.startswith("crates/store-io-posix/") or any(k in LINUX_ONLY for k in pkgs):
         return "linux"
     return None
 

@@ -230,6 +230,10 @@ where
                 rename_unlink_sync,
             ),
             (
+                "a directory reports its emptiness and its file system's free space",
+                dir_empty_and_free_space,
+            ),
+            (
                 "a no-replace rename refuses an existing name and renames to a free one",
                 rename_noreplace,
             ),
@@ -617,6 +621,43 @@ fn read_only_handle<P: Platform>(c: &Ctx<'_, P>) -> Check {
     check!(
         again == Ok(BLOCK) && back.is_some_and(|b| b.as_slice() == pattern(4, BLOCK).as_slice()),
         "the file changed through a read-only handle"
+    );
+    Ok(())
+}
+
+fn dir_empty_and_free_space<P: Platform>(c: &Ctx<'_, P>) -> Check {
+    let dir = c.dir()?;
+    check!(
+        ok(c.p.dir_is_empty(&dir), "dir_is_empty, new")?,
+        "a new directory is not empty"
+    );
+    let free = ok(c.p.free_space(&dir), "free_space")?;
+    check!(
+        free > 0,
+        "no free space on a writable directory's file system"
+    );
+    let f = c.file(&dir, "a", BLOCK as u64)?;
+    check!(
+        !ok(c.p.dir_is_empty(&dir), "dir_is_empty, a file")?,
+        "a directory holding a file is empty"
+    );
+    drop(f);
+    ok(c.p.unlink(&dir, &name("a")?), "unlink")?;
+    check!(
+        ok(c.p.dir_is_empty(&dir), "dir_is_empty, file removed")?,
+        "a directory whose only file was removed is not empty"
+    );
+    let dot = c.file(&dir, ".x", 0)?;
+    check!(
+        !ok(c.p.dir_is_empty(&dir), "dir_is_empty, a dot-file")?,
+        "a directory holding a dot-file is empty"
+    );
+    drop(dot);
+    ok(c.p.unlink(&dir, &name(".x")?), "unlink .x")?;
+    let _sub = ok(c.p.open_dir(&c.path.join("sub"), true), "open_dir sub")?;
+    check!(
+        !ok(c.p.dir_is_empty(&dir), "dir_is_empty, a directory")?,
+        "a directory holding a directory is empty"
     );
     Ok(())
 }

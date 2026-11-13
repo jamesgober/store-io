@@ -910,6 +910,39 @@ impl World {
         Ok(id)
     }
 
+    /// What files may still take: the fault plan's capacity less the bytes
+    /// of the files a directory entry (live or durable) still names, so an
+    /// unlinked file's space counts as free again, as a file system's does
+    /// once its last name and handle are gone (`u64::MAX` without a
+    /// capacity). The capacity fault itself still compares growth since the
+    /// world began (`allocated_bytes`).
+    pub(crate) fn free_space(&self) -> u64 {
+        let Some(cap) = self.cfg.faults.capacity else {
+            return u64::MAX;
+        };
+        let mut named: Vec<FileId> = self
+            .dirs
+            .values()
+            .flat_map(|d| d.entries.values().chain(d.durable.values()))
+            .copied()
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        let used: u64 = named
+            .iter()
+            .filter_map(|id| self.files.get(id))
+            .map(|f| f.visible.len() as u64)
+            .sum();
+        cap.saturating_sub(used)
+    }
+
+    /// Whether `dir` names no file and no directory has it as its parent.
+    pub(crate) fn dir_is_empty(&self, dir: &PathBuf) -> Result<bool, OsError> {
+        let d = self.dirs.get(dir).ok_or(ENOENT)?;
+        let child = self.dirs.keys().any(|k| k.parent() == Some(dir.as_path()));
+        Ok(d.entries.is_empty() && !child)
+    }
+
     pub(crate) fn lookup(&self, dir: &PathBuf, name: &str) -> Result<FileId, OsError> {
         self.dirs
             .get(dir)

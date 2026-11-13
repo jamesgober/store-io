@@ -538,6 +538,33 @@ pub trait Platform: Send + Sync + 'static {
     /// The raw error.
     fn sync_dir(&self, dir: &Self::Dir) -> RawResult<()>;
 
+    /// Bytes this process may still write to the file system holding
+    /// `dir`: the blocks free to an unprivileged writer on Linux
+    /// (`fstatvfs`: `f_bavail * f_frsize`) and macOS (`fstatfs`: `f_bavail *
+    /// f_bsize`, its counts 64 bits wide), user and group quotas not
+    /// counted; `GetDiskFreeSpaceExW`'s bytes available to the caller on
+    /// Windows (its quota counted); in the simulator its capacity less the
+    /// files a directory entry still names. A hint for a check before a
+    /// large write (an import's), never a reservation: another writer may
+    /// take the space meanwhile, and a quota may refuse the write first.
+    ///
+    /// # Errors
+    ///
+    /// The OS error of the query.
+    fn free_space(&self, dir: &Self::Dir) -> RawResult<u64>;
+
+    /// Whether `dir` holds no entry (`.` and `..` aside): no file, no
+    /// directory, nothing else, hidden and system entries counted (so a
+    /// volume's root, which holds `lost+found` or `System Volume
+    /// Information`, is never empty, nor is a folder a file manager wrote
+    /// its `.DS_Store` or `desktop.ini` into). Read through `dir` itself on
+    /// Linux and macOS, by its path on Windows.
+    ///
+    /// # Errors
+    ///
+    /// The OS error of reading the directory.
+    fn dir_is_empty(&self, dir: &Self::Dir) -> RawResult<bool>;
+
     /// A coarse monotonic clock in milliseconds (resolution 1-16 ms) that
     /// never decreases. Cold: read only by queries such as
     /// `oldest_outstanding`, never on the I/O path.

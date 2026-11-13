@@ -8,14 +8,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use store_io_core::errno::is_unsupported;
 use store_io_platform::{FileMode, FileName, RawResult};
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY, ERROR_WRITE_PROTECT,
+    ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY, ERROR_FILE_NOT_FOUND,
+    ERROR_NO_MORE_FILES, ERROR_WRITE_PROTECT, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FileRenameInfoEx, OPEN_EXISTING,
+    FileDispositionInfo, FileDispositionInfoEx, FileRenameInfo, FileRenameInfoEx, FindClose,
+    FindFirstFileW, FindNextFileW, GetDiskFreeSpaceExW, OPEN_EXISTING, WIN32_FIND_DATAW,
 };
 use windows_sys::Win32::System::WindowsProgramming::{
     FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
@@ -101,6 +103,78 @@ impl WinDir {
 
     pub(crate) fn handle(&self) -> &Handle {
         &self.handle
+    }
+
+    /// Bytes the caller may still write to the volume holding the directory
+    /// (`GetDiskFreeSpaceExW`'s `lpFreeBytesAvailableToCaller`: its quota
+    /// counted).
+    pub(crate) fn free_space(&self) -> RawResult<u64> {
+        // With a trailing separator (a UNC share's root needs one).
+        let mut dir = self.path.clone();
+        dir.push("");
+        let path = sys::wide(&dir);
+        let mut avail = 0u64;
+        // SAFETY: GetDiskFreeSpaceExW: `path` is NUL-terminated UTF-16 that
+        // outlives the call; `avail` is writable; the other outputs are
+        // optional and passed null.
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                path.as_ptr(),
+                &raw mut avail,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(sys::last_error());
+        }
+        Ok(avail)
+    }
+
+    /// Whether the directory holds no entry (`.` and `..` aside), listed by
+    /// its path (`FindFirstFileW` on `path\*`).
+    pub(crate) fn is_empty(&self) -> RawResult<bool> {
+        let pattern = sys::wide(&self.path.join("*"));
+        let mut data = core::mem::MaybeUninit::<WIN32_FIND_DATAW>::zeroed();
+        // SAFETY: FindFirstFileW: `pattern` is NUL-terminated UTF-16 that
+        // outlives the call; `data` is writable memory of the structure.
+        let find = unsafe { FindFirstFileW(pattern.as_ptr(), data.as_mut_ptr()) };
+        if find == INVALID_HANDLE_VALUE {
+            let e = sys::last_error();
+            // No match at all: not even `.` (a volume's root has none).
+            return if e.code == ERROR_FILE_NOT_FOUND as i32 {
+                Ok(true)
+            } else {
+                Err(e)
+            };
+        }
+        let result = loop {
+            // SAFETY: the find call above, or FindNextFileW below, succeeded
+            // and filled `data`.
+            let d = unsafe { data.assume_init_ref() };
+            let len = d
+                .cFileName
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(d.cFileName.len());
+            let name = &d.cFileName[..len];
+            if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
+                break Ok(false);
+            }
+            // SAFETY: FindNextFileW on the open search handle `find`, with
+            // `data` writable.
+            if unsafe { FindNextFileW(find, data.as_mut_ptr()) } == 0 {
+                let e = sys::last_error();
+                break if e.code == ERROR_NO_MORE_FILES as i32 {
+                    Ok(true)
+                } else {
+                    Err(e)
+                };
+            }
+        };
+        // SAFETY: FindClose on the search handle opened above, once.
+        let _closed = unsafe { FindClose(find) };
+        result
     }
 
     pub(crate) fn child(&self, name: &FileName) -> PathBuf {

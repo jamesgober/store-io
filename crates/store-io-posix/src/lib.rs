@@ -476,6 +476,14 @@ mod platform {
             dir.sync()
         }
 
+        fn free_space(&self, dir: &PosixDir) -> RawResult<u64> {
+            crate::posix::free_space(dir.raw())
+        }
+
+        fn dir_is_empty(&self, dir: &PosixDir) -> RawResult<bool> {
+            crate::posix::dir_is_empty(dir.raw())
+        }
+
         fn lock_exclusive(&self, file: &PosixFile) -> RawResult<PosixLock> {
             PosixLock::acquire(file, false)
         }

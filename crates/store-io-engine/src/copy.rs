@@ -38,7 +38,8 @@ use crate::pace::Pace;
 use crate::qos::Qos;
 use crate::settle::settle_read;
 
-use crate::store::{CONTAINER, LiveRegion, Store, StoreOptions, io, lock_meta};
+use crate::slot_handle::committed_object;
+use crate::store::{CONTAINER, LiveRegion, Meta, Store, StoreOptions, io, lock_meta};
 use crate::{RegionOptions, ScanItem};
 
 /// The temporary name a copy's target is built under (no live store ever
@@ -131,6 +132,38 @@ pub(crate) struct CopyAttrs {
     pub(crate) fill: FillPattern,
     pub(crate) fill_key: [u8; 16],
     pub(crate) tag: u32,
+}
+
+/// A region's header facts, from a plan's header pass.
+struct HeaderFacts {
+    fill: FillPattern,
+    fill_key: [u8; 16],
+    capped: bool,
+    object: Option<Vec<u8>>,
+}
+
+/// A copy's plan ([`Store::copy_plan`]): every region's facts, in the
+/// store's order, and the volume's.
+pub(crate) struct CopyPlan {
+    facts: Vec<Facts>,
+    omitted: Vec<RegionId>,
+    lost_pages: Vec<u32>,
+    stale_pages: Vec<u32>,
+    verified_up_to: Vec<(String, u64)>,
+    superseded: Vec<String>,
+    block: u64,
+    source_format: u16,
+}
+
+/// A refusal, its region named if it has one.
+fn refused(cause: NotWrittenCause, region: Option<RegionId>) -> Error {
+    Error::NotWritten {
+        cause,
+        ctx: ErrorContext {
+            region,
+            ..ErrorContext::default()
+        },
+    }
 }
 
 /// A source region, as the copy recreates it.
@@ -387,61 +420,16 @@ where
     P::Queue: Send,
 {
     let src = Store::open_readonly(platform.clone(), from, opts.store.clone())?;
-    let report = src.report();
-    let refused = |cause, region| Error::NotWritten {
-        cause,
-        ctx: ErrorContext {
-            region,
-            ..ErrorContext::default()
-        },
-    };
-    let accept = opts.accept_stale_pages;
-    let (mut omitted, mut lost_pages, mut stale_pages) = (Vec::new(), Vec::new(), Vec::new());
-    if accept {
-        // Every entry the open holds space for without serving it: the
-        // unavailable regions and the entries of an unknown kind (format
-        // 2's holds are the whole list; format 1 has only the former).
-        omitted = src.omitted_for_copy();
-        lost_pages.clone_from(&report.metadata.lost_pages);
-        stale_pages.clone_from(&report.metadata.stale_pages);
-    } else {
-        // The source's state now (a read-only open: what its open found).
-        if let Some(u) = src.unavailable_regions().first() {
-            return Err(refused(NotWrittenCause::NotReady, Some(u.id)));
-        }
-        // An entry whose kind or name does not decode (a newer release's)
-        // is a region the copy cannot recreate (the list may be truncated:
-        // any).
-        if let Some(&(p, s)) = report.metadata.invalid_entries.first() {
-            let id = RegionId::from_raw((u64::from(p) << 32) | u64::from(s));
-            return Err(refused(NotWrittenCause::NotReady, Some(id)));
-        }
-        if src.frozen() {
-            return Err(refused(NotWrittenCause::Frozen, None));
-        }
-    }
-    let block = report.block_size;
-    let log2 = block.trailing_zeros() as u8;
-    let source_format = report.format;
-    let regions = src.regions_snapshot();
-    let mut facts = Vec::with_capacity(regions.len());
-    let (mut verified_up_to, mut superseded) = (Vec::new(), Vec::new());
-    for r in &regions {
-        let f = src.facts_for_copy(r, &regions)?;
-        if let Some((_, recorded)) = &f.full {
-            verified_up_to.push((f.name.clone(), *recorded));
-        }
-        if f.superseded {
-            superseded.push(f.name.clone());
-        }
-        if f.object
-            .as_ref()
-            .is_some_and(|o| o.len() > max_object(log2))
-        {
-            return Err(refused(NotWrittenCause::TooLarge, Some(r.id)));
-        }
-        facts.push(f);
-    }
+    let CopyPlan {
+        facts,
+        omitted,
+        lost_pages,
+        stale_pages,
+        verified_up_to,
+        superseded,
+        block,
+        source_format,
+    } = src.copy_plan(opts.accept_stale_pages)?;
     let dir = platform
         .open_dir(to, true)
         .map_err(|raw| io(Op::Create, raw))?;
@@ -568,9 +556,8 @@ where
 {
     /// The entries `copy_store` leaves out (`CopyReport::omitted`): format
     /// 2's holds (every unavailable or unknown-kind entry), else the
-    /// unavailable regions.
-    fn omitted_for_copy(&self) -> Vec<RegionId> {
-        let meta = lock_meta(&self.inner.meta);
+    /// unavailable regions (from the held metadata).
+    fn omitted_for_copy(meta: &Meta) -> Vec<RegionId> {
         match meta.v2.as_deref() {
             Some(v2) => {
                 let mut ids: Vec<RegionId> = v2
@@ -599,10 +586,10 @@ where
     /// confirmed page.
     fn full_copy(
         &self,
+        meta: &Meta,
         r: &LiveRegion,
         regions: &[std::sync::Arc<LiveRegion>],
     ) -> Option<(Vec<(u64, u64)>, u64)> {
-        let meta = lock_meta(&self.inner.meta);
         let v2 = meta.v2.as_deref()?;
         let page = usize::try_from(r.id.get() >> 32).ok()?;
         if v2.pages.get(page)?.standing != Standing::Unconfirmed {
@@ -719,8 +706,7 @@ where
     /// is too (or lost), may hold another region's bytes (D-130): each
     /// such page's newest commit may be given up, one releasing `r`, the
     /// other handing its space to a region it created.
-    fn at_risk(&self, r: &LiveRegion) -> bool {
-        let meta = lock_meta(&self.inner.meta);
+    fn at_risk(meta: &Meta, r: &LiveRegion) -> bool {
         let Some(v2) = meta.v2.as_deref() else {
             return false;
         };
@@ -733,19 +719,24 @@ where
         })
     }
 
-    /// What `copy_store` keeps of region `r` (either format); `regions` is
-    /// every region of the store (a full copy's overlap test).
-    fn facts_for_copy(
-        &self,
-        r: &std::sync::Arc<LiveRegion>,
-        regions: &[std::sync::Arc<LiveRegion>],
-    ) -> Result<Facts, Error> {
+    /// What a region's header gives a plan, read with its header lock alone
+    /// and dropped (the header pass, D-113's order: never under the
+    /// metadata lock): its fill, fill key and capped flag, and a slot's
+    /// committed object. The region's gate is checked after the header is
+    /// read: a recycle or release retires it before it changes the header
+    /// (and swaps the region list's entry only after), so a header read
+    /// with the gate still live is the listed generation's, and one a retire
+    /// may have changed fails `StaleGeneration`, before it is decoded.
+    fn header_facts(&self, r: &LiveRegion) -> Result<HeaderFacts, Error> {
         let inner = &self.inner;
         let header = r
             .header
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        if r.gate.live().is_err() {
+            return Err(refused(NotWrittenCause::StaleGeneration, Some(r.id)));
+        }
         let payload = header.payload.as_deref().unwrap_or(&[]);
         let format_2 = inner.layout.format == FORMAT_2;
         let (fill, fill_key, capped) = if format_2 {
@@ -764,6 +755,54 @@ where
                 .ok_or_else(crate::store::corrupt)?;
             (m.fill, m.fill_key, false)
         };
+        let object = if r.kind == RegionKind::Slot {
+            committed_object(&header, &inner.layout)
+        } else {
+            None
+        };
+        Ok(HeaderFacts {
+            fill,
+            fill_key,
+            capped,
+            object,
+        })
+    }
+
+    /// Region `r`'s tag, from the held metadata's table entry.
+    fn tag_of(meta: &Meta, r: &LiveRegion) -> Result<u32, Error> {
+        match meta.v2.as_deref() {
+            Some(v2) => {
+                let id = r.id.get();
+                v2.pages
+                    .get(usize::try_from(id >> 32).unwrap_or(usize::MAX))
+                    .and_then(|p| {
+                        p.entries
+                            .iter()
+                            .find(|e| e.seq == (id & 0xFFFF_FFFF) as u32)
+                    })
+                    .map(|e| e.tag)
+                    .ok_or_else(crate::store::corrupt)
+            }
+            None => meta
+                .entries
+                .iter()
+                .find(|e| u64::from(e.region_id) == r.id.get())
+                .map(|e| e.tag)
+                .ok_or_else(crate::store::corrupt),
+        }
+    }
+
+    /// What a copy keeps of region `r` (either format): `h` from the header
+    /// pass, the rest from the held metadata; `regions` is every region of
+    /// the store (a full copy's overlap test).
+    fn facts_for_copy(
+        &self,
+        meta: &Meta,
+        r: &std::sync::Arc<LiveRegion>,
+        regions: &[std::sync::Arc<LiveRegion>],
+        h: HeaderFacts,
+    ) -> Result<Facts, Error> {
+        let format_2 = self.inner.layout.format == FORMAT_2;
         // A format-1 slot's header-pair generation counts its commits; a
         // slot is never recycled, so its region generation is 1.
         let generation = if !format_2 && r.kind == RegionKind::Slot {
@@ -771,39 +810,12 @@ where
         } else {
             r.generation.get()
         };
-        let tag = {
-            let meta = lock_meta(&inner.meta);
-            match meta.v2.as_deref() {
-                Some(v2) => {
-                    let id = r.id.get();
-                    v2.pages
-                        .get(usize::try_from(id >> 32).unwrap_or(usize::MAX))
-                        .and_then(|p| {
-                            p.entries
-                                .iter()
-                                .find(|e| e.seq == (id & 0xFFFF_FFFF) as u32)
-                        })
-                        .map(|e| e.tag)
-                        .ok_or_else(crate::store::corrupt)?
-                }
-                None => meta
-                    .entries
-                    .iter()
-                    .find(|e| u64::from(e.region_id) == r.id.get())
-                    .map(|e| e.tag)
-                    .ok_or_else(crate::store::corrupt)?,
-            }
-        };
-        let object = if r.kind == RegionKind::Slot {
-            self.slot(r.name.as_str())?.read()
-        } else {
-            None
-        };
+        let tag = Self::tag_of(meta, r)?;
         // A slot's object is whole as committed: never copied "in full".
         let full = if r.kind == RegionKind::Slot {
             None
         } else {
-            self.full_copy(r, regions)
+            self.full_copy(meta, r, regions)
         };
         let data_size = full
             .as_ref()
@@ -813,17 +825,132 @@ where
             kind: r.kind,
             data_size,
             // A capped region copied in full holds all of it.
-            cap: capped.then(|| r.map.capacity().max(data_size)),
+            cap: h.capped.then(|| r.map.capacity().max(data_size)),
             attrs: CopyAttrs {
                 generation,
-                fill,
-                fill_key,
+                fill: h.fill,
+                fill_key: h.fill_key,
                 tag,
             },
-            object,
+            object: h.object,
             full,
-            superseded: r.superseded || self.at_risk(r),
+            superseded: r.superseded || Self::at_risk(meta, r),
             source: std::sync::Arc::clone(r),
+        })
+    }
+
+    /// A copy's plan of this store (V6's export shares it): every region's
+    /// facts and the volume's, read in D-113's lock order. First the header
+    /// pass, each region's header lock taken alone and dropped; then one
+    /// metadata hold for the region list (its lock under the metadata
+    /// lock, as provisioning takes it), the tags, the full copies, the
+    /// regions at risk, and the unavailable and omitted lists. A region is
+    /// its (id, generation): the hold's list must be the header pass's, or
+    /// the plan fails `NotWritten(StaleGeneration)` naming the first region
+    /// that changed between them (provisioned, released, recycled), never
+    /// retried silently.
+    ///
+    /// # Errors
+    ///
+    /// `StaleGeneration` as above; without `accept`, `NotReady` for an
+    /// unavailable region or an entry that does not decode, `Frozen` for a
+    /// stale or lost page; `TooLarge` for a slot object a format-2 slot
+    /// cannot hold; `Corruption(Metadata)` for a header or entry that does
+    /// not decode.
+    pub(crate) fn copy_plan(&self, accept: bool) -> Result<CopyPlan, Error> {
+        let report = self.report();
+        let block = report.block_size;
+        let log2 = block.trailing_zeros() as u8;
+        let regions = self.regions_snapshot();
+        let mut headers = Vec::with_capacity(regions.len());
+        for r in &regions {
+            headers.push(self.header_facts(r)?);
+        }
+        crate::test_hook::step(crate::test_hook::Step::PlanHeaders);
+        let meta = lock_meta(&self.inner.meta);
+        let held = self.regions_snapshot();
+        let same = |a: &LiveRegion, b: &LiveRegion| a.id == b.id && a.generation == b.generation;
+        if let Some(i) = (0..regions.len().max(held.len()))
+            .find(|&i| !matches!((regions.get(i), held.get(i)), (Some(a), Some(b)) if same(a, b)))
+        {
+            let changed = regions.get(i).or_else(|| held.get(i)).map(|r| r.id);
+            return Err(refused(NotWrittenCause::StaleGeneration, changed));
+        }
+        let (mut omitted, mut lost_pages, mut stale_pages) = (Vec::new(), Vec::new(), Vec::new());
+        if accept {
+            // Every entry the open holds space for without serving it: the
+            // unavailable regions and the entries of an unknown kind (format
+            // 2's holds are the whole list; format 1 has only the former).
+            omitted = Self::omitted_for_copy(&meta);
+            // The pages as they stand now (an accepted rollback since the
+            // open confirmed some).
+            if let Some(v2) = meta.v2.as_deref() {
+                for (i, p) in v2.pages.iter().enumerate() {
+                    match p.standing {
+                        Standing::Unconfirmed => stale_pages.push(i as u32),
+                        Standing::Lost | Standing::Refused => lost_pages.push(i as u32),
+                        Standing::Confirmed => {}
+                    }
+                }
+            }
+        } else {
+            if let Some(u) = meta.unavailable.first() {
+                return Err(refused(NotWrittenCause::NotReady, Some(u.id)));
+            }
+            // An entry whose kind or name does not decode (a newer release's)
+            // is a region the copy cannot recreate (the list may be truncated:
+            // any).
+            // (The open's list, less those given up since: format 2's
+            // holds are the entries as they stand.)
+            let still = |id: u64| {
+                meta.v2
+                    .as_deref()
+                    .is_none_or(|v2| v2.holds.iter().any(|h| h.id() == id))
+            };
+            if let Some(id) = report
+                .metadata
+                .invalid_entries
+                .iter()
+                .map(|&(p, s)| (u64::from(p) << 32) | u64::from(s))
+                .find(|&id| still(id))
+            {
+                return Err(refused(
+                    NotWrittenCause::NotReady,
+                    Some(RegionId::from_raw(id)),
+                ));
+            }
+            if self.frozen() {
+                return Err(refused(NotWrittenCause::Frozen, None));
+            }
+        }
+        let mut facts = Vec::with_capacity(held.len());
+        let (mut verified_up_to, mut superseded) = (Vec::new(), Vec::new());
+        for (r, h) in held.iter().zip(headers) {
+            if h.object
+                .as_ref()
+                .is_some_and(|o| o.len() > max_object(log2))
+            {
+                return Err(refused(NotWrittenCause::TooLarge, Some(r.id)));
+            }
+            let f = self.facts_for_copy(&meta, r, &held, h)?;
+            if let Some((_, recorded)) = &f.full {
+                verified_up_to.push((f.name.clone(), *recorded));
+            }
+            if f.superseded {
+                superseded.push(f.name.clone());
+            }
+            facts.push(f);
+        }
+        drop(meta);
+        Ok(CopyPlan {
+            facts,
+            omitted,
+            lost_pages,
+            stale_pages,
+            verified_up_to,
+            superseded,
+            block,
+            source_format: report.format,
         })
     }
 
@@ -1107,5 +1234,208 @@ mod tests {
             back
         });
         assert!(back == data);
+    }
+}
+
+/// The plan's lock order and its region identity (V6: export plans a live
+/// store, so a region may change between the header pass and the hold).
+#[cfg(all(test, not(loom)))]
+mod plan_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, unused_results)]
+
+    use std::path::Path;
+
+    use store_io_core::error::{Error, NotWrittenCause};
+    use store_io_format::slot::{FORMAT_1, FORMAT_2};
+    use store_io_sim::{SimConfig, SimPlatform};
+
+    use crate::test_hook::{Step, lib_tests};
+    use crate::{Store, StoreOptions};
+
+    type Action = Box<dyn FnOnce() + Send>;
+
+    /// A writable store of `format` with an append region, a page region
+    /// and a committed slot.
+    fn store(seed: u64, format: u16) -> Store<SimPlatform> {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let opts = StoreOptions {
+            container_format: format,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p, Path::new("/s"), opts).unwrap();
+        let _a = s.provision_append_region("a", 1 << 20).unwrap();
+        let _p = s.provision_page_region("p", 1 << 20).unwrap();
+        let slot = s.provision_slot("s").unwrap();
+        let _r = slot.commit(b"object").unwrap();
+        s
+    }
+
+    /// Plans `s` with `act` run between its passes.
+    fn plan_with(s: &Store<SimPlatform>, act: Action) -> Result<super::CopyPlan, Error> {
+        lib_tests::at(Step::PlanHeaders, act);
+        let plan = s.copy_plan(false);
+        lib_tests::clear();
+        plan
+    }
+
+    /// The plan failed `StaleGeneration` naming `name`'s region (as it
+    /// was listed when the test began).
+    fn stale(r: &Result<super::CopyPlan, Error>, id: Option<store_io_core::id::RegionId>) -> bool {
+        matches!(
+            r,
+            Err(Error::NotWritten {
+                cause: NotWrittenCause::StaleGeneration,
+                ctx,
+            }) if ctx.region.is_some() && (id.is_none() || ctx.region == id)
+        )
+    }
+
+    fn id_of(s: &Store<SimPlatform>, name: &str) -> Option<store_io_core::id::RegionId> {
+        s.regions_snapshot()
+            .iter()
+            .find(|r| r.name.as_str() == name)
+            .map(|r| r.id)
+    }
+
+    /// A plan made while a recycle has rewritten its region's header but
+    /// not yet swapped the region list's entry (the list still names the
+    /// old generation) fails `StaleGeneration`, never a plan pairing the
+    /// new header with the old generation. Both formats.
+    #[test]
+    fn test_a_plan_inside_a_recycle_s_window_fails() {
+        for (seed, format) in [(84, FORMAT_1), (85, FORMAT_2)] {
+            let s = store(seed, format);
+            let p_id = id_of(&s, "p");
+            let s2 = s.clone();
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let out = std::sync::Arc::clone(&seen);
+            lib_tests::at(
+                Step::RecycleRewritten,
+                Box::new(move || {
+                    let plan = s2.copy_plan(false);
+                    *out.lock().unwrap() = Some(stale(&plan, p_id));
+                }),
+            );
+            let _q = s.page_region("p").unwrap().recycle().unwrap();
+            lib_tests::clear();
+            assert_eq!(*seen.lock().unwrap(), Some(true), "format {format}");
+            assert!(s.copy_plan(false).is_ok());
+        }
+    }
+
+    /// A region provisioned, released, recycled, or released and
+    /// provisioned again under its name between the header pass and the
+    /// hold fails the plan `StaleGeneration`, the region named; with
+    /// nothing between, the plan holds every region, its slot's object
+    /// from the header pass. Both formats.
+    #[test]
+    fn test_a_region_changed_between_the_passes_fails_the_plan() {
+        for (seed, format) in [(80, FORMAT_1), (81, FORMAT_2)] {
+            let s = store(seed, format);
+            let plan = plan_with(&s, Box::new(|| {})).unwrap();
+            assert_eq!(plan.facts.len(), 3, "format {format}");
+            let slot = plan.facts.iter().find(|f| f.name == "s").unwrap();
+            assert_eq!(slot.object.as_deref(), Some(&b"object"[..]));
+
+            let s2 = s.clone();
+            let r = plan_with(
+                &s,
+                Box::new(move || {
+                    let _n = s2.provision_append_region("new", 1 << 20).unwrap();
+                }),
+            );
+            assert!(
+                stale(&r, None),
+                "provisioned, format {format}: {:?}",
+                r.err()
+            );
+
+            let s2 = s.clone();
+            let r = plan_with(
+                &s,
+                Box::new(move || {
+                    let _q = s2.page_region("p").unwrap().recycle().unwrap();
+                }),
+            );
+            assert!(
+                stale(&r, id_of(&s, "p")),
+                "recycled, format {format}: {:?}",
+                r.err()
+            );
+
+            let a_id = id_of(&s, "a");
+            let s2 = s.clone();
+            let r = plan_with(
+                &s,
+                Box::new(move || {
+                    s2.append_region("a").unwrap().release().unwrap();
+                    let _a = s2.provision_append_region("a", 1 << 20).unwrap();
+                }),
+            );
+            assert!(
+                stale(&r, a_id),
+                "released and again, format {format}: {:?}",
+                r.err()
+            );
+
+            let a_id = id_of(&s, "a");
+            let s2 = s.clone();
+            let r = plan_with(
+                &s,
+                Box::new(move || {
+                    s2.append_region("a").unwrap().release().unwrap();
+                }),
+            );
+            assert!(stale(&r, a_id), "released, format {format}: {:?}", r.err());
+            assert!(s.copy_plan(false).is_ok(), "unchanged since");
+        }
+    }
+
+    /// Plans racing provisioning, growth, recycling and release on another
+    /// thread never deadlock (D-113's order: no header lock under the
+    /// metadata lock) and fail only `StaleGeneration`. Both formats, under
+    /// a watchdog.
+    #[test]
+    fn test_plans_racing_metadata_operations_never_deadlock() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _w = std::thread::spawn(move || {
+            for (seed, format) in [(82, FORMAT_1), (83, FORMAT_2)] {
+                let s = store(seed, format);
+                let s2 = s.clone();
+                let ops = std::thread::spawn(move || {
+                    for i in 0..60u64 {
+                        let name = format!("r{}", i % 4);
+                        if let Ok(r) = s2.provision_page_region(&name, 1 << 16) {
+                            let _g = r.grow(1 << 17);
+                            if i % 2 == 0 {
+                                let _q = r.recycle();
+                            }
+                            let _r = r.release();
+                        }
+                        let _q = s2.page_region("p").and_then(|p| p.recycle());
+                    }
+                });
+                let mut planned = 0;
+                while !ops.is_finished() || planned == 0 {
+                    match s.copy_plan(false) {
+                        Ok(_) => planned += 1,
+                        Err(e) => assert!(
+                            matches!(
+                                e,
+                                Error::NotWritten {
+                                    cause: NotWrittenCause::StaleGeneration,
+                                    ..
+                                }
+                            ),
+                            "format {format}: {e:?}"
+                        ),
+                    }
+                }
+                ops.join().unwrap();
+            }
+            let _sent = tx.send(());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(120))
+            .expect("a plan deadlocked against a metadata operation (or panicked)");
     }
 }

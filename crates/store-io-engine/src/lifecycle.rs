@@ -133,6 +133,7 @@ where
                 return Err(e);
             }
         };
+        crate::test_hook::step(crate::test_hook::Step::RecycleRewritten);
         let header = r
             .header
             .lock()

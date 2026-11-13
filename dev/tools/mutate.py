@@ -192,6 +192,8 @@ STREAM_RACE_T = ["-p", "store-io-engine", "--test", "stream_race"]
 PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
 # The stream's own unit tests (a stream as one part of a call, V6).
 STREAM_UNIT_T = ["-p", "store-io-engine", "--lib", "stream::"]
+# A copy's (and an export's) plan: its region identity and lock order (V6b).
+PLAN_T = ["-p", "store-io-engine", "--lib", "copy::plan_tests"]
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
@@ -838,7 +840,7 @@ M = [
  # only a usable 512 B region makes the store read-only; format 2's
  # space report gives the free bytes
  ('crates/store-io-format/src/meta2.rs', '        if self.capacity > self.span_end - self.span_start {', '        if self.capacity > self.span_end - self.span_start && false {', FORMAT),
- ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // The object follows', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // The object follows', F2R),
+ ('crates/store-io-engine/src/slot_handle.rs', '    if l.format == store_io_format::slot::FORMAT_2 {\n        // The object follows', '    if l.format == store_io_format::slot::FORMAT_2 && false {\n        // The object follows', F2R),
  ('crates/store-io-engine/src/slot_handle.rs', '        if l.format == store_io_format::slot::FORMAT_2 {\n            // After the format-2', '        if l.format == store_io_format::slot::FORMAT_2 && false {\n            // After the format-2', F2R),
  ('crates/store-io-engine/src/open2.rs', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed) {', '            if c.outcome.is_err() || (c.extra.is_some() && page.standing == Standing::Unconfirmed && false) {', F2R),
  ('crates/store-io-engine/src/open2.rs', '        if c.small {', '        if c.small && false {', F2R),
@@ -949,21 +951,21 @@ M = [
  ('crates/store-io-engine/src/directory.rs', "            '\\u{212A}' => 'k',", "            '\\u{212A}' => '\\u{212A}',"),
  (COPY_SRC, "        } else {\n            r.generation.get()\n        };", "        } else {\n            r.generation.get() & 1\n        };", COPYT),
  (COPY_SRC, "let generation = if !format_2 && r.kind == RegionKind::Slot {", "let generation = if !format_2 && r.kind == RegionKind::Slot && false {", COPYT),
- (COPY_SRC, "                fill_key,\n                tag,", "                fill_key: [fill_key[0] ^ 1; 16],\n                tag,", COPYT),
+ (COPY_SRC, '                fill_key: h.fill_key,\n                tag,', '                fill_key: [h.fill_key[0] ^ 1; 16],\n                tag,', COPYT),
  (COPY_SRC, "(m.fill, m.fill_key, false)", "(m.fill, [0; 16], false)", COPYT),
  (COPY_SRC, "                tag,\n            },", "                tag: tag & 0,\n            },", COPYT),
- (COPY_SRC, "cap: capped.then(|| r.map.capacity().max(data_size)),", "cap: capped.then(|| r.map.capacity().max(data_size)).and(None),", COPYT),
+ (COPY_SRC, 'cap: h.capped.then(|| r.map.capacity().max(data_size)),', 'cap: h.capped.then(|| r.map.capacity().max(data_size)).and(None),', COPYT),
  # The copy's one barrier makes a stale page's full copies durable (not
  # written as a fill, D-137), also when the clean close's flush fails.
  (COPY_SRC, "        dst.flush_all_accounted()?;", "", COPYT + ["--test", "copy_stale"]),
  (COPY_SRC, "    match platform.unlink(&dir, &temp) {", "    match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
  (COPY_SRC, "    platform\n        .sync_dir(&dir)\n", "    Ok::<(), store_io_platform::OsError>(())\n", COPYT),
  (COPY_SRC, "let src = Store::open_readonly(platform.clone(), from, opts.store.clone())?;", "let src = Store::open(platform.clone(), from, opts.store.clone())?;", COPYT),
- (COPY_SRC, "if src.frozen() {", "if src.frozen() && false {", COPYT),
- (COPY_SRC, "if let Some(u) = src.unavailable_regions().first() {", "if let Some(u) = src.unavailable_regions().first().filter(|_| false) {", COPYT),
+ (COPY_SRC, 'if self.frozen() {', 'if self.frozen() && false {', COPYT),
+ (COPY_SRC, 'if let Some(u) = meta.unavailable.first() {', 'if let Some(u) = meta.unavailable.first().filter(|_| false) {', COPYT),
  (COPY_SRC, "o.len() > max_object(log2)", "o.len() > max_object(log2) + 100", COPYT),
  (COPY_SRC, "        Ok(_) => Err(Error::AlreadyExists { what: Named::Store }),", "        Ok(_) => Ok(()),", COPYT),
- (COPY_SRC, "if let Some(&(p, s)) = report.metadata.invalid_entries.first() {", "if let Some(&(p, s)) = report.metadata.invalid_entries.first().filter(|_| false) {", COPYT),
+ (COPY_SRC, '                .find(|&id| still(id))', '                .find(|&id| still(id) && false)', COPYT),
  (COPY_SRC, "    let _lock = platform.lock_exclusive(&lock_file).map_err(|raw| {", "    let _lock = platform.lock_exclusive(&lock_file).map_or(Ok(()), |_| Ok(())).map_err(|raw: store_io_platform::OsError| {", COPYT),
  (COPY_SRC, "    match platform.rename_noreplace(&dir, &temp, &final_name, &file) {", "    match platform.rename_replace(&dir, &temp, &final_name, &file) {", COPYT),
  (COPY_SRC, "    holds_store()?;\n    match platform.unlink(&dir, &temp) {", "    drop(_lock);\n    holds_store()?;\n    match platform.unlink(&dir, &temp) {", COPYT),
@@ -1055,8 +1057,8 @@ M = [
  ('crates/store-io-engine/src/slots.rs', "        self.twin || !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", "        !matches!(other, SlotStatus::Valid(_) | SlotStatus::Blank)", F2REP),
  ('crates/store-io-engine/src/open2.rs', "                    stale_extra.push((c.page, c.id, range));", "                    stale_extra.clear();\n                    let _ = range;", F2B),
  # copy_store accept_stale_pages (v0.5 E6 C4).
- (COPY_SRC, "    let accept = opts.accept_stale_pages;", "    let accept = false;", COPYS),
- (COPY_SRC, "    let accept = opts.accept_stale_pages;", "    let accept = true;", COPYT),
+ (COPY_SRC, '    } = src.copy_plan(opts.accept_stale_pages)?;', '    } = src.copy_plan(false)?;', COPYS),
+ (COPY_SRC, '    } = src.copy_plan(opts.accept_stale_pages)?;', '    } = src.copy_plan(true)?;', COPYT),
  (COPY_SRC, "        if v2.pages.get(page)?.standing != Standing::Unconfirmed {", "        if v2.pages.get(page)?.standing == Standing::Lost {", COPYS),
  (COPY_SRC, "            if !others.any(|o| overlaps(extra, o)) {", "            if true || !others.any(|o| overlaps(extra, o)) {", COPYS),
  (COPY_SRC, "            if !others.any(|o| overlaps(extra, o)) {", "            if false && !others.any(|o| overlaps(extra, o)) {", COPYS),
@@ -1073,10 +1075,10 @@ M = [
  (COPY_SRC, "        let full = if r.kind == RegionKind::Slot {", "        let full = if false {", COPYS),
  (COPY_SRC, "            verified_up_to.push((f.name.clone(), *recorded));", "            verified_up_to.truncate(0);\n            let _ = recorded;", COPYS),
  (COPY_SRC, "            superseded.push(f.name.clone());", "            superseded.truncate(0);", COPYS),
- (COPY_SRC, "        omitted = src.omitted_for_copy();", "        omitted.truncate(0);\n        let _ = src.omitted_for_copy();", COPYS),
- (COPY_SRC, "        lost_pages.clone_from(&report.metadata.lost_pages);", "        lost_pages.truncate(0);", COPYS),
- (COPY_SRC, "        stale_pages.clone_from(&report.metadata.stale_pages);", "        stale_pages.truncate(0);", COPYS),
- (COPY_SRC, "            superseded: r.superseded || self.at_risk(r),", "            superseded: r.superseded || (self.at_risk(r) && false),", COPYS),
+ (COPY_SRC, '            omitted = Self::omitted_for_copy(&meta);', '            omitted = Self::omitted_for_copy(&meta).into_iter().filter(|_| false).collect();', COPYS),
+ (COPY_SRC, 'Standing::Lost | Standing::Refused => lost_pages.push(i as u32),', 'Standing::Lost | Standing::Refused => lost_pages.truncate(0),', COPYS),
+ (COPY_SRC, 'Standing::Unconfirmed => stale_pages.push(i as u32),', 'Standing::Unconfirmed => stale_pages.truncate(0),', COPYS),
+ (COPY_SRC, '            superseded: r.superseded || Self::at_risk(meta, r),', '            superseded: r.superseded || (Self::at_risk(meta, r) && false),', COPYS),
  (COPY_SRC, "            (pg.standing == Standing::Unconfirmed || pg.pair.possibly_accepted())", "            (pg.standing == Standing::Unconfirmed || (pg.pair.possibly_accepted() && false))", COPYS),
  (COPY_SRC, "                    i != page && (o.standing", "                    (i != page || true) && (o.standing", COPYS),
  (COPY_SRC, "(o.standing != Standing::Confirmed || o.pair.possibly_accepted())", "(o.standing != Standing::Confirmed || (o.pair.possibly_accepted() && false))", COPYS),
@@ -1864,6 +1866,10 @@ M = [
  (STREAM_SRC, '        if let Some((raw, _)) = self.collect_failed {\n            return Err(raw);', '        if let Some((raw, _)) = self.collect_failed.filter(|_| false) {\n            return Err(raw);', STREAM_UNIT_T),
  (STREAM_SRC, '        if self.finished {\n            return Ok(false);\n        }\n        if let Some', '        if self.finished && false {\n            return Ok(false);\n        }\n        if let Some', STREAM_UNIT_T),
  ("crates/store-io-engine/src/pace.rs", '                        if self.issuer.would_admit((self.clock)(), self.leave) {', '                        if self.issuer.would_admit((self.clock)(), self.leave * 0) {', PACE_T),
+ ("crates/store-io-engine/src/copy.rs", '        let same = |a: &LiveRegion, b: &LiveRegion| a.id == b.id && a.generation == b.generation;', '        let same = |a: &LiveRegion, b: &LiveRegion| a.id == b.id;', PLAN_T),
+ ("crates/store-io-engine/src/copy.rs", '        if let Some(i) = (0..regions.len().max(held.len()))', '        if let Some(i) = (0..regions.len().max(held.len())).filter(|_| false)', PLAN_T),
+ ("crates/store-io-engine/src/copy.rs", '        if let Some(i) = (0..regions.len().max(held.len()))', '        if let Some(i) = (0..regions.len().min(held.len()))', PLAN_T),
+ ("crates/store-io-engine/src/copy.rs", '        if r.gate.live().is_err() {\n            return Err(refused(NotWrittenCause::StaleGeneration, Some(r.id)));', '        if r.gate.live().is_err() && false {\n            return Err(refused(NotWrittenCause::StaleGeneration, Some(r.id)));', PLAN_T),
 ]
 
 def kill_stuck_tests():

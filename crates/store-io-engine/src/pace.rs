@@ -596,23 +596,8 @@ mod tests {
         });
     }
 
-    /// The thread the injected commit is for, and the store it holds.
-    static INJECT: Mutex<Option<(std::thread::ThreadId, Store<SimPlatform>)>> = Mutex::new(None);
+    /// Commit holds a test's injected commit keeps.
     static HOLDS: Mutex<Vec<crate::CommitHold>> = Mutex::new(Vec::new());
-
-    fn inject(step: crate::test_hook::Step) {
-        if step != crate::test_hook::Step::CollectRetry {
-            return;
-        }
-        let mut i = INJECT.lock().unwrap();
-        if i.as_ref()
-            .is_some_and(|(t, _)| *t == std::thread::current().id())
-        {
-            if let Some((_, s)) = i.take() {
-                HOLDS.lock().unwrap().push(s.commit_hold());
-            }
-        }
-    }
 
     /// The group turns paced between the collection that would admit a
     /// piece and the retry: the retry is refused, every piece of the call
@@ -624,10 +609,13 @@ mod tests {
         within(|| {
             let (_p, s, pace) = quiet(62);
             let (fake, _reg) = Fake::holding(&pace, 8);
-            *INJECT.lock().unwrap() = Some((std::thread::current().id(), s.clone()));
-            crate::test_hook::install(Some(inject));
+            let s2 = s.clone();
+            crate::test_hook::lib_tests::at(
+                crate::test_hook::Step::CollectRetry,
+                Box::new(move || HOLDS.lock().unwrap().push(s2.commit_hold())),
+            );
             let piece = pace.admit();
-            crate::test_hook::install(None);
+            crate::test_hook::lib_tests::clear();
             assert!(s.qos().active, "the commit came");
             let _piece = piece.unwrap();
             let st = fake.state();

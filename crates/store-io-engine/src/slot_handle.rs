@@ -84,26 +84,7 @@ where
             .header
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (_, info) = h.report.winner_info()?;
-        if info.generation <= 1 {
-            return None;
-        }
-        let l = &self.store.inner.layout;
-        if l.format == store_io_format::slot::FORMAT_2 {
-            // The object follows the header's fixed part, `object_len` long.
-            // A slot region lists no extents, so the file length bounds
-            // nothing here (and the metadata lock is not taken under the
-            // header's: release takes them the other way round).
-            let payload = h.payload.as_deref()?;
-            let view =
-                store_io_format::meta2::decode_region_header(payload, l.log2_block, u64::MAX)
-                    .ok()?;
-            return Some(view.object().to_vec());
-        }
-        h.payload
-            .as_ref()
-            .and_then(|p| p.get(REGION_META_LEN..))
-            .map(<[u8]>::to_vec)
+        committed_object(&h, &self.store.inner.layout)
     }
 
     /// Commits a new version of the object.
@@ -232,4 +213,29 @@ fn format2_payload(
         .map_err(|_| metadata(c))?;
     out.truncate(n);
     Ok(out)
+}
+
+/// A slot's committed object from its header pair as read, or `None` if
+/// never committed (generation 1 is the provisioning header). Read under
+/// the header's lock, or from a clone of the header (a copy's plan), never
+/// with the metadata lock taken under the header's: release takes them the
+/// other way round.
+pub(crate) fn committed_object(h: &PairRead, l: &crate::layout::Layout) -> Option<Vec<u8>> {
+    let (_, info) = h.report.winner_info()?;
+    if info.generation <= 1 {
+        return None;
+    }
+    if l.format == store_io_format::slot::FORMAT_2 {
+        // The object follows the header's fixed part, `object_len` long.
+        // A slot region lists no extents, so the file length bounds
+        // nothing here.
+        let payload = h.payload.as_deref()?;
+        let view =
+            store_io_format::meta2::decode_region_header(payload, l.log2_block, u64::MAX).ok()?;
+        return Some(view.object().to_vec());
+    }
+    h.payload
+        .as_ref()
+        .and_then(|p| p.get(REGION_META_LEN..))
+        .map(<[u8]>::to_vec)
 }

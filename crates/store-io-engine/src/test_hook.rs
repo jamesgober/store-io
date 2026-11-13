@@ -67,6 +67,13 @@ pub enum Step {
     /// one completion at a time until a piece would be admitted, about to
     /// try it again.
     CollectRetry,
+    /// A recycle has rewritten its region's header (the gate retired) and
+    /// is about to swap the region list's entry for the new generation (it
+    /// holds no lock).
+    RecycleRewritten,
+    /// A copy's or an export's plan has read every region's header, each
+    /// lock taken alone, and is about to take the metadata lock.
+    PlanHeaders,
 }
 
 #[cfg(feature = "sim-hooks")]
@@ -167,4 +174,50 @@ pub(crate) fn step(s: Step) {
     }
     #[cfg(not(feature = "sim-hooks"))]
     let _unused = s;
+}
+
+/// One hook for the engine's own unit tests, which share a process: each
+/// test queues an action for its own thread at a step ([`lib_tests::at`]),
+/// so tests running in parallel never replace each other's hook.
+#[cfg(all(test, not(loom), feature = "sim-hooks"))]
+pub(crate) mod lib_tests {
+    use std::sync::{Mutex, PoisonError};
+    use std::thread::ThreadId;
+
+    use super::Step;
+
+    type Action = Box<dyn FnOnce() + Send>;
+
+    static PENDING: Mutex<Vec<(Step, ThreadId, Action)>> = Mutex::new(Vec::new());
+
+    /// Runs `act` on this thread at its next `step` (once).
+    pub(crate) fn at(step: Step, act: Action) {
+        PENDING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((step, std::thread::current().id(), act));
+        super::install(Some(dispatch));
+    }
+
+    /// Drops this thread's actions not yet run.
+    pub(crate) fn clear() {
+        let me = std::thread::current().id();
+        PENDING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|(_, t, _)| *t != me);
+    }
+
+    fn dispatch(step: Step) {
+        let me = std::thread::current().id();
+        let act = {
+            let mut p = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+            p.iter()
+                .position(|(s, t, _)| *s == step && *t == me)
+                .map(|i| p.remove(i).2)
+        };
+        if let Some(act) = act {
+            act();
+        }
+    }
 }

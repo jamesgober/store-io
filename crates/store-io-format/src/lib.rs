@@ -18,6 +18,7 @@
 
 pub mod codec;
 pub mod crc32c;
+pub mod exportinfo;
 pub mod fill;
 pub mod footprint;
 pub mod judge;

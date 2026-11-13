@@ -80,6 +80,13 @@ doc   = false
 bench = false
 
 [[bin]]
+name  = "export_info"
+path  = "fuzz_targets/export_info.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
 name  = "probe_linux"
 path  = "fuzz_targets/probe_linux.rs"
 test  = false

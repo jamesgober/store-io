@@ -194,6 +194,9 @@ PACE_T = ["-p", "store-io-engine", "--lib", "pace::"]
 STREAM_UNIT_T = ["-p", "store-io-engine", "--lib", "stream::"]
 # A copy's (and an export's) plan: its region identity and lock order (V6b).
 PLAN_T = ["-p", "store-io-engine", "--lib", "copy::plan_tests"]
+# The export record's codec (V6b).
+EXPORTINFO = "crates/store-io-format/src/exportinfo.rs"
+EXPORTINFO_T = ["-p", "store-io-format", "--lib", "exportinfo"]
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
@@ -1870,6 +1873,44 @@ M = [
  ("crates/store-io-engine/src/copy.rs", '        if let Some(i) = (0..regions.len().max(held.len()))', '        if let Some(i) = (0..regions.len().max(held.len())).filter(|_| false)', PLAN_T),
  ("crates/store-io-engine/src/copy.rs", '        if let Some(i) = (0..regions.len().max(held.len()))', '        if let Some(i) = (0..regions.len().min(held.len()))', PLAN_T),
  ("crates/store-io-engine/src/copy.rs", '        if r.gate.live().is_err() {\n            return Err(refused(NotWrittenCause::StaleGeneration, Some(r.id)));', '        if r.gate.live().is_err() && false {\n            return Err(refused(NotWrittenCause::StaleGeneration, Some(r.id)));', PLAN_T),
+ (EXPORTINFO, '    if crc32c(body) != u32_at(crc, 0) {', '    if crc32c(body) != u32_at(crc, 0) && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if r.remaining() != 0 {', '    if r.remaining() != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if bytes.len() as u64 > max {', '    if bytes.len() as u64 > max && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if flags & !FLAG_WRITABLE != 0 {', '        if flags & !FLAG_WRITABLE != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if (LOG2_MIN..=LOG2_MAX).contains(&log2) {', '    if (LOG2_MIN..=LOG2_MAX).contains(&log2) || true {', EXPORTINFO_T),
+ (EXPORTINFO, '        if r.array::<3>()? != [0; 3] {', '        if r.array::<3>()? != [0; 3] && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if r.array::<16>()? != [0; 16] {', '        if r.array::<16>()? != [0; 16] && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if flags & !R_KNOWN != 0 {', '        if flags & !R_KNOWN != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if r.u32()? != 0 {', '        if r.u32()? != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if r.array::<32>()? != [0; 32] {', '        if r.array::<32>()? != [0; 32] && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if flags & R_CAPPED == 0 && cap != 0 {', '        if flags & R_CAPPED == 0 && cap != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if flags & R_DURABLE == 0 && durable != 0 {', '        if flags & R_DURABLE == 0 && durable != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        let _crcs = items(&mut r, spans, 4)?;', '        let _crcs = items(&mut r, spans.min(0), 4)?;', EXPORTINFO_T),
+ (EXPORTINFO, '            RegionName::from_padded(padded(item)).map_err(|_| InfoError::Field("verified"))?;', '            RegionName::from_padded(padded(item)).ok();', EXPORTINFO_T),
+ (EXPORTINFO, '        if spans.len() as u64 != rec.spans() {', '        if spans.len() as u64 != rec.spans() && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    let omitted = items(&mut r, header.omitted_count, 8)?;', '    let omitted = items(&mut r, header.omitted_count, 4)?;', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.generation == 0 {', '        if self.generation == 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.cap.is_some_and(|c| c < self.data_size) {', '        if self.cap.is_some_and(|c| c < self.data_size && false) {', EXPORTINFO_T),
+ (EXPORTINFO, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.full_copy || d > self.data_size {', EXPORTINFO_T),
+ (EXPORTINFO, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.kind != RegionKind::Append || d > self.data_size {', EXPORTINFO_T),
+ (EXPORTINFO, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size.max(d) {', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.object_len != 0 && !slot {', '        if self.object_len != 0 && !slot && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.full_copy && slot {', '        if self.full_copy && slot && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.stream_len != stream {', '        if self.stream_len != stream && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if bytes.len() != RECORD_LEN {', '        if bytes.len() < RECORD_LEN {', EXPORTINFO_T),
+ (EXPORTINFO, '        rec.check()?;\n        Ok(rec)', '        Ok(rec)', EXPORTINFO_T),
+ (EXPORTINFO, '        rec.check()?;\n        if spans.len()', '        if spans.len()', EXPORTINFO_T),
+ (EXPORTINFO, '        if x <= prev {', '        if x < prev {', EXPORTINFO_T),
+ (EXPORTINFO, '    if !ascending(omitted) {', '    if !ascending(omitted) && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if !ascending(lost.clone()) {', '    if !ascending(lost.clone()) && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if !ascending(stale.clone()) {', '    if !ascending(stale.clone()) && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if l.peek() == Some(&s) {', '        if l.peek() == Some(&s) && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if !ascending(verified) {', '    if !ascending(verified) && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if bytes.len() < HEADER_LEN + 4 {', '    if bytes.len() < HEADER_LEN + 4 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if bytes[..8] != MAGIC {', '    if bytes[..8] != MAGIC && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if bytes[8..10] != VERSION.to_le_bytes() {', '    if bytes[8..10] != VERSION.to_le_bytes() && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    if len as u64 > max {', '    if len as u64 > max && false {', EXPORTINFO_T),
+ (EXPORTINFO, '    check_log2(header.block_log2)?;\n    check_lists(', '    check_lists(', EXPORTINFO_T),
 ]
 
 def kill_stuck_tests():

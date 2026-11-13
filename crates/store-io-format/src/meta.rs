@@ -264,6 +264,12 @@ impl RegionName {
         core::str::from_utf8(&self.bytes[..usize::from(self.len)]).unwrap_or("")
     }
 
+    /// The name's bytes, zero padded to [`NAME_MAX`] (as the formats store it).
+    #[must_use]
+    pub fn as_padded(&self) -> [u8; NAME_MAX] {
+        self.bytes
+    }
+
     pub(crate) fn from_padded(raw: [u8; NAME_MAX]) -> Result<Self, MetaError> {
         let len = raw.iter().position(|&b| b == 0).unwrap_or(NAME_MAX);
         if len == 0 || raw[len..].iter().any(|&b| b != 0) {

@@ -361,6 +361,22 @@
   refused `Paced` and resubmitted): no futex call and no timed wait on its
   submit, reap or wait in either, nor in the commit-class window with an
   idle background `Submitter` registered.
+- Format: **the export record** (`store_io_format::exportinfo`, R5.6):
+  the codec of `regions.info`, the record a file export (0.6) writes
+  beside its data files: the source's block size, whether it was
+  exported from a writable open, the most bytes a restore needs, the
+  volume's facts (omitted entries, lost and stale table pages, regions
+  copied in full and how far each was verified), and per region every
+  attribute a restore recreates with one CRC-32C per 1 MiB of its data
+  file. `decode` tells a foreign file or another version apart, checks
+  the CRC-32C over the whole record before any other field, bounds every
+  count by the bytes left, requires each list in ascending order and each
+  region record's fields to agree with its kind, refuses a record over
+  1 GiB, and allocates nothing (a view, its lists read in place); a
+  record it accepts has one encoding, and `encode` writes only records
+  `decode` accepts.
+  `RegionName::as_padded` is new. Layout: FORMAT.md Part III; fuzz
+  target `export_info`.
 
 ### Changed
 

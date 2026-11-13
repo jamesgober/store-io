@@ -134,4 +134,54 @@ struct.pack_into("<II", pd, 8 + 16, 40, 16)
 write("probe_windows", "protocol-data", bytes([2]) + bytes(pd))
 write("probe_windows", "disk-extents", bytes([5]) + struct.pack("<IIIqq", 1, 0, 2, 0, 1 << 30))
 
+# export_info: the export record (docs/FORMAT.md, "Export record"): a
+# header, every list, and an append, a page and a slot region with their
+# span CRCs, then the CRC of it all.
+SPAN = 1 << 20
+
+
+def info_header(writable, log2, regions, lend, total, counts):
+    h = bytearray(64)
+    h[0:8] = b"SIOXINFO"
+    struct.pack_into("<HHB", h, 8, 1, 1 if writable else 0, log2)
+    struct.pack_into("<IIQ", h, 16, regions, lend, total)
+    struct.pack_into("<IIII", h, 32, *counts)
+    return bytes(h)
+
+
+def info_record(name, kind, fill, flags, tag, gen, cap, data_size, durable, object_len, stream_len):
+    r = bytearray(128)
+    r[0:len(name)] = name
+    struct.pack_into("<BBHIQQ", r, 24, kind, fill, flags, tag, gen, cap)
+    r[48:64] = bytes([7] * 16)
+    struct.pack_into("<QQI", r, 64, data_size, durable, object_len)
+    struct.pack_into("<Q", r, 88, stream_len)
+    return bytes(r)
+
+
+def spans(n):
+    return b"".join(struct.pack("<I", 0x1000 + i) for i in range((n + SPAN - 1) // SPAN))
+
+
+def info(writable, items, omitted=(), lost=(), stale=(), verified=()):
+    body = info_header(writable, 12, len(items), 5, 1 << 30,
+                       (len(omitted), len(lost), len(stale), len(verified)))
+    body += b"".join(struct.pack("<Q", x) for x in omitted)
+    body += b"".join(struct.pack("<I", x) for x in lost)
+    body += b"".join(struct.pack("<I", x) for x in stale)
+    body += b"".join(n.ljust(24, b"\0") + struct.pack("<Q", v) for n, v in verified)
+    for rec, n in items:
+        body += rec + spans(n)
+    return body + struct.pack("<I", crc32c(body))
+
+
+log_len = 3 * SPAN + 5
+items = [
+    (info_record(b"log", 1, 1, 0b11, 42, 3, 1 << 30, 4 * SPAN, log_len, 0, log_len), log_len),
+    (info_record(b"pages", 2, 0, 0b1100, 0, 1, 0, 2 * SPAN, 0, 0, 2 * SPAN), 2 * SPAN),
+    (info_record(b"obj", 3, 1, 0, 0, 1, 0, 0, 0, 6, 6), 6),
+]
+write("export_info", "three-regions", info(True, items, (9,), (3,), (1, 2), ((b"pages", 77),)))
+write("export_info", "empty", info(False, []))
+
 print("seeds written")

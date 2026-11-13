@@ -54,6 +54,10 @@
 
 - [F1. Conventions](#f1-conventions) &middot; [F2. Container layout](#f2-container-layout) &middot; [F3. The slot](#f3-the-slot) &middot; [F4. Validating a slot](#f4-validating-a-slot) &middot; [F5. Choosing the winner of a pair](#f5-choosing-the-winner-of-a-pair) &middot; [F6. The volume record](#f6-the-volume-record-object-0) &middot; [F7. The region table](#f7-the-region-table-object-1) &middot; [F8. Region headers and slot objects](#f8-region-headers-and-slot-objects) &middot; [F9. The keyed fill pattern](#f9-the-keyed-fill-pattern) &middot; [F10. Reading a container](#f10-reading-a-container) &middot; [F11. Region placement and space reuse](#f11-region-placement-and-space-reuse) &middot; [F12. Versioning and feature flags](#f12-versioning-and-feature-flags) &middot; [F13. Crash consistency of each change](#f13-crash-consistency-of-each-change) &middot; [F14. What store-io does not check](#f14-what-store-io-does-not-check)
 
+**Part III: The export record**
+
+- [E1. Layout](#e1-layout) &middot; [E2. Header](#e2-header-64-bytes) &middot; [E3. Region record](#e3-region-record-128-bytes) &middot; [E4. Decoding](#e4-decoding)
+
 ---
 
 # Part I: Container format 2
@@ -1478,6 +1482,93 @@ A reader that wants to be stricter than store-io can add these checks; store-io 
 - That a region header's `data_offset`, `data_size` and `fill` agree with its table entry; only `region_id`, `kind` and the Ready state are compared.
 - `owner_generation` in slot headers: it is recorded, never used to accept or refuse a slot.
 - The generation-gap and chain-break anomalies of a pair (computed, not acted on).
+
+---
+
+# Part III: The export record (`regions.info`)
+
+A file export (`FileSink`, from 0.6) writes a directory: one data file per exported region, holding the region's bytes as exported, and `regions.info`, the record described here, which says what each data file is and how to restore it. `FileSource` reads the record back for `import`. The record is not part of a container and is never read by an open.
+
+## E1. Layout
+
+Integers are little-endian. The record is, in order:
+
+| Part | Size | Content |
+|---|---|---|
+| header | 64 | E2 |
+| omitted | `omitted_count` &times; 8 | u64 region ids of the entries the export left out (unavailable, or of a kind this version does not know), strictly ascending |
+| lost | `lost_count` &times; 4 | u32 indices of the source's lost table pages, strictly ascending |
+| stale | `stale_count` &times; 4 | u32 indices of its stale table pages, strictly ascending, none of them lost |
+| verified | `verified_count` &times; 32 | per region copied in full: its name (24 bytes, zero padded, section 11's rules) and a u64, the length its data was verified to; names strictly ascending (by their padded bytes) |
+| regions | per region: 128, then its spans | E3, each record followed by its span CRCs |
+| crc | 4 | u32 CRC-32C (section 1) of every byte before it |
+
+## E2. Header (64 bytes)
+
+| Offset | Size | Type | Field | Meaning |
+|---|---|---|---|---|
+| 0 | 8 | bytes | `magic` | `SIOXINFO` |
+| 8 | 2 | u16 | `version` | `1` |
+| 10 | 2 | u16 | `flags` | bit 0 (`0x0001`): exported from a writable open (its regions read while in use); every other bit must be `0` |
+| 12 | 1 | u8 | `block_log2` | The source's block size as a power of two, `9` to `16` |
+| 13 | 3 | bytes | reserved | must be `0` |
+| 16 | 4 | u32 | `region_count` | Region records that follow |
+| 20 | 4 | u32 | `lend` | Chunks the export lent its sink at once |
+| 24 | 8 | u64 | `total` | The most bytes a restore needs (an upper bound) |
+| 32 | 4 | u32 | `omitted_count` | |
+| 36 | 4 | u32 | `lost_count` | |
+| 40 | 4 | u32 | `stale_count` | |
+| 44 | 4 | u32 | `verified_count` | |
+| 48 | 16 | bytes | reserved | must be `0` |
+
+## E3. Region record (128 bytes)
+
+| Offset | Size | Type | Field | Meaning |
+|---|---|---|---|---|
+| 0 | 24 | bytes | `name` | The region name, zero padded (section 11) |
+| 24 | 1 | u8 | `kind` | `1` append, `2` page, `3` slot |
+| 25 | 1 | u8 | `fill` | `0` zeros, `1` keyed pattern version 1 (section 12) |
+| 26 | 2 | u16 | `flags` | below; every other bit must be `0` |
+| 28 | 4 | u32 | `tag` | Its space-accounting tag |
+| 32 | 8 | u64 | `generation` | Its region generation (a format-1 slot's: `1`); never `0` |
+| 40 | 8 | u64 | `cap` | Its growth cap, at least `data_size`; `0` unless `capped` |
+| 48 | 16 | bytes | `fill_key` | Its fill key |
+| 64 | 8 | u64 | `data_size` | Its data size when the export planned it |
+| 72 | 8 | u64 | `durable_len` | An append region's durable length as exported, at most `data_size`; `0` unless `durable` |
+| 80 | 4 | u32 | `object_len` | A slot's committed object's length; `0` for another kind |
+| 84 | 4 | bytes | reserved | must be `0` |
+| 88 | 8 | u64 | `stream_len` | The length of its data file: a slot's `object_len`; an append region's `durable_len` when `durable` is set; else `data_size` |
+| 96 | 32 | bytes | reserved | must be `0` in version 1 |
+
+| `flags` bit | Name | Meaning |
+|---|---|---|
+| 0 (`0x0001`) | capped | `cap` holds its growth cap |
+| 1 (`0x0002`) | durable | `durable_len` holds an append region's durable length (clear: exported unpositioned, as read, its stream its `data_size`); only for an append region not copied in full |
+| 2 (`0x0004`) | full copy | A region of a stale page, copied over its whole capacity; never a slot |
+| 3 (`0x0008`) | superseded | Possibly superseded: its source held it read-only |
+
+The record is followed by its span CRCs: one u32 CRC-32C per 1 MiB (2^20 bytes) of its data file, in order, the last covering what is left: `ceil(stream_len / 2^20)` of them, none for an empty file. A reader checks each span of a data file against its CRC as it reads it, whatever its read sizes.
+
+## E4. Decoding
+
+A reader takes nothing on trust:
+
+1. It refuses a file longer than 1 GiB before reading it, and one shorter than the header and the CRC.
+2. It checks the magic and the version (a foreign file, or another version whose framing it does not know, is named as such), then the CRC over every byte before it.
+3. It checks the header's flags, `block_log2` and every reserved byte.
+4. It bounds each list by the bytes left before using its count, checks each verified name, and checks each list's order (above).
+5. For each region it decodes the record: the name by section 11's rules, a known kind and fill, no unknown flag, each reserved byte zero, `cap` and `durable_len` zero unless their flags say otherwise, and the fields agreeing with each other and the kind as the table above gives them. Then it bounds the region's span count by the bytes left.
+6. Nothing may follow the last region but the CRC.
+
+A record that passes has exactly one encoding: decoding and encoding it again gives the same bytes. What needs the whole record is the restore's to check, before it creates anything:
+
+- each name is used once;
+- each verified name names a region copied in full, with its verified length at most that region's `stream_len`;
+- each data file is `stream_len` bytes before its spans are checked;
+- `total` agrees with the regions' sizes before anything is sized from it;
+- the target can hold the block size.
+
+Source: [`crates/store-io-format/src/exportinfo.rs`](../crates/store-io-format/src/exportinfo.rs); fuzz target `fuzz/fuzz_targets/export_info.rs`.
 
 ---
 

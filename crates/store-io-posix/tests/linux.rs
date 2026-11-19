@@ -548,6 +548,48 @@ fn test_two_files_in_one_directory_share_a_device_and_differ_as_files() {
     assert!(p.path_identity(&dir, &name("none.sio")).is_err());
 }
 
+/// Whether the block stack under `dev` (an `st_dev`) holds a device-mapper
+/// node whose uuid has none of the prefixes the probe classifies
+/// unprivileged (`CRYPT-`, `VDO-`, `mpath-`, `part`, `LVM-`).
+fn unclassified_dm(dev: u64) -> bool {
+    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
+    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
+    fn walk(node: &Path, depth: usize) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        let node = if node.join("partition").is_file() {
+            match node.parent() {
+                Some(p) => p.to_path_buf(),
+                None => return false,
+            }
+        } else {
+            node.to_path_buf()
+        };
+        if let Ok(uuid) = std::fs::read_to_string(node.join("dm/uuid")) {
+            let u = uuid.trim().to_ascii_lowercase();
+            let name = std::fs::read_to_string(node.join("dm/name")).unwrap_or_default();
+            let known = ["crypt-", "vdo-", "mpath-", "part", "lvm-"]
+                .iter()
+                .any(|k| u.starts_with(k))
+                || name.trim().to_ascii_lowercase().starts_with("vdo");
+            if !known {
+                return true;
+            }
+        }
+        let Ok(rd) = std::fs::read_dir(node.join("slaves")) else {
+            return false;
+        };
+        rd.filter_map(Result::ok)
+            .filter_map(|e| std::fs::canonicalize(e.path()).ok())
+            .any(|s| walk(&s, depth + 1))
+    }
+    match std::fs::canonicalize(format!("/sys/dev/block/{major}:{minor}")) {
+        Ok(start) => walk(&start, 0),
+        Err(_) => false,
+    }
+}
+
 #[test]
 fn test_probe_on_ext4_reports_filesystem_alignment_stack_and_device() {
     let (t, p, dir, file, _pool, _q) = setup();
@@ -567,7 +609,11 @@ fn test_probe_on_ext4_reports_filesystem_alignment_stack_and_device() {
     }
     assert!(!ev.missing.contains(Missing::MountOptions), "{ev:?}");
     assert!(!ev.missing.contains(Missing::InodeFlags), "{ev:?}");
-    assert!(!ev.missing.contains(Missing::Stack), "{ev:?}");
+    // A device-mapper node of a kind the probe cannot name without root
+    // (a runner's own layering, say) leaves the stack uncertain, never
+    // guessed; any other stack is known.
+    let unnamed = ev.fs.device.is_some_and(unclassified_dm);
+    assert_eq!(ev.missing.contains(Missing::Stack), unnamed, "{ev:?}");
     assert!(!ev.missing.contains(Missing::OsCacheMode), "{ev:?}");
     assert_ne!(ev.device.os_cache_mode, OsCacheMode::Unknown);
     assert!(

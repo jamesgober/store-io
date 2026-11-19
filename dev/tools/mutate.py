@@ -201,6 +201,8 @@ EXPORTINFO_T = ["-p", "store-io-format", "--lib", "exportinfo"]
 CONF_SIM_T = ["-p", "store-io-conformance"]
 CONF_NATIVE_T = ["-p", "store-io", "--test", "conformance"]
 SIM_MODEL_T = ["-p", "store-io-sim", "--test", "model"]
+EXPORT_SRC = "crates/store-io-engine/src/export.rs"
+EXPORT_T = ["-p", "store-io-engine", "--test", "export"]
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
@@ -1821,7 +1823,7 @@ M = [
  (STREAM_SRC, '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live_of(part) {', '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live_of(part).or(Ok(())) {', STREAM_RACE_T),
  (STREAM_SRC, '                let place = (at - base) as usize;', '                let place = (at - base).min(0) as usize;', STREAM_T),
  (STREAM_SRC, '        while !self.copying() && self.submitted - self.delivered < depth && self.more() {', '        while (!self.copying() || true) && self.submitted - self.delivered < depth && self.more() {', STREAM_T),
- (STREAM_SRC, '                .min(self.parts[part].r.map.run_left(next)) as usize;', '                .min(self.parts[part].r.map.run_left(next).max(u64::MAX)) as usize;', STREAM_T),
+ (STREAM_SRC, '                .min(self.parts[part].run_left(next)) as usize;', '                .min(self.parts[part].run_left(next).max(u64::MAX)) as usize;', STREAM_T),
  ('crates/store-io-engine/src/region.rs', '        let end = range.end.min(self.durable_through());', '        let end = range.end.max(range.end.min(self.durable_through()));', STREAM_T),
  ('crates/store-io-engine/src/region.rs', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) {', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) && false {', STREAM_T),
  (STREAM_SRC, '                let bufs: Vec<IoBuf> = (0..n)\n                    .map_while(|_| pool.take_capped(req, class).ok())', '                let bufs: Vec<IoBuf> = (0..n)\n                    .map_while(|_| pool.take_within(req, class).ok())', STREAM_T),
@@ -1836,7 +1838,7 @@ M = [
  (STREAM_SRC, "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(part) {", "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(self.cur) {", STREAM_T),
  (STREAM_SRC, '            if !Arc::ptr_eq(&sr.store.inner, &self.inner) {', '            if !Arc::ptr_eq(&sr.store.inner, &self.inner) && false {', STREAM_T),
  (STREAM_SRC, '            sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;', '            if false {\n                sr.r.gate.live().map_err(|why| retired_error(why, &sr.r))?;\n            }', STREAM_T),
- (STREAM_SRC, '            offset: self.parts[part].r.map.locate(at, len),', '            offset: self.parts[self.cur].r.map.locate(at, len),', STREAM_T),
+ (STREAM_SRC, '            offset: self.parts[part].locate(at, len),', '            offset: self.parts[self.cur].locate(at, len),', STREAM_T),
  (STREAM_SRC, '                    Item::Bad {\n                        part,\n                        start: s,\n                        end: e,\n                    }', '                    Item::Bad {\n                        part: self.cur,\n                        start: s,\n                        end: e,\n                    }', STREAM_T),
 # REVIEW (independent review of 0.5.0)
 # No entry: open2's predecessor test by generation (`n.generation < info.generation`): an older
@@ -1924,6 +1926,52 @@ M = [
  ("crates/store-io-win/src/dir.rs", '        Ok(avail)\n    }', '        Ok(avail.min(0))\n    }', CONF_NATIVE_T),
  ("crates/store-io-sim/src/world.rs", '            .flat_map(|d| d.entries.values().chain(d.durable.values()))', '            .flat_map(|d| d.entries.values().chain(d.durable.values().filter(|_| false)))', SIM_MODEL_T),
  ("crates/store-io-sim/src/world.rs", '        let Some(cap) = self.cfg.faults.capacity else {\n            return u64::MAX;', '        let Some(cap) = self.cfg.faults.capacity else {\n            return 0;', SIM_MODEL_T),
+ (EXPORT_SRC, '        if RegionName::new(&self.name).is_err() || self.generation == 0 {', '        if RegionName::new(&self.name).is_err() && false || self.generation == 0 {', EXPORT_T),
+ (EXPORT_SRC, '        if RegionName::new(&self.name).is_err() || self.generation == 0 {', '        if RegionName::new(&self.name).is_err() || self.generation == u64::MAX {', EXPORT_T),
+ (EXPORT_SRC, '        if block != block_size || !block.is_power_of_two() || !(512..=1 << 16).contains(&block) {', '        if block != block_size && false || !block.is_power_of_two() || !(512..=1 << 16).contains(&block) {', EXPORT_T),
+ (EXPORT_SRC, '        if block != block_size || !block.is_power_of_two() || !(512..=1 << 16).contains(&block) {', '        if block != block_size || false || !(512..=1 << 16).contains(&block) {', EXPORT_T),
+ (EXPORT_SRC, '        if block != block_size || !block.is_power_of_two() || !(512..=1 << 16).contains(&block) {', '        if block != block_size || !block.is_power_of_two() || !(1..=1 << 16).contains(&block) {', EXPORT_T),
+ (EXPORT_SRC, '        if self.data_size % block != 0 {', '        if self.data_size % block > block {', EXPORT_T),
+ (EXPORT_SRC, '            if cap < self.data_size || cap % block != 0 {', '            if cap < self.data_size {', EXPORT_T),
+ (EXPORT_SRC, '            if cap < self.data_size || cap % block != 0 {', '            if cap % block != 0 {', EXPORT_T),
+ (EXPORT_SRC, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.full_copy || d > self.data_size {', EXPORT_T),
+ (EXPORT_SRC, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.kind != RegionKind::Append || d > self.data_size {', EXPORT_T),
+ (EXPORT_SRC, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size.max(d) {', EXPORT_T),
+ (EXPORT_SRC, '            if !slot || n > most {', '            if n > most {', EXPORT_T),
+ (EXPORT_SRC, '            if !slot || n > most {', '            if !slot || n > most.max(n) {', EXPORT_T),
+ (EXPORT_SRC, '        if self.full_copy && slot {', '        if self.full_copy && slot && false {', EXPORT_T),
+ (EXPORT_SRC, '        if footprint.is_none() {', '        if footprint.is_none() && false {', EXPORT_T),
+ (EXPORT_SRC, '            if (1..names.len()).any(|i| names[..i].contains(&names[i])) {', '            if (1..names.len()).any(|i| names[..i].contains(&names[i])) && false {', EXPORT_T),
+ (EXPORT_SRC, '        if !self.inner.read_only {\n            if let Some(f)', '        if self.inner.read_only {\n            if let Some(f)', EXPORT_T),
+ (EXPORT_SRC, '.find(|f| f.full.is_some() || f.superseded)', '.find(|f| f.superseded)', EXPORT_T),
+ (EXPORT_SRC, '            writable: !self.inner.read_only,', '            writable: true,', EXPORT_T),
+ (EXPORT_SRC, '                RegionKind::Slot => max_object(log2_block) as u64,', '                RegionKind::Slot => f.data_size,', EXPORT_T),
+ (EXPORT_SRC, '                _ => f.cap.unwrap_or(0).max(f.data_size),', '                _ => f.data_size,', EXPORT_T),
+ (EXPORT_SRC, '            total.saturating_add(2 * block).saturating_add(data)', '            total.saturating_add(block).saturating_add(data)', EXPORT_T),
+ (EXPORT_SRC, '        r.gate.live().map_err(|why| retired_error(why, r))?;', '        let _ = r.gate.live().map_err(|why| retired_error(why, r));', EXPORT_T),
+ (EXPORT_SRC, '            .is_some_and(|o| o.len() > max_object(block.trailing_zeros() as u8))', '            .is_some_and(|o| o.len() > max_object(block.trailing_zeros() as u8) + 64)', EXPORT_T),
+ (EXPORT_SRC, '                            .map_or(0, crate::frontier::AppendFrontier::durable)\n                            .min(f.data_size)', '                            .map_or(0, crate::frontier::AppendFrontier::durable)', EXPORT_T),
+ (EXPORT_SRC, 'kind == RegionKind::Append && r.positioned.load(Ordering::Acquire)', 'kind == RegionKind::Append && (r.positioned.load(Ordering::Acquire) || true)', EXPORT_T),
+ (EXPORT_SRC, '                    Err(e) if too_many(&e) && !settled => {', '                    Err(e) if too_many(&e) && settled => {', EXPORT_T),
+ (EXPORT_SRC, '                Some(Err(e)) if too_many(&e) && !settled => {', '                Some(Err(e)) if too_many(&e) && settled => {', EXPORT_T),
+ (EXPORT_SRC, '                    settled = false;\n                    sink.data(c)', '                    sink.data(c)', EXPORT_T),
+ (EXPORT_SRC, '                    report.offset = got;', '                    report.offset = 0;', EXPORT_T),
+ (EXPORT_SRC, '            report.regions += 1;', '            report.regions += 0;', EXPORT_T),
+ (EXPORT_SRC, '        sink.finish().map_err(sunk(None))', '        sink.finish().map_err(sunk(None)).or(Ok(()))', EXPORT_T),
+ (EXPORT_SRC, '            SinkError::Io(raw) => Error::Io {\n                op: Op::Write,', '            SinkError::Io(raw) => Error::Io {\n                op: Op::Read,', EXPORT_T),
+ (EXPORT_SRC, '                Some(Err(e)) => return Err(e.into()),', '                Some(Err(Error::Corruption {\n                    kind: store_io_core::error::CorruptionKind::MediaError,\n                    ..\n                })) => {}\n                Some(Err(e)) => return Err(e.into()),', EXPORT_T),
+ ("crates/store-io-engine/src/copy.rs", '            |r: &LiveRegion| subset.is_none_or(|names| names.iter().any(|n| n == r.name.as_str()));', '            |r: &LiveRegion| subset.is_none_or(|names| names.iter().any(|n| n == r.name.as_str()) || true);', EXPORT_T),
+ ("crates/store-io-engine/src/copy.rs", '        let held: Vec<_> = all.iter().filter(|r| picked(r)).cloned().collect();', '        let held: Vec<_> = all.iter().filter(|r| picked(r) || true).cloned().collect();', EXPORT_T),
+ ("crates/store-io-engine/src/copy.rs", '                .find(|n| !held.iter().any(|r| r.name.as_str() == n.as_str()))', '                .find(|n| !held.iter().any(|r| r.name.as_str() == n.as_str()) && false)', EXPORT_T),
+ ("crates/store-io-engine/src/copy.rs", '                    .is_none_or(|v2| v2.holds.iter().any(|h| h.id() == id))', '                    .is_none_or(|_v2| id == id)', EXPORT_T),
+ (STREAM_SRC, '        if first {\n            c.cur = 0;', '        if first && false {\n            c.cur = 0;', EXPORT_T),
+ (STREAM_SRC, '                        return file + (at - base);', '                        return file + at;', EXPORT_T),
+ (STREAM_SRC, '                        return base + len - at;', '                        return u64::MAX;', EXPORT_T),
+ (STREAM_SRC, '        if home.lent >= c.lend {', '        if home.lent >= c.lend + 64 {', EXPORT_T),
+ (EXPORT_SRC, '            if let Some(f) = plan.facts.iter().find(|f| f.full.is_some() || f.superseded) {', '            if let Some(f) = plan.facts.iter().find(|f| f.full.is_some()) {', EXPORT_T),
+ (EXPORT_SRC, '!(512..=1 << 16).contains(&block)', '!(512..=1 << 17).contains(&block)', EXPORT_T),
+ (COPY_SRC, '            if names.is_empty() {\n                return Err(refused(NotWrittenCause::InvalidOptions, None));', '            if names.is_empty() && false {\n                return Err(refused(NotWrittenCause::InvalidOptions, None));', EXPORT_T),
+ (COPY_SRC, '                if let Some(u) = meta.unavailable.iter().find(|u| u.name == **n) {', '                if let Some(u) = meta.unavailable.iter().find(|u| u.name == **n && false) {', EXPORT_T),
 ]
 
 def kill_stuck_tests():

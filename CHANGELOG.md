@@ -13,6 +13,32 @@
 
 ### Added
 
+- Engine: **export through a caller's sink** (PLANNING R5.6):
+  `Store::export(sink)` and `Store::export_with(sink, ExportOptions {
+  regions, depth, accept_stale_pages })` push the store's regions, in the
+  store's order, to an `ExportSink`: `begin` with an `ExportHeader` (the
+  region count, the block size, the volume's facts, whether the store was
+  writable, the stream's `lend`, and an upper bound on what a restore
+  takes), then per region `region` with its `RegionInfo`, its bytes as
+  owned `Chunk`s through `data`, and `end_region`, then `finish`. Export
+  shares `copy_store`'s plan, so every refusal and volume fact is decided
+  before the sink is called; sizes are fixed there (a region grown since
+  is exported at its planned size). A positioned append region exports
+  its durable prefix, an unpositioned one its whole data area as read, a
+  page region its data area as read, a slot its object; with
+  `accept_stale_pages` a region of a stale page is exported in full, by
+  container offset, from a read-only open only (a writable open refuses
+  it, and a possibly superseded region, `InvalidOptions`). A region
+  recycled or released since the plan fails the export, as does a media
+  error (a backup never has a silent hole). The bytes come from one
+  background read stream, paced by the export's own call; a sink holding
+  every lent chunk is asked to `settle` once, then the export fails
+  `TooManyInFlight`. A failed export returns an `ExportError` with the
+  sink's own `SinkError`, if it was the sink's, and an `ExportReport` of
+  how far it got: the offset counts only bytes the sink accepted, a
+  region counts once `end_region` returned `Ok`, and the export is
+  `complete` only once `finish` did. `RegionInfo::validate` checks an
+  info as untrusted input for a restore. The facade exports the types.
 - Engine: **read streams** (PLANNING R5.5): `AppendRegion::read_stream`
   and `PageRegion::read_stream` (`read_stream_with` taking
   `StreamOptions`) return a `ReadStream`, an iterator of owned `Chunk`s

@@ -143,16 +143,16 @@ struct HeaderFacts {
 }
 
 /// A copy's plan ([`Store::copy_plan`]): every region's facts, in the
-/// store's order, and the volume's.
+/// store's order, and the volume's (an export's too, `export.rs`).
 pub(crate) struct CopyPlan {
-    facts: Vec<Facts>,
-    omitted: Vec<RegionId>,
-    lost_pages: Vec<u32>,
-    stale_pages: Vec<u32>,
-    verified_up_to: Vec<(String, u64)>,
-    superseded: Vec<String>,
-    block: u64,
-    source_format: u16,
+    pub(crate) facts: Vec<Facts>,
+    pub(crate) omitted: Vec<RegionId>,
+    pub(crate) lost_pages: Vec<u32>,
+    pub(crate) stale_pages: Vec<u32>,
+    pub(crate) verified_up_to: Vec<(String, u64)>,
+    pub(crate) superseded: Vec<String>,
+    pub(crate) block: u64,
+    pub(crate) source_format: u16,
 }
 
 /// A refusal, its region named if it has one.
@@ -166,25 +166,25 @@ fn refused(cause: NotWrittenCause, region: Option<RegionId>) -> Error {
     }
 }
 
-/// A source region, as the copy recreates it.
-struct Facts {
-    name: String,
-    kind: RegionKind,
+/// A source region, as the copy recreates it (and an export describes it).
+pub(crate) struct Facts {
+    pub(crate) name: String,
+    pub(crate) kind: RegionKind,
     /// The target's data size (the source's, or a full copy's length).
-    data_size: u64,
+    pub(crate) data_size: u64,
     /// Its cap (format 2's capped regions): the target is capped there too.
-    cap: Option<u64>,
-    attrs: CopyAttrs,
+    pub(crate) cap: Option<u64>,
+    pub(crate) attrs: CopyAttrs,
     /// A slot's committed object, if any.
-    object: Option<Vec<u8>>,
+    pub(crate) object: Option<Vec<u8>>,
     /// A region of a stale page, copied in full: the container ranges, in
     /// data order (its capacity, then its extra extent if taken), and its
     /// recorded data size.
-    full: Option<(Vec<(u64, u64)>, u64)>,
+    pub(crate) full: Option<(Vec<(u64, u64)>, u64)>,
     /// Possibly superseded (spec §9 step 4).
-    superseded: bool,
+    pub(crate) superseded: bool,
     /// The source region (a full copy reads its runs and extra extent).
-    source: std::sync::Arc<LiveRegion>,
+    pub(crate) source: std::sync::Arc<LiveRegion>,
 }
 
 /// The largest piece a copy's reader hands the fill (a scan buffer is cut
@@ -858,23 +858,68 @@ where
     /// cannot hold; `Corruption(Metadata)` for a header or entry that does
     /// not decode.
     pub(crate) fn copy_plan(&self, accept: bool) -> Result<CopyPlan, Error> {
+        self.plan_of(accept, None)
+    }
+
+    /// [`Self::copy_plan`] of the regions `subset` names (each once; all
+    /// with `None`): an export's (R5.6). Only those regions' headers are
+    /// read and only their (id, generation) compared between the header
+    /// pass and the hold, so a provisioning or release of another region
+    /// meanwhile fails nothing; the volume-wide refusals (frozen, lost or
+    /// stale pages, unavailable entries) stand whatever the subset.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::copy_plan`]; `NotWritten(InvalidOptions)` for a name in
+    /// `subset` no region has.
+    pub(crate) fn plan_of(
+        &self,
+        accept: bool,
+        subset: Option<&[String]>,
+    ) -> Result<CopyPlan, Error> {
         let report = self.report();
         let block = report.block_size;
         let log2 = block.trailing_zeros() as u8;
-        let regions = self.regions_snapshot();
+        let picked =
+            |r: &LiveRegion| subset.is_none_or(|names| names.iter().any(|n| n == r.name.as_str()));
+        let regions: Vec<_> = self
+            .regions_snapshot()
+            .into_iter()
+            .filter(|r| picked(r))
+            .collect();
         let mut headers = Vec::with_capacity(regions.len());
         for r in &regions {
             headers.push(self.header_facts(r)?);
         }
         crate::test_hook::step(crate::test_hook::Step::PlanHeaders);
         let meta = lock_meta(&self.inner.meta);
-        let held = self.regions_snapshot();
+        // Every region (a full copy's overlap test), and those planned.
+        let all = self.regions_snapshot();
+        let held: Vec<_> = all.iter().filter(|r| picked(r)).cloned().collect();
         let same = |a: &LiveRegion, b: &LiveRegion| a.id == b.id && a.generation == b.generation;
         if let Some(i) = (0..regions.len().max(held.len()))
             .find(|&i| !matches!((regions.get(i), held.get(i)), (Some(a), Some(b)) if same(a, b)))
         {
             let changed = regions.get(i).or_else(|| held.get(i)).map(|r| r.id);
             return Err(refused(NotWrittenCause::StaleGeneration, changed));
+        }
+        if let Some(names) = subset {
+            // An empty subset is a caller's filter gone wrong, never a
+            // complete backup of nothing.
+            if names.is_empty() {
+                return Err(refused(NotWrittenCause::InvalidOptions, None));
+            }
+            if let Some(n) = names
+                .iter()
+                .find(|n| !held.iter().any(|r| r.name.as_str() == n.as_str()))
+            {
+                // A named region the open could not serve is not ready,
+                // not a name no region has.
+                if let Some(u) = meta.unavailable.iter().find(|u| u.name == **n) {
+                    return Err(refused(NotWrittenCause::NotReady, Some(u.id)));
+                }
+                return Err(refused(NotWrittenCause::InvalidOptions, None));
+            }
         }
         let (mut omitted, mut lost_pages, mut stale_pages) = (Vec::new(), Vec::new(), Vec::new());
         if accept {
@@ -932,7 +977,7 @@ where
             {
                 return Err(refused(NotWrittenCause::TooLarge, Some(r.id)));
             }
-            let f = self.facts_for_copy(&meta, r, &held, h)?;
+            let f = self.facts_for_copy(&meta, r, &all, h)?;
             if let Some((_, recorded)) = &f.full {
                 verified_up_to.push((f.name.clone(), *recorded));
             }

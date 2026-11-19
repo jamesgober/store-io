@@ -28,6 +28,7 @@ mod create;
 mod directory;
 pub mod domain;
 mod exec;
+mod export;
 #[cfg(all(test, not(loom)))]
 mod flush_slot_tests;
 // The format-2 test helpers, shared with the in-crate tests, name the crate
@@ -90,6 +91,10 @@ pub use completion::{SubmitterConfig, WriteMode};
 pub use copy::{COPY_LOCK, COPYING, CopyOptions, CopyReport, copy_store};
 pub use directory::Directory;
 pub use domain::DomainStats;
+pub use export::{
+    ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, RegionInfo, SinkError,
+    VolumeFacts,
+};
 pub use flusher::SubmitterWaker;
 pub use multi::{MAX_SET_STORES, SetStats, StoreSet};
 pub use options::RegionOptions;
@@ -103,6 +108,6 @@ pub use store::{
     CONTAINER, DamagedSlot, Healed, MetadataReport, Repair, SlotDamage, Store, StoreOptions,
     StoreReport, Unavailable, UnavailableRegion,
 };
-pub use store_io_format::meta::RegionKind;
+pub use store_io_format::meta::{FillPattern, RegionKind};
 pub use stream::{Chunk, ReadStream, StreamOptions, StreamRange};
 pub use submitter::{MAX_DEPTH, Submitter};

@@ -165,7 +165,9 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    /// The region offset of `bytes()[0]`.
+    /// The region offset of `bytes()[0]` (for an export's region copied
+    /// in full, its offset in the region's stream: the sum of the earlier
+    /// container ranges' lengths and its place in its own).
     #[must_use]
     pub fn offset(&self) -> u64 {
         self.offset
@@ -241,11 +243,62 @@ enum Item {
 }
 
 /// One range of a stream: its region (owned, no pass), the bytes asked for,
-/// and its index in the caller's ranges.
+/// its index in the caller's ranges, and where its bytes lie.
 struct Part {
     r: Arc<LiveRegion>,
     want: Range<u64>,
     index: usize,
+    loc: Locator,
+}
+
+/// Where a part's bytes lie in the container.
+pub(crate) enum Locator {
+    /// Through its region's map: a stream offset is a region offset.
+    Map,
+    /// Container ranges `(offset, len)`, in stream order (an export's
+    /// region of a stale page, copied in full: its capacity's runs, then
+    /// its extra extent): a stream offset is the sum of the earlier ranges'
+    /// lengths and the place in its own. Never through the map: the extra
+    /// extent is outside it.
+    Ranges(Vec<(u64, u64)>),
+}
+
+impl Part {
+    /// The bytes from stream offset `at` to the end of the device run that
+    /// holds it (0: none; a backstop the refill refuses).
+    fn run_left(&self, at: u64) -> u64 {
+        match &self.loc {
+            Locator::Map => self.r.map.run_left(at),
+            Locator::Ranges(ranges) => {
+                let mut base = 0u64;
+                for &(_, len) in ranges {
+                    if at < base + len {
+                        return base + len - at;
+                    }
+                    base += len;
+                }
+                0
+            }
+        }
+    }
+
+    /// The container offset of stream offset `at` (`len` bytes from it lie
+    /// in one run: [`Self::run_left`]).
+    fn locate(&self, at: u64, len: u64) -> u64 {
+        match &self.loc {
+            Locator::Map => self.r.map.locate(at, len),
+            Locator::Ranges(ranges) => {
+                let mut base = 0u64;
+                for &(file, n) in ranges {
+                    if at < base + n {
+                        return file + (at - base);
+                    }
+                    base += n;
+                }
+                u64::MAX
+            }
+        }
+    }
 }
 
 /// A region's bytes in order, as owned [`Chunk`]s, with an exact
@@ -436,6 +489,40 @@ where
         parts: Vec<(Arc<LiveRegion>, Range<u64>, usize)>,
         opts: StreamOptions,
     ) -> Result<ReadStream<P>, Error> {
+        // A `Background` stream is a call of its own (R5.4).
+        let pace = match opts.class {
+            IoClass::Read => None,
+            _ => self.inner.domain.new_pace(),
+        };
+        self.stream_of(parts, opts, pace, false)
+    }
+
+    /// An export's stream (R5.6): `Background`, paced by the export's call
+    /// (`pace`, its record on this store's device group), its buffers and
+    /// queue taken now with no part yet: each region is added at its turn
+    /// ([`ReadStream::add_part`]), so `lend` is known before the sink's
+    /// `begin`.
+    pub(crate) fn export_stream(
+        &self,
+        depth: Option<usize>,
+        pace: Option<Pace>,
+    ) -> Result<ReadStream<P>, Error> {
+        let mut opts = StreamOptions::default();
+        if let Some(d) = depth {
+            opts = opts.depth(d);
+        }
+        self.stream_of(Vec::new(), opts, pace, true)
+    }
+
+    /// A stream over `parts` paced by `pace`; `open`: its queue and buffers
+    /// taken even with no part (an export's, added later).
+    fn stream_of(
+        &self,
+        parts: Vec<(Arc<LiveRegion>, Range<u64>, usize)>,
+        opts: StreamOptions,
+        pace: Option<Pace>,
+        open: bool,
+    ) -> Result<ReadStream<P>, Error> {
         let none = ErrorContext::default();
         if !matches!(opts.class, IoClass::Background | IoClass::Read) {
             return Err(not_written(NotWrittenCause::InvalidOptions, none));
@@ -460,7 +547,12 @@ where
         let parts: Vec<Part> = parts
             .into_iter()
             .filter(|(_, want, _)| !want.is_empty())
-            .map(|(r, want, index)| Part { r, want, index })
+            .map(|(r, want, index)| Part {
+                r,
+                want,
+                index,
+                loc: Locator::Map,
+            })
             .collect();
         let (next, end) = parts.first().map_or((0, 0), |p| {
             (
@@ -494,11 +586,6 @@ where
             collect_failed: None,
             _thread: PhantomData,
         };
-        // A `Background` stream is a call of its own (R5.4).
-        let pace = match opts.class {
-            IoClass::Read => None,
-            _ => self.inner.domain.new_pace(),
-        };
         let req = match (opts.class, &pace) {
             (IoClass::Read, _) => self.chunk(),
             (_, Some(p)) => p.piece().min(self.chunk()),
@@ -521,7 +608,7 @@ where
             },
             None => None,
         };
-        if s.parts.is_empty() {
+        if s.parts.is_empty() && !open {
             // No queue, no buffers.
             s.ended = true;
             s.finished = true;
@@ -594,6 +681,102 @@ where
             Some(raw) => Err(c.read_error(raw)),
             None => Ok(()),
         }
+    }
+
+    /// Adds a part (an export's region at its turn): `want` of `r`, read
+    /// as `loc` places it; nothing for an empty `want`. The caller reads
+    /// every byte of the earlier parts before calling `next()` past them
+    /// (a stream with no part left ends).
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(Interrupted)` once the stream has ended.
+    pub(crate) fn add_part(
+        &self,
+        r: &Arc<LiveRegion>,
+        want: Range<u64>,
+        loc: Locator,
+    ) -> Result<(), Error> {
+        let mut c = self.core.borrow_mut();
+        if c.ended {
+            return Err(not_written(
+                NotWrittenCause::Interrupted,
+                ctx_range(r, want.start, want.end),
+            ));
+        }
+        if want.is_empty() {
+            return Ok(());
+        }
+        let block = c.store.block();
+        let first = c.parts.is_empty();
+        c.parts.push(Part {
+            r: Arc::clone(r),
+            want: want.clone(),
+            index: 0,
+            loc,
+        });
+        // The first part is the current one at once (`more` moves past a
+        // part only to a next one).
+        if first {
+            c.cur = 0;
+            c.next = want.start / block * block;
+            c.end = want.end.div_ceil(block) * block;
+        }
+        Ok(())
+    }
+
+    /// `bytes` (an export's slot object) as one chunk at stream offset
+    /// `offset`, in a buffer of the stream's: lent like a read's.
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(TooManyInFlight)` with every one of its `lend` chunks
+    /// held (or no buffer free); `NotWritten(TooLarge)` for bytes longer
+    /// than a buffer; `NotWritten(Interrupted)` once the stream has ended.
+    pub(crate) fn lend_bytes(
+        &self,
+        r: &LiveRegion,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<Chunk, Error> {
+        let c = self.core.borrow_mut();
+        let ctx = || ctx_range(r, offset, offset + bytes.len() as u64);
+        if c.ended {
+            return Err(not_written(NotWrittenCause::Interrupted, ctx()));
+        }
+        let mut home = lock(&c.home);
+        if home.lent >= c.lend {
+            return Err(not_written(NotWrittenCause::TooManyInFlight, ctx()));
+        }
+        let Some(mut buf) = home.bufs.pop() else {
+            return Err(not_written(NotWrittenCause::TooManyInFlight, ctx()));
+        };
+        if !buf.set_len(bytes.len()) {
+            home.bufs.push(buf);
+            return Err(not_written(NotWrittenCause::TooLarge, ctx()));
+        }
+        buf.as_mut_capacity()[..bytes.len()].copy_from_slice(bytes);
+        home.lent += 1;
+        drop(home);
+        Ok(Chunk {
+            buf: Some(buf),
+            at: 0,
+            len: bytes.len(),
+            offset,
+            range: 0,
+            home: Arc::clone(&c.home),
+        })
+    }
+
+    /// The next item, as [`Iterator::next`], through a shared handle (an
+    /// export's, which adds parts between items).
+    pub(crate) fn pull(&self) -> Option<Result<Chunk, Error>> {
+        self.core.borrow_mut().next_item()
+    }
+
+    /// The chunks its caller may hold at once.
+    pub(crate) fn lend(&self) -> usize {
+        self.core.borrow().lend
     }
 
     /// The stream's pacing (a `Background` stream's call).
@@ -750,7 +933,13 @@ where
             // Never across a run's end (one device operation each).
             let len = (self.end - next)
                 .min(self.req as u64)
-                .min(self.parts[part].r.map.run_left(next)) as usize;
+                .min(self.parts[part].run_left(next)) as usize;
+            // A part whose runs end before its bytes do (a backstop: never
+            // a read of nothing, which would never end).
+            if len == 0 {
+                lock(&self.home).bufs.push(buf);
+                return Err(not_written(NotWrittenCause::Interrupted, self.ctx()));
+            }
             // A background read is admitted before it is submitted; refused
             // with reads of its own in flight, the stream collects them.
             let charge = match &self.pace {
@@ -774,7 +963,7 @@ where
             let _fits = buf.set_len(len);
             let op = IoOp::Read {
                 file: &self.store.inner.file,
-                offset: self.parts[part].r.map.locate(next, len as u64),
+                offset: self.parts[part].locate(next, len as u64),
                 buf,
             };
             let Some(lane) = self.lane.as_mut() else {
@@ -1142,7 +1331,7 @@ where
         };
         let op = IoOp::Read {
             file: &self.store.inner.file,
-            offset: self.parts[part].r.map.locate(at, len),
+            offset: self.parts[part].locate(at, len),
             buf,
         };
         let Some(lane) = self.lane.as_mut() else {

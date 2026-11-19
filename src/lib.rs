@@ -125,6 +125,13 @@ pub use store_io_engine::{
 };
 /// A read stream's items and options ([`ReadStream`]).
 pub use store_io_engine::{Chunk, StreamOptions};
+/// Export through a caller's sink (`Store::export`, `Store::export_with`):
+/// its options, the header and each region's info a sink is told, the
+/// sink's trait and errors, and the report.
+pub use store_io_engine::{
+    ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, FillPattern, RegionInfo,
+    SinkError, VolumeFacts,
+};
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 
 /// The [`Submitter`]'s types: its configuration, buffers, completions and

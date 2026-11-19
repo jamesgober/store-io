@@ -324,7 +324,7 @@ fn test_every_kind_is_written_and_described() {
         assert_eq!(rec.fill_key, info.fill_key);
         assert_eq!(rec.data_size, info.data_size);
         assert_eq!(rec.durable_len, info.durable_len);
-        assert_eq!(u64::from(rec.object_len), info.object_len.unwrap_or(0));
+        assert_eq!(rec.object_len.map(u64::from), info.object_len);
         assert_eq!(rec.stream_len, info.stream_len());
         let want: Vec<u32> = bytes.chunks(SPAN as usize).map(crc32c).collect();
         assert_eq!(spans.len(), want.len(), "{}'s spans", info.name);

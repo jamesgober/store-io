@@ -96,6 +96,8 @@ FOOTPRINT_FMT = ["-p", "store-io-format", "--test", "footprint"]
 V2 = "crates/store-io-engine/src/v2.rs"
 # copy_store.
 COPY_SRC = "crates/store-io-engine/src/copy.rs"
+# The target directory of a copy or an import (factored out of copy.rs, V6c2b).
+TARGET_SRC = "crates/store-io-engine/src/target.rs"
 COPYT = ["-p", "store-io-engine", "--test", "copy"]
 # Format 1 read-only.
 F1T = ["-p", "store-io-engine", "--test", "format1"]
@@ -206,6 +208,11 @@ EXPORT_T = ["-p", "store-io-engine", "--test", "export"]
 FILE_SINK_SRC = "crates/store-io-engine/src/file_sink.rs"
 FILE_SINK_T = ["-p", "store-io-engine", "--test", "file_sink"]
 FILE_SINK_LIB = ["-p", "store-io-engine", "--lib", "file_sink::"]
+# V6c2b: FileSource, import, the target directory, the byte encodings.
+FILE_SOURCE_SRC = "crates/store-io-engine/src/file_source.rs"
+IMPORT_SRC = "crates/store-io-engine/src/import.rs"
+PROVISION_SRC = "crates/store-io-engine/src/provision.rs"
+IMPORT_T = ["-p", "store-io-engine", "--test", "import"]
 CALL_SRC = "crates/store-io-engine/src/call.rs"
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
@@ -971,18 +978,17 @@ M = [
  # The copy's one barrier makes a stale page's full copies durable (not
  # written as a fill, D-137), also when the clean close's flush fails.
  (COPY_SRC, "        dst.flush_all_accounted()?;", "", COPYT + ["--test", "copy_stale"]),
- (COPY_SRC, "    match platform.unlink(&dir, &temp) {", "    match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
- (COPY_SRC, "    platform\n        .sync_dir(&dir)\n", "    Ok::<(), store_io_platform::OsError>(())\n", COPYT),
+ (TARGET_SRC, "        match platform.unlink(&dir, &temp) {", "        match platform.unlink(&dir, &name(\"absent\")?) {", COPYT),
+ (TARGET_SRC, "        platform\n            .sync_dir(&self.dir)\n", "        Ok::<(), store_io_platform::OsError>(())\n", COPYT),
  (COPY_SRC, "let src = Store::open_readonly(platform.clone(), from, opts.store.clone())?;", "let src = Store::open(platform.clone(), from, opts.store.clone())?;", COPYT),
  (COPY_SRC, 'if self.frozen() {', 'if self.frozen() && false {', COPYT),
  (COPY_SRC, 'if let Some(u) = meta.unavailable.first() {', 'if let Some(u) = meta.unavailable.first().filter(|_| false) {', COPYT),
  (COPY_SRC, "o.len() > max_object(log2)", "o.len() > max_object(log2) + 100", COPYT),
- (COPY_SRC, "        Ok(_) => Err(Error::AlreadyExists { what: Named::Store }),", "        Ok(_) => Ok(()),", COPYT),
+ (TARGET_SRC, "            Ok(_) => Err(Error::AlreadyExists { what: Named::Store }),", "            Ok(_) => Ok(()),", COPYT),
  (COPY_SRC, '                .find(|&id| still(id))', '                .find(|&id| still(id) && false)', COPYT),
- (COPY_SRC, "    let _lock = platform.lock_exclusive(&lock_file).map_err(|raw| {", "    let _lock = platform.lock_exclusive(&lock_file).map_or(Ok(()), |_| Ok(())).map_err(|raw: store_io_platform::OsError| {", COPYT),
- (COPY_SRC, "    match platform.rename_noreplace(&dir, &temp, &final_name, &file) {", "    match platform.rename_replace(&dir, &temp, &final_name, &file) {", COPYT),
- (COPY_SRC, "    holds_store()?;\n    match platform.unlink(&dir, &temp) {", "    drop(_lock);\n    holds_store()?;\n    match platform.unlink(&dir, &temp) {", COPYT),
- (COPY_SRC, "        Err(raw) if is_not_found(raw) => Ok(()),\n        Err(raw) => Err(io(Op::Open, raw)),", "        Err(_) => Ok(()),", COPYT),
+ (TARGET_SRC, "        let lock = platform.lock_exclusive(&lock_file).map_err(|raw| {", "        let lock = platform.lock_shared(&lock_file).map_err(|raw| {", COPYT),
+ (TARGET_SRC, "        match platform.rename_noreplace(&self.dir, &self.temp, &self.final_name, &file) {", "        match platform.rename_replace(&self.dir, &self.temp, &self.final_name, &file) {", COPYT),
+ (TARGET_SRC, "            Err(raw) if is_not_found(raw) => Ok(()),\n            Err(raw) => Err(io(Op::Open, raw)),", "            Err(_) => Ok(()),", COPYT),
  (COPY_SRC, "if dst.report().block_size != block {", "if dst.report().block_size != block && false {", COPYT),
  (COPY_SRC, "if f.kind != RegionKind::Slot && f.data_size % self.block() != 0 {", "if f.kind != RegionKind::Slot && f.data_size % self.block() != 0 && false {", COPYT),
  ('crates/store-io-engine/src/open.rs', '            Found::V1(_) if !read_only => {', '            Found::V1(_) if !read_only && false => {', F1T),
@@ -1342,7 +1348,7 @@ M = [
  ('crates/store-io-engine/src/open.rs', '            if store_io_core::errno::is_lock_held(raw) {', '            if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "store"]),
  ('crates/store-io-engine/src/create.rs', '                    if store_io_core::errno::is_lock_held(raw) {', '                    if store_io_core::errno::is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "store"]),
  ('crates/store-io-engine/src/create.rs', '            if store_io_core::errno::is_lock_held(raw) {\n                exists()', '            if store_io_core::errno::is_lock_held(raw) || true {\n                exists()', ["-p", "store-io-engine", "--test", "store"]),
- ('crates/store-io-engine/src/copy.rs', '        if is_lock_held(raw) {', '        if is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "copy"]),
+ (TARGET_SRC, '            if is_lock_held(raw) {', '            if is_lock_held(raw) || true {', ["-p", "store-io-engine", "--test", "copy"]),
  ('crates/store-io-engine/src/open.rs', '            platform.sync_dir(&dir).map_err(|e| {', '            Ok::<(), store_io_platform::OsError>(()).map_err(|e| {', COPYT),
  ('crates/store-io-engine/src/open.rs', '            platform.sync_dir(&dir).map_err(|e| {', '            let _ = platform.sync_dir(&dir);\n            Ok::<(), store_io_platform::OsError>(()).map_err(|e| {', COPYT),
  ('crates/store-io-engine/src/open.rs', '                if store_io_core::errno::is_unsupported(e) {\n                    Error::Unsupported {\n                        what: store_io_core::error::Capability::DirectoryFlush,', '                if store_io_core::errno::is_unsupported(e) && false {\n                    Error::Unsupported {\n                        what: store_io_core::error::Capability::DirectoryFlush,', COPYT),
@@ -1686,7 +1692,7 @@ M = [
  ("crates/store-io-engine/src/store.rs", 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace())', 'write_slot(q, file, pool, at, next, policy.dsync, domain.pace().filter(|_| false))', PACE_T),
  ("crates/store-io-engine/src/slots.rs", '        Some(_) => pool.take_capped(at.size(), usize::MAX),', '        Some(_) => pool.take(at.size()),', PACE_T),
  ("crates/store-io-engine/src/slots.rs", '    let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '    let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
- ("crates/store-io-engine/src/provision.rs", '                Some(p) => p.lone_piece(chunk as usize) as u64,', '                Some(p) => (p.lone_piece(chunk as usize) as u64).max(1 << 20),', QOS_STORE_T),
+ ("crates/store-io-engine/src/provision.rs", '((p.lone_piece(chunk as usize) as u64).min(chunk) / block * block).max(block)', '((p.lone_piece(chunk as usize) as u64).max(1 << 20) / block * block).max(block)', QOS_STORE_T),
  # D-156: a fill's piece, while commits are quiet, is as many pieces as the
  # call may keep in flight, at most the store's chunk; paced, its piece
  ("crates/store-io-engine/src/pace.rs", '        if paced {\n            return self.piece;\n        }', '        if paced && false {\n            return self.piece;\n        }', QOS_STORE_T),
@@ -1695,7 +1701,7 @@ M = [
  ("crates/store-io-engine/src/qos.rs", '            let paced = rec.is_some_and(|r| self.qos.active_in(r, now) && r.opts.pacing);', '            let paced = rec.is_some_and(|r| self.qos.active_in(r, now) && r.opts.pacing && false);', QOS_STORE_T),
  ("crates/store-io-engine/src/provision.rs", '                Some(_) => self.take_capped(len as usize, ErrorContext::default())?,', '                Some(_) => self.take(len as usize, ErrorContext::default()).or_else(|_| self.take_capped(len as usize, ErrorContext::default()))?,', PACE_T),
  ("crates/store-io-engine/src/provision.rs", '            let charge = pace.map(crate::pace::Pace::admit).transpose()?;', '            let charge = pace.map(crate::pace::Pace::admit).transpose()?.filter(|_| false);', PACE_T),
- ("crates/store-io-engine/src/create.rs", '        let pace = class\n            .is_background()', '        let pace = (class.is_background() && false)', QOS_STORE_T),
+ ("crates/store-io-engine/src/create.rs", '            Creator::Background => Some(Pace::new(&qos, platform.clock())),', '            Creator::Background => Some(Pace::new(&qos, platform.clock())).filter(|_| false),', QOS_STORE_T),
  ("crates/store-io-engine/src/create.rs", '                    created,\n                    pace.as_ref(),', '                    created,\n                    pace.as_ref().filter(|_| false),', PACE_T),
  ("crates/store-io-engine/src/create.rs", '&vat, &next_v, false, pace.as_ref())?;', '&vat, &next_v, false, pace.as_ref().filter(|_| false))?;', PACE_T),
  ("crates/store-io-engine/src/create.rs", '&tat, &next_t, false, pace.as_ref())?;', '&tat, &next_t, false, pace.as_ref().filter(|_| false))?;', PACE_T),
@@ -1904,7 +1910,7 @@ M = [
  (EXPORTINFO, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.full_copy || d > self.data_size {', EXPORTINFO_T),
  (EXPORTINFO, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.kind != RegionKind::Append || d > self.data_size {', EXPORTINFO_T),
  (EXPORTINFO, '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size {', '            if self.kind != RegionKind::Append || self.full_copy || d > self.data_size.max(d) {', EXPORTINFO_T),
- (EXPORTINFO, '        if self.object_len != 0 && !slot {', '        if self.object_len != 0 && !slot && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.object_len.is_some() && !slot {', '        if self.object_len.is_some() && !slot && false {', EXPORTINFO_T),
  (EXPORTINFO, '        if self.full_copy && slot {', '        if self.full_copy && slot && false {', EXPORTINFO_T),
  (EXPORTINFO, '        if self.stream_len != stream {', '        if self.stream_len != stream && false {', EXPORTINFO_T),
  (EXPORTINFO, '        if bytes.len() != RECORD_LEN {', '        if bytes.len() < RECORD_LEN {', EXPORTINFO_T),
@@ -1920,7 +1926,7 @@ M = [
  (EXPORTINFO, '    if bytes[..8] != MAGIC {', '    if bytes[..8] != MAGIC && false {', EXPORTINFO_T),
  (EXPORTINFO, '    if bytes[8..10] != VERSION.to_le_bytes() {', '    if bytes[8..10] != VERSION.to_le_bytes() && false {', EXPORTINFO_T),
  (EXPORTINFO, '    if len as u64 > max {', '    if len as u64 > max && false {', EXPORTINFO_T),
- (EXPORTINFO, '    check_log2(header.block_log2)?;\n    check_lists(', '    check_lists(', EXPORTINFO_T),
+ (EXPORTINFO, '    check_log2(header.block_log2)?;\n    check_lists(', '    let _h = header;\n    check_lists(', EXPORTINFO_T),
  ("crates/store-io-sim/src/world.rs", '        Ok(d.entries.is_empty() && !child)', '        Ok(d.entries.is_empty() && !child.then_some(()).is_some_and(|()| false))', CONF_SIM_T),
  ("crates/store-io-sim/src/world.rs", '        cap.saturating_sub(used)', '        cap.saturating_sub(used.min(0))', SIM_MODEL_T),
  ("crates/store-io-posix/src/posix.rs", '        if name != c"." && name != c".." {', '        if name != c"." {', CONF_NATIVE_T),
@@ -2013,6 +2019,50 @@ M = [
  (EXPORT_SRC, '                            report.bytes = report.bytes.min(b);', '                            report.bytes = report.bytes.min(b).max(report.bytes);', FILE_SINK_T),
  (EXPORT_SRC, '            call.enter(index, report.bytes);', '            if false {\n                call.enter(index, report.bytes);\n            }', FILE_SINK_T),
  (EXPORT_SRC, '            call.leave(index.saturating_add(1));', '            if false {\n                call.leave(index.saturating_add(1));\n            }', FILE_SINK_T),
+ (FILE_SOURCE_SRC, '        if crc != u32::from_le_bytes(tail) {', '        if crc != u32::from_le_bytes(tail) && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '            if !all {', '            if !all && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '        if size != rec.stream_len {', '        if size != rec.stream_len && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '            if sum != want {', '            if sum != want && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '            State::InRegion => self.read_at == self.stream_len,', '            State::InRegion => self.read_at <= self.stream_len,', IMPORT_T),
+ (IMPORT_SRC, '    if free < header.total {', '    if free < header.total && false {', IMPORT_T),
+ (IMPORT_SRC, '                // Fewer regions than the header counts.\n                return Err(invalid());', '                // Fewer regions than the header counts.\n                break;', IMPORT_T),
+ (IMPORT_SRC, '            info.validate(block)?;', '            let _v = info.validate(block);', IMPORT_T),
+ (IMPORT_SRC, '            if !names.insert(info.name.clone()) {', '            if !names.insert(info.name.clone()) && false {', IMPORT_T),
+ (IMPORT_SRC, '                .filter(|&c| c <= header.total)', '                .filter(|&c| c <= header.total.max(c))', IMPORT_T),
+ (IMPORT_SRC, '        if source.next_region().map_err(src)?.is_some() {', '        if source.next_region().map_err(src)?.is_some() && false {', IMPORT_T),
+ (IMPORT_SRC, '        if n == 0 || n > want {\n            return Err(invalid());', '        if n == 0 || n > want {\n            break;', IMPORT_T),
+ (IMPORT_SRC, '        if n == 0 || n > want {', '        if n == 0 || n > want.max(n) {', IMPORT_T),
+ (IMPORT_SRC, '                _ => Err(invalid()),', '                _ => Ok(()),', IMPORT_T),
+ (IMPORT_SRC, '                FillPattern::KeyedV1 => fill_keyed_v1(&info.fill_key, at, &mut dst[done..]),', '                FillPattern::KeyedV1 => fill_keyed_v1(&info.fill_key, at.min(0), &mut dst[done..]),', IMPORT_T),
+ (PROVISION_SRC, '((p.lone_piece(chunk as usize) as u64).min(chunk) / block * block).max(block)', '((p.lone_piece(chunk as usize) as u64).min(chunk.max(1 << 20)) / block * block).max(block)', IMPORT_T),
+ (EXPORT_SRC, '        info.validate(block_size)?;', '        let _v = info.validate(block_size);', IMPORT_T),
+ (EXPORT_SRC, '            object_len: rec.object_len.map(u64::from),', '            object_len: rec.object_len.filter(|&n| n > 0).map(u64::from),', IMPORT_T),
+ (EXPORT_SRC, '        rec.check().map_err(|_| bad())?;', '        let _c = rec.check().map_err(|_| bad());', IMPORT_T),
+ (EXPORT_SRC, '        if !block.is_power_of_two() {\n            return Err(bad());\n        }\n        let mut omitted', '        if !block.is_power_of_two() && false {\n            return Err(bad());\n        }\n        let mut omitted', IMPORT_T),
+ (EXPORTINFO, '    if used != body.len() {', '    if used != body.len() && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if flags & R_OBJECT == 0 && object_len != 0 {', '        if flags & R_OBJECT == 0 && object_len != 0 && false {', EXPORTINFO_T),
+ (EXPORTINFO, '        if self.object_len.is_some() {\n            flags |= R_OBJECT;', '        if self.object_len.is_some() && false {\n            flags |= R_OBJECT;', EXPORTINFO_T),
+ (EXPORTINFO, '            object_len: (flags & R_OBJECT != 0).then_some(object_len),', '            object_len: Some(object_len),', EXPORTINFO_T),
+ (EXPORT_SRC, '                None => None,', '                None => Some(0),', IMPORT_T),
+ (IMPORT_SRC, '            if info.object_len.is_some() {', '            if info.object_len.is_some_and(|n| n > 0) {', IMPORT_T),
+ (FILE_SOURCE_SRC, '            if self.crc_at != body || self.run_crc != self.want_crc {', '            if (self.crc_at != body || self.run_crc != self.want_crc) && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '        info.validate(header.block_size)\n            .map_err(', '        Ok::<(), Error>(())\n            .map_err(', IMPORT_T),
+ (FILE_SOURCE_SRC, '        if counts.iter().any(|&c| c > MAX_ITEMS) {', '        if counts.iter().any(|&c| c > MAX_ITEMS) && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '        if head as u64 > body {', '        if head as u64 > body && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '            .filter(|&n| n <= body)', '            .filter(|&n| n <= body.max(n))', IMPORT_T),
+ (FILE_SOURCE_SRC, '        if len < (HEADER_LEN + 4) as u64 || len > MAX_LEN {', '        if len > MAX_LEN {', IMPORT_T),
+ (FILE_SOURCE_SRC, '        if self.state != State::Fresh {', '        if self.state != State::Fresh && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '        if self.state != State::InRegion {', '        if self.state != State::InRegion && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '        (piece / block * block).max(block).min(SPAN) as usize', '        piece.max(block).min(SPAN) as usize', IMPORT_T),
+ (IMPORT_SRC, '    if !block.is_power_of_two()\n        ||', '    if !block.is_power_of_two() && false\n        ||', IMPORT_T),
+ (IMPORT_SRC, '        || !(512..=1 << 16).contains(&block)', '        || !(512..=1 << 17).contains(&block)', IMPORT_T),
+ (IMPORT_SRC, '        || header.region_count > crate::v2::MAX_REGION_CAPACITY', '        || header.region_count > crate::v2::MAX_REGION_CAPACITY.max(header.region_count)', IMPORT_T),
+ (IMPORT_SRC, '        if dst.report().block_size != block {', '        if dst.report().block_size != block && false {', IMPORT_T),
+ (TARGET_SRC, '        holds_store()?;\n        match platform.unlink(&dir, &temp) {', '        match platform.unlink(&dir, &temp) {', IMPORT_T),
+ (PROVISION_SRC, '((p.lone_piece(chunk as usize) as u64).min(chunk) / block * block).max(block)', '(p.lone_piece(chunk as usize) as u64).min(chunk).max(block)', IMPORT_T),
+ (FILE_SOURCE_SRC, '            if view.header != h {', '            if view.header != h && false {', IMPORT_T),
+ (FILE_SOURCE_SRC, '            if n < want {\n                break;', '            if n < want && false {\n                break;', IMPORT_T),
+ (FILE_SOURCE_SRC, 'is_some_and(|&stream| *len <= stream)', 'is_some_and(|&stream| *len <= stream.max(*len))', IMPORT_T),
 ]
 
 def kill_stuck_tests():

@@ -7,7 +7,10 @@ use store_io_core::decide::{Trust, decide};
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsError};
 use store_io_platform::{FileName, LinuxTier, Platform};
 
-use crate::{CopyOptions, CopyReport, FileSinkOptions, NativePlatform, Probe, StoreOptions};
+use crate::{
+    CopyOptions, CopyReport, FileSinkOptions, FileSourceOptions, ImportError, ImportOptions,
+    ImportReport, ImportSource, NativePlatform, Probe, StoreOptions,
+};
 
 /// The native platform on the kernel interface `tier` asks for (D-082;
 /// only Linux has a choice).
@@ -55,6 +58,8 @@ pub type StreamRange<'a> = store_io_engine::StreamRange<'a, NativePlatform>;
 
 /// An export written to a directory ([`file_sink`]).
 pub type FileSink = store_io_engine::FileSink<NativePlatform>;
+/// An export read back from a directory ([`file_source`]).
+pub type FileSource = store_io_engine::FileSource<NativePlatform>;
 
 /// A store: one container file in a directory of its own, on one device.
 ///
@@ -286,6 +291,44 @@ pub fn copy_store(
 /// exist, `NotWritten(InvalidOptions)` if it is not empty, `Io`.
 pub fn file_sink(dir: impl AsRef<Path>, opts: FileSinkOptions) -> Result<FileSink, Error> {
     store_io_engine::FileSink::create(platform(opts.store.linux_tier)?, path_of(&dir), opts)
+}
+
+/// A source reading back the export a [`file_sink`] wrote into `dir`, for
+/// [`import`]: every span of every data file checked against its CRC-32C
+/// before its bytes are handed out.
+///
+/// # Errors
+///
+/// As [`store_io_engine::FileSource::open`]: `NotFound` if `dir` does not
+/// exist, `Corruption` if it holds no `regions.info`, `Io`.
+pub fn file_source(dir: impl AsRef<Path>, opts: FileSourceOptions) -> Result<FileSource, Error> {
+    store_io_engine::FileSource::open(platform(opts.store.linux_tier)?, path_of(&dir), opts)
+}
+
+/// Imports an export into a new store in `to`, whose directory must hold
+/// no store: built under a temporary name and renamed into place only when
+/// whole and durable, so after a crash `to` holds nothing or the whole
+/// store (import again).
+///
+/// ```no_run
+/// let mut source = store_io::file_source("backup/orders", Default::default())?;
+/// let r = store_io::import(&mut source, "data/orders", store_io::ImportOptions::default())
+///     .map_err(|e| e.error)?;
+/// println!("{} regions, {} bytes", r.regions.len(), r.bytes);
+/// # Ok::<(), store_io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`store_io_engine::import`] (boxed, with how far it got).
+pub fn import(
+    source: &mut dyn ImportSource,
+    to: impl AsRef<Path>,
+    opts: ImportOptions,
+) -> Result<ImportReport, Box<ImportError>> {
+    let p = platform(opts.store.linux_tier)
+        .map_err(|error| Box::new(ImportError::from_error(error)))?;
+    store_io_engine::import(p, path_of(&to), source, opts)
 }
 
 /// Probes the device under the existing directory `dir`: the evidence

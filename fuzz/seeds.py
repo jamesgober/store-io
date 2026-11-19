@@ -179,9 +179,15 @@ log_len = 3 * SPAN + 5
 items = [
     (info_record(b"log", 1, 1, 0b11, 42, 3, 1 << 30, 4 * SPAN, log_len, 0, log_len), log_len),
     (info_record(b"pages", 2, 0, 0b1100, 0, 1, 0, 2 * SPAN, 0, 0, 2 * SPAN), 2 * SPAN),
-    (info_record(b"obj", 3, 1, 0, 0, 1, 0, 0, 0, 6, 6), 6),
+    (info_record(b"obj", 3, 1, 0b10000, 0, 1, 0, 0, 0, 6, 6), 6),
 ]
 write("export_info", "three-regions", info(True, items, (9,), (3,), (1, 2), ((b"pages", 77),)))
 write("export_info", "empty", info(False, []))
+# A slot committed empty (its object flag set, length 0) beside one never
+# committed (no flag).
+write("export_info", "slots", info(False, [
+    (info_record(b"blank", 3, 1, 0b10000, 0, 2, 0, 0, 0, 0, 0), 0),
+    (info_record(b"none", 3, 1, 0, 0, 1, 0, 0, 0, 0, 0), 0),
+]))
 
 print("seeds written")

@@ -41,6 +41,7 @@ use std::sync::atomic::Ordering;
 
 use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
 use store_io_core::id::RegionId;
+use store_io_format::exportinfo::{self, InfoHeader, RECORD_LEN, RegionRecord};
 use store_io_format::meta::{FillPattern, RegionKind, RegionName};
 use store_io_format::meta2::max_object;
 use store_io_platform::Platform;
@@ -145,8 +146,8 @@ pub struct RegionInfo {
     /// `data_size` (`None`: an unpositioned append region's whole data
     /// area, as read, or another kind).
     pub durable_len: Option<u64>,
-    /// A slot's committed object's length (`None`: none committed, or
-    /// another kind).
+    /// A slot's committed object's length, `Some(0)` for an empty one
+    /// (`None`: none committed, or another kind).
     pub object_len: Option<u64>,
     /// Exported in full (a region of a stale page).
     pub full_copy: bool,
@@ -219,6 +220,203 @@ impl RegionInfo {
         }
         Ok(())
     }
+
+    /// The format's record of it (`None` if its name is not a region name
+    /// or its object length does not fit the record).
+    pub(crate) fn to_record(&self) -> Option<RegionRecord> {
+        Some(RegionRecord {
+            name: RegionName::new(&self.name).ok()?,
+            kind: self.kind,
+            fill: self.fill,
+            fill_key: self.fill_key,
+            tag: self.tag,
+            generation: self.generation,
+            cap: self.cap,
+            data_size: self.data_size,
+            durable_len: self.durable_len,
+            object_len: match self.object_len {
+                Some(n) => Some(u32::try_from(n).ok()?),
+                None => None,
+            },
+            stream_len: self.stream_len(),
+            full_copy: self.full_copy,
+            superseded: self.superseded,
+        })
+    }
+
+    /// The region a record describes, in a stream of blocks of
+    /// `block_size`.
+    pub(crate) fn from_record(rec: &RegionRecord, block_size: u64) -> Self {
+        Self {
+            name: rec.name.as_str().to_owned(),
+            kind: rec.kind,
+            generation: rec.generation,
+            tag: rec.tag,
+            cap: rec.cap,
+            fill: rec.fill,
+            fill_key: rec.fill_key,
+            block_size,
+            data_size: rec.data_size,
+            durable_len: rec.durable_len,
+            object_len: rec.object_len.map(u64::from),
+            full_copy: rec.full_copy,
+            superseded: rec.superseded,
+        }
+    }
+
+    /// Its bytes in format `exportinfo`'s region record ([`RECORD_LEN`],
+    /// versioned with the record), for a caller's own framing; the block
+    /// size travels in the header ([`ExportHeader::to_bytes`]).
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(InvalidOptions)` if its fields cannot be a record (a
+    /// name not a region name, an object length past `u32`, fields that
+    /// disagree with its kind).
+    pub fn to_bytes(&self) -> Result<[u8; RECORD_LEN], Error> {
+        let bad = || not_written(NotWrittenCause::InvalidOptions, ErrorContext::default());
+        let rec = self.to_record().ok_or_else(bad)?;
+        rec.check().map_err(|_| bad())?;
+        Ok(rec.encode())
+    }
+
+    /// A region from bytes [`Self::to_bytes`] wrote, in a stream of blocks
+    /// of `block_size`, decoded and then [`Self::validate`]d (the bytes are
+    /// untrusted).
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(InvalidOptions)` if the bytes are not a record or the
+    /// region fails [`Self::validate`].
+    pub fn from_bytes(bytes: &[u8], block_size: u64) -> Result<Self, Error> {
+        let rec = RegionRecord::decode(bytes)
+            .map_err(|_| not_written(NotWrittenCause::InvalidOptions, ErrorContext::default()))?;
+        let info = Self::from_record(&rec, block_size);
+        info.validate(block_size)?;
+        Ok(info)
+    }
+}
+
+impl ExportHeader {
+    /// Its bytes: format `exportinfo`'s header and lists, sealed by a
+    /// CRC-32C, for a caller's own framing (the regions follow as
+    /// [`RegionInfo::to_bytes`] records).
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(InvalidOptions)` if it cannot be encoded: a block size
+    /// out of range, a verified name not a region name, a list holding an
+    /// item twice, or a count past `u32`.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        let bad = || not_written(NotWrittenCause::InvalidOptions, ErrorContext::default());
+        // A power of two (its range the codec's to check).
+        let block = self.block_size;
+        if !block.is_power_of_two() {
+            return Err(bad());
+        }
+        let mut omitted: Vec<u64> = self.facts.omitted.iter().map(|id| id.get()).collect();
+        omitted.sort_unstable();
+        let mut lost = self.facts.lost_pages.clone();
+        lost.sort_unstable();
+        let mut stale = self.facts.stale_pages.clone();
+        stale.sort_unstable();
+        let mut verified = Vec::with_capacity(self.facts.verified_up_to.len());
+        for (name, len) in &self.facts.verified_up_to {
+            verified.push((RegionName::new(name).map_err(|_| bad())?, *len));
+        }
+        verified.sort_by_key(|(n, _)| n.as_padded());
+        let h = InfoHeader {
+            writable: self.writable,
+            block_log2: block.trailing_zeros() as u8,
+            region_count: self.region_count,
+            lend: u32::try_from(self.lend).unwrap_or(u32::MAX),
+            total: self.total,
+            omitted_count: 0,
+            lost_count: 0,
+            stale_count: 0,
+            verified_count: 0,
+        };
+        let counted = InfoHeader {
+            omitted_count: u32::try_from(omitted.len()).map_err(|_| bad())?,
+            lost_count: u32::try_from(lost.len()).map_err(|_| bad())?,
+            stale_count: u32::try_from(stale.len()).map_err(|_| bad())?,
+            verified_count: u32::try_from(verified.len()).map_err(|_| bad())?,
+            ..h
+        };
+        let len = exportinfo::head_len(&counted)
+            .and_then(|n| n.checked_add(4))
+            .ok_or_else(bad)?;
+        let mut out = vec![0u8; len];
+        let n = exportinfo::encode_head(&h, &omitted, &lost, &stale, &verified, &mut out)
+            .map_err(|_| bad())?;
+        out.truncate(n);
+        Ok(out)
+    }
+
+    /// A header from bytes [`Self::to_bytes`] wrote (or a `regions.info`'s
+    /// header and lists, sealed), decoded and checked: the CRC-32C, the
+    /// block size in range, each list in its order. Its `superseded` facts
+    /// are not carried (each region's record says it).
+    ///
+    /// # Errors
+    ///
+    /// `NotWritten(InvalidOptions)` if the bytes are not a sealed header.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let info = exportinfo::decode_head(bytes)
+            .map_err(|_| not_written(NotWrittenCause::InvalidOptions, ErrorContext::default()))?;
+        Ok(Self::from_view(&info))
+    }
+
+    /// The header a decoded view holds (its lists the volume's facts).
+    pub(crate) fn from_view(info: &exportinfo::ExportInfo<'_>) -> Self {
+        let h = info.header;
+        Self {
+            region_count: h.region_count,
+            block_size: 1u64 << h.block_log2,
+            facts: VolumeFacts {
+                omitted: info.omitted().map(RegionId::from_raw).collect(),
+                lost_pages: info.lost_pages().collect(),
+                stale_pages: info.stale_pages().collect(),
+                verified_up_to: info
+                    .verified()
+                    .map(|(n, len)| (n.as_str().to_owned(), len))
+                    .collect(),
+                superseded: Vec::new(),
+            },
+            writable: h.writable,
+            lend: h.lend as usize,
+            total: h.total,
+        }
+    }
+}
+
+/// Where an import pulls a store from: the header an export's sink was
+/// given, then each region's info and its bytes, in order. A caller's own
+/// source (its framing carried by [`ExportHeader::to_bytes`] and
+/// [`RegionInfo::to_bytes`]) or a [`FileSource`](crate::FileSource).
+/// Everything it yields is untrusted: the import checks it.
+pub trait ImportSource {
+    /// The export's header (first, once).
+    ///
+    /// # Errors
+    ///
+    /// The source's: the import stops, nothing renamed.
+    fn header(&mut self) -> Result<ExportHeader, SinkError>;
+
+    /// The next region's info, or `None` after the last.
+    ///
+    /// # Errors
+    ///
+    /// The source's: the import stops, nothing renamed.
+    fn next_region(&mut self) -> Result<Option<RegionInfo>, SinkError>;
+
+    /// The current region's next bytes into `buf` (at most `buf.len()`):
+    /// how many, 0 at the region's end.
+    ///
+    /// # Errors
+    ///
+    /// The source's: the import stops, nothing renamed.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, SinkError>;
 }
 
 /// How far an export got.

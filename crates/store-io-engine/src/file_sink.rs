@@ -247,25 +247,6 @@ impl<P: Platform> FileSink<P> {
         (charged <= header.total).then_some(charged)
     }
 
-    /// The format's record of `info`.
-    fn record_of(info: &RegionInfo) -> Option<RegionRecord> {
-        Some(RegionRecord {
-            name: RegionName::new(&info.name).ok()?,
-            kind: info.kind,
-            fill: info.fill,
-            fill_key: info.fill_key,
-            tag: info.tag,
-            generation: info.generation,
-            cap: info.cap,
-            data_size: info.data_size,
-            durable_len: info.durable_len,
-            object_len: u32::try_from(info.object_len.unwrap_or(0)).ok()?,
-            stream_len: info.stream_len(),
-            full_copy: info.full_copy,
-            superseded: info.superseded,
-        })
-    }
-
     /// Writes the staging buffer's first `len` bytes (whole blocks) at the
     /// current offset of `which` (the region's file, or `regions.info`),
     /// admitted by the call's record and completed before it returns.
@@ -494,7 +475,7 @@ impl<P: Platform> FileSink<P> {
         let Some(charged) = self.admits(info, header) else {
             return Err(refusal());
         };
-        let Some(record) = Self::record_of(info) else {
+        let Some(record) = info.to_record() else {
             return Err(refusal());
         };
         let name = file_name(&data_name(self.index))?;

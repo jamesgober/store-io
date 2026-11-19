@@ -13,6 +13,30 @@
 
 ### Added
 
+- Engine and facade: **import, and `FileSource`** (PLANNING R5.6):
+  `import(platform, dir, source, ImportOptions)` (the facade's
+  `import(source, to, opts)`) builds a new store from an export pulled
+  through an `ImportSource`: in the target directory under the copy lock,
+  a crashed copy's or import's temporary removed first, the free space
+  checked against the header's total before anything is written, each
+  region recreated with its name, kind, data size, cap, tag, generation,
+  fill pattern and key, its bytes written once as its provisioning's fill
+  (an append region exported with a durable length filled with its pattern
+  past it, and restored unpositioned: its durable length is in the
+  report), a slot by one commit; then flushed, closed and renamed into
+  place by a rename that never replaces. The source is untrusted: its
+  header's block size and region count, each region's info
+  (`RegionInfo::validate`, each name once, the sizes within the header's
+  total), its bytes exactly each region's stream length, and exactly the
+  regions its header counts; any refusal renames nothing
+  (`ImportError` holds how far it got). `FileSource` (the facade's
+  `file_source(dir, opts)`) reads back a `FileSink`'s directory:
+  `regions.info` checked whole against its CRC-32C first, every data file
+  exactly its region's length, each 1 MiB span checked against its
+  CRC-32C before its bytes are handed out; anything else is
+  `Corruption(Metadata)`. `ExportHeader::to_bytes`/`from_bytes` and
+  `RegionInfo::to_bytes`/`from_bytes` carry an export in a caller's own
+  framing (format `exportinfo`'s header, lists and region records).
 - Engine and facade: **`FileSink`, an export written to a directory**
   (PLANNING R5.6): `FileSink::create` (the facade's `file_sink(dir,
   opts)`) takes an existing, empty directory and writes one data file per

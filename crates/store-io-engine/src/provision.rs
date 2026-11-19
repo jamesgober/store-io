@@ -355,8 +355,14 @@ where
                 return Err(Error::Poisoned { first });
             }
             // Sized at each piece: commits may begin or go quiet mid-fill.
+            // Never past this store's chunk, and whole blocks of it: a
+            // device group's piece is its first member's, and a store of
+            // smaller buffers or larger blocks may share it (an import's
+            // target, joined after its source).
             let piece = match pace {
-                Some(p) => p.lone_piece(chunk as usize) as u64,
+                Some(p) => {
+                    ((p.lone_piece(chunk as usize) as u64).min(chunk) / block * block).max(block)
+                }
                 None => chunk,
             };
             let len = piece.min(extent - at);

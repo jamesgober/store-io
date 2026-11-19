@@ -63,7 +63,9 @@ const R_CAPPED: u16 = 1;
 const R_DURABLE: u16 = 1 << 1;
 const R_FULL_COPY: u16 = 1 << 2;
 const R_SUPERSEDED: u16 = 1 << 3;
-const R_KNOWN: u16 = R_CAPPED | R_DURABLE | R_FULL_COPY | R_SUPERSEDED;
+/// A slot with a committed object (an empty one included).
+const R_OBJECT: u16 = 1 << 4;
+const R_KNOWN: u16 = R_CAPPED | R_DURABLE | R_FULL_COPY | R_SUPERSEDED | R_OBJECT;
 /// The smallest and largest store block (512 B to 64 KiB).
 const LOG2_MIN: u8 = 9;
 const LOG2_MAX: u8 = 16;
@@ -235,9 +237,9 @@ pub struct RegionRecord {
     /// An append region's durable length as exported, at most `data_size`
     /// (`None`: exported unpositioned, as read, or another kind).
     pub durable_len: Option<u64>,
-    /// A slot's committed object's length (0 for another kind, or none
-    /// committed).
-    pub object_len: u32,
+    /// A slot's committed object's length, `Some(0)` for an empty one
+    /// (`None`: none committed, or another kind).
+    pub object_len: Option<u32>,
     /// The bytes of its data file: a slot's `object_len`, an append
     /// region's `durable_len` when it has one, else `data_size`.
     pub stream_len: u64,
@@ -274,14 +276,14 @@ impl RegionRecord {
                 return Err(InfoError::Field("durable_len"));
             }
         }
-        if self.object_len != 0 && !slot {
+        if self.object_len.is_some() && !slot {
             return Err(InfoError::Field("object_len"));
         }
         if self.full_copy && slot {
             return Err(InfoError::Field("flags"));
         }
         let stream = if slot {
-            u64::from(self.object_len)
+            u64::from(self.object_len.unwrap_or(0))
         } else {
             self.durable_len.unwrap_or(self.data_size)
         };
@@ -308,6 +310,9 @@ impl RegionRecord {
         if self.superseded {
             flags |= R_SUPERSEDED;
         }
+        if self.object_len.is_some() {
+            flags |= R_OBJECT;
+        }
         let mut w = Writer::new(&mut out);
         // Every write fits: the buffer is the record's length.
         let _done: Result<(), CodecError> = (|| {
@@ -321,7 +326,7 @@ impl RegionRecord {
             w.bytes(&self.fill_key)?;
             w.u64(self.data_size)?;
             w.u64(self.durable_len.unwrap_or(0))?;
-            w.u32(self.object_len)?;
+            w.u32(self.object_len.unwrap_or(0))?;
             w.zeros(4)?;
             w.u64(self.stream_len)?;
             // Reserved: zero in version 1.
@@ -370,6 +375,9 @@ impl RegionRecord {
         if flags & R_DURABLE == 0 && durable != 0 {
             return Err(InfoError::Field("durable_len"));
         }
+        if flags & R_OBJECT == 0 && object_len != 0 {
+            return Err(InfoError::Field("object_len"));
+        }
         let rec = Self {
             name,
             kind,
@@ -380,7 +388,7 @@ impl RegionRecord {
             cap: (flags & R_CAPPED != 0).then_some(cap),
             data_size,
             durable_len: (flags & R_DURABLE != 0).then_some(durable),
-            object_len,
+            object_len: (flags & R_OBJECT != 0).then_some(object_len),
             stream_len,
             full_copy: flags & R_FULL_COPY != 0,
             superseded: flags & R_SUPERSEDED != 0,
@@ -477,8 +485,9 @@ pub fn decode(bytes: &[u8]) -> Result<ExportInfo<'_>, InfoError> {
     decode_within(bytes, MAX_LEN)
 }
 
-/// [`decode`], refusing a record longer than `max`.
-fn decode_within(bytes: &[u8], max: u64) -> Result<ExportInfo<'_>, InfoError> {
+/// The body of a sealed record (all but its CRC), its length within
+/// `max`, its magic and version told apart before its CRC-32C is checked.
+fn unseal(bytes: &[u8], max: u64) -> Result<&[u8], InfoError> {
     if bytes.len() as u64 > max {
         return Err(InfoError::Length);
     }
@@ -497,24 +506,16 @@ fn decode_within(bytes: &[u8], max: u64) -> Result<ExportInfo<'_>, InfoError> {
     if crc32c(body) != u32_at(crc, 0) {
         return Err(InfoError::Checksum);
     }
-    let header = InfoHeader::decode(&body[..HEADER_LEN])?;
-    let mut r = Reader::new(&body[HEADER_LEN..]);
-    let omitted = items(&mut r, header.omitted_count, 8)?;
-    let lost = items(&mut r, header.lost_count, 4)?;
-    let stale = items(&mut r, header.stale_count, 4)?;
-    let verified = items(&mut r, header.verified_count, VERIFIED_LEN)?;
-    for item in verified.chunks_exact(VERIFIED_LEN) {
-        let _name =
-            RegionName::from_padded(padded(item)).map_err(|_| InfoError::Field("verified"))?;
-    }
-    check_lists(
-        (0..omitted.len() / 8).map(|i| u64_at(omitted, i)),
-        u32s(lost),
-        u32s(stale),
-        verified.chunks_exact(VERIFIED_LEN).map(padded),
-    )?;
-    let start = r.position();
-    for _ in 0..header.region_count {
+    Ok(body)
+}
+
+/// [`decode`], refusing a record longer than `max`.
+fn decode_within(bytes: &[u8], max: u64) -> Result<ExportInfo<'_>, InfoError> {
+    let body = unseal(bytes, max)?;
+    let (head, used) = decode_prefix(body)?;
+    let all = &body[used..];
+    let mut r = Reader::new(all);
+    for _ in 0..head.header.region_count {
         let rec = RegionRecord::decode(items(&mut r, 1, RECORD_LEN)?)?;
         let spans = u32::try_from(rec.spans()).map_err(|_| InfoError::Truncated)?;
         let _crcs = items(&mut r, spans, 4)?;
@@ -522,14 +523,9 @@ fn decode_within(bytes: &[u8], max: u64) -> Result<ExportInfo<'_>, InfoError> {
     if r.remaining() != 0 {
         return Err(InfoError::Length);
     }
-    let all = &body[HEADER_LEN..];
     Ok(ExportInfo {
-        header,
-        omitted,
-        lost,
-        stale,
-        verified,
-        regions: &all[start..],
+        regions: all,
+        ..head
     })
 }
 
@@ -701,6 +697,24 @@ pub fn encode(
     )
 }
 
+/// The header's block size and the four lists' order rules (shared by
+/// [`encode`] and [`encode_head`]).
+fn check_head(
+    header: &InfoHeader,
+    omitted: &[u64],
+    lost: &[u32],
+    stale: &[u32],
+    verified: &[(RegionName, u64)],
+) -> Result<(), InfoError> {
+    check_log2(header.block_log2)?;
+    check_lists(
+        omitted.iter().copied(),
+        lost.iter().copied(),
+        stale.iter().copied(),
+        verified.iter().map(|(n, _)| n.as_padded()),
+    )
+}
+
 /// [`encode`], refusing a record longer than `max`.
 #[allow(clippy::too_many_arguments)]
 fn encode_within(
@@ -713,13 +727,7 @@ fn encode_within(
     out: &mut [u8],
     max: u64,
 ) -> Result<usize, InfoError> {
-    check_log2(header.block_log2)?;
-    check_lists(
-        omitted.iter().copied(),
-        lost.iter().copied(),
-        stale.iter().copied(),
-        verified.iter().map(|(n, _)| n.as_padded()),
-    )?;
+    check_head(header, omitted, lost, stale, verified)?;
     for (rec, spans) in regions {
         rec.check()?;
         if spans.len() as u64 != rec.spans() {
@@ -771,6 +779,123 @@ fn encode_within(
     Ok(n + 4)
 }
 
+/// The bytes of a header and its four lists ([`HEADER_LEN`] and the
+/// lists its counts give), or `None` if that does not fit a `usize`.
+#[must_use]
+pub fn head_len(header: &InfoHeader) -> Option<usize> {
+    HEADER_LEN
+        .checked_add((header.omitted_count as usize).checked_mul(8)?)?
+        .checked_add(
+            (header.lost_count as usize)
+                .checked_add(header.stale_count as usize)?
+                .checked_mul(4)?,
+        )?
+        .checked_add((header.verified_count as usize).checked_mul(VERIFIED_LEN)?)
+}
+
+/// Decodes the header and the four lists at the start of `bytes` (a record
+/// whose CRC-32C the caller checked itself, read as a stream: the regions
+/// follow), each list bounded by the bytes given and in its order. Returns
+/// the view (its regions empty) and the bytes it took.
+///
+/// # Errors
+///
+/// [`InfoError`] as [`decode`].
+pub fn decode_prefix(bytes: &[u8]) -> Result<(ExportInfo<'_>, usize), InfoError> {
+    if bytes.len() < HEADER_LEN {
+        return Err(InfoError::Truncated);
+    }
+    let header = InfoHeader::decode(&bytes[..HEADER_LEN])?;
+    let mut r = Reader::new(&bytes[HEADER_LEN..]);
+    let omitted = items(&mut r, header.omitted_count, 8)?;
+    let lost = items(&mut r, header.lost_count, 4)?;
+    let stale = items(&mut r, header.stale_count, 4)?;
+    let verified = items(&mut r, header.verified_count, VERIFIED_LEN)?;
+    for item in verified.chunks_exact(VERIFIED_LEN) {
+        let _name =
+            RegionName::from_padded(padded(item)).map_err(|_| InfoError::Field("verified"))?;
+    }
+    check_lists(
+        (0..omitted.len() / 8).map(|i| u64_at(omitted, i)),
+        u32s(lost),
+        u32s(stale),
+        verified.chunks_exact(VERIFIED_LEN).map(padded),
+    )?;
+    let used = HEADER_LEN + r.position();
+    Ok((
+        ExportInfo {
+            header,
+            omitted,
+            lost,
+            stale,
+            verified,
+            regions: &[],
+        },
+        used,
+    ))
+}
+
+/// Encodes a header and its four lists alone, sealed by a CRC-32C: an
+/// export's header apart from its regions (its `region_count` kept as
+/// given: the regions travel elsewhere). The counts are taken from the
+/// lists. Returns the bytes written ([`head_len`] and 4).
+///
+/// # Errors
+///
+/// [`InfoError::Field`] for a block size out of range or a list out of
+/// order; [`InfoError::Length`] for a count that does not fit its field;
+/// [`InfoError::Buffer`] if `out` is too short.
+pub fn encode_head(
+    header: &InfoHeader,
+    omitted: &[u64],
+    lost: &[u32],
+    stale: &[u32],
+    verified: &[(RegionName, u64)],
+    out: &mut [u8],
+) -> Result<usize, InfoError> {
+    check_head(header, omitted, lost, stale, verified)?;
+    let count = |n: usize| u32::try_from(n).map_err(|_| InfoError::Length);
+    let h = InfoHeader {
+        omitted_count: count(omitted.len())?,
+        lost_count: count(lost.len())?,
+        stale_count: count(stale.len())?,
+        verified_count: count(verified.len())?,
+        ..*header
+    };
+    let mut w = Writer::new(out);
+    w.bytes(&h.encode())?;
+    for &id in omitted {
+        w.u64(id)?;
+    }
+    for &p in lost.iter().chain(stale) {
+        w.u32(p)?;
+    }
+    for (name, len) in verified {
+        w.bytes(&name.as_padded())?;
+        w.u64(*len)?;
+    }
+    let n = w.position();
+    let crc = crc32c(&out[..n]);
+    let mut w = Writer::new(&mut out[n..]);
+    w.u32(crc)?;
+    Ok(n + 4)
+}
+
+/// Decodes what [`encode_head`] wrote: the magic and version, the CRC-32C,
+/// then the header and lists, with nothing after them.
+///
+/// # Errors
+///
+/// [`InfoError`] as [`decode`].
+pub fn decode_head(bytes: &[u8]) -> Result<ExportInfo<'_>, InfoError> {
+    let body = unseal(bytes, MAX_LEN)?;
+    let (info, used) = decode_prefix(body)?;
+    if used != body.len() {
+        return Err(InfoError::Length);
+    }
+    Ok(info)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -807,7 +932,7 @@ mod tests {
             cap: None,
             data_size: stream_len,
             durable_len: None,
-            object_len: 0,
+            object_len: None,
             stream_len,
             full_copy: false,
             superseded: false,
@@ -827,7 +952,7 @@ mod tests {
         b.fill = FillPattern::Zeros;
         let mut c = record("obj", RegionKind::Slot, 6);
         c.data_size = 0;
-        c.object_len = 6;
+        c.object_len = Some(6);
         [a, b, c]
     }
 
@@ -1040,7 +1165,7 @@ mod tests {
         assert_eq!(edited(&[(R0 + 24, &[4])]), Some(InfoError::Field("kind")));
         assert_eq!(edited(&[(R0 + 25, &[2])]), Some(InfoError::Field("fill")));
         assert_eq!(
-            edited(&[(R0 + 26, &[0x10])]),
+            edited(&[(R0 + 26, &[0x20])]),
             Some(InfoError::Field("flags"))
         );
         assert_eq!(
@@ -1097,7 +1222,8 @@ mod tests {
             ),
             both("durable_len")
         );
-        assert_eq!(bad(&|r| r.object_len = 1, b), both("object_len"));
+        assert_eq!(bad(&|r| r.object_len = Some(1), b), both("object_len"));
+        assert_eq!(bad(&|r| r.object_len = Some(0), b), both("object_len"));
         assert_eq!(bad(&|r| r.full_copy = true, c), both("flags"));
         assert_eq!(bad(&|r| r.stream_len += 1, a), both("stream_len"));
         assert_eq!(bad(&|r| r.stream_len -= 1, b), both("stream_len"));
@@ -1208,7 +1334,7 @@ mod tests {
         if !std::path::Path::new(fuzz).join("seeds.py").exists() {
             return;
         }
-        for (seed, regions) in [("three-regions", 3), ("empty", 0)] {
+        for (seed, regions) in [("three-regions", 3), ("empty", 0), ("slots", 2)] {
             let path = format!("{fuzz}/corpus/export_info/{seed}");
             let b = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
             let info = decode(&b).unwrap_or_else(|e| panic!("{seed}: {e}"));
@@ -1236,6 +1362,79 @@ mod tests {
         assert_eq!(
             RegionRecord::decode(&b[R2..R2 + RECORD_LEN]).unwrap(),
             regions()[2]
+        );
+    }
+
+    /// A header apart from its regions: sealed, its counts from the lists,
+    /// its region count kept; a flipped byte, a short record or bytes after
+    /// the lists refused; a whole record's prefix decodes to the same.
+    #[test]
+    fn test_a_head_alone_round_trips_and_is_checked() {
+        let mut h = header();
+        h.region_count = 7;
+        let verified = [(name("a"), 4096u64), (name("b"), 8192)];
+        let mut out = vec![0u8; 512];
+        let n = encode_head(&h, &[3, 9], &[1], &[2, 5], &verified, &mut out).unwrap();
+        assert_eq!(
+            Some(n - 4),
+            head_len(&decode_head(&out[..n]).unwrap().header)
+        );
+        let info = decode_head(&out[..n]).unwrap();
+        assert_eq!(info.header.region_count, 7);
+        assert_eq!(info.omitted().collect::<Vec<_>>(), [3, 9]);
+        assert_eq!(info.lost_pages().collect::<Vec<_>>(), [1]);
+        assert_eq!(info.stale_pages().collect::<Vec<_>>(), [2, 5]);
+        assert_eq!(info.verified().collect::<Vec<_>>(), verified);
+        assert_eq!(info.regions().count(), 0);
+        let mut bad = out[..n].to_vec();
+        bad[HEADER_LEN] ^= 1;
+        assert_eq!(decode_head(&bad).unwrap_err(), InfoError::Checksum);
+        assert_eq!(
+            decode_head(&out[..HEADER_LEN]).unwrap_err(),
+            InfoError::Truncated
+        );
+        // Bytes after the lists, sealed.
+        let mut long = out[..n - 4].to_vec();
+        long.extend_from_slice(&[0; 4]);
+        let crc = crc32c(&long);
+        long.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(decode_head(&long).unwrap_err(), InfoError::Length);
+        // Out of order is refused before anything is written.
+        assert_eq!(
+            encode_head(&h, &[9, 3], &[], &[], &[], &mut [0u8; 512]).unwrap_err(),
+            InfoError::Field("omitted")
+        );
+        // A prefix with too few bytes for its counts.
+        assert_eq!(
+            decode_prefix(&out[..n - 8]).unwrap_err(),
+            InfoError::Truncated
+        );
+        let (p, used) = decode_prefix(&out[..n]).unwrap();
+        assert_eq!(used, n - 4);
+        assert_eq!(p.header, info.header);
+    }
+
+    /// A slot's committed object, an empty one included, is its own flag:
+    /// none committed, committed empty and committed with bytes all decode
+    /// as they were; an object length without the flag is refused.
+    #[test]
+    fn test_a_slot_s_committed_object_is_flagged() {
+        for obj in [None, Some(0u32), Some(6)] {
+            let mut r = record("s", RegionKind::Slot, u64::from(obj.unwrap_or(0)));
+            r.data_size = 0;
+            r.object_len = obj;
+            let b = r.encode();
+            assert_eq!(RegionRecord::decode(&b).unwrap(), r, "{obj:?}");
+            assert_eq!(b[26] & (1 << 4) != 0, obj.is_some(), "{obj:?}");
+        }
+        let mut r = record("s", RegionKind::Slot, 6);
+        r.data_size = 0;
+        r.object_len = Some(6);
+        let mut b = r.encode();
+        b[26] &= !(1 << 4);
+        assert_eq!(
+            RegionRecord::decode(&b).unwrap_err(),
+            InfoError::Field("object_len")
         );
     }
 }

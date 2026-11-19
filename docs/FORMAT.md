@@ -1535,7 +1535,7 @@ Integers are little-endian. The record is, in order:
 | 48 | 16 | bytes | `fill_key` | Its fill key |
 | 64 | 8 | u64 | `data_size` | Its data size when the export planned it |
 | 72 | 8 | u64 | `durable_len` | An append region's durable length as exported, at most `data_size`; `0` unless `durable` |
-| 80 | 4 | u32 | `object_len` | A slot's committed object's length; `0` for another kind |
+| 80 | 4 | u32 | `object_len` | A slot's committed object's length, `0` for an empty one; `0` unless `object` |
 | 84 | 4 | bytes | reserved | must be `0` |
 | 88 | 8 | u64 | `stream_len` | The length of its data file: a slot's `object_len`; an append region's `durable_len` when `durable` is set; else `data_size` |
 | 96 | 32 | bytes | reserved | must be `0` in version 1 |
@@ -1546,6 +1546,7 @@ Integers are little-endian. The record is, in order:
 | 1 (`0x0002`) | durable | `durable_len` holds an append region's durable length (clear: exported unpositioned, as read, its stream its `data_size`); only for an append region not copied in full |
 | 2 (`0x0004`) | full copy | A region of a stale page, copied over its whole capacity; never a slot |
 | 3 (`0x0008`) | superseded | Possibly superseded: its source held it read-only |
+| 4 (`0x0010`) | object | A slot with a committed object, an empty one included (clear: none committed); only on a slot |
 
 The record is followed by its span CRCs: one u32 CRC-32C per 1 MiB (2^20 bytes) of its data file, in order, the last covering what is left: `ceil(stream_len / 2^20)` of them, none for an empty file. A reader checks each span of a data file against its CRC as it reads it, whatever its read sizes.
 
@@ -1557,7 +1558,7 @@ A reader takes nothing on trust:
 2. It checks the magic and the version (a foreign file, or another version whose framing it does not know, is named as such), then the CRC over every byte before it.
 3. It checks the header's flags, `block_log2` and every reserved byte.
 4. It bounds each list by the bytes left before using its count, checks each verified name, and checks each list's order (above).
-5. For each region it decodes the record: the name by section 11's rules, a known kind and fill, no unknown flag, each reserved byte zero, `cap` and `durable_len` zero unless their flags say otherwise, and the fields agreeing with each other and the kind as the table above gives them. Then it bounds the region's span count by the bytes left.
+5. For each region it decodes the record: the name by section 11's rules, a known kind and fill, no unknown flag, each reserved byte zero, `cap`, `durable_len` and `object_len` zero unless their flags say otherwise, and the fields agreeing with each other and the kind as the table above gives them. Then it bounds the region's span count by the bytes left.
 6. Nothing may follow the last region but the CRC.
 
 A record that passes has exactly one encoding: decoding and encoding it again gives the same bytes. What needs the whole record is the restore's to check, before it creates anything:

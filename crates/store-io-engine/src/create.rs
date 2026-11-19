@@ -17,6 +17,19 @@ use crate::pace::{Joined, Pace};
 use crate::slots::{PairRead, plan_next, write_slot};
 use crate::store::*;
 
+/// Whose a new store's writes are, from its first metadata write to its
+/// clean close (PLANNING R5.4).
+#[derive(Clone, Copy)]
+pub(crate) enum Creator<'a> {
+    /// Its own: a store a caller creates, whose writes are commits.
+    Commit,
+    /// A background call of its own (`copy_store`'s target).
+    Background,
+    /// A call in progress (an import): its record on the store's device
+    /// group.
+    Call(&'a crate::call::CallState),
+}
+
 impl<P: Platform> Store<P>
 where
     P::Queue: Send,
@@ -55,6 +68,24 @@ where
         name: &store_io_platform::FileName,
         class: IoClass,
     ) -> Result<Self, Error> {
+        let creator = if class.is_background() {
+            Creator::Background
+        } else {
+            Creator::Commit
+        };
+        Self::create_as(platform, path, opts, name, creator)
+    }
+
+    /// [`Self::create_named`] for `creator`: a store an import builds is a
+    /// part of the import's call, its writes charged to the call's record
+    /// on its device group (made for that group when the call has none).
+    pub(crate) fn create_as(
+        platform: P,
+        path: &Path,
+        opts: StoreOptions,
+        name: &store_io_platform::FileName,
+        creator: Creator<'_>,
+    ) -> Result<Self, Error> {
         let dir = platform
             .open_dir(path, true)
             .map_err(|e| io(Op::Create, e))?;
@@ -75,7 +106,7 @@ where
             }
             Err(e) => return Err(io(Op::Create, e)),
         };
-        let built = Self::build_new(&platform, &dir, &file, &opts, class);
+        let built = Self::build_new(&platform, &dir, &file, &opts, creator);
         match built {
             Ok((meta, report, layout, policy, pool, queues, joined)) => {
                 if let Err(e) = platform.sync_dir(&dir) {
@@ -216,7 +247,7 @@ where
         dir: &P::Dir,
         file: &P::File,
         opts: &StoreOptions,
-        class: IoClass,
+        creator: Creator<'_>,
     ) -> Result<
         (
             Meta,
@@ -244,9 +275,11 @@ where
         // Joined before any metadata is written: a background call's first
         // write is already its piece, admitted by the group (R5.4).
         let qos = join_group(platform, &evidence, opts, layout.block());
-        let pace = class
-            .is_background()
-            .then(|| Pace::new(&qos, platform.clock()));
+        let pace = match creator {
+            Creator::Commit => None,
+            Creator::Background => Some(Pace::new(&qos, platform.clock())),
+            Creator::Call(call) => call.pace_for(&qos, &platform.clock()),
+        };
         let pool = make_pool(&evidence, &layout, opts, true)?;
         let lanes = if policy.flush {
             flush_slots(platform, opts)

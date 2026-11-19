@@ -435,6 +435,9 @@ pub struct World {
     pub(crate) submit_probe: SubmitProbe,
     /// Run first by every `Platform::release_range`, outside the world lock.
     pub(crate) release_probe: SubmitProbe,
+    /// Run first by every `Platform::lock_exclusive` and `lock_shared`,
+    /// outside the world lock.
+    pub(crate) lock_probe: SubmitProbe,
     pub(crate) step_probe: StepProbe,
     /// The power is off ([`World::set_step_probe`]): every step and every
     /// completion fails with EIO, changing nothing, until the next crash.
@@ -480,6 +483,7 @@ impl World {
             lock_calls: 0,
             submit_probe: SubmitProbe::default(),
             release_probe: SubmitProbe::default(),
+            lock_probe: SubmitProbe::default(),
             step_probe: StepProbe::default(),
             powered_off: false,
             flushes_completed: 0,
@@ -693,6 +697,14 @@ impl World {
     /// on the caller's thread and outside the world lock.
     pub fn set_release_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
         self.release_probe = SubmitProbe(probe);
+    }
+
+    /// Sets (or clears) the hook every `Platform::lock_exclusive` and
+    /// `Platform::lock_shared` runs first, on the caller's thread and
+    /// outside the world lock (another process acting just before a lock
+    /// is taken). It may use the platform itself, locks included.
+    pub fn set_lock_probe(&mut self, probe: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+        self.lock_probe = SubmitProbe(probe);
     }
 
     /// Lock calls so far (see [`FaultPlan::fail_lock`]).

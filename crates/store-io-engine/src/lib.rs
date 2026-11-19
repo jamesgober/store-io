@@ -31,6 +31,7 @@ pub mod domain;
 mod exec;
 mod export;
 mod file_sink;
+mod file_source;
 #[cfg(all(test, not(loom)))]
 mod flush_slot_tests;
 // The format-2 test helpers, shared with the in-crate tests, name the crate
@@ -43,6 +44,7 @@ mod force;
 pub mod frontier;
 mod gate;
 mod grow2;
+mod import;
 mod io;
 mod layout;
 mod lifecycle;
@@ -77,6 +79,7 @@ mod store;
 mod stream;
 mod submitter;
 mod sync;
+mod target;
 #[cfg(feature = "sim-hooks")]
 #[doc(hidden)]
 pub mod test_hook;
@@ -94,11 +97,13 @@ pub use copy::{COPY_LOCK, COPYING, CopyOptions, CopyReport, copy_store};
 pub use directory::Directory;
 pub use domain::DomainStats;
 pub use export::{
-    ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, RegionInfo, SinkError,
-    VolumeFacts,
+    ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, ImportSource, RegionInfo,
+    SinkError, VolumeFacts,
 };
 pub use file_sink::{FileSink, FileSinkOptions, REGIONS_INFO};
+pub use file_source::{FileSource, FileSourceOptions};
 pub use flusher::SubmitterWaker;
+pub use import::{ImportError, ImportOptions, ImportReport, import};
 pub use multi::{MAX_SET_STORES, SetStats, StoreSet};
 pub use options::RegionOptions;
 pub use qos::{CommitHold, QosReport};

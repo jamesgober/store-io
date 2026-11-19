@@ -225,6 +225,17 @@ name = "store-io-core"
 version = "0.5.0"
 
 [[package]]
+name = "store-io-engine"
+version = "0.5.0"
+dependencies = [
+ "loom",
+ "store-io-buf",
+ "store-io-core",
+ "store-io-format",
+ "store-io-platform",
+]
+
+[[package]]
 name = "store-io-format"
 version = "0.5.0"
 
@@ -233,6 +244,7 @@ name = "store-io-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "store-io-engine",
  "store-io-format",
  "store-io-posix",
  "store-io-win",

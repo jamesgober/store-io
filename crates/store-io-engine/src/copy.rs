@@ -24,22 +24,22 @@
 use std::ops::ControlFlow;
 use std::path::Path;
 
-use store_io_core::errno::{is_already_exists, is_lock_held, is_not_found};
-use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op};
+use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op};
 use store_io_core::id::RegionId;
 use store_io_format::judge::Standing;
 use store_io_format::meta::{FillPattern, REGION_META_LEN, RegionKind, RegionMeta};
 use store_io_format::meta2::{FLAG_CAPPED, decode_region_header, max_object};
 use store_io_format::slot::FORMAT_2;
-use store_io_platform::{FileMode, FileName, IoOp, Platform};
+use store_io_platform::{IoOp, Platform};
 
 use crate::exec::{Ran, clear_stale, run};
 use crate::pace::Pace;
 use crate::qos::Qos;
 use crate::settle::settle_read;
+use crate::target::TargetDir;
 
 use crate::slot_handle::committed_object;
-use crate::store::{CONTAINER, LiveRegion, Meta, Store, StoreOptions, io, lock_meta};
+use crate::store::{LiveRegion, Meta, Store, StoreOptions, io, lock_meta};
 use crate::{RegionOptions, ScanItem};
 
 /// The temporary name a copy's target is built under (no live store ever
@@ -430,41 +430,9 @@ where
         block,
         source_format,
     } = src.copy_plan(opts.accept_stale_pages)?;
-    let dir = platform
-        .open_dir(to, true)
-        .map_err(|raw| io(Op::Create, raw))?;
-    let final_name = name(CONTAINER)?;
-    let temp = name(COPYING)?;
-    let holds_store = || match platform.open_file(&dir, &final_name, FileMode::ReadOnly) {
-        Ok(_) => Err(Error::AlreadyExists { what: Named::Store }),
-        Err(raw) if is_not_found(raw) => Ok(()),
-        Err(raw) => Err(io(Op::Open, raw)),
-    };
-    holds_store()?;
-    // The copy lock, then (under it) no store there and a crashed copy's
-    // leftover removed: no other copy can touch the temporary name until
-    // this one's rename is done.
-    let lock_name = name(COPY_LOCK)?;
-    let lock_file = match platform.create_file(&dir, &lock_name) {
-        Ok(f) => f,
-        Err(raw) if is_already_exists(raw) => platform
-            .open_file(&dir, &lock_name, FileMode::ReadWrite)
-            .map_err(|raw| io(Op::Open, raw))?,
-        Err(raw) => return Err(io(Op::Create, raw)),
-    };
-    let _lock = platform.lock_exclusive(&lock_file).map_err(|raw| {
-        if is_lock_held(raw) {
-            Error::Locked
-        } else {
-            io(Op::Lock, raw)
-        }
-    })?;
-    holds_store()?;
-    match platform.unlink(&dir, &temp) {
-        Ok(()) => {}
-        Err(raw) if is_not_found(raw) => {}
-        Err(raw) => return Err(io(Op::Unlink, raw)),
-    }
+    // The target directory under its copy lock, a crashed copy's or
+    // import's temporary removed (`target.rs`).
+    let target = TargetDir::open(&platform, to)?;
     let mut target_opts = opts.store.clone();
     target_opts.container_format = FORMAT_2;
     target_opts.block_size = Some(block as u32);
@@ -479,7 +447,7 @@ where
             platform.clone(),
             to,
             target_opts,
-            &temp,
+            &target.temp,
             store_io_core::IoClass::Background,
         )?;
         // A device that needs larger blocks than the source's would round
@@ -499,35 +467,7 @@ where
     }
     // Into place: the rename is the commit of the copy, and never replaces
     // a store another process created meanwhile.
-    let file = platform
-        .open_file(&dir, &temp, FileMode::ReadWrite)
-        .map_err(|raw| io(Op::Open, raw))?;
-    match platform.rename_noreplace(&dir, &temp, &final_name, &file) {
-        Ok(()) => {}
-        Err(raw) if is_already_exists(raw) => {
-            drop(file);
-            // Best effort: the next copy removes it otherwise.
-            if platform.unlink(&dir, &temp).is_ok() {
-                let _synced = platform.sync_dir(&dir);
-            }
-            return Err(Error::AlreadyExists { what: Named::Store });
-        }
-        Err(raw) => {
-            return Err(Error::DurabilityUnknown {
-                op: Op::Rename,
-                raw: Some(raw),
-                ctx: ErrorContext::default(),
-            });
-        }
-    }
-    drop(file);
-    platform
-        .sync_dir(&dir)
-        .map_err(|raw| Error::DurabilityUnknown {
-            op: Op::SyncDir,
-            raw: Some(raw),
-            ctx: ErrorContext::default(),
-        })?;
+    target.commit(&platform)?;
     Ok(CopyReport {
         regions: facts.len(),
         bytes,
@@ -537,13 +477,6 @@ where
         stale_pages,
         verified_up_to,
         superseded,
-    })
-}
-
-fn name(s: &str) -> Result<FileName, Error> {
-    FileName::new(s).map_err(|_| Error::NotWritten {
-        cause: NotWrittenCause::InvalidName,
-        ctx: ErrorContext::default(),
     })
 }
 

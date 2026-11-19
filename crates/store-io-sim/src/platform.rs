@@ -448,6 +448,16 @@ fn step(world: &Mutex<World>) -> RawResult<()> {
     Ok(())
 }
 
+impl SimPlatform {
+    /// Runs the world's lock probe, if any, outside the world lock.
+    fn lock_probe(&self) {
+        let probe = lock(&self.world).lock_probe.0.clone();
+        if let Some(probe) = probe {
+            probe();
+        }
+    }
+}
+
 impl Platform for SimPlatform {
     type File = SimFile;
     type Dir = SimDir;
@@ -557,6 +567,7 @@ impl Platform for SimPlatform {
     }
 
     fn lock_exclusive(&self, file: &SimFile) -> RawResult<SimLock> {
+        self.lock_probe();
         // As on Linux, a write lock needs a handle open for writing.
         let mut w = lock(&self.world);
         file.check(&w, true)?;
@@ -609,6 +620,7 @@ impl Platform for SimPlatform {
     }
 
     fn lock_shared(&self, file: &SimFile) -> RawResult<SimLock> {
+        self.lock_probe();
         let mut w = lock(&self.world);
         file.check(&w, false)?;
         w.lock(file.id, true)?;

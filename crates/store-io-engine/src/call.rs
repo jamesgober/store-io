@@ -31,8 +31,9 @@ pub(crate) struct Failure {
 
 /// One call's state.
 pub(crate) struct CallState {
-    /// The source store's device group and the call's record on it.
-    source: Arc<Qos>,
+    /// The source store's device group and the call's record on it (none
+    /// for an import: its source is a part that joins like any other).
+    source: Option<Arc<Qos>>,
     source_pace: Option<Pace>,
     /// The call's records on other groups, made when a part first joins.
     others: RefCell<Vec<(Arc<Qos>, Pace)>>,
@@ -53,6 +54,16 @@ pub(crate) struct CallState {
 
 impl CallState {
     pub(crate) fn new(source: Arc<Qos>, source_pace: Option<Pace>) -> Rc<Self> {
+        Self::with_source(Some(source), source_pace)
+    }
+
+    /// A call with no source store (an import): every part's record is
+    /// made when it first joins.
+    pub(crate) fn detached() -> Rc<Self> {
+        Self::with_source(None, None)
+    }
+
+    fn with_source(source: Option<Arc<Qos>>, source_pace: Option<Pace>) -> Rc<Self> {
         Rc::new(Self {
             source,
             source_pace,
@@ -71,7 +82,11 @@ impl CallState {
     /// source's group (the part then shares it), else one made for that
     /// group the first time a part joins it.
     pub(crate) fn pace_for(&self, qos: &Arc<Qos>, clock: &Clock) -> Option<Pace> {
-        if Qos::same_group(&self.source, qos) {
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|s| Qos::same_group(s, qos))
+        {
             self.shares_source.set(true);
             return self.source_pace.clone();
         }

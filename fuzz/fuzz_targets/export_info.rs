@@ -11,11 +11,17 @@
 //! - its lists hold exactly the counts its header gives, each strictly
 //!   ascending;
 //! - it encodes back to the same bytes (one encoding per record), and
-//!   decoding that encoding gives the same record.
+//!   decoding that encoding gives the same record;
+//! - each region record goes through the engine's `RegionInfo::from_bytes`
+//!   (decode, then `validate` for the record's block size) without a
+//!   panic, and one it accepts encodes back to the same record; the input
+//!   as a header alone (`ExportHeader::from_bytes`) never panics, and one
+//!   it accepts encodes back to a header that decodes the same.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use store_io_engine::{ExportHeader, RegionInfo};
 use store_io_format::crc32c::crc32c;
 use store_io_format::exportinfo::{decode, encode_into};
 
@@ -24,10 +30,17 @@ fn check(data: &[u8]) {
         return;
     };
     let h = info.header;
-    assert_eq!(info.regions().count(), h.region_count as usize, "a region dropped");
+    assert_eq!(
+        info.regions().count(),
+        h.region_count as usize,
+        "a region dropped"
+    );
     for (rec, spans) in info.regions() {
         assert_eq!(spans.len() as u64, rec.spans(), "spans not one per SPAN");
-        assert!(rec.check().is_ok(), "an accepted record disagrees with its kind");
+        assert!(
+            rec.check().is_ok(),
+            "an accepted record disagrees with its kind"
+        );
     }
     assert_eq!(info.omitted().count(), h.omitted_count as usize);
     assert_eq!(info.lost_pages().count(), h.lost_count as usize);
@@ -40,10 +53,31 @@ fn check(data: &[u8]) {
     assert_eq!(&out[..n], data, "not its one encoding");
     let again = decode(&out[..n]).expect("a re-encoded record decodes");
     assert_eq!(again.header, info.header);
+    let block = 1u64 << h.block_log2;
+    for (rec, _) in info.regions() {
+        let bytes = rec.encode();
+        if let Ok(r) = RegionInfo::from_bytes(&bytes, block) {
+            assert_eq!(
+                r.to_bytes().ok(),
+                Some(bytes),
+                "an accepted region re-encodes"
+            );
+        }
+    }
+}
+
+/// The input as an export's header alone (`ExportHeader::to_bytes`).
+fn check_head(data: &[u8]) {
+    let Ok(h) = ExportHeader::from_bytes(data) else {
+        return;
+    };
+    let again = h.to_bytes().expect("an accepted header encodes");
+    assert_eq!(ExportHeader::from_bytes(&again).ok(), Some(h));
 }
 
 fuzz_target!(|data: &[u8]| {
     check(data);
+    check_head(data);
     if data.len() >= 4 {
         let mut sealed = data.to_vec();
         let n = sealed.len() - 4;

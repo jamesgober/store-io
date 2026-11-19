@@ -7,7 +7,7 @@ use store_io_core::decide::{Trust, decide};
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsError};
 use store_io_platform::{FileName, LinuxTier, Platform};
 
-use crate::{CopyOptions, CopyReport, NativePlatform, Probe, StoreOptions};
+use crate::{CopyOptions, CopyReport, FileSinkOptions, NativePlatform, Probe, StoreOptions};
 
 /// The native platform on the kernel interface `tier` asks for (D-082;
 /// only Linux has a choice).
@@ -52,6 +52,9 @@ pub type ReadStream = store_io_engine::ReadStream<NativePlatform>;
 
 /// One range for `Store::prefetch` (`stream_range` on a region).
 pub type StreamRange<'a> = store_io_engine::StreamRange<'a, NativePlatform>;
+
+/// An export written to a directory ([`file_sink`]).
+pub type FileSink = store_io_engine::FileSink<NativePlatform>;
 
 /// A store: one container file in a directory of its own, on one device.
 ///
@@ -263,6 +266,26 @@ pub fn copy_store(
         path_of(&to),
         opts,
     )
+}
+
+/// A sink writing an export into the existing, empty directory `dir`: one
+/// data file per region and a `regions.info` record, restorable only once
+/// the export returned `Ok`.
+///
+/// ```no_run
+/// let store = store_io::Store::open("data/orders")?;
+/// let mut sink = store_io::file_sink("backup/orders", store_io::FileSinkOptions::default())?;
+/// let report = store.export(&mut sink).map_err(|e| e.error)?;
+/// assert!(report.complete);
+/// # Ok::<(), store_io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`store_io_engine::FileSink::create`]: `NotFound` if `dir` does not
+/// exist, `NotWritten(InvalidOptions)` if it is not empty, `Io`.
+pub fn file_sink(dir: impl AsRef<Path>, opts: FileSinkOptions) -> Result<FileSink, Error> {
+    store_io_engine::FileSink::create(platform(opts.store.linux_tier)?, path_of(&dir), opts)
 }
 
 /// Probes the device under the existing directory `dir`: the evidence

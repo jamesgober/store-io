@@ -203,6 +203,10 @@ CONF_NATIVE_T = ["-p", "store-io", "--test", "conformance"]
 SIM_MODEL_T = ["-p", "store-io-sim", "--test", "model"]
 EXPORT_SRC = "crates/store-io-engine/src/export.rs"
 EXPORT_T = ["-p", "store-io-engine", "--test", "export"]
+FILE_SINK_SRC = "crates/store-io-engine/src/file_sink.rs"
+FILE_SINK_T = ["-p", "store-io-engine", "--test", "file_sink"]
+FILE_SINK_LIB = ["-p", "store-io-engine", "--lib", "file_sink::"]
+CALL_SRC = "crates/store-io-engine/src/call.rs"
 TUNE_SRC = "crates/store-io-engine/src/tune.rs"
 TUNE_T = ["-p", "store-io-engine", "--lib", "tune::"]
 COPY_FEED_T = ["-p", "store-io-engine", "--test", "copy_feed"]
@@ -1972,6 +1976,43 @@ M = [
  (EXPORT_SRC, '!(512..=1 << 16).contains(&block)', '!(512..=1 << 17).contains(&block)', EXPORT_T),
  (COPY_SRC, '            if names.is_empty() {\n                return Err(refused(NotWrittenCause::InvalidOptions, None));', '            if names.is_empty() && false {\n                return Err(refused(NotWrittenCause::InvalidOptions, None));', EXPORT_T),
  (COPY_SRC, '                if let Some(u) = meta.unavailable.iter().find(|u| u.name == **n) {', '                if let Some(u) = meta.unavailable.iter().find(|u| u.name == **n && false) {', EXPORT_T),
+ (FILE_SINK_SRC, '        if !platform.dir_is_empty(&d).map_err(|raw| io(Op::Open, raw))? {', '        if !platform.dir_is_empty(&d).map_err(|raw| io(Op::Open, raw))? && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '                c.part_failed(e, offset);', '                if false {\n                    c.part_failed(e, offset);\n                }', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if self.index >= header.region_count || info.validate(header.block_size).is_err() {', '        if false || info.validate(header.block_size).is_err() {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if self.index >= header.region_count || info.validate(header.block_size).is_err() {', '        if self.index >= header.region_count || info.validate(header.block_size).is_err() && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if self.done.iter().any(|(r, _)| r.name.as_str() == info.name) {', '        if self.done.iter().any(|(r, _)| r.name.as_str() == info.name) && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        (charged <= header.total).then_some(charged)', '        (charged <= header.total.max(charged)).then_some(charged)', FILE_SINK_T),
+ (FILE_SINK_SRC, '            Ok(n) if n == len => {', '            Ok(n) if n <= len => {', FILE_SINK_T),
+ (FILE_SINK_SRC, '            if self.span_len == SPAN {', '            if self.span_len == SPAN / 2 {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if self.span_len > 0 {', '        if self.span_len > 0 && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.platform\n            .set_len(file, len)\n            .map_err(|raw| io(Op::Allocate, raw))?;\n', '        if false {\n            self.platform\n                .set_len(file, len)\n                .map_err(|raw| io(Op::Allocate, raw))?;\n        }\n', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.platform\n            .flush_all(file)\n            .map_err(|raw| io(Op::FlushAll, raw))\n    }', '        let _ = file;\n        Ok(())\n    }', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.platform\n            .sync_dir(&self.dir)\n            .map_err(|raw| io(Op::SyncDir, raw))\n    }', '        if false {\n            self.platform\n                .sync_dir(&self.dir)\n                .map_err(|raw| io(Op::SyncDir, raw))?;\n        }\n        Ok(())\n    }', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if !block.is_power_of_two() || !(512..=1 << 16).contains(&block) {\n            return Err(refusal());', '        if (!block.is_power_of_two() || !(512..=1 << 16).contains(&block)) && false {\n            return Err(refusal());', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if header.region_count > crate::v2::MAX_REGION_CAPACITY {', '        if header.region_count > crate::v2::MAX_REGION_CAPACITY && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if free < header.total {', '        if free < header.total && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if self.index != header.region_count || self.charged > header.total {', '        if self.index != header.region_count && false || self.charged > header.total {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if self.state != State::Fresh {', '        if self.state != State::Fresh && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '    fn region(&mut self, info: &RegionInfo) -> Result<(), SinkError> {\n        if !matches!(self.state, State::Begun | State::Ended) {', '    fn region(&mut self, info: &RegionInfo) -> Result<(), SinkError> {\n        if !matches!(self.state, State::Begun | State::Ended) && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if chunk.offset() != written || n > declared - written {', '        if n > declared - written {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if written != declared {', '        if written != declared && false {', FILE_SINK_T),
+ (EXPORT_SRC, '                        report.offset = f.offset;', '                        report.offset = f.offset.min(0);', FILE_SINK_T),
+ (EXPORT_SRC, '                        report.region = Some(r.name.clone());', '                        report.region = Some(r.name.clone()).filter(|_| false);', FILE_SINK_T),
+ (EXPORT_SRC, '                    stop.error = f.error.clone();\n                }\n                clamp(report);', '                    if false {\n                        stop.error = f.error.clone();\n                    }\n                }\n                clamp(report);', FILE_SINK_T),
+ (EXPORT_SRC, '                if let Some(f) = &failure {\n                    clamp(report);', '                if let Some(f) = failure.as_ref().filter(|_| false) {\n                    clamp(report);', FILE_SINK_T),
+ (EXPORT_SRC, '                if !call.all_finished() {', '                if !call.all_finished() && false {', FILE_SINK_T),
+ (FILE_SINK_SRC, '            if !self.admit_failed {', '            if !self.admit_failed || true {', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '            c.sink_bound();', '            if false {\n                c.sink_bound();\n            }', FILE_SINK_T),
+ (EXPORT_SRC, '        let _bound = call::bind(&call);', '        let _bound = Some(call::bind(&call)).filter(|_| false);', FILE_SINK_T),
+ (EXPORT_SRC, '                report.regions = report.regions.min(f.region as usize);', '                report.regions = report.regions.min(f.region as usize).max(report.regions);', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.crc_bytes(bytes);', '        if false {\n            self.crc_bytes(bytes);\n        }', FILE_SINK_T),
+ (CALL_SRC, '        if f.is_none() {', '        if f.is_none() || true {', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.platform\n            .set_len(file, len)\n            .map_err(|raw| io(Op::Allocate, raw))?;\n        self.platform\n            .flush_all(file)\n            .map_err(|raw| io(Op::FlushAll, raw))\n    }', '        self.platform\n            .flush_all(file)\n            .map_err(|raw| io(Op::FlushAll, raw))?;\n        self.platform\n            .set_len(file, len)\n            .map_err(|raw| io(Op::Allocate, raw))\n    }', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.sync_dir()?;\n        self.done.push(', '        if false {\n            self.sync_dir()?;\n        }\n        self.done.push(', FILE_SINK_T),
+ (EXPORT_SRC, '                            report.bytes = report.bytes.min(b.saturating_add(f.offset));', '                            report.bytes = report.bytes.min(b.saturating_add(f.offset)).max(report.bytes);', FILE_SINK_T),
+ (EXPORT_SRC, '                            report.bytes = report.bytes.min(b);', '                            report.bytes = report.bytes.min(b).max(report.bytes);', FILE_SINK_T),
+ (EXPORT_SRC, '            call.enter(index, report.bytes);', '            if false {\n                call.enter(index, report.bytes);\n            }', FILE_SINK_T),
+ (EXPORT_SRC, '            call.leave(index.saturating_add(1));', '            if false {\n                call.leave(index.saturating_add(1));\n            }', FILE_SINK_T),
 ]
 
 def kill_stuck_tests():

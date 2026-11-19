@@ -774,6 +774,21 @@ where
         self.core.borrow_mut().next_item()
     }
 
+    /// A part of the call (an export's sink) joined the stream's record:
+    /// the stream leaves it one of the call's unpaced pieces
+    /// ([`Pace::second`]), so its read-ahead never starves the sink.
+    pub(crate) fn make_second(&self) {
+        let mut c = self.core.borrow_mut();
+        c.pace = c.pace.as_ref().map(Pace::second);
+    }
+
+    /// The error of a collection for another part of the call that lost
+    /// the stream's reads (sticky), as a read error of the part then read.
+    pub(crate) fn failure(&self) -> Option<Error> {
+        let c = self.core.try_borrow().ok()?;
+        c.collect_failed.map(|(raw, _)| c.read_error(raw))
+    }
+
     /// The chunks its caller may hold at once.
     pub(crate) fn lend(&self) -> usize {
         self.core.borrow().lend

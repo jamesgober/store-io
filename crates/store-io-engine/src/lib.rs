@@ -22,6 +22,7 @@
 
 mod after;
 mod batch;
+mod call;
 pub mod completion;
 mod copy;
 mod create;
@@ -29,6 +30,7 @@ mod directory;
 pub mod domain;
 mod exec;
 mod export;
+mod file_sink;
 #[cfg(all(test, not(loom)))]
 mod flush_slot_tests;
 // The format-2 test helpers, shared with the in-crate tests, name the crate
@@ -95,6 +97,7 @@ pub use export::{
     ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, RegionInfo, SinkError,
     VolumeFacts,
 };
+pub use file_sink::{FileSink, FileSinkOptions, REGIONS_INFO};
 pub use flusher::SubmitterWaker;
 pub use multi::{MAX_SET_STORES, SetStats, StoreSet};
 pub use options::RegionOptions;

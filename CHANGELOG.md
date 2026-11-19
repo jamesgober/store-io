@@ -13,6 +13,28 @@
 
 ### Added
 
+- Engine and facade: **`FileSink`, an export written to a directory**
+  (PLANNING R5.6): `FileSink::create` (the facade's `file_sink(dir,
+  opts)`) takes an existing, empty directory and writes one data file per
+  region (`region-00000.data`, named by its index, never by the region's
+  name), each exactly its region's stream length, and a `regions.info`
+  record (`REGIONS_INFO`, format `exportinfo`: the header, the volume's
+  facts, every region's attributes and a CRC-32C of each 1 MiB span of
+  each file). The directory is restorable only once the export returned
+  `Ok`: `regions.info` is created empty at `begin` and written, flushed
+  and its directory synced only at `finish`. What the sink is pushed is
+  checked (the calls in order, each region's info by
+  `RegionInfo::validate` and its name once, each chunk at the region's
+  next byte, each region's length whole, the sizes within the header's
+  total, exactly `region_count` regions, enough free space at `begin`),
+  and any refusal or failure is sticky. Its writes are direct, paced by
+  the export's own call on the target's device group, each completed
+  before the call that made it returns; each region's file is cut to its
+  length, flushed and its directory synced at its `end_region`. A failed
+  sink write is the export's, with the report clamped to the region and
+  offset where that write began, even through a caller's wrapper that
+  swallowed the error; and an export whose `FileSink` never finished is
+  not complete.
 - Engine: **export through a caller's sink** (PLANNING R5.6):
   `Store::export(sink)` and `Store::export_with(sink, ExportOptions {
   regions, depth, accept_stale_pages })` push the store's regions, in the

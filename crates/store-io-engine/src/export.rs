@@ -45,6 +45,7 @@ use store_io_format::meta::{FillPattern, RegionKind, RegionName};
 use store_io_format::meta2::max_object;
 use store_io_platform::Platform;
 
+use crate::call::{self, CallState};
 use crate::copy::{CopyPlan, Facts};
 use crate::io::{ctx_range, not_written};
 use crate::lifecycle::retired_error;
@@ -524,6 +525,80 @@ where
         report: &mut ExportReport,
     ) -> Result<(), Stop> {
         let plan = self.export_plan(opts)?;
+        // The call's record on this store's device group: the stream's
+        // reads are its pieces; a reference sink joins it at `begin`.
+        let pace = self.inner.domain.new_pace();
+        let call = CallState::new(Arc::clone(&self.inner.qos), pace.clone());
+        let _bound = call::bind(&call);
+        let ran = self.export_body(sink, opts, report, &plan, pace, &call);
+        // A part's failure (a reference sink's write, even one a caller's
+        // wrapper swallowed) is the export's: its error, and the report
+        // clamped to where the failed write began.
+        let failure = call.failure();
+        // To where the failure was in the export's own order of regions:
+        // the regions ended before it, the region and offset when inside
+        // one, and the bytes up to there.
+        let clamp = |report: &mut ExportReport| {
+            if let Some(f) = &failure {
+                report.regions = report.regions.min(f.region as usize);
+                let base = call.base(f.region);
+                match plan.facts.get(f.region as usize).filter(|_| f.inside) {
+                    Some(r) => {
+                        report.region = Some(r.name.clone());
+                        report.offset = f.offset;
+                        if let Some(b) = base {
+                            report.bytes = report.bytes.min(b.saturating_add(f.offset));
+                        }
+                    }
+                    None => {
+                        report.region = None;
+                        report.offset = 0;
+                        if let Some(b) = base {
+                            report.bytes = report.bytes.min(b);
+                        }
+                    }
+                }
+            }
+        };
+        match ran {
+            Err(mut stop) => {
+                if let Some(f) = &failure {
+                    stop.error = f.error.clone();
+                }
+                clamp(report);
+                Err(stop)
+            }
+            Ok(()) => {
+                if let Some(f) = &failure {
+                    clamp(report);
+                    return Err(Stop {
+                        error: f.error.clone(),
+                        sink: None,
+                    });
+                }
+                // A bound reference sink that never finished (a wrapper
+                // that dropped it, or fell back to another).
+                if !call.all_finished() {
+                    return Err(Stop::from(not_written(
+                        NotWrittenCause::Interrupted,
+                        ErrorContext::default(),
+                    )));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The export's sink calls, bound to its call.
+    fn export_body(
+        &self,
+        sink: &mut dyn ExportSink,
+        opts: &ExportOptions,
+        report: &mut ExportReport,
+        plan: &CopyPlan,
+        pace: Option<crate::pace::Pace>,
+        call: &CallState,
+    ) -> Result<(), Stop> {
         report.facts = VolumeFacts {
             omitted: plan.omitted.clone(),
             lost_pages: plan.lost_pages.clone(),
@@ -531,9 +606,6 @@ where
             verified_up_to: plan.verified_up_to.clone(),
             superseded: plan.superseded.clone(),
         };
-        // The call's record on this store's device group: the stream's
-        // reads are its pieces.
-        let pace = self.inner.domain.new_pace();
         let stream = self.export_stream(opts.depth, pace)?;
         let header = ExportHeader {
             region_count: u32::try_from(plan.facts.len()).unwrap_or(u32::MAX),
@@ -544,17 +616,43 @@ where
             total: Self::export_total(&plan.facts, plan.block),
         };
         sink.begin(&header).map_err(sunk(None))?;
-        for f in &plan.facts {
+        // A sink that joined the source's record shares its pieces.
+        if call.shares_source() {
+            stream.make_second();
+        }
+        for (i, f) in plan.facts.iter().enumerate() {
             report.region = Some(f.name.clone());
             report.offset = 0;
-            self.export_region(f, plan.block, &stream, sink, report)?;
+            let index = u32::try_from(i).unwrap_or(u32::MAX);
+            call.enter(index, report.bytes);
+            self.export_region(f, plan.block, &stream, sink, report)
+                .map_err(|stop| Self::part_error(&stream, stop))?;
             report.regions += 1;
+            call.leave(index.saturating_add(1));
         }
         report.region = None;
         report.offset = 0;
+        // Every part asked before the export reports anything: a read the
+        // stream lost while a sink's wait collected it is its failure.
+        if let Some(e) = stream.failure() {
+            return Err(Stop::from(e));
+        }
         // Nothing is in flight: every part was read to its end.
         stream.cancel()?;
         sink.finish().map_err(sunk(None))
+    }
+
+    /// The stream's own failure, if a collection for another part of the
+    /// call lost its reads (the sink then only saw its wait end), else
+    /// `stop` as it was.
+    fn part_error(stream: &ReadStream<P>, stop: Stop) -> Stop {
+        match stream.failure() {
+            Some(error) => Stop {
+                error,
+                sink: stop.sink,
+            },
+            None => stop,
+        }
     }
 
     /// Slot `r`'s committed object at its turn, read under its header lock

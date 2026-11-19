@@ -129,8 +129,8 @@ pub use store_io_engine::{Chunk, StreamOptions};
 /// its options, the header and each region's info a sink is told, the
 /// sink's trait and errors, and the report.
 pub use store_io_engine::{
-    ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, FillPattern, RegionInfo,
-    SinkError, VolumeFacts,
+    ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, FileSinkOptions,
+    FillPattern, REGIONS_INFO, RegionInfo, SinkError, VolumeFacts,
 };
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 
@@ -168,8 +168,8 @@ mod native;
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use native::{
-    AppendBatch, AppendRegion, Directory, PageBatch, PageRegion, ReadStream, Reservation, Slot,
-    Store, StoreSet, StreamRange, Submitter, copy_store, probe,
+    AppendBatch, AppendRegion, Directory, FileSink, PageBatch, PageRegion, ReadStream, Reservation,
+    Slot, Store, StoreSet, StreamRange, Submitter, copy_store, file_sink, probe,
 };
 
 /// What [`probe`] found out about a directory's device.

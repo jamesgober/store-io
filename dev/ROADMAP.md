@@ -154,6 +154,10 @@ Exit criteria (dispositions recorded 2026-11-09, at the v0.5.0 release; the perf
 
 Mirror writes, dependent writes, multi-device barriers, flush-sharing certification, I/O classes, auto-tuned background budget, clone and unshare, many-file mode, streaming copy, prefetch.
 
+**0.6.0 released 2026-11-20** (`docs/release/v0.6.0.md`): device and file identity; `StoreSet` with its barrier, dependent writes and ditto writes; I/O classes and per-device pacing with opt-in auto-tuning; read streams and prefetch; export to a caller's sink, to files (`FileSink`, `FileSource`) or straight into a new store (`StoreSink`), and import. G17, G18, G19 and G20 are gated in CI; G21 (export against fio) is published, not gated.
+
+The 0.6.x releases, in order: the export's speed, with G21 gated at 80%; range clone and unshare; copy-and-swap; write-combining append regions; shadow paging; many-file mode; NUMA and the registration hook; flush-sharing conformance per file system, then the exit gate.
+
 Exit criteria:
 - [ ] At least 90% of summed per-device fio on the devices available.
 - [ ] Commit-class p99 at most 2x idle p99 under background load.

@@ -2,7 +2,7 @@
 //! volume record and table pages the way the store does (each write the
 //! next `meta_seq`, into the slot that does not hold the winner), then
 //! tears or damages copies, and the judgement must tell the one possible
-//! torn write from damage (`.dev/design/format2-draft.md` §7).
+//! torn write from damage (`docs/FORMAT.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used, unused_results)]
 

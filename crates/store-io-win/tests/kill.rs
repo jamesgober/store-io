@@ -13,7 +13,7 @@
 //! that landed after the new owner's.
 //!
 //! Measured on the dev box (Windows 11 build 26200, NTFS, a consumer NVMe
-//! drive; `.dev/experiments/win-kill`): with the lock, no late block in 250
+//! drive): with the lock, no late block in 250
 //! rounds with 512 MiB in flight (1,250 rounds in all), the wait for the
 //! lock growing with what was in flight (0.4 ms for 256 KiB, 110-220 ms
 //! medians for 512 MiB); writing at the kill without waiting for the lock,

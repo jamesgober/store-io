@@ -1,5 +1,5 @@
 //! Container format 2 in the engine, create (E2a,
-//! `.dev/design/format2-draft.md`): the pages are durable before the volume
+//! `docs/FORMAT.md`): the pages are durable before the volume
 //! record, and a crashed format-2 create, and only that, is taken over by
 //! the next create, after a power failure at any step.
 

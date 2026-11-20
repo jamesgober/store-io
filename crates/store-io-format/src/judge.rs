@@ -1,4 +1,4 @@
-//! The format-2 tear judgement (`.dev/design/format2-draft.md` §7): given
+//! The format-2 tear judgement (`docs/FORMAT.md`): given
 //! both slots of the volume record and of every table page, decide each
 //! pair's standing, which failed copy (if any) is the one metadata write a
 //! crash can leave torn, and whether the open may write.

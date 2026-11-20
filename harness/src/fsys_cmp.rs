@@ -1,8 +1,8 @@
 //! fsys 1.1.3, the comparison baseline: journal configurations and the
 //! read-back check of a journal file.
 //!
-//! The configurations are the ones Phase 0 measured
-//! (`.dev/experiments/fsys-baseline`): the library default (500 µs group-
+//! The configurations are the ones Phase 0 measured:
+//! the library default (500 µs group-
 //! commit window), the window turned off (fsys's best QD1 configuration), and
 //! direct mode with the window off.
 

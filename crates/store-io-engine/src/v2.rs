@@ -1,4 +1,4 @@
-//! Container format 2 (`.dev/design/format2-draft.md`): the paged region
+//! Container format 2 (`docs/FORMAT.md`, Part I): the paged region
 //! table's metadata, create, the open's tear judgement, region checks
 //! (`open2`) and healing, and the clean close. Built beside format 1 (D-116
 //! makes format 1 read-only once creation switches, v0.5 E5).
@@ -1222,7 +1222,7 @@ mod tests {
     /// table, or hostile, never a store to recreate); the largest real one
     /// opens (independent review F-1).
     #[test]
-    fn test_a_volume_record_past_the_largest_table_is_corrupt() {
+    fn test_a_volume_record_past_the_largest_table_is_unsupported() {
         for log2_table in 12..=16u8 {
             let max = max_table_pages(log2_table);
             let real = layout_for(12, log2_table, MAX_REGION_CAPACITY).pages;

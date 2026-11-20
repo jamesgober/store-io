@@ -1,5 +1,5 @@
 //! Reproductions of the v0.3.0 hazards found while recording the retroactive
-//! decisions (`.dev/DECISIONS-0.3.0.md`, D-057 and D-059). Each test states
+//! decisions (D-057 and D-059). Each test states
 //! the behaviour store-io must have; on v0.3.0 it fails.
 
 #![allow(

@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: 0.6: several devices, background pacing, export and import.</strong> The simple and batch APIs on Windows, Linux and macOS, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. On macOS, APFS with <code>F_FULLFSYNC</code> for every flush; a store on APFS on the Mac's own drive is meant to be flush-required, not yet confirmed on real hardware, and anything else is Unverified or Unsafe (<code>docs/PLATFORMS.md</code> section 5). Container format 2: a paged region table (65,536 regions by default) and regions that can grow; a store made before 0.5 (format 1) opens read-only and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>); a store whose region table is damaged still opens, the damage reported and nothing guessed, with three ways out (repair an entry, accept a rolled-back page, or copy what can be copied: <code>docs/GUIDE.md</code> section 15). Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>, after power-cut certification in <code>0.9</code>. New in 0.6: several devices (a barrier across stores, dependent and ditto writes), pacing of background I/O against commits, and export and import (to a directory as a backup, or straight into a new store). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: 0.6.0, with several devices, background pacing, read streams, and export and import.</strong> The simple and batch APIs on Windows, Linux and macOS, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. On macOS, APFS with <code>F_FULLFSYNC</code> for every flush; a store on APFS on the Mac's own drive is meant to be flush-required, not yet confirmed on real hardware, and anything else is Unverified or Unsafe (<code>docs/PLATFORMS.md</code> section 5). Container format 2: a paged region table (65,536 regions by default) and regions that can grow; a store made before 0.5 (format 1) opens read-only and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>); a store whose region table is damaged still opens, the damage reported and nothing guessed, with three ways out (repair an entry, accept a rolled-back page, or copy what can be copied: <code>docs/GUIDE.md</code> section 15). Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>, after power-cut certification in <code>0.9</code>. New in 0.6: several devices (a barrier across stores, dependent and ditto writes), pacing of background I/O against commits, read streams and prefetch, and export and import (to a directory as a backup, or straight into a new store). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -38,7 +38,7 @@
 store-io replaces [fsys](https://github.com/jamesgober/fsys-rs) as the only code in a database stack that touches files and devices. It is built for:
 
 - **Write-ahead logs and commit layers**: small, sector-aligned, positioned writes at low queue depth, durable on completion on power-safe devices and with the minimum barrier cost on volatile-cache devices; exact receipts with out-of-order completion; raw, uninterpreted recovery reads.
-- **Columnar and page stores**: large vectored writes, dependent writes across files and devices with at most one flush per device, release on compaction, clone for backup.
+- **Columnar and page stores**: large vectored writes, dependent writes across files and devices with at most one flush per device, release on compaction, and clone for backup (planned for a 0.6.x release).
 - **Buffer pools**: batched direct reads into caller-owned aligned frames, explicit cancellable prefetch, per-range errors.
 - **Backup and replication shipping**: streaming direct-read copies with bounded memory.
 - **Embedded deployments**: one portable container file, unprivileged, with zero idle wakeups.
@@ -56,7 +56,7 @@ store-io replaces [fsys](https://github.com/jamesgober/fsys-rs) as the only code
 - **Fail-stop.** A failed write or flush poisons the device's barrier domain. A flush is never retried, and success is never reported after a failed one.
 - **Opens never touch caller data.** A read-only open, a scan and a lock acquisition change nothing: no byte, size, timestamp or directory entry. A writable open writes the volume record (the next owner generation) and may heal one torn metadata write before it returns, so the container's bytes and modification time change; caller data is never modified.
 - **No hidden latency.** No timers, no polling threads, no group-commit windows, no idle wakeups.
-- **Measured, not claimed.** Every performance number names the device, durability class, filesystem, OS and kernel, and fsync status, and is gated against fio on the same box.
+- **Measured, not claimed.** Every performance number names the device, durability class, filesystem, OS and kernel, and fsync status, and is measured against fio on the same box: gated, or published where its gate is not yet set.
 
 <hr>
 <br>
@@ -89,7 +89,7 @@ let (start, receipt) = batch.commit()?;
 | [`docs/API.md`](./docs/API.md) | Every public item, grouped by purpose. |
 | [`docs/DURABILITY.md`](./docs/DURABILITY.md) | The durability model: classes, evidence, trust, receipts, flush sharing, fail-stop. |
 | [`docs/PLATFORMS.md`](./docs/PLATFORMS.md) | What store-io does on Windows, Linux and macOS, and the known limits of each. |
-| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk formats: format 2 (made by 0.5), and format 1 (made by 0.4 and earlier, read-only from 0.5). |
+| [`docs/FORMAT.md`](./docs/FORMAT.md) | The on-disk formats: format 2 (made by 0.5 and later), format 1 (made by 0.4 and earlier, read-only from 0.5), and the export record (Part III). |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Every change. |
 
 ## Installation

@@ -514,6 +514,13 @@ fn test_a_caller_s_source_is_checked() {
         if wrong == Wrong::Fails {
             assert_eq!(e.source, Some(SinkError::Other(7)));
         }
+        if wrong == Wrong::Fewer {
+            // Refused where the missing region should have been, every
+            // region before it imported.
+            let last = want.regions.len() - 1;
+            assert_eq!(e.report.index, Some(last as u32), "{wrong:?}");
+            assert_eq!(e.report.regions.len(), last, "{wrong:?}");
+        }
         none_restored(&p);
     }
     let mut src = Framed::new(&want, Wrong::None);
@@ -663,14 +670,18 @@ fn test_a_power_cut_at_any_step_leaves_no_store_or_the_whole_one() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    let fixture = |seed: u64| {
-        let p = SimPlatform::new(SimConfig::volatile(seed));
+    // Built once (the store and its export to files, every handle
+    // dropped); each run on a fork of it, the world exactly as a rebuild
+    // from the same seed leaves it.
+    let base = {
+        let p = SimPlatform::new(SimConfig::volatile(4010));
         let s = small(&p);
         let want = kept(&s);
         to_files(&p, &s);
         drop(s);
         (p, want)
     };
+    let fixture = || (base.0.fork(), &base.1);
     let probe = |p: &SimPlatform, cut: u64| {
         let steps = Arc::new(AtomicU64::new(0));
         let n = Arc::clone(&steps);
@@ -682,14 +693,14 @@ fn test_a_power_cut_at_any_step_leaves_no_store_or_the_whole_one() {
         steps
     };
     let all = {
-        let (p, _w) = fixture(4010);
+        let (p, _w) = fixture();
         let steps = probe(&p, u64::MAX);
         let _r = import_files(&p).unwrap();
         steps.load(Ordering::Relaxed)
     };
     assert!(all > 10, "{all} steps");
-    for cut in 0..=all {
-        let (p, want) = fixture(4010);
+    each_cut(all, |cut| {
+        let (p, want) = fixture();
         let _steps = probe(&p, cut);
         let done = import_files(&p).is_ok();
         let mode = if cut % 2 == 0 {
@@ -704,17 +715,36 @@ fn test_a_power_cut_at_any_step_leaves_no_store_or_the_whole_one() {
         match Store::open(p.clone(), Path::new(TO), opts()) {
             Ok(t) => {
                 drop(t);
-                restored_matches(&p, &want);
+                restored_matches(&p, want);
             }
             Err(e) => {
                 assert!(!done, "cut {cut}: an import that returned Ok is not there");
                 assert!(matches!(e, Error::NotFound { .. }), "cut {cut}: {e:?}");
                 let r = import_files(&p).unwrap();
                 assert!(r.complete, "cut {cut}");
-                restored_matches(&p, &want);
+                restored_matches(&p, want);
             }
         }
-    }
+    });
+}
+
+/// Runs `f` for every cut in `0..=all`, each exactly once, spread over up
+/// to four threads (each cut on a world of its own: a fork). A cut's
+/// failure fails the test with that cut's message.
+fn each_cut(all: u64, f: impl Fn(u64) + Sync) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4)) as u64;
+    std::thread::scope(|scope| {
+        for first in 0..threads {
+            let f = &f;
+            let _worker = scope.spawn(move || {
+                let mut cut = first;
+                while cut <= all {
+                    f(cut);
+                    cut += threads;
+                }
+            });
+        }
+    });
 }
 
 /// `regions.info`'s bytes as `OUT` holds them.

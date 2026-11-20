@@ -374,10 +374,15 @@ fn test_each_misuse_is_refused_and_the_export_is_not_complete() {
     // (none at `begin` or at `finish`).
     for (n, (m, at, ended, inside)) in [
         (Misuse::BeginTwice, "begin", 0, None),
-        (Misuse::SkipFirstEnd, "region", 1, Some("capped")),
+        // The first region's `end_region` never reached the sink: it never
+        // ended it, so the report stands in it, at the sink's writes done.
+        (Misuse::SkipFirstEnd, "region", 0, Some("pages")),
         (Misuse::DropFirstChunk, "data", 0, Some("pages")),
         (Misuse::EndEarly, "end_region", 0, Some("pages")),
-        (Misuse::SkipSecondRegion, "finish", 5, None),
+        // The second region never reached the sink: only the first counts
+        // (the sink ended no region after a gap); the report stands at the
+        // second's start, nothing past it.
+        (Misuse::SkipSecondRegion, "finish", 1, Some("capped")),
         (Misuse::FinishTwice, "finish", 5, None),
         (Misuse::BadInfo, "region", 0, Some("pages")),
         (Misuse::SmallTotal, "region", 0, Some("pages")),
@@ -395,11 +400,19 @@ fn test_each_misuse_is_refused_and_the_export_is_not_complete() {
         assert!(!e.report.complete, "{m:?}");
         assert_eq!(e.report.regions, ended, "{m:?}");
         assert_eq!(e.report.region.as_deref(), inside, "{m:?}");
-        assert_eq!(e.report.offset, 0, "{m:?}");
+        // Where it stands in that region: its writes done (the first
+        // region's whole 128 KiB pieces when its end never came), none
+        // otherwise.
+        let offset = if m == Misuse::SkipFirstEnd {
+            (2 * SPAN + 3 * B) / CHUNK as u64 * CHUNK as u64
+        } else {
+            0
+        };
+        assert_eq!(e.report.offset, offset, "{m:?}");
         if ended < 5 {
-            // The bytes of the regions before it, none of its own.
+            // The bytes of the regions before it, and its own written.
             let before = if ended == 1 { 2 * SPAN + 3 * B } else { 0 };
-            assert_eq!(e.report.bytes, before, "{m:?}");
+            assert_eq!(e.report.bytes, before + offset, "{m:?}");
         }
         assert_eq!(
             cause(&e.error),
@@ -551,11 +564,23 @@ fn test_a_power_cut_at_any_step_leaves_no_false_backup() {
 
     use store_io_sim::CrashMode;
 
-    let want: Vec<Vec<u8>> = {
-        let (_p, s) = every_kind(3050);
+    // Built once (the source store, closed); each run on a fork of it,
+    // the store reopened with its append region resumed at its durable
+    // length, so it exports what the store that made it did.
+    let (base, want, durable) = {
+        let (p, s) = every_kind(3050);
         let mut keep = Keep::default();
         let _r = export(&s, &mut keep).unwrap();
-        keep.regions.into_iter().map(|(_, b)| b).collect()
+        let durable = s.append_region("log").unwrap().durable_through();
+        drop(s);
+        let want: Vec<Vec<u8>> = keep.regions.into_iter().map(|(_, b)| b).collect();
+        (p, want, durable)
+    };
+    let fixture = || {
+        let p = base.fork();
+        let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
+        let _at = s.append_region("log").unwrap().resume_at(durable).unwrap();
+        (p, s)
     };
     let probe = |p: &SimPlatform, cut: u64| {
         let steps = Arc::new(AtomicU64::new(0));
@@ -569,15 +594,15 @@ fn test_a_power_cut_at_any_step_leaves_no_false_backup() {
     };
     // The steps of a whole export.
     let all = {
-        let (p, s) = every_kind(3050);
+        let (p, s) = fixture();
         let steps = probe(&p, u64::MAX);
         let mut fs = sink(&p);
         let _r = export(&s, &mut fs).unwrap();
         steps.load(Ordering::Relaxed)
     };
     assert!(all > 10, "{all} steps");
-    for cut in 0..=all {
-        let (p, s) = every_kind(3050);
+    each_cut(all, |cut| {
+        let (p, s) = fixture();
         let _steps = probe(&p, cut);
         let mut fs = sink(&p);
         let ended = match export(&s, &mut fs) {
@@ -603,5 +628,24 @@ fn test_a_power_cut_at_any_step_leaves_no_false_backup() {
                 }
             }
         }
-    }
+    });
+}
+
+/// Runs `f` for every cut in `0..=all`, each exactly once, spread over up
+/// to four threads (each cut on a world of its own: a fork). A cut's
+/// failure fails the test with that cut's message.
+fn each_cut(all: u64, f: impl Fn(u64) + Sync) {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4)) as u64;
+    std::thread::scope(|scope| {
+        for first in 0..threads {
+            let f = &f;
+            let _worker = scope.spawn(move || {
+                let mut cut = first;
+                while cut <= all {
+                    f(cut);
+                    cut += threads;
+                }
+            });
+        }
+    });
 }

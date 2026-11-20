@@ -50,11 +50,39 @@ impl SimPlatform {
     pub fn with_world<R>(&self, f: impl FnOnce(&mut World) -> R) -> R {
         f(&mut lock(&self.world))
     }
+
+    /// A platform over a deep copy of this world, for tests that build a
+    /// fixture once and run each case on a copy of it: independent from
+    /// here on in both directions; its files, faults, clock, trace and
+    /// random state as this world's now (it goes on exactly as this world
+    /// would); a fresh world id (so its volumes, and the device groups and
+    /// file identities built on them, are its own); no probe set.
+    ///
+    /// # Panics
+    ///
+    /// If any handle of this world is open (a file, directory, lock or
+    /// queue, which holds any I/O in flight): a handle would belong to one
+    /// world only. Drop every store, sink, source and queue first.
+    #[must_use]
+    pub fn fork(&self) -> Self {
+        let w = lock(&self.world);
+        let open = w.live_handles();
+        assert!(
+            open == 0,
+            "SimPlatform::fork: {open} handles of this world are open (files, \
+             directories, locks or queues): drop every store, sink, source and \
+             queue before forking"
+        );
+        Self {
+            world: Arc::new(Mutex::new(w.forked())),
+        }
+    }
 }
 
 /// An open simulated file. Invalid after a crash.
 #[derive(Debug)]
 pub struct SimFile {
+    _live: crate::world::Live,
     id: FileId,
     epoch: u64,
     /// This handle's serial (`World::next_open`): a handle open when its
@@ -84,6 +112,7 @@ impl SimFile {
 /// An open simulated directory.
 #[derive(Debug, Clone)]
 pub struct SimDir {
+    _live: crate::world::Live,
     path: PathBuf,
     /// This handle's serial: a handle open when its directory's device was
     /// lost fails every operation (`World::crash_device`).
@@ -103,6 +132,7 @@ impl SimDir {
 /// A held simulated ownership lock.
 #[derive(Debug)]
 pub struct SimLock {
+    _live: crate::world::Live,
     world: Arc<Mutex<World>>,
     file: FileId,
     epoch: u64,
@@ -143,6 +173,7 @@ enum Pending {
 
 /// A simulated per-thread queue.
 pub struct SimQueue {
+    _live: crate::world::Live,
     world: Arc<Mutex<World>>,
     in_flight: Vec<(u64, Pending)>,
     depth: usize,
@@ -471,6 +502,7 @@ impl Platform for SimPlatform {
         let mut w = lock(&self.world);
         w.open_dir(path.to_path_buf(), create)?;
         Ok(SimDir {
+            _live: w.live(),
             path: path.to_path_buf(),
             opened: w.next_open(),
         })
@@ -482,6 +514,7 @@ impl Platform for SimPlatform {
         dir.check(&w)?;
         let id = w.create_file(&dir.path, name.as_str())?;
         Ok(SimFile {
+            _live: w.live(),
             id,
             epoch: w.epoch(),
             opened: w.next_open(),
@@ -505,6 +538,7 @@ impl Platform for SimPlatform {
             return Err(crate::world::EROFS);
         }
         Ok(SimFile {
+            _live: w.live(),
             id,
             epoch: w.epoch(),
             opened: w.next_open(),
@@ -573,6 +607,7 @@ impl Platform for SimPlatform {
         file.check(&w, true)?;
         w.lock(file.id, false)?;
         Ok(SimLock {
+            _live: w.live(),
             world: Arc::clone(&self.world),
             file: file.id,
             epoch: w.epoch(),
@@ -604,7 +639,9 @@ impl Platform for SimPlatform {
 
     fn reopen(&self, file: &SimFile) -> Option<SimFile> {
         // Another handle of the same open: lost with it.
-        (file.writable && lock(&self.world).reopen()).then_some(SimFile {
+        let mut w = lock(&self.world);
+        (file.writable && w.reopen()).then(|| SimFile {
+            _live: w.live(),
             id: file.id,
             epoch: file.epoch,
             opened: file.opened,
@@ -625,6 +662,7 @@ impl Platform for SimPlatform {
         file.check(&w, false)?;
         w.lock(file.id, true)?;
         Ok(SimLock {
+            _live: w.live(),
             world: Arc::clone(&self.world),
             file: file.id,
             epoch: w.epoch(),
@@ -775,8 +813,10 @@ impl Platform for SimPlatform {
     }
 
     fn queue(&self, cfg: QueueConfig) -> RawResult<SimQueue> {
-        lock(&self.world).queue_made();
+        let mut w = lock(&self.world);
+        w.queue_made();
         Ok(SimQueue {
+            _live: w.live(),
             world: Arc::clone(&self.world),
             in_flight: Vec::new(),
             depth: cfg.depth.max(1) as usize,

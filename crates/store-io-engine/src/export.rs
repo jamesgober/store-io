@@ -32,9 +32,11 @@
 //! once (a backup never has a silent hole).
 //!
 //! **What the report says.** The offset reached in the region being
-//! exported counts only bytes the sink's `data` accepted; a region counts
-//! as exported only once `end_region` returned `Ok`; the export is
-//! `complete` only once `finish` returned `Ok`.
+//! exported counts only bytes the sink's `data` accepted, and with a
+//! reference sink (`FileSink`, `StoreSink`) only bytes it wrote (a chunk it
+//! holds in a piece not yet written counts none); a region counts as
+//! exported only once `end_region` returned `Ok`; the export is `complete`
+//! only once `finish` returned `Ok`.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -738,15 +740,25 @@ where
         // one, and the bytes up to there.
         let clamp = |report: &mut ExportReport| {
             if let Some(f) = &failure {
+                // The regions ended before it (a backstop beside the count
+                // of regions every bound sink ended, below: a part that
+                // records a failure without binding as a sink).
                 report.regions = report.regions.min(f.region as usize);
                 let base = call.base(f.region);
                 match plan.facts.get(f.region as usize).filter(|_| f.inside) {
                     Some(r) => {
+                        // Never past the bytes `data` accepted when the
+                        // export stopped in the failure's region (a write
+                        // that failed inside a later chunk's call began
+                        // past that chunk's start); a region the export
+                        // went past was accepted whole.
+                        let same = report.region.as_deref() == Some(r.name.as_str());
                         report.region = Some(r.name.clone());
-                        report.offset = f.offset;
-                        if let Some(b) = base {
-                            report.bytes = report.bytes.min(b.saturating_add(f.offset));
-                        }
+                        report.offset = if same {
+                            report.offset.min(f.offset)
+                        } else {
+                            f.offset
+                        };
                     }
                     None => {
                         report.region = None;
@@ -754,6 +766,44 @@ where
                         if let Some(b) = base {
                             report.bytes = report.bytes.min(b);
                         }
+                    }
+                }
+            }
+            // Stopped inside a region, whatever stopped it: no further than
+            // every bound reference sink's writes done (a sink holding
+            // accepted bytes not yet written counts none of them), and the
+            // bytes no further than that offset.
+            let inside = match &failure {
+                Some(f) => f.inside.then_some(f.region),
+                None => call.inside_region(),
+            };
+            if let (Some(i), Some(_)) = (inside, report.region.as_ref()) {
+                if let Some(w) = call.written_up_to(i) {
+                    report.offset = report.offset.min(w);
+                }
+                if let Some(b) = call.base(i) {
+                    report.bytes = report.bytes.min(b.saturating_add(report.offset));
+                }
+            }
+            // A region counts only once every bound reference sink ended
+            // it (a wrapper may have swallowed a sink's failure no part
+            // recorded).
+            if let Some(n) = call.regions_ended() {
+                // Short of where the report stands (the region it names,
+                // else past the regions it counts): it stands at region
+                // `n` instead, the first a sink never ended, with that
+                // region's writes done, and nothing past it.
+                let i = n as usize;
+                let named = report
+                    .region
+                    .as_ref()
+                    .and_then(|name| plan.facts.iter().position(|f| &f.name == name));
+                if i < named.unwrap_or(report.regions) {
+                    report.regions = i;
+                    report.region = plan.facts.get(i).map(|f| f.name.clone());
+                    report.offset = call.written_up_to(n).unwrap_or(0);
+                    if let Some(b) = call.base(n) {
+                        report.bytes = report.bytes.min(b.saturating_add(report.offset));
                     }
                 }
             }
@@ -777,6 +827,7 @@ where
                 // A bound reference sink that never finished (a wrapper
                 // that dropped it, or fell back to another).
                 if !call.all_finished() {
+                    clamp(report);
                     return Err(Stop::from(not_written(
                         NotWrittenCause::Interrupted,
                         ErrorContext::default(),

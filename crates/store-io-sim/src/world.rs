@@ -224,6 +224,25 @@ impl SimConfig {
 /// Numbers each world, so the volumes of separate worlds never coincide.
 static WORLDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// One open handle of a world (a file, directory, lock or queue), counted
+/// while it lives ([`World::live_handles`]: a world is forked only with
+/// none open).
+#[derive(Debug)]
+pub(crate) struct Live(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Clone for Live {
+    fn clone(&self) -> Self {
+        let _n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        let _n = self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// The most bytes a simulated world holds in a volatile cache at once (see
 /// `SimConfig::runaway_writes`).
 const RUNAWAY_CACHED_BYTES: usize = 1 << 30;
@@ -452,6 +471,8 @@ pub struct World {
     set_lens: u64,
     allocated: u64,
     trace: Vec<TraceEvent>,
+    /// This world's open handles ([`Live`]).
+    live: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl World {
@@ -496,7 +517,40 @@ impl World {
             set_lens: 0,
             allocated: 0,
             trace: Vec::new(),
+            live: std::sync::Arc::default(),
         }
+    }
+
+    /// A handle of this world, counted while it lives.
+    pub(crate) fn live(&self) -> Live {
+        let _n = self.live.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Live(std::sync::Arc::clone(&self.live))
+    }
+
+    /// The handles of this world open now: files, directories, locks and
+    /// queues (a queue holds any I/O in flight).
+    #[must_use]
+    pub fn live_handles(&self) -> u64 {
+        self.live.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A deep copy of this world, for [`SimPlatform::fork`]: every file,
+    /// directory, cached write, fault, counter, the clock, the trace and
+    /// the random state as they are (so the copy goes on exactly as this
+    /// world would), under a fresh id (its volumes never coincide with
+    /// this world's), with no handle open and no probe set (a probe's
+    /// closure acts on the world it was made for).
+    ///
+    /// [`SimPlatform::fork`]: crate::SimPlatform::fork
+    pub(crate) fn forked(&self) -> Self {
+        let mut w = self.clone();
+        w.id = WORLDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        w.live = std::sync::Arc::default();
+        w.submit_probe = SubmitProbe::default();
+        w.release_probe = SubmitProbe::default();
+        w.lock_probe = SubmitProbe::default();
+        w.step_probe = StepProbe::default();
+        w
     }
 
     /// The configuration.

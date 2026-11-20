@@ -13,6 +13,8 @@
 //! from there to its data size; a slot by one commit of its object. Then
 //! flushed, closed, and renamed into place by a rename that never
 //! replaces: no store under the target name unless the import completed.
+//! A [`StoreSink`](crate::StoreSink) restores each region the same way
+//! (`restore.rs`).
 //!
 //! **The source is untrusted.** Its header's block size must be the
 //! target's and its region count within the format's table; each region
@@ -27,23 +29,17 @@
 //! `resume_at`.
 
 use std::cell::Cell;
-use std::collections::HashSet;
 use std::path::Path;
 
-use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, ReserveTag};
-use store_io_format::fill::fill_keyed_v1;
-use store_io_format::meta::{FillPattern, RegionKind};
-use store_io_format::meta2::max_object;
-use store_io_format::slot::FORMAT_2;
+use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op};
+use store_io_format::meta::RegionKind;
 use store_io_platform::Platform;
 
-use crate::RegionOptions;
 use crate::call::{self, CallState};
-use crate::copy::CopyAttrs;
-use crate::create::Creator;
 use crate::export::{ExportHeader, ImportSource, RegionInfo, SinkError};
 use crate::io::not_written;
-use crate::store::{Store, StoreOptions, io};
+use crate::restore::{Restore, check_header, invalid};
+use crate::store::StoreOptions;
 use crate::target::TargetDir;
 
 /// How [`import`] builds its store.
@@ -114,10 +110,6 @@ impl std::error::Error for ImportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
-}
-
-fn invalid() -> Error {
-    not_written(NotWrittenCause::InvalidOptions, ErrorContext::default())
 }
 
 /// A source's error as the import's: the failure the source recorded on
@@ -210,48 +202,10 @@ where
     };
     let header = source.header().map_err(src)?;
     report.header = Some(header.clone());
-    let block = header.block_size;
-    if !block.is_power_of_two()
-        || !(512..=1 << 16).contains(&block)
-        || header.region_count > crate::v2::MAX_REGION_CAPACITY
-    {
-        return Err(invalid());
-    }
+    check_header(&header)?;
     let target = TargetDir::open(platform, dir)?;
-    // Before anything is written: the header's total is an upper bound on
-    // what the store takes.
-    let free = platform
-        .free_space(&target.dir)
-        .map_err(|raw| io(Op::Open, raw))?;
-    if free < header.total {
-        return Err(Error::NoSpace {
-            tag: ReserveTag::Caller(0),
-            ctx: ErrorContext::default(),
-        });
-    }
-    let mut target_opts = opts.store.clone();
-    target_opts.container_format = FORMAT_2;
-    target_opts.block_size = Some(block as u32);
-    target_opts.region_capacity = target_opts.region_capacity.max(header.region_count);
     {
-        let dst = Store::create_as(
-            platform.clone(),
-            dir,
-            target_opts,
-            &target.temp,
-            Creator::Call(call),
-        )?;
-        // A device that needs larger blocks than the export's would round
-        // every size up: refused (the temporary is removed by the next
-        // copy or import).
-        if dst.report().block_size != block {
-            return Err(not_written(
-                NotWrittenCause::Misaligned,
-                ErrorContext::default(),
-            ));
-        }
-        let mut names = HashSet::new();
-        let mut charged = 0u64;
+        let mut dst = Restore::create(platform, dir, &target, &header, &opts.store, call)?;
         for i in 0..header.region_count {
             report.index = Some(i);
             report.region = None;
@@ -261,20 +215,8 @@ where
                 return Err(invalid());
             };
             report.region = Some(info.name.clone());
-            info.validate(block)?;
-            if !names.insert(info.name.clone()) {
-                return Err(invalid());
-            }
-            let data = match info.kind {
-                RegionKind::Slot => max_object(block.trailing_zeros() as u8) as u64,
-                _ => info.cap.unwrap_or(0).max(info.data_size),
-            };
-            charged = charged
-                .checked_add(2 * block)
-                .and_then(|c| c.checked_add(data))
-                .filter(|&c| c <= header.total)
-                .ok_or_else(invalid)?;
-            let n = dst.import_region(&info, source, &src)?;
+            dst.admit(&info)?;
+            let n = import_region(&dst, &info, source, &src)?;
             report.bytes += n;
             report.regions.push(info);
             call.leave(i.saturating_add(1));
@@ -285,8 +227,8 @@ where
         if source.next_region().map_err(src)?.is_some() {
             return Err(invalid());
         }
-        dst.flush_all_accounted()?;
         // Closed here (the drop writes the clean-close record).
+        dst.close()?;
     }
     // Into place: the rename is the import's commit.
     target.commit(platform)
@@ -313,89 +255,53 @@ fn pull(
     Ok(())
 }
 
-impl<P: Platform> Store<P>
+/// The region's bytes end exactly where its info says: one more read must
+/// find nothing.
+fn ended(source: &mut dyn ImportSource, src: &dyn Fn(SinkError) -> Error) -> Result<(), Error> {
+    let mut one = [0u8; 1];
+    match source.read(&mut one).map_err(src)? {
+        0 => Ok(()),
+        _ => Err(invalid()),
+    }
+}
+
+/// Restores admitted `info`'s region from `source`: an append or page
+/// region's bytes read into its fill's pieces in place, its pattern past
+/// them; a slot's object read whole, then committed. Returns the source's
+/// bytes written.
+fn import_region<P: Platform + Clone>(
+    dst: &Restore<P>,
+    info: &RegionInfo,
+    source: &mut dyn ImportSource,
+    src: &dyn Fn(SinkError) -> Error,
+) -> Result<u64, Error>
 where
     P::Queue: Send,
 {
-    /// Provisions `info`'s region and writes its bytes from `source`, once:
-    /// an append or page region's as its provisioning's fill, its pattern
-    /// past the source's bytes; a slot's by one commit. Returns the
-    /// source's bytes written.
-    fn import_region(
-        &self,
-        info: &RegionInfo,
-        source: &mut dyn ImportSource,
-        src: &dyn Fn(SinkError) -> Error,
-    ) -> Result<u64, Error> {
-        let mut opts = RegionOptions::default().size(info.data_size);
-        if let Some(cap) = info.cap {
-            opts = opts.max_size(cap);
-        }
-        let attrs = CopyAttrs {
-            generation: info.generation,
-            fill: info.fill,
-            fill_key: info.fill_key,
-            tag: info.tag,
-        };
-        let len = info.stream_len();
-        let piece = self.inner.opts.max_io.max(1);
-        // The region's bytes end exactly where its info says: one more
-        // read must find nothing.
-        let ended = |source: &mut dyn ImportSource| -> Result<(), Error> {
-            let mut one = [0u8; 1];
-            match source.read(&mut one).map_err(src)? {
-                0 => Ok(()),
-                _ => Err(invalid()),
-            }
-        };
-        if info.kind == RegionKind::Slot {
-            let _made = self.provision2(&info.name, info.kind, opts, None, Some(&attrs), None)?;
-            // Committed, an empty object included: one commit.
-            if info.object_len.is_some() {
-                let mut object = vec![0u8; len as usize];
-                pull(source, &mut object, piece, src)?;
-                let _receipt = self.slot(&info.name)?.commit(&object)?;
-            }
-            ended(source)?;
-            return Ok(len);
-        }
-        if info.data_size == 0 {
-            let _made = self.provision2(&info.name, info.kind, opts, None, Some(&attrs), None)?;
-            ended(source)?;
-            return Ok(0);
-        }
-        let mut next = 0u64;
-        let mut content = |index: u64, dst: &mut [u8]| -> Result<(), Error> {
-            // In order and without a gap (a backstop: the fill asks so).
-            if index != next {
-                return Err(crate::store::corrupt());
-            }
-            // The source's bytes, then past them the region's pattern.
-            let done = (len.saturating_sub(index)).min(dst.len() as u64) as usize;
-            pull(source, &mut dst[..done], piece, src)?;
-            // Past the source's bytes: the region's pattern.
-            let at = index + done as u64;
-            match info.fill {
-                FillPattern::KeyedV1 => fill_keyed_v1(&info.fill_key, at, &mut dst[done..]),
-                FillPattern::Zeros => dst[done..].fill(0),
-            }
-            next = index + dst.len() as u64;
-            Ok(())
-        };
-        let made = self.provision2(
-            &info.name,
-            info.kind,
-            opts,
-            None,
-            Some(&attrs),
-            Some(&mut content),
-        )?;
-        // Every byte of the data area was asked for, the source's among
-        // them (a backstop: the fill covers the data size).
-        if made.map.len() != info.data_size || next != info.data_size {
+    let len = info.stream_len();
+    let piece = dst.read_piece();
+    if info.kind == RegionKind::Slot {
+        let mut object = vec![0u8; len as usize];
+        pull(source, &mut object, piece, src)?;
+        ended(source, src)?;
+        dst.slot(info, &object)?;
+        return Ok(len);
+    }
+    let mut made = dst.region(info)?;
+    let mut left = len;
+    while left > 0 {
+        let room = made.room()?;
+        // Past the data area (a backstop: `validate` holds a stream's
+        // length within its data size).
+        if room.is_empty() {
             return Err(crate::store::corrupt());
         }
-        ended(source)?;
-        Ok(len)
+        let n = room.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        pull(source, &mut room[..n], piece, src)?;
+        made.filled(n)?;
+        left -= n as u64;
     }
+    ended(source, src)?;
+    let _live = made.finish()?;
+    Ok(len)
 }

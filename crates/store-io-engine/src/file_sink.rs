@@ -116,8 +116,10 @@ pub struct FileSink<P: Platform> {
     opts: FileSinkOptions,
     state: State,
     header: Option<ExportHeader>,
-    /// The export's call, found at `begin` (none when driven by hand).
+    /// The export's call, found at `begin` (none when driven by hand), and
+    /// the sink's id on it.
     call: Option<Rc<CallState>>,
+    id: usize,
     pace: Option<Pace>,
     queue: Option<QueueSet<P::Queue>>,
     pool: Option<BufPool>,
@@ -181,6 +183,7 @@ impl<P: Platform> FileSink<P> {
             state: State::Fresh,
             header: None,
             call: None,
+            id: 0,
             pace: None,
             queue: None,
             pool: None,
@@ -390,7 +393,7 @@ impl<P: Platform> FileSink<P> {
         // export's from here on).
         self.call = call::current();
         if let Some(c) = &self.call {
-            c.sink_bound();
+            self.id = c.sink_bound();
         }
         let block = header.block_size;
         if !block.is_power_of_two() || !(512..=1 << 16).contains(&block) {
@@ -613,7 +616,12 @@ impl<P: Platform> ExportSink for FileSink<P> {
             return Err(self.refuse(written));
         }
         self.crc_bytes(bytes);
-        match self.stage_bytes(bytes, false) {
+        let staged = self.stage_bytes(bytes, false);
+        // Its writes done (the staged bytes not yet written count none).
+        if let Some(c) = &self.call {
+            c.wrote(self.id, self.at.min(declared));
+        }
+        match staged {
             Ok(()) => {
                 self.state = State::InRegion {
                     declared,
@@ -636,6 +644,9 @@ impl<P: Platform> ExportSink for FileSink<P> {
         match self.end_run(declared) {
             Ok(()) => {
                 self.state = State::Ended;
+                if let Some(c) = &self.call {
+                    c.region_ended(self.id);
+                }
                 Ok(())
             }
             Err(e) => Err(self.fail(e, self.at)),

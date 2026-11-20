@@ -9,7 +9,7 @@ use store_io_platform::{FileName, LinuxTier, Platform};
 
 use crate::{
     CopyOptions, CopyReport, FileSinkOptions, FileSourceOptions, ImportError, ImportOptions,
-    ImportReport, ImportSource, NativePlatform, Probe, StoreOptions,
+    ImportReport, ImportSource, NativePlatform, Probe, StoreOptions, StoreSinkOptions,
 };
 
 /// The native platform on the kernel interface `tier` asks for (D-082;
@@ -60,6 +60,8 @@ pub type StreamRange<'a> = store_io_engine::StreamRange<'a, NativePlatform>;
 pub type FileSink = store_io_engine::FileSink<NativePlatform>;
 /// An export read back from a directory ([`file_source`]).
 pub type FileSource = store_io_engine::FileSource<NativePlatform>;
+/// An export restored straight into a new store ([`store_sink`]).
+pub type StoreSink = store_io_engine::StoreSink<NativePlatform>;
 
 /// A store: one container file in a directory of its own, on one device.
 ///
@@ -329,6 +331,29 @@ pub fn import(
     let p = platform(opts.store.linux_tier)
         .map_err(|error| Box::new(ImportError::from_error(error)))?;
     store_io_engine::import(p, path_of(&to), source, opts)
+}
+
+/// A sink restoring an export straight into a new store in `to`, whose
+/// directory must hold no store (its copy lock held until the sink drops):
+/// each region rebuilt as [`import`] rebuilds it, the store renamed into
+/// place only once the export returned `Ok`, so after a crash `to` holds
+/// nothing or the whole store.
+///
+/// ```no_run
+/// let store = store_io::Store::open("data/orders")?;
+/// let mut sink = store_io::store_sink("replica/orders", store_io::StoreSinkOptions::default())?;
+/// let report = store.export(&mut sink).map_err(|e| e.error)?;
+/// assert!(report.complete && sink.is_complete());
+/// # Ok::<(), store_io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// As [`store_io_engine::StoreSink::create`]: `AlreadyExists` if a store
+/// is in `to`, `Locked` while another copy, import or sink into it runs,
+/// `Io`.
+pub fn store_sink(to: impl AsRef<Path>, opts: StoreSinkOptions) -> Result<StoreSink, Error> {
+    store_io_engine::StoreSink::create(platform(opts.store.linux_tier)?, path_of(&to), opts)
 }
 
 /// Probes the device under the existing directory `dir`: the evidence

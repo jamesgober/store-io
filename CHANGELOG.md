@@ -13,6 +13,40 @@
 
 ### Added
 
+- Simulator: **`SimPlatform::fork`**, test support: a deep copy of a
+  world (its files, cached writes, faults, clock, trace and random state,
+  so it goes on exactly as the world would) under a fresh world id, with
+  no probe set; it panics while any file, directory, lock or queue of the
+  world is open (`World::live_handles` counts them). The engine's power-cut
+  sweeps of import, `StoreSink` and `FileSink` build their fixture once and
+  fork it for each cut, spread over up to four threads: every cut is still
+  tested, in about a quarter of the time.
+- Engine and facade: **`StoreSink`, an export restored straight into a
+  new store** (PLANNING R5.6): `StoreSink::create(platform, dir, opts)`
+  (the facade's `store_sink(to, opts)`) takes the target directory as an
+  import does (made if missing, its copy lock held until the sink drops,
+  a store already there refused `AlreadyExists`, a crashed copy's or
+  import's temporary removed), and `store.export(&mut sink)` restores
+  into it with no files between: at `begin` the header checked and the
+  free space against its total (`NoSpace`, nothing written), then each
+  region recreated with its attributes and its bytes written once as its
+  provisioning's fill, an append region's pattern past its durable length,
+  a slot by one commit (an empty one kept committed); at `finish` the
+  store flushed, closed and renamed into place by a rename that never
+  replaces. Import and `StoreSink` restore a region through the same code.
+  What the sink is pushed is checked as `FileSink` checks it, every
+  refusal or failure sticky (nothing renamed). Each fill piece is filled
+  in place from the chunks, in whole blocks of the new store, admitted by
+  the export's call and completed before the call that filled it
+  returns: one call with the export's reads, paced or not, on the same
+  device or another; a piece sized while commits were quiet goes out in
+  paced pieces once they are active. `StoreSink::restored` lists each
+  region as exported (an append region's `durable_len` is its restored
+  writer's `resume_at`), and `StoreSink::header` keeps the export's header
+  and its volume facts (what the export left out). With a reference sink
+  (`FileSink`, `StoreSink`), an export's report counts only bytes the sink
+  wrote, whatever stopped it, and never past a failed chunk's start.
+
 - Engine and facade: **import, and `FileSource`** (PLANNING R5.6):
   `import(platform, dir, source, ImportOptions)` (the facade's
   `import(source, to, opts)`) builds a new store from an export pulled

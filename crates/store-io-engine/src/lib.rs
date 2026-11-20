@@ -69,6 +69,7 @@ mod region;
 mod regionmap;
 mod repair;
 mod report;
+mod restore;
 mod scan;
 mod settle;
 mod slot_handle;
@@ -76,6 +77,7 @@ mod slots;
 mod space;
 mod stats;
 mod store;
+mod store_sink;
 mod stream;
 mod submitter;
 mod sync;
@@ -117,5 +119,6 @@ pub use store::{
     StoreReport, Unavailable, UnavailableRegion,
 };
 pub use store_io_format::meta::{FillPattern, RegionKind};
+pub use store_sink::{StoreSink, StoreSinkOptions};
 pub use stream::{Chunk, ReadStream, StreamOptions, StreamRange};
 pub use submitter::{MAX_DEPTH, Submitter};

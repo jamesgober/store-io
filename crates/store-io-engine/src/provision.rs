@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use store_io_buf::IoBuf;
 use store_io_core::error::{
     Error, ErrorContext, FirstCause, Named, NotWrittenCause, Op, ReserveTag,
 };
@@ -340,39 +341,9 @@ where
         key_at: u64,
         content: &mut Content<'_>,
     ) -> Result<(), Error> {
-        let inner = &self.inner;
-        let block = inner.layout.block();
-        let pace = inner.domain.pace();
-        let chunk = (self.chunk() as u64).min(1 << 20).max(block);
-        let mut q = inner.queues.get(0);
         let mut at = 0u64;
         while at < extent {
-            // No fill piece goes to a poisoned store (fail-stop, FAIL-01): a
-            // fill another operation's poison stops returns it, the region
-            // never Ready (as any failed fill).
-            crate::test_hook::step(crate::test_hook::Step::FillPiece);
-            if let Some(first) = inner.domain.poisoned() {
-                return Err(Error::Poisoned { first });
-            }
-            // Sized at each piece: commits may begin or go quiet mid-fill.
-            // Never past this store's chunk, and whole blocks of it: a
-            // device group's piece is its first member's, and a store of
-            // smaller buffers or larger blocks may share it (an import's
-            // target, joined after its source).
-            let piece = match pace {
-                Some(p) => {
-                    ((p.lone_piece(chunk as usize) as u64).min(chunk) / block * block).max(block)
-                }
-                None => chunk,
-            };
-            let len = piece.min(extent - at);
-            // (A capped refusal is final here: the store's one background
-            // taker is this call's single writer, so no other capped take
-            // can hold a unit for an instant.)
-            let mut buf = match pace {
-                Some(_) => self.take_capped(len as usize, ErrorContext::default())?,
-                None => self.take(len as usize, ErrorContext::default())?,
-            };
+            let (mut buf, len) = self.fill_piece(extent - at)?;
             // The content from the first byte past the zeros, even inside a
             // chunk that also covers some of them.
             let dst = buf.as_mut_slice();
@@ -380,58 +351,122 @@ where
             dst[..z].fill(0);
             let index = key_at + (at + z as u64).saturating_sub(zeros);
             content(index, &mut dst[z..])?;
-            let charge = pace.map(crate::pace::Pace::admit).transpose()?;
-            let ran = run(
-                &mut q,
-                IoOp::Write {
-                    file: &inner.file,
-                    offset: offset + at,
-                    buf,
-                    dsync: false,
-                },
-            )
-            .map_err(|(_, raw)| {
-                raw.map_or(
-                    Error::NotWritten {
-                        cause: NotWrittenCause::QueueFull,
-                        ctx: ErrorContext::default(),
-                    },
-                    |r| space_err(Op::Write, r, 0),
-                )
-            })?;
-            // Completed (or abandoned): the piece's charge goes with it.
-            drop(charge);
-            // A fill write that failed after submission stops the store
-            // (fail-stop, D-071); only running out of space is reported as
-            // `NoSpace` without poisoning: the region never became Ready.
-            // An abandoned write (its wait failed) is never "out of space":
-            // its fate is unknown, so it poisons like any other failure.
-            let (result, abandoned) = match ran {
-                Ran::Done { result, .. } => (result, false),
-                Ran::Abandoned(raw) => (Err(raw), true),
-            };
-            match result {
-                Ok(n) if n as u64 == len => {}
-                Err(raw) if !abandoned && store_io_core::errno::is_no_space(raw) => {
-                    return Err(space_err(Op::Write, raw, 0));
-                }
-                result => {
-                    let raw = result.err();
-                    inner.domain.poison(FirstCause {
-                        op: Some(Op::Write),
-                        raw,
-                    });
-                    self.wake_frontiers();
-                    return Err(Error::DurabilityUnknown {
-                        op: Op::Write,
-                        raw,
-                        ctx: ErrorContext::default(),
-                    });
-                }
-            }
+            self.write_fill_piece(offset + at, buf, len)?;
             at += len;
         }
         Ok(())
+    }
+
+    /// The next fill piece of at most `left` bytes, and its buffer of that
+    /// length: 1 MiB (the store's chunk at most), or for a background
+    /// call's store (`Domain::pace`) its pieces, sized at each piece
+    /// (commits may begin or go quiet mid-fill), in whole blocks of this
+    /// store and never past its chunk; the buffer under the pool's
+    /// background cap when paced. No piece goes to a poisoned store.
+    pub(crate) fn fill_piece(&self, left: u64) -> Result<(IoBuf, u64), Error> {
+        // No fill piece goes to a poisoned store (fail-stop, FAIL-01): a
+        // fill another operation's poison stops returns it, the region
+        // never Ready (as any failed fill).
+        crate::test_hook::step(crate::test_hook::Step::FillPiece);
+        if let Some(first) = self.inner.domain.poisoned() {
+            return Err(Error::Poisoned { first });
+        }
+        let len = self.fill_piece_len().min(left);
+        Ok((self.fill_buf(len)?, len))
+    }
+
+    /// A fill piece's length now (see [`Self::fill_piece`]).
+    pub(crate) fn fill_piece_len(&self) -> u64 {
+        let inner = &self.inner;
+        let block = inner.layout.block();
+        let chunk = (self.chunk() as u64).min(1 << 20).max(block);
+        // Never past this store's chunk, and whole blocks of it: a device
+        // group's piece is its first member's, and a store of smaller
+        // buffers or larger blocks may share it (an import's target, joined
+        // after its source).
+        match inner.domain.pace() {
+            Some(p) => {
+                ((p.lone_piece(chunk as usize) as u64).min(chunk) / block * block).max(block)
+            }
+            None => chunk,
+        }
+    }
+
+    /// A fill piece's buffer of `len` bytes, under the pool's background
+    /// cap when paced.
+    pub(crate) fn fill_buf(&self, len: u64) -> Result<IoBuf, Error> {
+        // (A capped refusal is final here: the store's one background
+        // taker is this call's single writer, so no other capped take
+        // can hold a unit for an instant.)
+        match self.inner.domain.pace() {
+            Some(_) => self.take_capped(len as usize, ErrorContext::default()),
+            None => self.take(len as usize, ErrorContext::default()),
+        }
+    }
+
+    /// Writes the fill piece `buf` (`len` bytes) at container `offset` on
+    /// the store's lane 0, taken first and then the piece admitted (as
+    /// every admitted write: a lane is never waited for with an admitted
+    /// piece held), its charge released once it completed or was
+    /// abandoned, completed before it returns: failures as
+    /// [`Self::write_range`].
+    pub(crate) fn write_fill_piece(&self, offset: u64, buf: IoBuf, len: u64) -> Result<(), Error> {
+        let inner = &self.inner;
+        let mut q = inner.queues.get(0);
+        let charge = inner
+            .domain
+            .pace()
+            .map(crate::pace::Pace::admit)
+            .transpose()?;
+        let ran = run(
+            &mut q,
+            IoOp::Write {
+                file: &inner.file,
+                offset,
+                buf,
+                dsync: false,
+            },
+        )
+        .map_err(|(_, raw)| {
+            raw.map_or(
+                Error::NotWritten {
+                    cause: NotWrittenCause::QueueFull,
+                    ctx: ErrorContext::default(),
+                },
+                |r| space_err(Op::Write, r, 0),
+            )
+        })?;
+        // Completed (or abandoned): the piece's charge goes with it.
+        drop(charge);
+        drop(q);
+        // A fill write that failed after submission stops the store
+        // (fail-stop, D-071); only running out of space is reported as
+        // `NoSpace` without poisoning: the region never became Ready.
+        // An abandoned write (its wait failed) is never "out of space":
+        // its fate is unknown, so it poisons like any other failure.
+        let (result, abandoned) = match ran {
+            Ran::Done { result, .. } => (result, false),
+            Ran::Abandoned(raw) => (Err(raw), true),
+        };
+        match result {
+            Ok(n) if n as u64 == len => Ok(()),
+            Err(raw) if !abandoned && store_io_core::errno::is_no_space(raw) => {
+                Err(space_err(Op::Write, raw, 0))
+            }
+            result => {
+                let raw = result.err();
+                inner.domain.poison(FirstCause {
+                    op: Some(Op::Write),
+                    raw,
+                });
+                self.wake_frontiers();
+                Err(Error::DurabilityUnknown {
+                    op: Op::Write,
+                    raw,
+                    ctx: ErrorContext::default(),
+                })
+            }
+        }
     }
 
     pub(crate) fn flush_all_accounted(&self) -> Result<(), Error> {

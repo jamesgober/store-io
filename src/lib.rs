@@ -131,7 +131,7 @@ pub use store_io_engine::{Chunk, StreamOptions};
 pub use store_io_engine::{
     ExportError, ExportHeader, ExportOptions, ExportReport, ExportSink, FileSinkOptions,
     FileSourceOptions, FillPattern, ImportError, ImportOptions, ImportReport, ImportSource,
-    REGIONS_INFO, RegionInfo, SinkError, VolumeFacts,
+    REGIONS_INFO, RegionInfo, SinkError, StoreSinkOptions, VolumeFacts,
 };
 pub use store_io_platform::{IoInterface, IoPath, LinuxTier};
 
@@ -170,8 +170,8 @@ mod native;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use native::{
     AppendBatch, AppendRegion, Directory, FileSink, FileSource, PageBatch, PageRegion, ReadStream,
-    Reservation, Slot, Store, StoreSet, StreamRange, Submitter, copy_store, file_sink, file_source,
-    import, probe,
+    Reservation, Slot, Store, StoreSet, StoreSink, StreamRange, Submitter, copy_store, file_sink,
+    file_source, import, probe, store_sink,
 };
 
 /// What [`probe`] found out about a directory's device.

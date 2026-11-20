@@ -43,6 +43,13 @@ pub(crate) struct CallState {
     /// Reference sinks bound to the call, and those that finished.
     sinks: Cell<u32>,
     finished: Cell<u32>,
+    /// Each bound reference sink's writes done: the region index and the
+    /// offset in its stream they reach (R5.6: the report advances only
+    /// over writes a sink completed).
+    written: RefCell<Vec<(u32, u64)>>,
+    /// Each bound reference sink's regions ended, from the first, without
+    /// a gap: a region counts as exported only once every one ended it.
+    ended: RefCell<Vec<u32>>,
     /// The first failure a part recorded (sticky).
     failure: RefCell<Option<Failure>>,
     /// Where the export is: its region index, whether inside it, and the
@@ -71,6 +78,8 @@ impl CallState {
             shares_source: Cell::new(false),
             sinks: Cell::new(0),
             finished: Cell::new(0),
+            written: RefCell::new(Vec::new()),
+            ended: RefCell::new(Vec::new()),
             failure: RefCell::new(None),
             region: Cell::new(0),
             inside: Cell::new(false),
@@ -104,9 +113,50 @@ impl CallState {
         self.shares_source.get()
     }
 
-    /// A reference sink bound itself to the call.
-    pub(crate) fn sink_bound(&self) {
+    /// A reference sink bound itself to the call: its id for
+    /// [`Self::wrote`].
+    pub(crate) fn sink_bound(&self) -> usize {
         self.sinks.set(self.sinks.get().saturating_add(1));
+        self.ended.borrow_mut().push(0);
+        let mut w = self.written.borrow_mut();
+        w.push((u32::MAX, 0));
+        w.len() - 1
+    }
+
+    /// Sink `id` ended the export's current region (its `end_region`
+    /// returned `Ok`): counted when it ended every region before it.
+    pub(crate) fn region_ended(&self, id: usize) {
+        let region = self.region.get();
+        if let Some(n) = self.ended.borrow_mut().get_mut(id) {
+            if *n == region {
+                *n = region.saturating_add(1);
+            }
+        }
+    }
+
+    /// The regions, from the first, every bound reference sink ended;
+    /// `None` with no reference sink bound.
+    pub(crate) fn regions_ended(&self) -> Option<u32> {
+        self.ended.borrow().iter().copied().min()
+    }
+
+    /// Sink `id`'s writes done in the export's current region reach
+    /// `offset` of its stream.
+    pub(crate) fn wrote(&self, id: usize, offset: u64) {
+        let region = self.region.get();
+        if let Some(w) = self.written.borrow_mut().get_mut(id) {
+            *w = (region, offset);
+        }
+    }
+
+    /// The offset in region `index`'s stream every bound reference sink's
+    /// writes done reach (one that wrote nothing there: 0); `None` with no
+    /// reference sink bound.
+    pub(crate) fn written_up_to(&self, index: u32) -> Option<u64> {
+        let w = self.written.borrow();
+        w.iter()
+            .map(|&(r, at)| if r == index { at } else { 0 })
+            .min()
     }
 
     /// A bound reference sink finished.
@@ -132,6 +182,11 @@ impl CallState {
     pub(crate) fn leave(&self, next: u32) {
         self.region.set(next);
         self.inside.set(false);
+    }
+
+    /// The region the export is inside, if it is inside one.
+    pub(crate) fn inside_region(&self) -> Option<u32> {
+        self.inside.get().then(|| self.region.get())
     }
 
     /// The bytes the export had exported when region `index` began.

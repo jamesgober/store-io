@@ -207,7 +207,7 @@ where
         // charge back.
         drop(meta);
         let mut holds = Holds {
-            store: self,
+            store: self.clone(),
             ranges: vec![(at, ext_len)],
             claim: None,
             tag: old.tag,

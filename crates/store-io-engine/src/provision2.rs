@@ -20,6 +20,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use store_io_buf::IoBuf;
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, ReserveTag};
 use store_io_core::id::{Generation, RegionId};
 use store_io_format::judge::Standing;
@@ -54,6 +55,24 @@ where
         copied: Option<&crate::copy::CopyAttrs>,
         data: Option<&mut crate::provision::Content<'_>>,
     ) -> Result<Arc<LiveRegion>, Error> {
+        let (placed, mut holds) = self.place2(name, kind, opts, from, copied)?;
+        // Any return before the commit drops `holds` armed: every hold
+        // given back.
+        self.fill_and_commit2(&placed, &mut holds, data)
+    }
+
+    /// Phase 1 of a format-2 provisioning (see the module docs): the name
+    /// and a table slot claimed, the space placed and marked, the tag
+    /// charged or the reservation's bytes held; what it holds is given back
+    /// when the returned [`Holds`] drops armed.
+    fn place2<'a>(
+        &self,
+        name: &str,
+        kind: RegionKind,
+        opts: crate::RegionOptions,
+        from: Option<&'a mut Reservation<P>>,
+        copied: Option<&crate::copy::CopyAttrs>,
+    ) -> Result<(Placed, Holds<'a, P>), Error> {
         let inner = &self.inner;
         let data_size = opts.size_bytes();
         // A region `copy_store` recreates keeps its tag, generation, fill
@@ -204,8 +223,8 @@ where
             0
         };
         drop(meta);
-        let mut holds = Holds {
-            store: self,
+        let holds = Holds {
+            store: self.clone(),
             ranges: footprint,
             claim: Some((p, seq)),
             tag,
@@ -225,15 +244,13 @@ where
             data_size,
             capacity,
             extent,
-            extents: &extents,
+            extents,
             fill_whole: capped.is_none() || self.writes_slack(),
             fill,
             fill_key,
             generation,
         };
-        // Any return before the commit drops `holds` armed: every hold
-        // given back.
-        self.fill_and_commit2(&placed, &mut holds, data)
+        Ok((placed, holds))
     }
 
     /// Phases 2 and 3 of a format-2 provisioning placed and marked by
@@ -247,9 +264,35 @@ where
     /// no other provisioning can take its name between the two.
     fn fill_and_commit2(
         &self,
-        pl: &Placed<'_>,
+        pl: &Placed,
         holds: &mut Holds<'_, P>,
         data: Option<&mut crate::provision::Content<'_>>,
+    ) -> Result<Arc<LiveRegion>, Error> {
+        let block = self.inner.layout.block();
+        let written = match data {
+            None => 0,
+            // A region `copy_store` recreates (D-137): its data area is the
+            // source's bytes instead of the pattern; the header blocks zero
+            // and any slack the pattern, as a fill writes them.
+            Some(data) => {
+                let head = 2 * block + pl.data_size;
+                self.write_range(pl.offset, head, 2 * block, 0, data)?;
+                head
+            }
+        };
+        self.commit2(pl, holds, written)
+    }
+
+    /// Phases 2 and 3 of a format-2 provisioning whose first `written`
+    /// bytes from its header blocks on are written: the rest filled as a
+    /// fill writes it (the header blocks zero, the data area and any slack
+    /// the region's pattern at its offset), made durable and verified, its
+    /// header written, and committed (see [`Self::fill_and_commit2`]).
+    fn commit2(
+        &self,
+        pl: &Placed,
+        holds: &mut Holds<'_, P>,
+        written: u64,
     ) -> Result<Arc<LiveRegion>, Error> {
         let inner = &self.inner;
         let block = inner.layout.block();
@@ -262,25 +305,15 @@ where
         } else {
             2 * block + pl.data_size
         };
-        match data {
-            None => self.fill(pl.offset, filled, block, fill, &fill_key)?,
-            // A region `copy_store` recreates (D-137): its data area is the
-            // source's bytes instead of the pattern; the header blocks zero
-            // and any slack the pattern, as a fill writes them.
-            Some(data) => {
-                let head = 2 * block + pl.data_size;
-                self.write_range(pl.offset, head, 2 * block, 0, data)?;
-                if filled > head {
-                    self.fill_range(
-                        pl.offset + head,
-                        filled - head,
-                        0,
-                        fill,
-                        &fill_key,
-                        pl.data_size,
-                    )?;
-                }
-            }
+        if written < filled {
+            self.fill_range(
+                pl.offset + written,
+                filled - written,
+                (2 * block).saturating_sub(written),
+                fill,
+                &fill_key,
+                written.saturating_sub(2 * block),
+            )?;
         }
         if filled < pl.extent {
             inner
@@ -307,7 +340,7 @@ where
             object_len: 0,
         };
         let mut hbuf = vec![0u8; block as usize];
-        let hlen = encode_region_header(&mut hbuf, &h, pl.extents, &[]).map_err(|_| meta_err())?;
+        let hlen = encode_region_header(&mut hbuf, &h, &pl.extents, &[]).map_err(|_| meta_err())?;
         let at = PairAt {
             volume: *inner.volume.as_bytes(),
             object: inner.layout.region_object(pl.id),
@@ -418,7 +451,7 @@ where
             generation: pl.generation,
             map: match pl.kind == RegionKind::Slot {
                 true => crate::regionmap::RegionMap::single(pl.offset + 2 * block, 0),
-                false => crate::regionmap::RegionMap::from_extents(pl.extents, pl.data_size),
+                false => crate::regionmap::RegionMap::from_extents(&pl.extents, pl.data_size),
             }
             .with_room(store_io_format::meta2::max_extents(inner.layout.log2_block) - 1),
             header_at: [pl.offset, pl.offset + block],
@@ -500,7 +533,7 @@ pub(crate) struct Holds<'a, P: Platform>
 where
     P::Queue: Send,
 {
-    pub(crate) store: &'a Store<P>,
+    pub(crate) store: Store<P>,
     /// The ranges marked allocated.
     pub(crate) ranges: Vec<(u64, u64)>,
     /// A provisioning's claimed table slot `(page, seq)` (its name with it).
@@ -558,7 +591,7 @@ where
 
 /// A format-2 provisioning placed, marked and claimed (phase 1), for
 /// [`Store::fill_and_commit2`].
-struct Placed<'a> {
+struct Placed {
     kind: RegionKind,
     name: RegionName,
     tag: u32,
@@ -573,7 +606,7 @@ struct Placed<'a> {
     data_size: u64,
     capacity: u64,
     extent: u64,
-    extents: &'a [(u64, u64)],
+    extents: Vec<(u64, u64)>,
     /// The whole footprint written (else the slack allocated).
     fill_whole: bool,
     /// Its fill pattern and key, and its region generation (1, or the
@@ -581,4 +614,191 @@ struct Placed<'a> {
     fill: FillPattern,
     fill_key: [u8; 16],
     generation: Generation,
+}
+
+/// A format-2 region placed (phase 1) whose data area is given to it in
+/// order, from its first byte (an import's or a [`StoreSink`]'s region,
+/// D-170): each piece filled in place in its buffer (one copy), written
+/// once full, admitted and completed before the call that filled it
+/// returns (the progress rule, R5.4: nothing is in flight between calls);
+/// at [`Self::finish`] the rest of the data area and any slack its
+/// pattern, then made durable, verified, its header written and committed,
+/// as any provisioning. Dropped before that, every hold is given back
+/// (`Holds`).
+///
+/// [`StoreSink`]: crate::StoreSink
+pub(crate) struct Pushed<P: Platform>
+where
+    P::Queue: Send,
+{
+    pl: Placed,
+    holds: Holds<'static, P>,
+    /// The bytes from its header blocks on written.
+    at: u64,
+    /// The piece being filled: its buffer, its length, the bytes in it.
+    piece: Option<(IoBuf, u64, usize)>,
+}
+
+impl<P: Platform> Store<P>
+where
+    P::Queue: Send,
+{
+    /// A format-2 region recreated with `copied`'s attributes, its data
+    /// area to be given in order ([`Pushed`]). Refusals as
+    /// [`Self::provision2`]'s, before any I/O.
+    pub(crate) fn push_region(
+        &self,
+        name: &str,
+        kind: RegionKind,
+        opts: crate::RegionOptions,
+        copied: &crate::copy::CopyAttrs,
+    ) -> Result<Pushed<P>, Error> {
+        let (pl, holds) = self.place2(name, kind, opts, None, Some(copied))?;
+        Ok(Pushed {
+            pl,
+            holds,
+            at: 0,
+            piece: None,
+        })
+    }
+}
+
+impl<P: Platform> Pushed<P>
+where
+    P::Queue: Send,
+{
+    /// The data area's bytes given and written (a failed write began
+    /// there).
+    pub(crate) fn written(&self) -> u64 {
+        let block = self.holds.store.inner.layout.block();
+        self.at.saturating_sub(2 * block)
+    }
+
+    /// Room for the data area's next bytes: the rest of the piece being
+    /// filled, a new one taken when there is none (its share of the header
+    /// blocks zeroed first, a piece of them alone written at once). Empty
+    /// once the data area is whole.
+    pub(crate) fn room(&mut self) -> Result<&mut [u8], Error> {
+        let block = self.holds.store.inner.layout.block();
+        let head = 2 * block + self.pl.data_size;
+        loop {
+            if self.piece.is_none() {
+                if self.at >= head {
+                    return Ok(&mut []);
+                }
+                let (mut buf, len) = self.holds.store.fill_piece(head - self.at)?;
+                let z = (2 * block).saturating_sub(self.at).min(len) as usize;
+                buf.as_mut_slice()[..z].fill(0);
+                self.piece = Some((buf, len, z));
+            }
+            match &self.piece {
+                Some((_, len, n)) if (*n as u64) < *len => break,
+                _ => self.write_piece()?,
+            }
+        }
+        match self.piece.as_mut() {
+            Some((buf, _, n)) => Ok(&mut buf.as_mut_slice()[*n..]),
+            None => Ok(&mut []),
+        }
+    }
+
+    /// `n` bytes of the [`Self::room`] last given were filled: the piece is
+    /// written once full.
+    pub(crate) fn filled(&mut self, n: usize) -> Result<(), Error> {
+        let Some((_, len, at)) = self.piece.as_mut() else {
+            return Err(corrupt());
+        };
+        let to = at.checked_add(n).filter(|&t| t as u64 <= *len);
+        let Some(to) = to else {
+            return Err(corrupt());
+        };
+        *at = to;
+        if to as u64 == *len {
+            self.write_piece()?;
+        }
+        Ok(())
+    }
+
+    /// Gives `bytes`, the data area's next, in order.
+    pub(crate) fn give(&mut self, mut bytes: &[u8]) -> Result<(), Error> {
+        while !bytes.is_empty() {
+            let room = self.room()?;
+            // Past the data area (a backstop: a stream's length is at most
+            // its data size).
+            if room.is_empty() {
+                return Err(corrupt());
+            }
+            let n = room.len().min(bytes.len());
+            room[..n].copy_from_slice(&bytes[..n]);
+            self.filled(n)?;
+            bytes = &bytes[n..];
+        }
+        Ok(())
+    }
+
+    /// Writes the piece being filled, its unfilled rest the region's
+    /// pattern (the data area past the bytes given), each write admitted
+    /// first: an admission that ends without one is
+    /// `NotWritten(Interrupted)` (R5.4: another part's failure, or pieces of
+    /// the call this thread holds that no collector can collect). Sized when
+    /// it was taken, a piece larger than the fill's piece now (commits began
+    /// while it filled: D-156) goes out as pieces of that size, each whole
+    /// blocks and admitted on its own, never holding two of the pool's
+    /// buffers; the written length moves past each write done.
+    fn write_piece(&mut self) -> Result<(), Error> {
+        let store = &self.holds.store;
+        let block = store.inner.layout.block();
+        let Some((mut buf, len, n)) = self.piece.take() else {
+            return Ok(());
+        };
+        if (n as u64) < len {
+            let index = (self.at + n as u64).saturating_sub(2 * block);
+            let rest = &mut buf.as_mut_slice()[n..];
+            match self.pl.fill {
+                FillPattern::KeyedV1 => {
+                    store_io_format::fill::fill_keyed_v1(&self.pl.fill_key, index, rest)
+                }
+                FillPattern::Zeros => rest.fill(0),
+            }
+        }
+        let now = store.fill_piece_len();
+        if len <= now {
+            store.write_fill_piece(self.pl.offset + self.at, buf, len)?;
+            self.at += len;
+            return Ok(());
+        }
+        // Never two of the pool's buffers at once: the rest copied out,
+        // the buffer written shortened to the first part, each later part
+        // in a buffer taken once the one before it was given back.
+        let rest = buf.as_slice()[now as usize..len as usize].to_vec();
+        if !buf.set_len(now as usize) {
+            return Err(crate::store::corrupt());
+        }
+        store.write_fill_piece(self.pl.offset + self.at, buf, now)?;
+        self.at += now;
+        let mut done = 0usize;
+        while done < rest.len() {
+            let part = (now as usize).min(rest.len() - done);
+            let mut b = store.fill_buf(part as u64)?;
+            b.as_mut_slice().copy_from_slice(&rest[done..done + part]);
+            store.write_fill_piece(self.pl.offset + self.at, b, part as u64)?;
+            self.at += part as u64;
+            done += part;
+        }
+        Ok(())
+    }
+
+    /// Its data size as placed (a slot's: 0).
+    pub(crate) fn data_size(&self) -> u64 {
+        self.pl.data_size
+    }
+
+    /// The data area's rest (past the bytes given) and any slack its
+    /// pattern, then made durable, verified, its header written and
+    /// committed: the region live.
+    pub(crate) fn finish(&mut self) -> Result<Arc<LiveRegion>, Error> {
+        self.write_piece()?;
+        let store = self.holds.store.clone();
+        store.commit2(&self.pl, &mut self.holds, self.at)
+    }
 }

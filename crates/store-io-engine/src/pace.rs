@@ -162,9 +162,12 @@ impl Pace {
     /// report), or pieces of the call this thread holds that no collector
     /// can collect (a wait would be on itself).
     pub(crate) fn admit(&self) -> Result<Held, Error> {
-        self.obtain().map_err(|()| Error::NotWritten {
-            cause: NotWrittenCause::Interrupted,
-            ctx: ErrorContext::default(),
+        self.obtain().map_err(|()| {
+            let _n = ENDED.try_with(|n| n.set(n.get().wrapping_add(1)));
+            Error::NotWritten {
+                cause: NotWrittenCause::Interrupted,
+                ctx: ErrorContext::default(),
+            }
         })
     }
 
@@ -289,6 +292,16 @@ thread_local! {
     /// Collectors registered on this thread: their record, id and part.
     static PARTS: RefCell<Vec<PartEntry>> = const { RefCell::new(Vec::new()) };
     static NEXT_PART: Cell<u64> = const { Cell::new(0) };
+    /// Admissions ([`Pace::admit`]) that ended without one on this thread.
+    static ENDED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many admissions ([`Pace::admit`]) ended without one on this thread
+/// so far: a reference sink compares it across a call to tell an ended
+/// admission (another part's failure, R5.4) from its own failure, whichever
+/// of its writes was being admitted.
+pub(crate) fn admissions_ended() -> u64 {
+    ENDED.try_with(Cell::get).unwrap_or(0)
 }
 
 /// An admitted piece's charge, counted for its record on the thread holding

@@ -1997,7 +1997,7 @@ M = [
  (FILE_SINK_SRC, '        if self.index >= header.region_count || info.validate(header.block_size).is_err() {', '        if self.index >= header.region_count || info.validate(header.block_size).is_err() && false {', FILE_SINK_T),
  (FILE_SINK_SRC, '        if self.done.iter().any(|(r, _)| r.name.as_str() == info.name) {', '        if self.done.iter().any(|(r, _)| r.name.as_str() == info.name) && false {', FILE_SINK_T),
  (FILE_SINK_SRC, '        (charged <= header.total).then_some(charged)', '        (charged <= header.total.max(charged)).then_some(charged)', FILE_SINK_T),
- (FILE_SINK_SRC, '            Ok(n) if n == len => {', '            Ok(n) if n <= len => {', FILE_SINK_T),
+ (FILE_SINK_SRC, '                    Ok(n) if n == w.len => self.done_to = w.offset + w.len as u64,', '                    Ok(n) if n <= w.len => self.done_to = w.offset + w.len as u64,', FILE_SINK_T),
  (FILE_SINK_SRC, '            if self.span_len == SPAN {', '            if self.span_len == SPAN / 2 {', FILE_SINK_T),
  (FILE_SINK_SRC, '        if self.span_len > 0 {', '        if self.span_len > 0 && false {', FILE_SINK_T),
  (FILE_SINK_SRC, '        self.platform\n            .set_len(file, len)\n            .map_err(|raw| io(Op::Allocate, raw))?;\n', '        if false {\n            self.platform\n                .set_len(file, len)\n                .map_err(|raw| io(Op::Allocate, raw))?;\n        }\n', FILE_SINK_T),
@@ -2095,7 +2095,7 @@ M = [
  (EXPORT_SRC, '                            report.offset.min(f.offset)\n', '                            f.offset\n', STORE_SINK_T),
  (EXPORT_SRC, '                if let Some(w) = call.written_up_to(i) {', '                if let Some(w) = call.written_up_to(i).filter(|_| false) {', STORE_SINK_T),
  (STORE_SINK_SRC, '            c.wrote(self.id, self.written().min(declared));', '            let _w = (&c, declared);', STORE_SINK_T),
- (FILE_SINK_SRC, '            c.wrote(self.id, self.at.min(declared));', '            let _w = (&c, declared);', STORE_SINK_T),
+ (FILE_SINK_SRC, '                    c.wrote(self.id, self.written().min(declared));', '                    let _w = (&c, declared, self.written());', STORE_SINK_T),
  (STORE_SINK_SRC, '        self.header = Some(header.clone());', '        let _h = header;', STORE_SINK_T),
  ('crates/store-io-engine/src/provision2.rs', '        if len <= now {', '        if len <= now.max(len) {', STORE_SINK_T),
  (STORE_SINK_SRC, '                let at = self.written();', '                let at = self.written() & 0;', STORE_SINK_T),
@@ -2122,6 +2122,22 @@ M = [
  (SIMW, '        w.release_probe = SubmitProbe::default();\n', '', FORK_T),
  (SIMW, '        w.lock_probe = SubmitProbe::default();\n', '', FORK_T),
  (SIMW, '        w.step_probe = StepProbe::default();\n', '', FORK_T),
+ # V6e (D-171): FileSink's writes in flight together, each data file
+ # allocated before its writes.
+ (FILE_SINK_SRC, '            if self.failed.is_none() {\n                match result {', '            if self.failed.is_none() || true {\n                match result {', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '                    Err(raw) => self.failed = Some((io(Op::Write, raw), w.offset)),', '                    Err(_) => {}', FILE_SINK_T),
+ (FILE_SINK_SRC, '            w.borrow_mut().done_to = 0;', '            let _w = w;', FILE_SINK_T),
+ (FILE_SINK_SRC, '        if len > 0 {\n            self.platform\n                .allocate(&file, len)', '        if len > 0 && false {\n            self.platform\n                .allocate(&file, len)', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.drain_stage(false)?;\n        self.settle_writes()?;\n', '        self.drain_stage(false)?;\n', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.drain_stage(true)?;\n        self.settle_writes()?;\n', '        self.drain_stage(true)?;\n', FILE_SINK_T),
+ # V6e review (D-171): the sink's own collection inside an admission, a
+ # failed sink's writes collected, a region not made durable.
+ (FILE_SINK_SRC, '                    self.failure_of(&w)?;\n                    self.admit_failed = true;', '                    let _f = self.failure_of(&w);\n                    self.admit_failed = true;', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '        // charge released).\n        self.failure_of(&w)?;', '        // charge released).\n        let _f = self.failure_of(&w);', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '                if self.failed.is_none() {\n                    self.failed = Some((io(Op::Write, raw), lost));', '                if false {\n                    self.failed = Some((io(Op::Write, raw), lost));', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '                let _waited = ws.wait_all();\n            }\n        }\n        let shown = shown(&e);', '                let _waited = ws.reap();\n            }\n        }\n        let shown = shown(&e);', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '    fn drop(&mut self) {\n        if let Some(w) = &self.writes {\n            if let Ok(mut ws) = w.try_borrow_mut() {\n                let _waited = ws.wait_all();', '    fn drop(&mut self) {\n        if let Some(w) = &self.writes {\n            if let Ok(mut ws) = w.try_borrow_mut() {\n                let _waited = ws.reap();', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '                let at = if self.writes_failed() {', '                let at = if self.writes_failed() || true {', FILE_SINK_T),
 ]
 
 def kill_stuck_tests():

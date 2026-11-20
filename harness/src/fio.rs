@@ -144,6 +144,101 @@ pub fn jobs_together(
     parse(&text, side).ok_or_else(|| "fio output not understood".to_owned())
 }
 
+/// Runs two time-based jobs at once in one fio process: one reading
+/// `read_file` and one writing `write_file` (made by fio if missing), each
+/// with `args`, `warmup` seconds of ramp and `secs` measured, the writer
+/// ending with an fsync. Returns the read side, the write side
+/// (`--group_reporting`: each side is its one job's), and the writer's rate
+/// with that fsync counted: the bytes it wrote in the measured window over
+/// fio's whole run less the ramp (fio reports no time for an end fsync, so
+/// its process's start and exit count too: a lower bound), bytes per
+/// second.
+///
+/// # Errors
+///
+/// fio's failure or an output this reader does not understand, as text.
+pub fn read_write_together(
+    read_file: &Path,
+    write_file: &Path,
+    bytes: u64,
+    args: &[&str],
+    secs: f64,
+    warmup: f64,
+) -> Result<(Stats, Stats, f64), String> {
+    let mut all = vec![
+        format!("--size={bytes}"),
+        "--direct=1".to_owned(),
+        "--randrepeat=0".to_owned(),
+        "--lat_percentiles=1".to_owned(),
+        "--time_based".to_owned(),
+        format!("--runtime={}ms", (secs * 1000.0) as u64),
+        format!("--ramp_time={}ms", (warmup * 1000.0) as u64),
+        "--group_reporting".to_owned(),
+        "--output-format=json".to_owned(),
+    ];
+    all.extend(args.iter().map(|a| (*a).to_owned()));
+    all.extend([
+        "--name=reader".to_owned(),
+        format!("--filename={}", path_arg(read_file)),
+        "--rw=read".to_owned(),
+        "--name=writer".to_owned(),
+        format!("--filename={}", path_arg(write_file)),
+        "--rw=write".to_owned(),
+        "--end_fsync=1".to_owned(),
+    ]);
+    let t = std::time::Instant::now();
+    let (text, _) = run_raw(&all)?;
+    let wall = t.elapsed().as_secs_f64();
+    let side = |s: &str| parse(&text, s).ok_or_else(|| "fio output not understood".to_owned());
+    let (r, w) = (side("read")?, side("write")?);
+    let written =
+        side_bytes(&text, "write").ok_or_else(|| "fio output not understood".to_owned())?;
+    let synced = written / (wall - warmup).max(1e-9);
+    Ok((r, w, synced))
+}
+
+/// The bytes the first job's `side` moved in its measured window
+/// (`io_bytes`; with `--group_reporting`, the group's).
+fn side_bytes(json: &str, side: &str) -> Option<f64> {
+    let jobs = &json[json.find("\"jobs\"")?..];
+    let job = object_after(jobs, "[")?;
+    let sect = object_after(job, &format!("\"{side}\" :"))?;
+    number_after(sect, "\"io_bytes\" :")
+}
+
+/// Writes `bytes` to a fresh `file` (removed first: fio creates it, with
+/// no layout, as an export creates its files), direct, with `args`, ending
+/// with an fsync, and returns the write rate with that fsync counted,
+/// bytes per second: the bytes over fio's whole run less a run writing
+/// 1 MiB to a fresh file the same way (fio's start, the file's creation
+/// and the fsync's fixed cost cancel).
+///
+/// # Errors
+///
+/// fio's failure, as text.
+pub fn write_fresh(file: &Path, bytes: u64, args: &[&str]) -> Result<f64, String> {
+    let run = |size: u64| -> Result<f64, String> {
+        let _gone = std::fs::remove_file(file);
+        let mut all = vec![
+            "--name=fresh".to_owned(),
+            format!("--filename={}", path_arg(file)),
+            format!("--size={size}"),
+            "--rw=write".to_owned(),
+            "--direct=1".to_owned(),
+            "--end_fsync=1".to_owned(),
+            "--output-format=json".to_owned(),
+        ];
+        all.extend(args.iter().map(|a| (*a).to_owned()));
+        let t = std::time::Instant::now();
+        let _out = run_raw(&all)?;
+        Ok(t.elapsed().as_secs_f64())
+    };
+    let small = run(1 << 20)?;
+    let big = run(bytes)?;
+    let _gone = std::fs::remove_file(file);
+    Ok((bytes - (1 << 20)) as f64 / (big - small).max(1e-9))
+}
+
 /// Runs one time-based job of `secs` (no ramp) on `file` and returns its
 /// `side` with `cpu_s` replaced by the CPU time of fio's whole process
 /// (every thread: on Windows, `windowsaio` reaps on a thread of its own)

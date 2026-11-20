@@ -2,7 +2,7 @@
 
 > The on-disk format of a store's container file, `store.sio`, byte by byte: the layout, the A/B slot every piece of metadata is written with, the metadata records, the keyed fill pattern, every validation rule, how a reader decides which copy of each record is current, and why each multi-step change survives a crash. It is written so that an independent reader can be built from it. Every statement is taken from the code, and each section names its source.
 >
-> **Status: pre-1.0.** store-io 0.5 creates **container format 2** (Part I). It still opens a container of **format 1**, the format store-io 0.1 to 0.4 write, but for reading only (Part II); `copy_store` (`store-io copy`) copies one into a new format-2 store. Either format may change incompatibly before the first stable release, and a container written by one 0.x release is not promised to open in another.
+> **Status: pre-1.0.** store-io 0.5 and later create **container format 2** (Part I). It still opens a container of **format 1**, the format store-io 0.1 to 0.4 write, but for reading only (Part II); `copy_store` (`store-io copy`) copies one into a new format-2 store. Either format may change incompatibly before the first stable release, and a container written by one 0.x release is not promised to open in another.
 
 ---
 
@@ -10,8 +10,8 @@
 
 | | Format 1 | Format 2 |
 |---|---|---|
-| Written by | store-io 0.1 to 0.4 | store-io 0.5 |
-| Opened by 0.5 | read-only (a writable open fails `Unsupported(FormatVersion)` before anything is written) | read and write |
+| Written by | store-io 0.1 to 0.4 | store-io 0.5 and later |
+| Opened by 0.5 and later | read-only (a writable open fails `Unsupported(FormatVersion)` before anything is written) | read and write |
 | Slot header `format_major` (offset 14) | `1` | `2` |
 | Slot header bytes `[96, 104)` | reserved, zero | `meta_seq` |
 | Volume record | 48 bytes | 64 bytes |
@@ -135,7 +135,7 @@ A region owns:
 
 A region's **footprint** is its two header blocks and its committed extents (the first `extent_count` extents its header lists, where `extent_count` is the entry's). Every overlap, free-space and placement rule uses footprints. Its **span** `[span_start, span_end)`, recorded in its entry, runs from the lowest byte of its footprint to one past the highest; it may cover other regions' bytes between its extents.
 
-store-io 0.5 places a new region's header blocks next to each other, `header_b = header_a + B`, followed by its first extent at `header_a + 2B`. A reader must not assume that: it finds every region through its entry and its header, and the rules of sections 8 and 13 are the only constraints on placement.
+store-io (0.5 and later) places a new region's header blocks next to each other, `header_b = header_a + B`, followed by its first extent at `header_a + 2B`. A reader must not assume that: it finds every region through its entry and its header, and the rules of sections 8 and 13 are the only constraints on placement.
 
 ### Object identities
 
@@ -383,7 +383,7 @@ Entries follow at offset `24 + 96 * i`, in any order. The payload is exactly `24
 
 | `flags` bit | Name | Meaning |
 |---|---|---|
-| 0 (`0x01`) | unwritten | Provisioned with `unwritten_ok`. Defined and accepted by readers; store-io 0.5 never sets it. |
+| 0 (`0x01`) | unwritten | Provisioned with `unwritten_ok`. Defined and accepted by readers; store-io (0.5 and later) never sets it. |
 | 1 (`0x02`) | capped | Growth is limited to `capacity` (`max_size`, section 10). |
 
 ### Page checks
@@ -499,7 +499,7 @@ A slot region (`kind = 3`) has no extents and no data area. Its object lives in 
 
 ### Placement
 
-The entry checks require each header slot to be a whole block inside the span, past the table end, the two apart. store-io 0.5 writes `header_b = header_a + B`, and reads such a pair with one read of both blocks; any other placement is read slot by slot.
+The entry checks require each header slot to be a whole block inside the span, past the table end, the two apart. store-io (0.5 and later) writes `header_b = header_a + B`, and reads such a pair with one read of both blocks; any other placement is read slot by slot.
 
 Source: [`crates/store-io-format/src/meta2.rs`](../crates/store-io-format/src/meta2.rs) (`RegionHeader2`, `encode_region_header`, `decode_region_header`, `max_extents`, `max_object`), [`crates/store-io-engine/src/lifecycle2.rs`](../crates/store-io-engine/src/lifecycle2.rs) (`rewrite_header2`), [`crates/store-io-engine/src/slot_handle.rs`](../crates/store-io-engine/src/slot_handle.rs), [`crates/store-io-engine/src/open2.rs`](../crates/store-io-engine/src/open2.rs)
 
@@ -602,7 +602,7 @@ Regions that pass these rules are then settled against each other and against th
 
 ### 512-byte append blocks
 
-An append region whose header says `log2_block = 9` uses 512-byte data blocks: its `data_size` is a multiple of 512, while its extents and `capacity` stay multiples of B. store-io 0.5 reads such a region but does not write it: a store with a usable one opens read-only, with the reason.
+An append region whose header says `log2_block = 9` uses 512-byte data blocks: its `data_size` is a multiple of 512, while its extents and `capacity` stay multiples of B. store-io (0.5 and later) reads such a region but does not write it: a store with a usable one opens read-only, with the reason.
 
 Source: [`crates/store-io-format/src/meta2.rs`](../crates/store-io-format/src/meta2.rs) (`Entry2::check_header`), [`crates/store-io-format/src/footprint.rs`](../crates/store-io-format/src/footprint.rs) (`check_region`), [`crates/store-io-engine/src/open2.rs`](../crates/store-io-engine/src/open2.rs) (`check_regions`, `reason_of`), [`crates/store-io-engine/src/report.rs`](../crates/store-io-engine/src/report.rs) (`Unavailable`)
 
@@ -934,7 +934,7 @@ Source: [`crates/store-io-engine/src/repair.rs`](../crates/store-io-engine/src/r
 
 ## 21. What format 2 does not check
 
-A reader that wants to be stricter than store-io can add these checks; store-io 0.5 does not make them.
+A reader that wants to be stricter than store-io can add these checks; store-io (0.5 and later) does not make them.
 
 - The bytes of a slot after its payload.
 - The volume record's `device_index` and `created_unix_s`.
@@ -951,7 +951,7 @@ A reader that wants to be stricter than store-io can add these checks; store-io 
 
 # Part II: Format 1 (read-only from 0.5)
 
-Format 1 is the format store-io 0.1 to 0.4 write. store-io 0.5 opens a format-1 container for reading only: `Store::open_readonly` reads it as these sections describe, and a writable open fails `Unsupported(FormatVersion)` after its flush-first step and before anything is written. `copy_store` copies a format-1 store into a new format-2 one. 0.5 creates a format-1 container only through a hidden option kept for tests and migration fixtures. The sections on writing (F10's writable open, F11, F13) describe what 0.1 to 0.4 do, and are kept so that a reader can interpret any format-1 container it finds.
+Format 1 is the format store-io 0.1 to 0.4 write. store-io (0.5 and later) opens a format-1 container for reading only: `Store::open_readonly` reads it as these sections describe, and a writable open fails `Unsupported(FormatVersion)` after its flush-first step and before anything is written. `copy_store` copies a format-1 store into a new format-2 one. It creates a format-1 container only through a hidden option kept for tests and migration fixtures. The sections on writing (F10's writable open, F11, F13) describe what 0.1 to 0.4 do, and are kept so that a reader can interpret any format-1 container it finds.
 
 ## F1. Conventions
 
@@ -1335,7 +1335,7 @@ This is how store-io opens a container. An independent reader that follows it re
    The region's data area starts at the entry's `offset + 2B` and is `data_size` bytes long; its generation is the winning header slot's generation.
 4. Released entries are not read.
 
-A **writable** open also does the following, in this order: it takes the ownership lock; refuses an unsafe or unverified device unless trusted; flushes the whole file (data and metadata) *before* reading any slot; reads as above; and finally writes the volume record's next generation with `owner_generation` one higher, durably. A **read-only** open writes nothing. (That is the writable open of 0.1 to 0.4. store-io 0.5 refuses a writable open of a format-1 container with `Unsupported(FormatVersion)` once step 1 has found the record, after the flush and before anything is written.)
+A **writable** open also does the following, in this order: it takes the ownership lock; refuses an unsafe or unverified device unless trusted; flushes the whole file (data and metadata) *before* reading any slot; reads as above; and finally writes the volume record's next generation with `owner_generation` one higher, durably. A **read-only** open writes nothing. (That is the writable open of 0.1 to 0.4. store-io (0.5 and later) refuses a writable open of a format-1 container with `Unsupported(FormatVersion)` once step 1 has found the record, after the flush and before anything is written.)
 
 Source: [`crates/store-io-engine/src/open.rs`](../crates/store-io-engine/src/open.rs) (`open_inner`, `find_volume`)
 
@@ -1362,7 +1362,7 @@ Source: [`crates/store-io-engine/src/layout.rs`](../crates/store-io-engine/src/l
 
 | Mechanism | Where | Rule |
 |---|---|---|
-| `format_major` | Every slot, offset 14 | `1` in this document. 0.4 and earlier read and write only `1`: any other value refuses the pair (the open fails with `Unsupported(FormatVersion)` for the volume record and the region table, and the region is not presented for a region header). 0.5 writes `2`. In a format-1 container it refuses any value other than `1` the same way (a format-2 slot included), in a format-2 container any value other than `2` (section 5), and it opens a format-1 container for reading only (a writable open is `Unsupported(FormatVersion)`, before anything is written). |
+| `format_major` | Every slot, offset 14 | `1` in this document. 0.4 and earlier read and write only `1`: any other value refuses the pair (the open fails with `Unsupported(FormatVersion)` for the volume record and the region table, and the region is not presented for a region header). 0.5 and later write `2`. In a format-1 container it refuses any value other than `1` the same way (a format-2 slot included), in a format-2 container any value other than `2` (section 5), and it opens a format-1 container for reading only (a writable open is `Unsupported(FormatVersion)`, before anything is written). |
 | `incompat_flags` | Every slot, offset 16 | No bit is defined. Any set bit refuses the pair, as above. |
 | `ro_compat_flags` | Every slot, offset 20 | No bit is defined. A slot with an unknown bit stays readable, and the pair must not be written by a version that does not know the bit. |
 | `compat_flags` | Every slot, offset 24 | No bit is defined. Unknown bits are ignored. |

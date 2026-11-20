@@ -334,6 +334,234 @@ fn test_every_kind_is_written_and_described() {
     }
 }
 
+/// Reaps held back (as a device that has not completed them yet), so the
+/// sink's writes stay in flight together until it waits: every region's
+/// file is still whole and durable, exactly its stream length, before its
+/// region counts (each region's writes all completed before its file is
+/// cut and flushed), and `regions.info` too.
+#[test]
+fn test_writes_held_in_flight_are_whole_and_durable() {
+    let (p, s) = every_kind(3050);
+    let mut keep = Keep::default();
+    let _r = export(&s, &mut keep).unwrap();
+    p.with_world(|w| w.hold_reaps(1 << 40));
+    let mut fs = sink(&p);
+    let r = export(&s, &mut fs).unwrap();
+    p.with_world(|w| w.hold_reaps(0));
+    assert!(r.complete);
+    assert_eq!(r.regions, 5);
+    for (i, (info, bytes)) in keep.regions.iter().enumerate() {
+        let got = media(&p, &format!("region-{i:05}.data")).unwrap();
+        assert!(got == *bytes, "region {i}'s file");
+        assert_eq!(got.len() as u64, info.stream_len());
+    }
+    let raw = media(&p, REGIONS_INFO).unwrap();
+    assert_eq!(exportinfo::decode(&raw).unwrap().header.region_count, 5);
+}
+
+/// A write failing while later ones are in flight (reaps held back, so
+/// they complete after it): the export fails where the failed write began,
+/// none of the later writes counted; also through a wrapper that swallows
+/// it.
+#[test]
+fn test_a_failed_write_with_later_ones_in_flight_counts_none_after_it() {
+    for swallow in [false, true] {
+        let (p, s) = every_kind(3052 + u64::from(swallow));
+        p.with_world(|w| {
+            let n = w.writes();
+            w.faults_mut().fail_write = Some(n + 2);
+            w.hold_reaps(1 << 40);
+        });
+        let e = if swallow {
+            let mut w = Wrap::new(&p, Misuse::None);
+            export(&s, &mut w).unwrap_err()
+        } else {
+            let mut fs = sink(&p);
+            export(&s, &mut fs).unwrap_err()
+        };
+        p.with_world(|w| w.hold_reaps(0));
+        assert!(
+            matches!(e.error, Error::Io { op: Op::Write, .. }),
+            "{:?}",
+            e.error
+        );
+        let r = &e.report;
+        assert!(!r.complete);
+        assert_eq!(r.region.as_deref(), Some("pages"));
+        assert_eq!(r.regions, 0);
+        assert_eq!(r.bytes, r.offset);
+        assert!(
+            r.offset > 0 && r.offset <= 256 << 10 && r.offset % B == 0,
+            "{}",
+            r.offset
+        );
+        assert!(media(&p, REGIONS_INFO).unwrap_or_default().is_empty());
+    }
+}
+
+/// A later region's first write failing: the export fails at that region's
+/// offset 0 (each file's writes counted from its own start), every region
+/// before it counted.
+#[test]
+fn test_a_later_region_s_first_write_failing_fails_it_at_its_start() {
+    struct Arm {
+        inner: FileSink<SimPlatform>,
+        p: SimPlatform,
+        index: u32,
+    }
+    impl ExportSink for Arm {
+        fn begin(&mut self, header: &ExportHeader) -> Result<(), SinkError> {
+            self.inner.begin(header)
+        }
+        fn region(&mut self, info: &RegionInfo) -> Result<(), SinkError> {
+            if self.index == 1 {
+                // The next write completed: this region's first.
+                self.p.with_world(|w| {
+                    let n = w.writes();
+                    w.faults_mut().fail_write = Some(n + 1);
+                });
+            }
+            self.index += 1;
+            self.inner.region(info)
+        }
+        fn data(&mut self, chunk: Chunk) -> Result<(), SinkError> {
+            self.inner.data(chunk)
+        }
+        fn end_region(&mut self) -> Result<(), SinkError> {
+            self.inner.end_region()
+        }
+        fn finish(&mut self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+    }
+    let (p, s) = every_kind(3054);
+    let mut arm = Arm {
+        inner: sink(&p),
+        p: p.clone(),
+        index: 0,
+    };
+    let e = export(&s, &mut arm).unwrap_err();
+    assert!(
+        matches!(e.error, Error::Io { op: Op::Write, .. }),
+        "{:?}",
+        e.error
+    );
+    let r = &e.report;
+    assert_eq!(r.region.as_deref(), Some("capped"));
+    assert_eq!(r.regions, 1);
+    assert_eq!(r.offset, 0);
+    assert_eq!(r.bytes, 2 * SPAN + 3 * B);
+}
+
+/// The export stopped (here by a wrapper refusing a chunk) while a later
+/// region's first write is still in flight (reaps held back): nothing of
+/// that region counts written, though the region before it ended (each
+/// file's writes counted from its own start).
+#[test]
+fn test_a_stop_before_a_file_s_first_write_completes_counts_none_of_it() {
+    struct Stop {
+        inner: FileSink<SimPlatform>,
+        index: u32,
+        chunks: u32,
+    }
+    impl ExportSink for Stop {
+        fn begin(&mut self, header: &ExportHeader) -> Result<(), SinkError> {
+            self.inner.begin(header)
+        }
+        fn region(&mut self, info: &RegionInfo) -> Result<(), SinkError> {
+            self.index += 1;
+            self.chunks = 0;
+            self.inner.region(info)
+        }
+        fn data(&mut self, chunk: Chunk) -> Result<(), SinkError> {
+            // The third region (`log`): its first chunk forwarded, its
+            // second refused.
+            self.chunks += 1;
+            if self.index == 3 && self.chunks == 2 {
+                return Err(SinkError::Other(7));
+            }
+            self.inner.data(chunk)
+        }
+        fn end_region(&mut self) -> Result<(), SinkError> {
+            self.inner.end_region()
+        }
+        fn finish(&mut self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+    }
+    let (p, s) = every_kind(3056);
+    let mut stop = Stop {
+        inner: sink(&p),
+        index: 0,
+        chunks: 0,
+    };
+    p.with_world(|w| w.hold_reaps(1 << 40));
+    let e = export(&s, &mut stop).unwrap_err();
+    p.with_world(|w| w.hold_reaps(0));
+    let r = &e.report;
+    assert_eq!(r.region.as_deref(), Some("log"), "{r:?}");
+    assert_eq!(r.regions, 2);
+    assert_eq!(r.offset, 0, "{r:?}");
+    assert_eq!(r.bytes, 2 * SPAN + 3 * B + 4 * B);
+}
+
+/// A region whose file cannot be made durable (its directory's sync
+/// failing at `end_region`): the export fails there, the report's offset
+/// where its writes done reached when it ended, never its whole length.
+#[test]
+fn test_a_region_whose_file_is_not_made_durable_counts_only_its_writes_done() {
+    struct Arm {
+        inner: FileSink<SimPlatform>,
+        p: SimPlatform,
+    }
+    impl ExportSink for Arm {
+        fn begin(&mut self, header: &ExportHeader) -> Result<(), SinkError> {
+            self.inner.begin(header)
+        }
+        fn region(&mut self, info: &RegionInfo) -> Result<(), SinkError> {
+            self.inner.region(info)
+        }
+        fn data(&mut self, chunk: Chunk) -> Result<(), SinkError> {
+            self.inner.data(chunk)
+        }
+        fn end_region(&mut self) -> Result<(), SinkError> {
+            self.p.with_world(|w| {
+                let n = w.dir_syncs();
+                w.faults_mut().fail_dir_sync = Some(n + 1);
+            });
+            self.inner.end_region()
+        }
+        fn finish(&mut self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+    }
+    let (p, s) = every_kind(3058);
+    let mut arm = Arm {
+        inner: sink(&p),
+        p: p.clone(),
+    };
+    let e = export(&s, &mut arm).unwrap_err();
+    assert!(
+        matches!(
+            e.error,
+            Error::Io {
+                op: Op::SyncDir,
+                ..
+            }
+        ),
+        "{:?}",
+        e.error
+    );
+    let r = &e.report;
+    assert_eq!(r.region.as_deref(), Some("pages"));
+    assert_eq!(r.regions, 0);
+    // Its whole pieces written; the last, partial one, and the file's
+    // durability, not counted.
+    assert_eq!(r.offset, 2 * SPAN, "{r:?}");
+    assert_eq!(r.bytes, r.offset);
+    assert!(media(&p, REGIONS_INFO).unwrap_or_default().is_empty());
+}
+
 /// A store with no region: `begin` then `finish`, and a `regions.info`
 /// with none.
 #[test]
@@ -500,14 +728,75 @@ fn test_a_failed_write_fails_the_export_where_it_began() {
         assert!(!r.complete);
         assert_eq!(r.region.as_deref(), Some("pages"));
         assert_eq!(r.regions, 0);
-        // Nothing past the failed write's start counted.
+        // Nothing past the failed write's start counted: the second
+        // write begins one piece in (the sink's piece, at most 256 KiB),
+        // whatever writes after it completed while it was in flight.
         assert_eq!(r.bytes, r.offset);
         assert!(
-            r.offset > 0 && r.offset < 2 * SPAN && r.offset % B == 0,
+            r.offset > 0 && r.offset <= 256 << 10 && r.offset % B == 0,
             "{}",
             r.offset
         );
         assert!(media(&p, REGIONS_INFO).unwrap_or_default().is_empty());
+    }
+}
+
+/// Each region's data file is allocated to its padded length before any
+/// of its bytes are written (D-171: a write that extends a file is
+/// serialised by the file system), then cut to its stream length at its
+/// end.
+#[test]
+fn test_each_data_file_is_allocated_before_its_writes() {
+    struct Peek {
+        inner: FileSink<SimPlatform>,
+        p: SimPlatform,
+        index: u32,
+        /// Each data file's size once `region` returned, and its stream
+        /// length.
+        seen: Vec<(u64, u64)>,
+    }
+    impl ExportSink for Peek {
+        fn begin(&mut self, header: &ExportHeader) -> Result<(), SinkError> {
+            self.inner.begin(header)
+        }
+        fn region(&mut self, info: &RegionInfo) -> Result<(), SinkError> {
+            self.inner.region(info)?;
+            let d = self.p.open_dir(Path::new(OUT), false).unwrap();
+            let name = store_io_platform::FileName::new(&format!("region-{:05}.data", self.index))
+                .unwrap();
+            let f = self
+                .p
+                .open_file(&d, &name, store_io_platform::FileMode::ReadOnly)
+                .unwrap();
+            self.seen
+                .push((self.p.size(&f).unwrap(), info.stream_len()));
+            self.index += 1;
+            Ok(())
+        }
+        fn data(&mut self, chunk: Chunk) -> Result<(), SinkError> {
+            self.inner.data(chunk)
+        }
+        fn end_region(&mut self) -> Result<(), SinkError> {
+            self.inner.end_region()
+        }
+        fn finish(&mut self) -> Result<(), SinkError> {
+            self.inner.finish()
+        }
+    }
+    let (p, s) = every_kind(3040);
+    let mut peek = Peek {
+        inner: sink(&p),
+        p: p.clone(),
+        index: 0,
+        seen: Vec::new(),
+    };
+    let r = export(&s, &mut peek).unwrap();
+    assert!(r.complete);
+    assert_eq!(peek.seen.len(), r.regions);
+    for (i, &(size, len)) in peek.seen.iter().enumerate() {
+        assert_eq!(size, len.div_ceil(B) * B, "region {i}");
+        let file = media(&p, &format!("region-{i:05}.data")).unwrap_or_default();
+        assert_eq!(file.len() as u64, len, "region {i}");
     }
 }
 
@@ -576,10 +865,16 @@ fn test_a_power_cut_at_any_step_leaves_no_false_backup() {
         let want: Vec<Vec<u8>> = keep.regions.into_iter().map(|(_, b)| b).collect();
         (p, want, durable)
     };
-    let fixture = || {
+    // `cut`: the cut the fixture is for (`None`: the step count's), named
+    // by a failure here.
+    let fixture = |cut: Option<u64>| {
         let p = base.fork();
-        let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
-        let _at = s.append_region("log").unwrap().resume_at(durable).unwrap();
+        let s = Store::open(p.clone(), Path::new(DIR), opts())
+            .unwrap_or_else(|e| panic!("cut {cut:?}: reopen the source: {e:?}"));
+        let _at = s
+            .append_region("log")
+            .and_then(|r| r.resume_at(durable))
+            .unwrap_or_else(|e| panic!("cut {cut:?}: resume the log: {e:?}"));
         (p, s)
     };
     let probe = |p: &SimPlatform, cut: u64| {
@@ -594,7 +889,7 @@ fn test_a_power_cut_at_any_step_leaves_no_false_backup() {
     };
     // The steps of a whole export.
     let all = {
-        let (p, s) = fixture();
+        let (p, s) = fixture(None);
         let steps = probe(&p, u64::MAX);
         let mut fs = sink(&p);
         let _r = export(&s, &mut fs).unwrap();
@@ -602,7 +897,7 @@ fn test_a_power_cut_at_any_step_leaves_no_false_backup() {
     };
     assert!(all > 10, "{all} steps");
     each_cut(all, |cut| {
-        let (p, s) = fixture();
+        let (p, s) = fixture(Some(cut));
         let _steps = probe(&p, cut);
         let mut fs = sink(&p);
         let ended = match export(&s, &mut fs) {

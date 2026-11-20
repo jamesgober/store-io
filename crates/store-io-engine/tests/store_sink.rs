@@ -941,10 +941,16 @@ fn test_a_power_cut_at_any_step_leaves_no_store_or_the_whole_one() {
         drop(s);
         (p, want, durable)
     };
-    let fixture = |_seed: u64| {
+    // `cut`: the cut the fixture is for (`None`: the step count's), named
+    // by a failure here.
+    let fixture = |cut: Option<u64>| {
         let p = base.0.fork();
-        let s = Store::open(p.clone(), Path::new(DIR), opts()).unwrap();
-        let _at = s.append_region("log").unwrap().resume_at(base.2).unwrap();
+        let s = Store::open(p.clone(), Path::new(DIR), opts())
+            .unwrap_or_else(|e| panic!("cut {cut:?}: reopen the source: {e:?}"));
+        let _at = s
+            .append_region("log")
+            .and_then(|r| r.resume_at(base.2))
+            .unwrap_or_else(|e| panic!("cut {cut:?}: resume the log: {e:?}"));
         (p, s, &base.1)
     };
     let probe = |p: &SimPlatform, cut: u64| {
@@ -958,7 +964,7 @@ fn test_a_power_cut_at_any_step_leaves_no_store_or_the_whole_one() {
         steps
     };
     let all = {
-        let (p, s, _w) = fixture(5220);
+        let (p, s, _w) = fixture(None);
         let steps = probe(&p, u64::MAX);
         let mut ss = sink(&p);
         assert!(export_into(&s, &mut ss).unwrap().complete);
@@ -966,7 +972,7 @@ fn test_a_power_cut_at_any_step_leaves_no_store_or_the_whole_one() {
     };
     assert!(all > 10, "{all} steps");
     each_cut(all, |cut| {
-        let (p, s, want) = fixture(5220);
+        let (p, s, want) = fixture(Some(cut));
         let _steps = probe(&p, cut);
         let done = match StoreSink::create(p.clone(), Path::new(TO), sink_opts()) {
             Ok(mut ss) => export_into(&s, &mut ss).is_ok(),

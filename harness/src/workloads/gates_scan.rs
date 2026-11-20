@@ -24,14 +24,15 @@ pub const REPS: usize = 3;
 const MIB: u64 = 1 << 20;
 
 /// Scans a written region repeatedly; MB/s over the time inside the scans,
-/// alternating with `fio` (one baseline run, in MB/s): `mb_per_s` and
+/// alternating with `fio` (one round of the baseline: its QD8 and QD1
+/// reads, in MB/s, the better of the two taken): `mb_per_s` and
 /// `fio_mb_per_s` are the medians of [`REPS`] each, `spread` the larger
 /// relative range of the two.
 /// Every block holds its own pattern ([`stamp`], block number = region
 /// offset / 4 KiB). The measured scans' visitor checks offsets (in order,
 /// no gap, whole blocks) and each block's first word; one more scan
 /// afterwards, outside the window, checks every word.
-pub fn scan(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point {
+pub fn scan(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64), String>) -> Point {
     let p = Point::new(System::StoreIo, "PageRegion::scan, whole region");
     with_store(ctx, "g7", p, |store, p| {
         let pages = store
@@ -88,8 +89,11 @@ pub fn scan(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point {
             }
         }
         let (mut ours, mut theirs, mut scans) = (Vec::new(), Vec::new(), 0u64);
+        let mut rounds = Vec::new();
         for _ in 0..REPS {
-            theirs.push(fio()?);
+            let (q8, q1) = fio()?;
+            rounds.push((q8, q1));
+            theirs.push(q8.max(q1));
             let (mut bytes, mut inside) = (0u64, Duration::ZERO);
             let t0 = Instant::now();
             while t0.elapsed().as_secs_f64() < ctx.secs {
@@ -111,7 +115,7 @@ pub fn scan(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point {
         p.metric("spread", Some(range(&ours, m).max(range(&theirs, f))));
         p.metric("scans", Some(scans as f64));
         p.notes.push(format!(
-            "alternated with fio: scan {ours:.0?} MB/s, fio {theirs:.0?} MB/s"
+            "alternated with fio: scan {ours:.0?} MB/s, fio's best {theirs:.0?} MB/s (QD8, QD1 each round: {rounds:.0?})"
         ));
         p.verify = match pass(true)? {
             (_, Some(why)) => Verify::Failed(why),

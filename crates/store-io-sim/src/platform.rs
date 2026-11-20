@@ -56,7 +56,12 @@ impl SimPlatform {
     /// here on in both directions; its files, faults, clock, trace and
     /// random state as this world's now (it goes on exactly as this world
     /// would); a fresh world id (so its volumes, and the device groups and
-    /// file identities built on them, are its own); no probe set.
+    /// file identities built on them, are its own); no probe set. Evidence
+    /// set explicitly in the world's [`SimConfig`] is copied as it is: a
+    /// device identity a test built from this world's `identity_scope()`
+    /// still names this world's volume, not the fork's, so a fork shares a
+    /// device group only through such evidence (a fixture that needs its
+    /// own group sets none).
     ///
     /// # Panics
     ///

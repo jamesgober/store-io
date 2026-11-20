@@ -23,19 +23,32 @@
 //! directory restorable.
 //!
 //! **Writes.** Direct, in whole blocks of the larger of the source's block
-//! and the target file system's, through one staging buffer: each write
-//! is admitted by the call's record on the target's device group and
-//! completed before the call that made it returns, so the sink holds no
-//! piece between calls (it registers no collector: its waits collect the
-//! export stream's reads, R5.4). A region's last write is padded, then the
+//! and the target file system's, staged in pieces of the call's piece and
+//! kept in flight together, up to [`DEPTH`] (D-171: G21 measured one write
+//! at a time, D-168, far under the device's rate). Each write is admitted
+//! by the call's record on the target's device group before it is
+//! submitted, and its charge held until it completes; the sink's writes in
+//! flight are a collector of the call on this thread (R5.4), so a wait for
+//! an admission anywhere in the call (the export stream's, or the sink's
+//! own) reaps them first and never waits on itself. What the sink reports
+//! written is only how far its writes done reach without a gap. A
+//! region's writes are all completed before its last is padded and the
 //! file cut to its length, flushed, and its directory synced: a region
 //! counts as written only then. A failed write is reported to the export's
-//! call with where it began, so the export's report never counts bytes the
-//! sink did not write.
+//! call with where it began (every write before it done), so the export's
+//! report never counts bytes the sink did not write. A failed or refused
+//! sink collects its writes in flight at once (their charges released on
+//! the target's group); one the export stopped for its own reasons (a
+//! media error, say) is not told, and holds its writes in flight, at most
+//! [`DEPTH`], until its next call or its drop: drop it once the export
+//! returns.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use store_io_buf::{BufPool, IoBuf, PoolConfig};
 use store_io_core::error::{Error, ErrorContext, Named, NotWrittenCause, Op, OsError, ReserveTag};
@@ -43,13 +56,14 @@ use store_io_format::crc32c::crc32c_append;
 use store_io_format::exportinfo::{self, InfoHeader, RegionRecord, SPAN};
 use store_io_format::meta::{RegionKind, RegionName};
 use store_io_format::meta2::max_object;
-use store_io_platform::{FileName, IoOp, Platform, QueueConfig};
+use store_io_platform::{FileName, IoOp, Owner, Platform, Queue, QueueConfig, RawResult};
 
 use crate::call::{self, CallState};
-use crate::exec::{QueueSet, Ran, run};
+use crate::exec::{Lane, LaneMark, owned_lane};
 use crate::export::{ExportHeader, ExportSink, RegionInfo, SinkError};
 use crate::io::not_written;
-use crate::pace::Pace;
+use crate::pace::{Held, Pace, Registered};
+use crate::qos::Collect;
 use crate::store::StoreOptions;
 
 /// The record that makes a [`FileSink`]'s directory restorable.
@@ -57,6 +71,181 @@ pub const REGIONS_INFO: &str = "regions.info";
 
 /// The largest staging write when the target is not paced.
 const UNPACED_PIECE: usize = 256 << 10;
+
+/// The sink's writes in flight at most (each admitted by the call's
+/// record, which bounds the call's pieces in flight: R5.4), and its
+/// staging buffers: one being filled and the others in flight.
+pub(crate) const DEPTH: usize = 8;
+
+/// One write in flight.
+struct Pending {
+    tag: u64,
+    offset: u64,
+    len: usize,
+    /// Its result, once its completion was collected.
+    result: Option<RawResult<usize>>,
+    /// Its admission, released when its completion is collected.
+    charge: Option<Held>,
+}
+
+/// The sink's writes in flight, oldest first, and how far its writes done
+/// reach: a collector of the export's call on the sink's thread (R5.4).
+struct Writes<Q: Queue> {
+    lane: Lane<Q>,
+    pending: VecDeque<Pending>,
+    /// The buffers of writes completed, for staging again.
+    free: Vec<IoBuf>,
+    /// The file being written: where its writes done reach without a gap.
+    done_to: u64,
+    /// The first failure: the error, and the start of the write it lost
+    /// (every write before it done).
+    failed: Option<(Error, u64)>,
+    /// A failed wait, as [`Collect::failed`] reports it.
+    wait_failed: Option<(OsError, u64)>,
+    next_tag: u64,
+}
+
+impl<Q: Queue> Writes<Q> {
+    /// Submits `buf` at `offset` of `file`, its admission `charge` held
+    /// until it completes.
+    fn submit(
+        &mut self,
+        file: &Q::File,
+        offset: u64,
+        buf: IoBuf,
+        charge: Option<Held>,
+    ) -> Result<(), Error> {
+        let len = buf.len();
+        let tag = self.next_tag;
+        let op = IoOp::Write {
+            file,
+            offset,
+            buf,
+            dsync: false,
+        };
+        match self.lane.submit(op, tag) {
+            Ok(()) => {
+                self.next_tag += 1;
+                self.pending.push_back(Pending {
+                    tag,
+                    offset,
+                    len,
+                    result: None,
+                    charge,
+                });
+                Ok(())
+            }
+            Err(rejected) => {
+                if let Some(b) = rejected.buf {
+                    self.free.push(b);
+                }
+                Err(rejected.raw.map_or_else(
+                    || not_written(NotWrittenCause::QueueFull, ErrorContext::default()),
+                    |r| io(Op::Write, r),
+                ))
+            }
+        }
+    }
+
+    /// Files every completion the lane holds under its write (its charge
+    /// released, its buffer free again), then moves `done_to` over the
+    /// writes done in order: a write that failed or came back short stops
+    /// it there, recorded as the failure.
+    fn file(&mut self) {
+        for comp in self.lane.done.drain() {
+            if let Some(w) = self.pending.iter_mut().find(|w| w.tag == comp.tag) {
+                w.result = Some(comp.result);
+                w.charge = None;
+            }
+            if let Some(b) = comp.buf {
+                self.free.push(b);
+            }
+        }
+        while let Some(w) = self.pending.front() {
+            let Some(result) = w.result else {
+                break;
+            };
+            if self.failed.is_none() {
+                match result {
+                    Ok(n) if n == w.len => self.done_to = w.offset + w.len as u64,
+                    Ok(_) => {
+                        self.failed = Some((
+                            not_written(NotWrittenCause::Interrupted, ErrorContext::default()),
+                            w.offset,
+                        ));
+                    }
+                    Err(raw) => self.failed = Some((io(Op::Write, raw), w.offset)),
+                }
+            }
+            let _done = self.pending.pop_front();
+        }
+    }
+
+    /// Collects what has completed, without waiting.
+    fn reap(&mut self) {
+        let _arrived = self.lane.reap();
+        self.file();
+    }
+
+    /// Waits for at least one write in flight: whether there was one. A
+    /// failed wait is the sink's failure (sticky), at the oldest write's
+    /// start, and every write's charge is dropped (the writes stay with the
+    /// queue, never waited on again).
+    fn wait_one(&mut self) -> Result<bool, OsError> {
+        if let Some((raw, _)) = self.wait_failed {
+            return Err(raw);
+        }
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        match self.lane.wait(1) {
+            Ok(_) => {
+                self.file();
+                Ok(true)
+            }
+            Err(raw) => {
+                self.file();
+                let lost = self.pending.front().map_or(self.done_to, |w| w.offset);
+                self.wait_failed = Some((raw, lost));
+                if self.failed.is_none() {
+                    self.failed = Some((io(Op::Write, raw), lost));
+                }
+                for w in &mut self.pending {
+                    w.charge = None;
+                }
+                Err(raw)
+            }
+        }
+    }
+
+    /// Waits for every write in flight.
+    fn wait_all(&mut self) -> Result<(), OsError> {
+        while self.wait_one()? {}
+        Ok(())
+    }
+}
+
+impl<Q: Queue> Collect for RefCell<Writes<Q>> {
+    fn collect_one(&self) -> Result<bool, OsError> {
+        // Borrowed: the sink is the part asking, between its own calls
+        // into its writes (it never holds the borrow while admitting).
+        match self.try_borrow_mut() {
+            Ok(mut w) => w.wait_one(),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn collect_all(&self) -> Result<(), OsError> {
+        match self.try_borrow_mut() {
+            Ok(mut w) => w.wait_all(),
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn failed(&self) -> Option<(OsError, u64)> {
+        self.try_borrow().ok()?.wait_failed
+    }
+}
 
 /// How a [`FileSink`] writes.
 #[derive(Debug, Clone, Default)]
@@ -121,7 +310,10 @@ pub struct FileSink<P: Platform> {
     call: Option<Rc<CallState>>,
     id: usize,
     pace: Option<Pace>,
-    queue: Option<QueueSet<P::Queue>>,
+    /// Its writes in flight, registered as a collector of the call while
+    /// the sink lives.
+    writes: Option<Rc<RefCell<Writes<P::Queue>>>>,
+    registered: Option<Registered>,
     pool: Option<BufPool>,
     /// The write block and the staging buffer's size (a multiple of it).
     block: u64,
@@ -185,7 +377,8 @@ impl<P: Platform> FileSink<P> {
             call: None,
             id: 0,
             pace: None,
-            queue: None,
+            writes: None,
+            registered: None,
             pool: None,
             block: 0,
             piece: 0,
@@ -214,6 +407,14 @@ impl<P: Platform> FileSink<P> {
     /// export asks it), never the sink's.
     fn fail(&mut self, e: Error, offset: u64) -> SinkError {
         self.state = State::Failed;
+        // Its writes in flight collected now (best effort: a failed wait
+        // drops their charges), so a failed sink holds no piece of the
+        // target's group while its caller still holds it.
+        if let Some(w) = &self.writes {
+            if let Ok(mut ws) = w.try_borrow_mut() {
+                let _waited = ws.wait_all();
+            }
+        }
         let shown = shown(&e);
         if let Some(c) = &self.call {
             if !self.admit_failed {
@@ -250,26 +451,37 @@ impl<P: Platform> FileSink<P> {
         (charged <= header.total).then_some(charged)
     }
 
-    /// Writes the staging buffer's first `len` bytes (whole blocks) at the
-    /// current offset of `which` (the region's file, or `regions.info`),
-    /// admitted by the call's record and completed before it returns.
+    /// Submits the staging buffer's first `len` bytes (whole blocks) at
+    /// the current offset of `which` (the region's file, or
+    /// `regions.info`), admitted by the call's record first; the write
+    /// stays in flight (with up to [`DEPTH`] - 1 others) until a collection
+    /// completes it, and the next staging buffer is a completed write's.
     fn write_stage(&mut self, len: usize, info_file: bool) -> Result<(), Error> {
-        let file = if info_file { &self.info } else { &self.file };
-        let (Some(file), Some(queue)) = (file.as_ref(), self.queue.as_ref()) else {
+        let Some(w) = self.writes.clone() else {
             return Err(refusal());
         };
-        // Admitted first (its wait collects the export stream's reads), so
-        // a refusal keeps the staging buffer.
-        let _held = match &self.pace {
+        self.failure_of(&w)?;
+        // Admitted first, with no borrow of the writes held: its wait
+        // collects the call's pieces on this thread, the sink's own writes
+        // among them (R5.4). A refusal keeps the staging buffer.
+        let charge = match &self.pace {
             Some(p) => match p.admit() {
                 Ok(h) => Some(h),
                 Err(e) => {
+                    // The admission's wait collected the sink's own writes
+                    // and that collection failed (a write, or the wait
+                    // itself): the sink's failure, recorded as its own.
+                    self.failure_of(&w)?;
                     self.admit_failed = true;
                     return Err(e);
                 }
             },
             None => None,
         };
+        // A write the admission's wait collected may have failed: that is
+        // the failure, before anything more is submitted (the admission's
+        // charge released).
+        self.failure_of(&w)?;
         let Some(mut buf) = self.stage.take() else {
             return Err(refusal());
         };
@@ -277,46 +489,80 @@ impl<P: Platform> FileSink<P> {
             self.stage = Some(buf);
             return Err(refusal());
         }
-        let mut lane = queue.get(0);
-        let ran = run(
-            &mut lane,
-            IoOp::Write {
-                file,
-                offset: self.at,
-                buf,
-                dsync: false,
-            },
-        );
-        drop(lane);
-        let (buf, result) = match ran {
-            Ok(Ran::Done { buf, result }) => (buf, result.map_err(|raw| io(Op::Write, raw))),
-            Ok(Ran::Abandoned(raw)) => (None, Err(io(Op::Write, raw))),
-            // Refused before it reached the device: a full queue (none is
-            // in flight here) or the OS's refusal.
-            Err((buf, raw)) => (
-                buf,
-                Err(raw.map_or_else(
-                    || not_written(NotWrittenCause::QueueFull, ErrorContext::default()),
-                    |r| io(Op::Write, r),
-                )),
-            ),
+        let file = if info_file { &self.info } else { &self.file };
+        let Some(file) = file.as_ref() else {
+            self.stage = Some(buf);
+            return Err(refusal());
         };
-        // A buffer the queue kept (abandoned) is replaced from the pool.
-        self.stage = match buf {
-            Some(b) => Some(b),
-            None => self.pool.as_ref().and_then(|p| p.take(self.piece).ok()),
-        };
-        match result {
-            Ok(n) if n == len => {
-                self.at += len as u64;
-                Ok(())
+        w.borrow_mut().submit(file, self.at, buf, charge)?;
+        self.at += len as u64;
+        // The next staging buffer: a completed write's, else one waited
+        // for (the pool holds one per write in flight and one to fill).
+        self.stage = loop {
+            let mut ws = w.borrow_mut();
+            ws.reap();
+            if let Some(b) = ws.free.pop() {
+                break Some(b);
             }
-            Ok(_) => Err(not_written(
-                NotWrittenCause::Interrupted,
-                ErrorContext::default(),
-            )),
-            Err(e) => Err(e),
+            if !ws.wait_one().map_err(|raw| io(Op::Write, raw))? {
+                break None;
+            }
+        };
+        self.failure_of(&w)
+    }
+
+    /// The writes' recorded failure, if any (sticky).
+    fn failure_of(&self, w: &Rc<RefCell<Writes<P::Queue>>>) -> Result<(), Error> {
+        match &w.borrow().failed {
+            Some((e, _)) => Err(e.clone()),
+            None => Ok(()),
         }
+    }
+
+    /// Collects every write in flight, then the writes' failure if any.
+    fn settle_writes(&self) -> Result<(), Error> {
+        let Some(w) = &self.writes else {
+            return Err(refusal());
+        };
+        let waited = w.borrow_mut().wait_all();
+        self.failure_of(w)?;
+        waited.map_err(|raw| io(Op::Write, raw))
+    }
+
+    /// How far the writes done reach in the file being written without a
+    /// gap (after collecting what has completed).
+    fn written(&self) -> u64 {
+        self.writes.as_ref().map_or(0, |w| {
+            let mut ws = w.borrow_mut();
+            ws.reap();
+            ws.done_to
+        })
+    }
+
+    /// Whether a write (or a wait for one) failed.
+    fn writes_failed(&self) -> bool {
+        self.writes
+            .as_ref()
+            .is_some_and(|w| w.borrow().failed.is_some())
+    }
+
+    /// Where a failure leaves the file being written: every write in
+    /// flight collected (best effort), how far the writes done reach.
+    fn failed_at(&self) -> u64 {
+        self.writes.as_ref().map_or(0, |w| {
+            let mut ws = w.borrow_mut();
+            let _waited = ws.wait_all();
+            ws.done_to
+        })
+    }
+
+    /// Starts a file: its writes done counted from 0 (none in flight).
+    fn start_file(&mut self) {
+        if let Some(w) = &self.writes {
+            w.borrow_mut().done_to = 0;
+        }
+        self.fill = 0;
+        self.at = 0;
     }
 
     /// Writes what the staging buffer holds, its last block padded with
@@ -450,22 +696,46 @@ impl<P: Platform> FileSink<P> {
             align.min(self.piece),
             self.piece,
             self.piece,
-            2,
+            DEPTH as u32,
         ))
         .map_err(|_| not_written(NotWrittenCause::PoolExhausted, ErrorContext::default()))?;
-        self.stage =
-            Some(pool.take(self.piece).map_err(|_| {
+        // One buffer to fill and the others for the writes in flight: the
+        // lane never holds more than it has rows.
+        let mut free = Vec::with_capacity(DEPTH);
+        for _ in 0..DEPTH {
+            free.push(pool.take(self.piece).map_err(|_| {
                 not_written(NotWrittenCause::PoolExhausted, ErrorContext::default())
             })?);
+        }
+        self.stage = free.pop();
         self.pool = Some(pool);
         let queue = self
             .platform
             .queue(QueueConfig {
-                depth: 1,
-                ..QueueConfig::default()
+                depth: DEPTH as u32,
+                // Several writes in flight before a wait (the Linux
+                // backend otherwise performs each inside `submit`), on
+                // the sink's one thread.
+                parallel: true,
+                pool_threads: self.opts.store.t3_pool_threads,
+                owner: Owner::Thread,
             })
             .map_err(|raw| io(Op::Queue, raw))?;
-        self.queue = Some(QueueSet::new(vec![queue], 1));
+        let writes = Rc::new(RefCell::new(Writes {
+            lane: owned_lane(queue, &Arc::new(LaneMark::new()), DEPTH),
+            pending: VecDeque::with_capacity(DEPTH),
+            free,
+            done_to: 0,
+            failed: None,
+            wait_failed: None,
+            next_tag: 0,
+        }));
+        if let Some(p) = &self.pace {
+            let part: Rc<dyn Collect> = writes.clone();
+            let weak: Weak<dyn Collect> = Rc::downgrade(&part);
+            self.registered = Some(p.register(weak));
+        }
+        self.writes = Some(writes);
         self.info = Some(info);
         self.header = Some(header.clone());
         Ok(())
@@ -486,11 +756,26 @@ impl<P: Platform> FileSink<P> {
             .platform
             .create_file(&self.dir, &name)
             .map_err(|raw| io(Op::Create, raw))?;
+        // Its blocks allocated before its writes (D-171), so a device
+        // without the room fails here, before any byte is written: on ext4
+        // a direct write that extends a file is serialised, so allocation
+        // lets the writes in flight overlap (measured: 40% of G21's
+        // baseline without it, about 80% with it). On NTFS it does not:
+        // allocation moves the end of file but not the valid data length
+        // (`SetFileValidData` is never called: it needs a privilege and
+        // exposes stale clusters), and each overlapped write past it still
+        // blocks inside `WriteFile` before it returns pending. The file is
+        // cut to the region's length at its end.
+        let len = info.stream_len().div_ceil(self.block) * self.block;
+        if len > 0 {
+            self.platform
+                .allocate(&file, len)
+                .map_err(|raw| io(Op::Allocate, raw))?;
+        }
         self.charged = charged;
         self.file = Some(file);
         self.cur = Some(record);
-        self.fill = 0;
-        self.at = 0;
+        self.start_file();
         self.span_crc = 0;
         self.span_len = 0;
         self.spans = Vec::new();
@@ -499,6 +784,7 @@ impl<P: Platform> FileSink<P> {
 
     fn end_run(&mut self, declared: u64) -> Result<(), Error> {
         self.drain_stage(false)?;
+        self.settle_writes()?;
         if self.span_len > 0 {
             self.spans.push(self.span_crc);
             self.span_len = 0;
@@ -563,15 +849,28 @@ impl<P: Platform> FileSink<P> {
         )
         .map_err(|_| refusal())?;
         drop(regions);
-        self.fill = 0;
-        self.at = 0;
+        self.start_file();
         self.stage_bytes(&bytes[..n], true)?;
         self.drain_stage(true)?;
+        self.settle_writes()?;
         let Some(info) = self.info.take() else {
             return Err(refusal());
         };
         self.settle_file(&info, n as u64)?;
         self.sync_dir()
+    }
+}
+
+impl<P: Platform> Drop for FileSink<P> {
+    /// Collects every write still in flight before the files they write
+    /// and their buffers' pool go (best effort: a failed wait leaves them
+    /// with the queue, which keeps their buffers).
+    fn drop(&mut self) {
+        if let Some(w) = &self.writes {
+            if let Ok(mut ws) = w.try_borrow_mut() {
+                let _waited = ws.wait_all();
+            }
+        }
     }
 }
 
@@ -617,20 +916,27 @@ impl<P: Platform> ExportSink for FileSink<P> {
         }
         self.crc_bytes(bytes);
         let staged = self.stage_bytes(bytes, false);
-        // Its writes done (the staged bytes not yet written count none).
-        if let Some(c) = &self.call {
-            c.wrote(self.id, self.at.min(declared));
-        }
         match staged {
             Ok(()) => {
+                // Its writes done without a gap (the bytes staged or in
+                // flight count none).
+                if let Some(c) = &self.call {
+                    c.wrote(self.id, self.written().min(declared));
+                }
                 self.state = State::InRegion {
                     declared,
                     written: written + n,
                 };
                 Ok(())
             }
-            // The failed write's start (`at` moves only past a write done).
-            Err(e) => Err(self.fail(e, self.at)),
+            // The failed write's start: every write before it done.
+            Err(e) => {
+                let at = self.failed_at();
+                if let Some(c) = &self.call {
+                    c.wrote(self.id, at.min(declared));
+                }
+                Err(self.fail(e, at))
+            }
         }
     }
 
@@ -641,6 +947,11 @@ impl<P: Platform> ExportSink for FileSink<P> {
         if written != declared {
             return Err(self.refuse(written));
         }
+        // Where its writes done reach now: a failure from here that is not
+        // a write's (the last piece's admission, the file's cut, flush or
+        // its directory's sync) is reported there, never past it (StoreSink
+        // reports such a failure the same way, D-170).
+        let before = self.written().min(declared);
         match self.end_run(declared) {
             Ok(()) => {
                 self.state = State::Ended;
@@ -649,7 +960,19 @@ impl<P: Platform> ExportSink for FileSink<P> {
                 }
                 Ok(())
             }
-            Err(e) => Err(self.fail(e, self.at)),
+            Err(e) => {
+                // A write that failed: where it began, every write before
+                // it done.
+                let at = if self.writes_failed() {
+                    self.failed_at().min(declared)
+                } else {
+                    before
+                };
+                if let Some(c) = &self.call {
+                    c.wrote(self.id, at);
+                }
+                Err(self.fail(e, at))
+            }
         }
     }
 
@@ -683,6 +1006,193 @@ mod tests {
     use super::*;
     use crate::Store;
     use crate::export::VolumeFacts;
+
+    /// A sink bound to an export's call, begun, in a 1 MiB page region,
+    /// with reaps held back so its writes stay in flight until a wait.
+    struct InFlight {
+        p: SimPlatform,
+        _s: Store<SimPlatform>,
+        call: Rc<CallState>,
+        pace: Pace,
+        sink: FileSink<SimPlatform>,
+        _bound: call::Bound,
+    }
+
+    fn begun_in_flight(seed: u64) -> InFlight {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        drop(p.open_dir(Path::new("/out"), true).unwrap());
+        let pace = s.inner.domain.new_pace();
+        let call = CallState::new(Arc::clone(&s.inner.qos), pace.clone());
+        let bound = call::bind(&call);
+        let mut sink =
+            FileSink::create(p.clone(), Path::new("/out"), FileSinkOptions::default()).unwrap();
+        let header = ExportHeader {
+            region_count: 1,
+            block_size: 4096,
+            facts: VolumeFacts::default(),
+            writable: true,
+            lend: 4,
+            total: 1 << 30,
+        };
+        sink.begin(&header).unwrap();
+        let info = RegionInfo {
+            name: "r".to_owned(),
+            kind: RegionKind::Page,
+            generation: 1,
+            tag: 0,
+            cap: None,
+            fill: FillPattern::Zeros,
+            fill_key: [0; 16],
+            block_size: 4096,
+            data_size: 1 << 20,
+            durable_len: None,
+            object_len: None,
+            full_copy: false,
+            superseded: false,
+        };
+        sink.region(&info).unwrap();
+        p.with_world(|w| w.hold_reaps(1 << 40));
+        InFlight {
+            p,
+            _s: s,
+            call,
+            pace: pace.unwrap(),
+            sink,
+            _bound: bound,
+        }
+    }
+
+    /// Every piece the call may still hold, held here.
+    fn hold_the_rest(pace: &Pace) -> Vec<Held> {
+        let mut held = Vec::new();
+        while let Some(h) = pace.try_charge() {
+            held.push(h);
+            assert!(held.len() < 1024, "an admission that never refuses");
+        }
+        held
+    }
+
+    /// A wait for the sink's own writes failing inside its admission's
+    /// collection is the sink's failure, recorded with its offset, never
+    /// taken for another part's.
+    #[test]
+    fn test_a_failed_wait_inside_an_admission_is_the_sink_s_failure() {
+        let mut t = begun_in_flight(3120);
+        let piece = t.sink.piece;
+        t.sink.stage_bytes(&vec![7u8; 2 * piece], false).unwrap();
+        assert_eq!(t.sink.writes.as_ref().unwrap().borrow().pending.len(), 2);
+        let held = hold_the_rest(&t.pace);
+        t.p.with_world(|w| {
+            let n = w.waits();
+            w.faults_mut().fail_wait = Some((n + 1, 5));
+        });
+        let e = t.sink.stage_bytes(&vec![7u8; piece], false).unwrap_err();
+        drop(held);
+        assert!(matches!(e, Error::Io { op: Op::Write, .. }), "{e:?}");
+        assert!(!t.sink.admit_failed);
+        let at = t.sink.failed_at();
+        let _shown = t.sink.fail(e, at);
+        let f = t.call.failure().expect("recorded as the sink's");
+        assert!(matches!(f.error, Error::Io { op: Op::Write, .. }));
+        assert_eq!(f.offset, 0);
+    }
+
+    /// A write that failed, collected by the admission of the next one:
+    /// that failure is returned before anything more is submitted (here the
+    /// next submission would be refused with another code).
+    #[test]
+    fn test_a_write_failure_collected_by_an_admission_is_returned_first() {
+        let mut t = begun_in_flight(3122);
+        let piece = t.sink.piece;
+        t.p.with_world(|w| {
+            let n = w.writes();
+            w.faults_mut().fail_write = Some(n + 1);
+        });
+        t.sink.stage_bytes(&vec![7u8; 2 * piece], false).unwrap();
+        let held = hold_the_rest(&t.pace);
+        t.p.with_world(|w| {
+            let n = w.write_submits();
+            w.faults_mut().fail_submit = Some((n + 1, 28));
+        });
+        let e = t.sink.stage_bytes(&vec![7u8; piece], false).unwrap_err();
+        drop(held);
+        match e {
+            Error::Io {
+                op: Op::Write, raw, ..
+            } => assert_eq!(raw.code, 5, "{e:?}"),
+            _ => panic!("{e:?}"),
+        }
+        assert_eq!(t.sink.failed_at(), 0);
+    }
+
+    /// A failed sink collects its writes in flight at once: it holds no
+    /// piece of the target's group afterwards.
+    #[test]
+    fn test_a_failed_sink_holds_no_piece() {
+        let mut t = begun_in_flight(3124);
+        let piece = t.sink.piece;
+        t.sink.stage_bytes(&vec![7u8; 2 * piece], false).unwrap();
+        assert_eq!(t.pace.held_here(), 2);
+        let _shown = t.sink.refuse(0);
+        assert_eq!(t.pace.held_here(), 0);
+        assert!(t.sink.writes.as_ref().unwrap().borrow().pending.is_empty());
+    }
+
+    /// A sink dropped with writes in flight completes them first.
+    #[test]
+    fn test_a_dropped_sink_completes_its_writes_in_flight() {
+        let mut t = begun_in_flight(3126);
+        let piece = t.sink.piece;
+        t.sink.stage_bytes(&vec![7u8; 2 * piece], false).unwrap();
+        let before = t.p.with_world(|w| w.writes());
+        let InFlight { p, sink, .. } = t;
+        drop(sink);
+        assert_eq!(p.with_world(|w| w.writes()), before + 2);
+    }
+
+    /// Three writes in flight, the second failing: the writes done reach
+    /// only the first's end and the failure is the second's start, though
+    /// the third completed after it (`done_to` never moves past a failure).
+    #[test]
+    fn test_a_failed_write_stops_the_writes_done_at_its_start() {
+        let p = SimPlatform::new(SimConfig::volatile(3110));
+        let d = p.open_dir(Path::new("/w"), true).unwrap();
+        let f = p.create_file(&d, &FileName::new("f").unwrap()).unwrap();
+        let q = p
+            .queue(QueueConfig {
+                depth: DEPTH as u32,
+                ..QueueConfig::default()
+            })
+            .unwrap();
+        let pool = BufPool::new(&PoolConfig::uniform(4096, 4096, 4096, 4)).unwrap();
+        let mut w = Writes {
+            lane: owned_lane(q, &Arc::new(LaneMark::new()), DEPTH),
+            pending: VecDeque::new(),
+            free: Vec::new(),
+            done_to: 0,
+            failed: None,
+            wait_failed: None,
+            next_tag: 0,
+        };
+        p.with_world(|w| {
+            let n = w.writes();
+            w.faults_mut().fail_write = Some(n + 2);
+        });
+        for i in 0..3u64 {
+            let mut b = pool.take(4096).unwrap();
+            assert!(b.set_len(4096));
+            w.submit(&f, i * 4096, b, None).unwrap();
+        }
+        w.wait_all().unwrap();
+        assert_eq!(w.done_to, 4096);
+        assert!(matches!(
+            w.failed,
+            Some((Error::Io { op: Op::Write, .. }, 4096))
+        ));
+        assert!(w.pending.is_empty());
+        assert_eq!(w.free.len(), 3);
+    }
 
     /// An admission that ends without one (here: every piece of the call
     /// held on this thread, which no collector can collect) fails the sink

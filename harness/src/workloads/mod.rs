@@ -13,6 +13,7 @@ pub mod gates_g18;
 pub mod gates_g19;
 pub mod gates_g2;
 pub mod gates_g20;
+pub mod gates_g21;
 pub mod gates_scan;
 pub mod gates_seq;
 pub mod lone;

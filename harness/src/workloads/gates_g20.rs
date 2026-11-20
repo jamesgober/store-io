@@ -1,9 +1,10 @@
 //! G20's measurement (R5.5, FILEMAP's gates row): a `Read`-class
 //! [`PageRegion::read_stream`](store_io_engine::PageRegion::read_stream)
 //! over a whole region, front to back, repeated for the measured time,
-//! alternating with fio's QD8 1 MiB sequential read [`REPS`] times each
-//! (G7's rule: a virtual disk's read bandwidth swings between runs, so
-//! medians of alternated runs are compared). A `Background`-class stream's
+//! alternating with fio's best 1 MiB sequential read (its QD8 and QD1
+//! reads, the better of the two each round) [`REPS`] times each (G7's
+//! rule: a virtual disk's read bandwidth swings between runs, so medians of
+//! alternated runs are compared). A `Background`-class stream's
 //! figure is published beside it, never gated.
 
 use std::time::{Duration, Instant};
@@ -23,13 +24,14 @@ pub const REPS: usize = 3;
 const MIB: u64 = 1 << 20;
 
 /// Streams a written region repeatedly; MB/s over the time inside the
-/// streams, alternating with `fio` (one baseline run, in MB/s): `mb_per_s`
+/// streams, alternating with `fio` (one round of the baseline: its QD8
+/// and QD1 reads, in MB/s, the better of the two taken): `mb_per_s`
 /// and `fio_mb_per_s` are the medians of [`REPS`] each, `spread` the larger
 /// relative range of the two; `background_mb_per_s` a `Background` stream's
 /// median, measured after. Every block holds its own pattern ([`stamp`]):
 /// the measured streams check each chunk's offset (in order, no gap) and
 /// each block's first word; one more stream afterwards checks every word.
-pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point {
+pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64), String>) -> Point {
     let p = Point::new(System::StoreIo, "PageRegion::read_stream, Read class");
     with_store(ctx, "g20", p, |store, p| {
         let pages = store
@@ -51,8 +53,11 @@ pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point 
             }
         }
         let (mut ours, mut theirs, mut passes) = (Vec::new(), Vec::new(), 0u64);
+        let mut rounds = Vec::new();
         for _ in 0..REPS {
-            theirs.push(fio()?);
+            let (q8, q1) = fio()?;
+            rounds.push((q8, q1));
+            theirs.push(q8.max(q1));
             match timed(ctx, &pages, read, &mut passes)? {
                 Ok(mb) => ours.push(mb),
                 Err(why) => {
@@ -90,7 +95,7 @@ pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<f64, String>) -> Point 
         }
         p.metric("streams", Some(passes as f64));
         p.notes.push(format!(
-            "alternated with fio: Read stream {ours:.0?} MB/s, fio {theirs:.0?} MB/s; Background stream {quiet:.0?} MB/s"
+            "alternated with fio: Read stream {ours:.0?} MB/s, fio's best {theirs:.0?} MB/s (QD8, QD1 each round: {rounds:.0?}); Background stream {quiet:.0?} MB/s"
         ));
         p.verify = match pass(&pages, read, true)? {
             (_, Some(why)) => Verify::Failed(why),

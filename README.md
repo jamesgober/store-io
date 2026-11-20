@@ -26,7 +26,7 @@
         <strong>MSRV is 1.85+</strong> (Rust 2024 edition).
     </p>
     <blockquote>
-        <strong>Status: 0.5 &mdash; macOS and the single-file container.</strong> The simple and batch APIs on Windows, Linux and macOS, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. On macOS, APFS with <code>F_FULLFSYNC</code> for every flush; a store on APFS on the Mac's own drive is meant to be flush-required, not yet confirmed on real hardware, and anything else is Unverified or Unsafe (<code>docs/PLATFORMS.md</code> section 5). Container format 2: a paged region table (65,536 regions by default) and regions that can grow; a store made before 0.5 (format 1) opens read-only and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>); a store whose region table is damaged still opens, the damage reported and nothing guessed, with three ways out (repair an entry, accept a rolled-back page, or copy what can be copied: <code>docs/GUIDE.md</code> section 15). Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>; power-cut certification follows in <code>1.x</code>. In development for 0.6: several devices (a barrier across stores, dependent and ditto writes), pacing of background I/O against commits, and streaming export, import and copy. See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
+        <strong>Status: 0.6: several devices, background pacing, export and import.</strong> The simple and batch APIs on Windows, Linux and macOS, plus the <code>Submitter</code>: many reads and writes in flight from one thread, with the same receipts and fail-stop rules. On Linux, io_uring through store-io's own binding (never on the kernel's worker threads), chosen at run time with a synchronous fallback. On macOS, APFS with <code>F_FULLFSYNC</code> for every flush; a store on APFS on the Mac's own drive is meant to be flush-required, not yet confirmed on real hardware, and anything else is Unverified or Unsafe (<code>docs/PLATFORMS.md</code> section 5). Container format 2: a paged region table (65,536 regions by default) and regions that can grow; a store made before 0.5 (format 1) opens read-only and moves to format 2 with <code>store-io copy</code> (or <code>copy_store</code>); a store whose region table is damaged still opens, the damage reported and nothing guessed, with three ways out (repair an entry, accept a rolled-back page, or copy what can be copied: <code>docs/GUIDE.md</code> section 15). Evidence-based durability classes, receipts, scans, recycle and release, reservations and directory mode. <code>0.x</code> releases make no compatibility promise, the on-disk format included; the SemVer promise starts at <code>1.0</code>, after power-cut certification in <code>0.9</code>. New in 0.6: several devices (a barrier across stores, dependent and ditto writes), pacing of background I/O against commits, and export and import (to a directory as a backup, or straight into a new store). See the <a href="./dev/ROADMAP.md"><code>ROADMAP</code></a>.
     </blockquote>
 </div>
 
@@ -37,11 +37,11 @@
 
 store-io replaces [fsys](https://github.com/jamesgober/fsys-rs) as the only code in a database stack that touches files and devices. It is built for:
 
-- **Write-ahead logs and commit layers** &mdash; small, sector-aligned, positioned writes at low queue depth, durable on completion on power-safe devices and with the minimum barrier cost on volatile-cache devices; exact receipts with out-of-order completion; raw, uninterpreted recovery reads.
-- **Columnar and page stores** &mdash; large vectored writes, dependent writes across files and devices with at most one flush per device, release on compaction, clone for backup.
-- **Buffer pools** &mdash; batched direct reads into caller-owned aligned frames, explicit cancellable prefetch, per-range errors.
-- **Backup and replication shipping** &mdash; streaming direct-read copies with bounded memory.
-- **Embedded deployments** &mdash; one portable container file, unprivileged, with zero idle wakeups.
+- **Write-ahead logs and commit layers**: small, sector-aligned, positioned writes at low queue depth, durable on completion on power-safe devices and with the minimum barrier cost on volatile-cache devices; exact receipts with out-of-order completion; raw, uninterpreted recovery reads.
+- **Columnar and page stores**: large vectored writes, dependent writes across files and devices with at most one flush per device, release on compaction, clone for backup.
+- **Buffer pools**: batched direct reads into caller-owned aligned frames, explicit cancellable prefetch, per-range errors.
+- **Backup and replication shipping**: streaming direct-read copies with bounded memory.
+- **Embedded deployments**: one portable container file, unprivileged, with zero idle wakeups.
 
 ## What it is not
 
@@ -96,7 +96,7 @@ let (start, receipt) = batch.commit()?;
 
 ```toml
 [dependencies]
-store-io = "0.5"
+store-io = "0.6"
 ```
 
 The `store-io` command-line tool (`store-io probe <dir>`, `store-io info <store>`, `store-io copy <old> <new>`) is behind the `cli` feature.
@@ -114,8 +114,8 @@ See <a href="./dev/DIRECTIVES.md"><code>dev/DIRECTIVES.md</code></a> for enginee
     <h2>License</h2>
     <p>Licensed under either of</p>
     <ul>
-        <li><b>Apache License, Version 2.0</b> &mdash; <a href="./LICENSE-APACHE">LICENSE-APACHE</a></li>
-        <li><b>MIT License</b> &mdash; <a href="./LICENSE-MIT">LICENSE-MIT</a></li>
+        <li><b>Apache License, Version 2.0</b>: <a href="./LICENSE-APACHE">LICENSE-APACHE</a></li>
+        <li><b>MIT License</b>: <a href="./LICENSE-MIT">LICENSE-MIT</a></li>
     </ul>
     <p>at your option.</p>
 </div>

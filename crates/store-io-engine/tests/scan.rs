@@ -15,8 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use store_io_core::IoClass;
 use store_io_core::error::{Error, NotWrittenCause};
-use store_io_engine::{CONTAINER, ScanItem, ScanSummary, Store, StoreOptions};
+use store_io_engine::{CONTAINER, ScanItem, ScanOptions, ScanSummary, Store, StoreOptions};
 use store_io_sim::{FaultPlan, SimConfig, SimPlatform};
 
 const DIR: &str = "/db";
@@ -314,6 +315,50 @@ fn one_lane() -> StoreOptions {
     }
 }
 
+/// A caller's scan holds its buffers under the pool's background cap in
+/// either class, as a read stream does: with four buffers a class, its
+/// visitor can still append a whole chunk durably at every item (half of
+/// each class stays for commits), and every byte arrives in order.
+#[test]
+fn test_a_caller_s_scan_leaves_buffers_for_commits_in_either_class() {
+    for (seed, so) in [
+        (42, ScanOptions::default()),
+        (43, ScanOptions::default().class(IoClass::Read)),
+    ] {
+        within(move || {
+            let p = SimPlatform::new(SimConfig::volatile(seed));
+            let few = StoreOptions {
+                buffers_per_class: 4,
+                ..opts()
+            };
+            let s = Store::create(p, Path::new(DIR), few).unwrap();
+            let wal = s.provision_append_region("wal", 8 * CHUNK as u64).unwrap();
+            let data = record(14, 8 * CHUNK);
+            for c in data.chunks(CHUNK) {
+                wal.append_durable(c).unwrap();
+            }
+            let log = s.provision_append_region("log", 32 * CHUNK as u64).unwrap();
+            let one = record(15, CHUNK);
+            let mut appended = 0u32;
+            let (got, bad, sum) = collect(
+                |v| {
+                    wal.scan_with(0, so, |item| {
+                        log.append_durable(&one).unwrap();
+                        appended += 1;
+                        v(item)
+                    })
+                    .unwrap()
+                },
+                0,
+            );
+            assert!(bad.is_empty());
+            assert_eq!(sum.end, wal.len());
+            assert!(got == data, "the scan's bytes ({so:?})");
+            assert!(appended >= 1);
+        });
+    }
+}
+
 /// A visitor may call the store, even with one shared lane: on a scan of
 /// one read (the caller's shared lane, put back before delivering) and on
 /// a scan nested in another's visitor (the parallel lane taken, so the
@@ -322,7 +367,17 @@ fn one_lane() -> StoreOptions {
 /// the inner scan's batches each taking a lane again.
 #[test]
 fn test_a_visitor_may_call_the_store_on_one_lane() {
-    within(|| {
+    visitor_on_one_lane(ScanOptions::default());
+}
+
+/// As above, every scan of class `Read` (unpaced, on the same lanes).
+#[test]
+fn test_a_visitor_may_call_the_store_on_one_lane_read_class() {
+    visitor_on_one_lane(ScanOptions::default().class(IoClass::Read));
+}
+
+fn visitor_on_one_lane(so: ScanOptions) {
+    within(move || {
         let p = SimPlatform::new(SimConfig::volatile(40));
         let s = Store::create(p, Path::new(DIR), one_lane()).unwrap();
         // Twelve chunks: more than one batch of the pipeline (8 reads).
@@ -345,7 +400,7 @@ fn test_a_visitor_may_call_the_store_on_one_lane() {
         let (got, bad, _) = collect(
             |v| {
                 small
-                    .scan(0, |item| {
+                    .scan_with(0, so, |item| {
                         call_the_store();
                         v(item)
                     })
@@ -357,11 +412,11 @@ fn test_a_visitor_may_call_the_store_on_one_lane() {
         assert!(got == one);
         // Nested: the outer scan holds the only parallel lane.
         let mut inner = None;
-        wal.scan(0, |_| {
+        wal.scan_with(0, so, |_| {
             if inner.is_none() {
                 inner = Some(collect(
                     |v| {
-                        wal.scan(0, |item| {
+                        wal.scan_with(0, so, |item| {
                             call_the_store();
                             v(item)
                         })
@@ -386,7 +441,17 @@ fn test_a_visitor_may_call_the_store_on_one_lane() {
 /// block, in order, with the bytes around it.
 #[test]
 fn test_a_bisection_on_one_lane_delivers_after_putting_the_lane_back() {
-    within(|| {
+    bisection_on_one_lane(ScanOptions::default());
+}
+
+/// As above, the scan of class `Read`.
+#[test]
+fn test_a_bisection_on_one_lane_delivers_after_putting_the_lane_back_read_class() {
+    bisection_on_one_lane(ScanOptions::default().class(IoClass::Read));
+}
+
+fn bisection_on_one_lane(so: ScanOptions) {
+    within(move || {
         let p = SimPlatform::new(SimConfig::volatile(41));
         let s = Store::create(p.clone(), Path::new(DIR), one_lane()).unwrap();
         let small = s.provision_append_region("small", CHUNK as u64).unwrap();
@@ -405,7 +470,7 @@ fn test_a_bisection_on_one_lane_delivers_after_putting_the_lane_back() {
         let (got, bad, sum) = collect(
             |v| {
                 small
-                    .scan(0, |item| {
+                    .scan_with(0, so, |item| {
                         let mut back = [0u8; 4096];
                         assert_eq!(small.read(bad1.1, &mut back).unwrap(), back.len());
                         v(item)

@@ -11,6 +11,46 @@
 
 ## [Unreleased]
 
+### Added
+
+- Engine and facade: **`ScanOptions` and `scan_with`** on append and
+  page regions: a scan of class `Background` (the default, what `scan`
+  does: `background_io` pieces, each admitted while the device's commits
+  are active) or `Read` (whole chunks, unpaced, for a scan its caller
+  waits on, such as a recovery's: it competes with commits unpaced, so
+  their latency may rise while it runs); another class is refused
+  `NotWritten(InvalidOptions)` before any I/O. Since 0.6's pacing made
+  every caller's scan a background call, a full-speed scan had no API.
+  A caller's scan of either class holds its buffers under the pool's
+  background cap, as a read stream does, so half of each buffer class
+  stays for commits however long its visitor runs.
+
+### Changed
+
+- Harness: **G7 gates a `Read`-class scan** (`scan_with`), with the
+  default `Background` scan's figure published beside it, as G20 does for
+  read streams. The `Background` scan (256 KiB pieces, 2 MiB in flight)
+  has run at 82 to 98% of fio's best on CI since 0.6's pacing, below 85% in
+  2 of the last 11 runs, and at about half of fio's QD8 read on the dev
+  box's NVMe, which 2 MiB in flight does not fill; the old rule's spread
+  band reported that half as NOT RESOLVABLE.
+
+- Harness: **G7 and G20 are judged on paired rounds**, as G1 and G3 are:
+  10 alternated rounds, store-io first in half of them, each round's
+  store-io rate over fio's best sequential read in that round; PASS when
+  the worse of the rounds' median ratio and the pooled ratio (the
+  medians') reaches the gate, NOT RESOLVABLE when only the median's
+  interval (2nd smallest to 2nd largest of 10, about 98%) does, FAIL
+  otherwise. A PASS still needs the pooled ratio; pairing moves the line
+  between NOT RESOLVABLE and FAIL, which the old rule drew at the
+  baseline's spread across three unpaired runs a side, so judging the
+  runner's drift as well as store-io: G20 failed at 84% on 0.6.0's dev CI
+  run, on code whose main run passed at 94%, and a separate run of the
+  same read stream in 6 paired rounds on CI's memory-backed device read
+  94 to 100% of fio in each. The rows publish the ratio, its interval and
+  the pooled ratio beside both sides' medians, and the gates job prints
+  G7's, G20's and G21's rounds.
+
 ## [0.6.0] - 2026-11-20
 
 Several devices, background pacing, read streams, and export and import. The container format is unchanged: a store made by 0.5 opens with 0.6. Release notes: `docs/release/v0.6.0.md`.

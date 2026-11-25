@@ -18,6 +18,7 @@ pub mod gates_scan;
 pub mod gates_seq;
 pub mod lone;
 pub mod page_batch;
+pub mod paired;
 pub mod sequential;
 pub mod stamp;
 pub mod submitter;

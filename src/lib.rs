@@ -120,8 +120,8 @@ pub use store_io_core::observe;
 pub use store_io_engine::{
     CONTAINER, COPY_LOCK, COPYING, CommitHold, CopyOptions, CopyReport, DomainStats,
     DurableReceipt, MAX_SET_STORES, Outstanding, QosReport, RegionKind, RegionOptions, RegionPos,
-    Repair, ScanItem, ScanSummary, SetStats, SpaceReport, StoreOptions, StoreReport, TagSpace,
-    Unavailable, UnavailableRegion, WriteTicket,
+    Repair, ScanItem, ScanOptions, ScanSummary, SetStats, SpaceReport, StoreOptions, StoreReport,
+    TagSpace, Unavailable, UnavailableRegion, WriteTicket,
 };
 /// A read stream's items and options ([`ReadStream`]).
 pub use store_io_engine::{Chunk, StreamOptions};

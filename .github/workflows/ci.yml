@@ -375,6 +375,8 @@ jobs:
             --settle 0 --dir /mnt/gates --out "$RUNNER_TEMP/gates"
           f=$(ls "$RUNNER_TEMP"/gates/*-gates.md)
           sed -n '/^| gate |/,/^$/p' "$f"
+          # G7's, G20's and G21's rounds, side by side (the report's notes).
+          grep -oE "alternated with [^|]*" "$f" || true
           grep -q "every measurement completed and every integrity check passed" "$f"
           if grep -E '^\| G[0-9a-z]+ \|.*\| FAIL \|$' "$f"; then exit 1; fi
           # A gate that never ran leaves no row: G20 (the read stream) must have one.

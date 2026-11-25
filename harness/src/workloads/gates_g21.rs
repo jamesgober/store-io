@@ -5,7 +5,7 @@
 //! and its directory synced for each) to a [`FileSink`] in a directory on
 //! the same device, repeated for the measured time, alternating with fio
 //! reading one file while it writes another on that device at the same
-//! time, [`REPS`] times each (G7's rule: medians of alternated runs). The
+//! time, [`REPS`] times each (medians of alternated runs). The
 //! gate is the export's rate against the lower of fio's two rates: a copy
 //! reads and writes every byte once, so it can go no faster than the
 //! slower side while both share the device.

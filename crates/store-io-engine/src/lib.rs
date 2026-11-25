@@ -111,7 +111,7 @@ pub use options::RegionOptions;
 pub use qos::{CommitHold, QosReport};
 pub use receipt::{DurableReceipt, RegionPos, WriteTicket};
 pub use region::{AppendRegion, PageRegion, Slot};
-pub use scan::{ScanItem, ScanSummary};
+pub use scan::{ScanItem, ScanOptions, ScanSummary};
 pub use space::{Reservation, SpaceReport, TagSpace};
 pub use stats::Outstanding;
 pub use store::{

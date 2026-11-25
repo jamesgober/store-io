@@ -15,8 +15,8 @@ use store_io_core::error::{Error, NotWrittenCause};
 use store_io_core::identity::{DeviceId, DeviceIdentity, DeviceNode};
 use store_io_engine::completion::{Completion, Rejected};
 use store_io_engine::{
-    AppendRegion, CONTAINER, CopyOptions, ScanItem, Store, StoreOptions, SubmitterConfig,
-    WriteMode, copy_store,
+    AppendRegion, CONTAINER, CopyOptions, ScanItem, ScanOptions, Store, StoreOptions,
+    SubmitterConfig, WriteMode, copy_store,
 };
 use store_io_platform::Platform;
 use store_io_sim::world::TraceEvent;
@@ -1211,6 +1211,109 @@ fn test_a_scan_runs_unpaced_in_background_pieces_while_commits_are_quiet() {
         reads.iter().map(|r| r.1).collect::<Vec<_>>(),
         vec![256 << 10; 16]
     );
+}
+
+/// A `Read`-class scan (`scan_with`) is a foreground read, as a `Read`
+/// stream is: while commits are active it reads unpaced (none of its reads
+/// admitted to the device group), in pieces larger than `background_io`,
+/// and its bytes are the region's.
+#[test]
+fn test_a_read_class_scan_reads_unpaced_while_commits_are_active() {
+    let p = two_devices(85, DeviceKind::VolatileCache);
+    let (s, log) = scan_source(&p);
+    let _hold = s.commit_hold();
+    assert!(s.qos().active);
+    let from = p.with_world(|w| w.trace().len());
+    let seen = sample_in_flight(&p, &s);
+    let (mut back, mut most) = (vec![0u8; 4 << 20], 0usize);
+    let read = ScanOptions::default().class(IoClass::Read);
+    let sum = log
+        .scan_with(0, read, |item| {
+            if let ScanItem::Data { offset, bytes } = item {
+                back[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+                most = most.max(bytes.len());
+            }
+            ControlFlow::Continue(())
+        })
+        .unwrap();
+    p.with_world(|w| w.set_submit_probe(None));
+    assert_eq!((sum.end, sum.unreadable), (4 << 20, 0));
+    assert!(is_pattern(&back, 0x50), "the scan's bytes");
+    let seen = seen.lock().unwrap().clone();
+    assert!(!seen.is_empty() && seen.iter().all(|&n| n == 0), "{seen:?}");
+    let reads = reads_since(&p, "/a", from);
+    assert_eq!(seen.len(), reads.len(), "only the scan's reads: {seen:?}");
+    assert_eq!(reads.iter().map(|r| r.1).sum::<u64>(), 4 << 20);
+    assert!(reads.iter().all(|r| r.1 > 256 << 10), "{reads:?}");
+    assert!(most > 256 << 10, "chunks larger than a background piece");
+}
+
+/// A page region's `scan_with` reads as its options say, as an append
+/// region's does: of class `Read`, in pieces larger than `background_io`
+/// while commits are active; by default, one admitted `background_io`
+/// piece at a time.
+#[test]
+fn test_a_page_region_s_scan_reads_as_its_class_says() {
+    let p = two_devices(87, DeviceKind::VolatileCache);
+    let s = create(&p, "/a");
+    let pages = s.provision_page_region("pages", 4 << 20).unwrap();
+    let mut data = vec![0u8; 4 << 20];
+    pattern(&mut data, 0x51);
+    for (i, c) in data.chunks(1 << 20).enumerate() {
+        let pos = pages.pos(i as u64 * (1 << 20)).unwrap();
+        let _t = pages.write(pos, c).unwrap();
+    }
+    let _hold = s.commit_hold();
+    for (class, big) in [(IoClass::Read, true), (IoClass::Background, false)] {
+        let from = p.with_world(|w| w.trace().len());
+        let mut back = vec![0u8; 4 << 20];
+        let sum = pages
+            .scan_with(0, ScanOptions::default().class(class), |item| {
+                if let ScanItem::Data { offset, bytes } = item {
+                    back[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+                }
+                ControlFlow::Continue(())
+            })
+            .unwrap();
+        assert_eq!((sum.end, sum.unreadable), (4 << 20, 0));
+        assert!(back == data, "{class:?}: the scan's bytes");
+        let reads = reads_since(&p, "/a", from);
+        assert_eq!(reads.iter().map(|r| r.1).sum::<u64>(), 4 << 20);
+        if big {
+            assert!(reads.iter().all(|r| r.1 > 256 << 10), "{reads:?}");
+        } else {
+            assert!(reads.iter().all(|r| r.1 == 256 << 10), "{reads:?}");
+        }
+    }
+}
+
+/// A scan of another class than `Background` or `Read` is refused
+/// `InvalidOptions` before any I/O, the region named.
+#[test]
+fn test_a_commit_class_scan_is_refused_before_any_io() {
+    let p = two_devices(86, DeviceKind::VolatileCache);
+    let (_s, log) = scan_source(&p);
+    let from = p.with_world(|w| w.trace().len());
+    let commit = ScanOptions::default().class(IoClass::Commit);
+    let mut visited = 0;
+    let err = log
+        .scan_with(0, commit, |_| {
+            visited += 1;
+            ControlFlow::Continue(())
+        })
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::NotWritten {
+                cause: NotWrittenCause::InvalidOptions,
+                ref ctx,
+            } if ctx.region.is_some()
+        ),
+        "{err:?}"
+    );
+    assert_eq!(visited, 0);
+    assert!(reads_since(&p, "/a", from).is_empty());
 }
 
 /// A scan keeps every buffer a refusal hands back: one that starts while

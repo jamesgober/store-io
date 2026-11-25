@@ -522,6 +522,9 @@ where
     /// must not be called from `visit`; nor may an append wait there for
     /// room that only the same thread's [`crate::Submitter`] can free.
     ///
+    /// A `Background` scan ([`crate::ScanOptions`]'s default: R5.4); see
+    /// [`Self::scan_with`] for a `Read`-class one.
+    ///
     /// # Errors
     ///
     /// `NotWritten(Misaligned | OutOfBounds | PoolExhausted)` before any I/O;
@@ -531,9 +534,25 @@ where
         from: u64,
         visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
     ) -> Result<ScanSummary, Error> {
+        self.scan_with(from, crate::ScanOptions::default(), visit)
+    }
+
+    /// As [`Self::scan`], its reads of `opts`'s class: `Background` (as
+    /// `scan`) or `Read` (whole chunks, unpaced, a foreground read its
+    /// caller waits on).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::scan`]; `NotWritten(InvalidOptions)` for another class.
+    pub fn scan_with(
+        &self,
+        from: u64,
+        opts: crate::ScanOptions,
+        visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
+    ) -> Result<ScanSummary, Error> {
         let _pass = self.pass()?;
         self.store
-            .scan_reported(&self.state, from, self.state.map.len(), visit)
+            .scan_reported(&self.state, from, self.state.map.len(), opts, visit)
     }
 
     /// Moves the append position forward to `offset` (rounded up to a block),
@@ -981,6 +1000,9 @@ where
     /// must not be called from `visit`; nor may an append wait there for
     /// room that only the same thread's [`crate::Submitter`] can free.
     ///
+    /// A `Background` scan ([`crate::ScanOptions`]'s default: R5.4); see
+    /// [`Self::scan_with`] for a `Read`-class one.
+    ///
     /// # Errors
     ///
     /// `NotWritten(Misaligned | OutOfBounds | PoolExhausted)` before any I/O;
@@ -990,9 +1012,25 @@ where
         from: u64,
         visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
     ) -> Result<ScanSummary, Error> {
+        self.scan_with(from, crate::ScanOptions::default(), visit)
+    }
+
+    /// As [`Self::scan`], its reads of `opts`'s class: `Background` (as
+    /// `scan`) or `Read` (whole chunks, unpaced, a foreground read its
+    /// caller waits on).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::scan`]; `NotWritten(InvalidOptions)` for another class.
+    pub fn scan_with(
+        &self,
+        from: u64,
+        opts: crate::ScanOptions,
+        visit: impl FnMut(ScanItem<'_>) -> ControlFlow<()>,
+    ) -> Result<ScanSummary, Error> {
         let _pass = self.pass()?;
         self.store
-            .scan_reported(&self.state, from, self.state.map.len(), visit)
+            .scan_reported(&self.state, from, self.state.map.len(), opts, visit)
     }
 
     /// The bytes of `range` (region offsets, any start and end) as a

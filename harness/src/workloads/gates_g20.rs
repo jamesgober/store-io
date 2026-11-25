@@ -2,10 +2,11 @@
 //! [`PageRegion::read_stream`](store_io_engine::PageRegion::read_stream)
 //! over a whole region, front to back, repeated for the measured time,
 //! alternating with fio's best 1 MiB sequential read (its QD8 and QD1
-//! reads, the better of the two each round) [`REPS`] times each (G7's
-//! rule: a virtual disk's read bandwidth swings between runs, so medians of
-//! alternated runs are compared). A `Background`-class stream's
-//! figure is published beside it, never gated.
+//! reads, the better of the two each round) in [`paired::ROUNDS`] rounds,
+//! the side first alternating, judged on the rounds' ratios ([`paired`]:
+//! a runner's speed drifts between runs, and each round's ratio judges
+//! store-io, not the drift). A `Background`-class stream's figure is
+//! published beside it, never gated.
 
 use std::time::{Duration, Instant};
 
@@ -13,24 +14,27 @@ use store_io_core::IoClass;
 use store_io_engine::{PageRegion, StreamOptions};
 use store_io_platform::Platform;
 
+use super::paired::{self, median};
 use super::stamp::{self, BLOCK};
 use super::{Ctx, sioerr, with_store};
 use crate::report::{Point, System, Verify};
 
 /// The region streamed.
 const SPAN: u64 = 256 << 20;
-/// Alternations of fio and the stream.
-pub const REPS: usize = 3;
+/// Runs of the published `Background` stream.
+const QUIET: usize = 3;
 const MIB: u64 = 1 << 20;
 
 /// Streams a written region repeatedly; MB/s over the time inside the
 /// streams, alternating with `fio` (one round of the baseline: its QD8
-/// and QD1 reads, in MB/s, the better of the two taken): `mb_per_s`
-/// and `fio_mb_per_s` are the medians of [`REPS`] each, `spread` the larger
-/// relative range of the two; `background_mb_per_s` a `Background` stream's
-/// median, measured after. Every block holds its own pattern ([`stamp`]):
-/// the measured streams check each chunk's offset (in order, no gap) and
-/// each block's first word; one more stream afterwards checks every word.
+/// and QD1 reads, in MB/s, the better of the two taken) in
+/// [`paired::ROUNDS`] rounds: the rounds' ratios as [`paired::record`]
+/// names them, `mb_per_s` and `fio_mb_per_s` the medians of each side,
+/// `spread` the larger relative range of the two; `background_mb_per_s` a
+/// `Background` stream's median of [`QUIET`] runs, measured after. Every
+/// block holds its own pattern ([`stamp`]): the measured streams check each
+/// chunk's offset (in order, no gap) and each block's first word; one more
+/// stream afterwards checks every word.
 pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64), String>) -> Point {
     let p = Point::new(System::StoreIo, "PageRegion::read_stream, Read class");
     with_store(ctx, "g20", p, |store, p| {
@@ -54,15 +58,21 @@ pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64), String>) ->
         }
         let (mut ours, mut theirs, mut passes) = (Vec::new(), Vec::new(), 0u64);
         let mut rounds = Vec::new();
-        for _ in 0..REPS {
-            let (q8, q1) = fio()?;
-            rounds.push((q8, q1));
-            theirs.push(q8.max(q1));
-            match timed(ctx, &pages, read, &mut passes)? {
-                Ok(mb) => ours.push(mb),
-                Err(why) => {
-                    p.verify = Verify::Failed(why);
-                    return Ok(());
+        for i in 0..paired::ROUNDS {
+            let first = paired::ours_first(i);
+            for ours_turn in [first, !first] {
+                if ours_turn {
+                    match timed(ctx, &pages, read, &mut passes)? {
+                        Ok(mb) => ours.push(mb),
+                        Err(why) => {
+                            p.verify = Verify::Failed(why);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    let (q8, q1) = fio()?;
+                    rounds.push((q8, q1));
+                    theirs.push(q8.max(q1));
                 }
             }
         }
@@ -72,31 +82,41 @@ pub fn stream(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64), String>) ->
         p.metric("mb_per_s", Some(m));
         p.metric("fio_mb_per_s", Some(f));
         p.metric("spread", Some(range(&ours, m).max(range(&theirs, f))));
-        // Published, not gated: a refusal (`PoolExhausted`, say) is noted
-        // and leaves the gate to the `Read` stream; wrong bytes from it are
-        // a stream's integrity failure, and fail the point.
+        paired::record(p, &ours, &theirs);
+        p.metric("streams", Some(passes as f64));
+        p.notes.push(format!(
+            "alternated with fio (store-io first in the 2nd, 4th, ... rounds): Read stream {ours:.0?} MB/s, fio's best {theirs:.0?} MB/s (QD8, QD1 each round: {rounds:.0?})"
+        ));
+        // Published, not gated, after the rounds: a refusal for buffers
+        // (`PoolExhausted`, in the error's text) is noted and leaves the
+        // gate to the `Read` stream; any other error fails the point, as do
+        // wrong bytes (a stream's integrity failure).
         let mut quiet = Vec::new();
-        for _ in 0..REPS {
+        for _ in 0..QUIET {
             match timed(ctx, &pages, background, &mut passes) {
                 Ok(Ok(mb)) => quiet.push(mb),
                 Ok(Err(why)) => {
                     p.verify = Verify::Failed(format!("the Background stream: {why}"));
                     return Ok(());
                 }
-                Err(why) => {
+                Err(why) if why.contains("PoolExhausted") => {
                     p.notes
                         .push(format!("the Background stream not measured: {why}"));
                     break;
                 }
+                Err(why) => return Err(format!("the Background stream: {why}")),
             }
         }
         if !quiet.is_empty() {
-            p.metric("background_mb_per_s", Some(median(&quiet)));
+            let b = median(&quiet);
+            p.metric("background_mb_per_s", Some(b));
+            // Against fio's median: comparable from run to run, though
+            // measured after the rounds, not alternated.
+            p.metric("background_ratio", (f > 0.0).then(|| b / f));
+            p.notes.push(format!(
+                "the Background stream, after the rounds: {quiet:.0?} MB/s"
+            ));
         }
-        p.metric("streams", Some(passes as f64));
-        p.notes.push(format!(
-            "alternated with fio: Read stream {ours:.0?} MB/s, fio's best {theirs:.0?} MB/s (QD8, QD1 each round: {rounds:.0?}); Background stream {quiet:.0?} MB/s"
-        ));
         p.verify = match pass(&pages, read, true)? {
             (_, Some(why)) => Verify::Failed(why),
             (_, None) => Verify::Passed(format!(
@@ -187,18 +207,6 @@ where
         ));
     }
     Ok((expect, None))
-}
-
-/// The median of a non-empty set.
-fn median(v: &[f64]) -> f64 {
-    let mut v = v.to_vec();
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    }
 }
 
 /// A set's range relative to `m`.

@@ -101,11 +101,12 @@ const WORKLOADS: [Workload; 9] = [
         command: Command::Gates,
         run: workloads::gates::run,
         // W1-W5, G13's reruns (Windows: W2 and W3 twice more), G15's 21
-        // points, the gate-only measurements and fio, G7's and G20's QD1
-        // reads in each of their rounds (6 more fio runs), and G21's
-        // alternated exports and fio runs, each round's fresh-file write
-        // included (about 12 points' time).
-        points: 418,
+        // points, the gate-only measurements and fio, G7's and G20's 10
+        // rounds each (fio's QD8 and QD1 reads and store-io's: 60 points),
+        // G7's published Background scans (3), and G21's alternated
+        // exports and fio runs, each round's fresh-file write included
+        // (about 12 points' time).
+        points: 463,
         // Before W2-W5 and the fio controls (5), and before each of G13's
         // reruns (at most 4, on Windows).
         settles: 9,

@@ -16,8 +16,8 @@
 
 use super::{
     Ctx, caller_batch, concurrent, gates_extra, gates_g1, gates_g2, gates_g15, gates_g17,
-    gates_g18, gates_g19, gates_g20, gates_g21, gates_scan, gates_seq, lone, page_batch, remove,
-    sequential,
+    gates_g18, gates_g19, gates_g20, gates_g21, gates_scan, gates_seq, lone, page_batch, paired,
+    remove, sequential,
 };
 use crate::fio;
 use crate::json::Json;
@@ -116,6 +116,17 @@ fn get(p: Option<&Point>, k: &str) -> Option<f64> {
 /// checked out (a failed integrity check never feeds a verdict).
 fn val(p: &Point, k: &str) -> Option<f64> {
     if p.usable() { p.get(k) } else { None }
+}
+
+/// A paired point's ratio, its interval and the pooled ratio
+/// ([`paired::record`]), none from a point that is not usable.
+fn ratios(p: &Point) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    (
+        val(p, "ratio"),
+        val(p, "ratio_lo"),
+        val(p, "ratio_hi"),
+        val(p, "pooled_ratio"),
+    )
 }
 
 /// The worse of two PASS / NOT RESOLVABLE / FAIL verdicts.
@@ -232,8 +243,9 @@ pub fn run(ctx: &Ctx) -> Section {
     );
     sec.method = vec![
         "Workloads: W1 (lone), W2 (concurrent), W3 (caller batch), W4 (page batch), W5 (sequential); fio controls on one 256 MiB file written in full first; the gate-only measurements in `gates_extra` (submitter loops, allocations, QoS), and `gates_g1` and `gates_g2` (G1, G2 and G3 against raw, alternated rounds).".to_owned(),
-        "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (each fio control a gate uses run three times); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
+        "Verdicts: PASS within the gate; NOT RESOLVABLE when outside it by less than the baseline's own run-to-run spread on this machine (each fio control a gate judged this way runs three times), or for alternated rounds by less than the median's interval (below); FAIL beyond that, when a baseline did not run, or when the measurement failed or its data check did not pass; REPORTED where the table asks for a report; ELSEWHERE where another check measures it.".to_owned(),
         "G1 and G2 are measured in 20 alternated rounds (`gates_g1`, `gates_g2`, G2 at p50 and p99): PASS when the worse of the median per-round difference and the pooled difference is within the gate; NOT RESOLVABLE when it is not but the median's interval (6th smallest to 6th largest difference, ~96%) reaches the gate; FAIL when the interval is over the gate. G3 against raw is judged the same way on G1's rounds, on the ratio of the two sides' mean latencies.".to_owned(),
+        "G7 and G20 are measured in 10 alternated rounds (`paired`), store-io first in half of them, against fio's best sequential read in the same round: PASS when the worse of the median per-round ratio and the pooled ratio (the two sides' medians) reaches the gate; NOT RESOLVABLE when it does not but the median's interval (2nd smallest to 2nd largest ratio, ~98%) does; FAIL when the interval is below the gate.".to_owned(),
         "The latency gates (+2 µs, +5 µs) are far below the spread of a virtual disk's flush (milliseconds): on such a disk they are expected to be NOT RESOLVABLE; certified results need bare metal (dev/TODO.md).".to_owned(),
     ];
     // Each inner workload idles first, as the top-level ones do.
@@ -649,58 +661,65 @@ pub fn run(ctx: &Ctx) -> Section {
             Verdict::Fail
         },
     });
-    // G7: scan, at least 85% of fio's best sequential read: the scan and
-    // fio's best (its QD8 and QD1 reads, the better, each round) alternated
-    // (medians); fio's QD1 read measured alone for reference.
+    // G7: a `Read`-class scan, at least 85% of fio's best sequential read:
+    // the scan and fio's best (its QD8 and QD1 reads, the better, each
+    // round) in alternated rounds judged on their ratios; a default
+    // (`Background`) scan's figure published beside it; fio's QD1 read
+    // measured alone for reference.
     let scan_mb = val(&g7, "mb_per_s");
     let best_fio = val(&g7, "fio_mb_per_s");
     let q1 = ok(&fio_sr1).map(|s| s.bytes_per_s / 1e6);
     let r1m = get(find(&w5, System::StoreIo, "read, 1 MiB", None), "mb_per_s");
     let r8m = get(find(&w5, System::StoreIo, "read, 8 MiB", None), "mb_per_s");
     let rspread = val(&g7, "spread").unwrap_or(0.0);
+    let (g7r, g7lo, g7hi, g7p) = ratios(&g7);
     rows.push(Row {
         id: "G7",
-        gate: "Scan (sequential read) at least 85% of fio's best sequential read",
+        gate: "Scan (sequential read, Read class) at least 85% of fio's best sequential read (10 alternated rounds, G1's rule on the rounds' ratios)",
         measured: format!(
-            "store-io scan {} MB/s, fio's best sequential read, each round {} MB/s (QD8 or QD1; medians of {} alternated runs, spread {:.0}%); fio QD1 alone {} MB/s; read calls 1 MiB {} / 8 MiB {} MB/s",
+            "store-io / fio's best sequential read each round (QD8 or QD1): median {} (interval {} to {}), pooled {}; store-io Read scan {} MB/s, fio {} MB/s (medians of {} rounds, spread {:.0}%); fio QD1 alone {} MB/s; Background scan {} MB/s, {} of fio's median (published); read calls 1 MiB {} / 8 MiB {} MB/s",
+            f(g7r, 3),
+            f(g7lo, 3),
+            f(g7hi, 3),
+            f(g7p, 3),
             f(scan_mb, 0),
             f(best_fio, 0),
-            gates_scan::REPS,
+            paired::ROUNDS,
             rspread * 100.0,
             f(q1, 0),
+            f(val(&g7, "background_mb_per_s"), 0),
+            f(val(&g7, "background_ratio"), 3),
             f(r1m, 0),
             f(r8m, 0)
         ),
-        verdict: if best_fio.is_some() {
-            at_least(scan_mb, best_fio, 0.85, rspread)
-        } else {
-            Verdict::Fail
-        },
+        verdict: paired::judge(g7r, g7lo, g7hi, g7p, 0.85),
     });
     // G20: a `Read`-class read stream, at least 90% of fio's best
     // sequential read (G7's rule: the stream and fio's best, its QD8 and
-    // QD1 reads the better each round, alternated, medians); the
-    // `Background` stream's figure published beside it.
+    // QD1 reads the better each round, in alternated rounds judged on
+    // their ratios); the `Background` stream's figure published beside it.
     let stream_mb = val(&g20, "mb_per_s");
     let best_fio20 = val(&g20, "fio_mb_per_s");
     let sspread = val(&g20, "spread").unwrap_or(0.0);
+    let (g20r, g20lo, g20hi, g20p) = ratios(&g20);
     rows.push(Row {
         id: "G20",
-        gate: "Read stream (Read class) at least 90% of fio's best sequential read",
+        gate: "Read stream (Read class) at least 90% of fio's best sequential read (10 alternated rounds, G1's rule on the rounds' ratios)",
         measured: format!(
-            "store-io Read stream {} MB/s, fio's best sequential read, each round {} MB/s (QD8 or QD1; medians of {} alternated runs, spread {:.0}%); fio QD1 alone {} MB/s; Background stream {} MB/s (published)",
+            "store-io / fio's best sequential read each round (QD8 or QD1): median {} (interval {} to {}), pooled {}; store-io Read stream {} MB/s, fio {} MB/s (medians of {} rounds, spread {:.0}%); fio QD1 alone {} MB/s; Background stream {} MB/s, {} of fio's median (published)",
+            f(g20r, 3),
+            f(g20lo, 3),
+            f(g20hi, 3),
+            f(g20p, 3),
             f(stream_mb, 0),
             f(best_fio20, 0),
-            gates_g20::REPS,
+            paired::ROUNDS,
             sspread * 100.0,
             f(q1, 0),
-            f(val(&g20, "background_mb_per_s"), 0)
+            f(val(&g20, "background_mb_per_s"), 0),
+            f(val(&g20, "background_ratio"), 3)
         ),
-        verdict: if best_fio20.is_some() {
-            at_least(stream_mb, best_fio20, 0.9, sspread)
-        } else {
-            Verdict::Fail
-        },
+        verdict: paired::judge(g20r, g20lo, g20hi, g20p, 0.9),
     });
     // G21: an export to `FileSink`, reported in 0.6.0 and gated at 80%
     // from V6f (D-172): against fio's writer with its end fsync counted

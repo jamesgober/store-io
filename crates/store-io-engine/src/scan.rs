@@ -23,8 +23,14 @@
 //! after it. Only the caller decides where valid data ends, by returning
 //! [`ControlFlow::Break`] from its visitor.
 //!
-//! A background scan (a caller's `region.scan`, a copy's reader: R5.4)
-//! reads in `background_io` pieces into buffers under the pool's
+//! A caller's `Read` scan ([`ScanOptions`]) reads whole chunks unpaced, as
+//! a read does: it competes with the device's commits, which no pacing then
+//! protects (G19 bounds background work only), though its buffers stay
+//! under the pool's background cap.
+//!
+//! A background scan (a caller's `region.scan`, or `scan_with` and the
+//! default [`ScanOptions`]; a copy's reader: R5.4) reads in `background_io`
+//! pieces into buffers under the pool's
 //! background cap, and admits each read through its call's issuer record
 //! before it is submitted; the read's charge rides in its ring slot and is
 //! released the moment its completion is collected. A read refused with
@@ -37,6 +43,7 @@
 
 use std::ops::ControlFlow;
 
+use store_io_core::IoClass;
 use store_io_core::errno::is_media_error;
 use store_io_core::error::{Error, ErrorContext, NotWrittenCause, Op, OsError};
 use store_io_core::observe::Counter;
@@ -80,6 +87,37 @@ pub struct ScanSummary {
     pub unreadable: u64,
     /// The visitor stopped the scan.
     pub stopped: bool,
+}
+
+/// How a caller's scan reads (`scan_with`): `class`
+/// [`IoClass::Background`] (the default, as `scan`: a background call of
+/// its own, R5.4, in `background_io` pieces, each admitted while the
+/// device's commits are active) or [`IoClass::Read`] (`max_io` pieces,
+/// unpaced: a foreground read its caller waits on, such as a recovery's
+/// scan at open; it competes with commits unpaced, so their latency may
+/// rise while it runs). Either way its buffers are under the pool's
+/// background cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ScanOptions {
+    class: IoClass,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            class: IoClass::Background,
+        }
+    }
+}
+
+impl ScanOptions {
+    /// The class of its reads: `Background` or `Read`.
+    #[must_use]
+    pub fn class(mut self, class: IoClass) -> Self {
+        self.class = class;
+        self
+    }
 }
 
 /// Delivers items to the visitor in order, merging adjacent unreadable
@@ -196,22 +234,35 @@ impl<P: Platform> Store<P>
 where
     P::Queue: Send,
 {
-    /// Scans `r` from `from` to `to` (clamped to the data area).
-    /// A scan whose unreadable ranges are reported to the caller: each is
-    /// counted once as a media error (internal rescans are not counted).
+    /// Scans `r` from `from` to `to` (clamped to the data area), read as
+    /// `opts` says. A scan whose unreadable ranges are reported to the
+    /// caller: each is counted once as a media error (internal rescans are
+    /// not counted). A class other than `Background` or `Read` is refused
+    /// `InvalidOptions` before any I/O.
     pub(crate) fn scan_reported<F>(
         &self,
         r: &LiveRegion,
         from: u64,
         to: u64,
+        opts: ScanOptions,
         mut visit: F,
     ) -> Result<ScanSummary, Error>
     where
         F: FnMut(ScanItem<'_>) -> ControlFlow<()>,
     {
         let obs = &self.inner.observer;
-        // A caller's scan is a background call of its own (R5.4).
-        let pace = self.inner.domain.new_pace();
+        // A caller's `Background` scan is a background call of its own
+        // (R5.4); a `Read` scan reads unpaced, as a read does.
+        let pace = match opts.class {
+            IoClass::Background => self.inner.domain.new_pace(),
+            IoClass::Read => None,
+            _ => {
+                return Err(not_written(
+                    NotWrittenCause::InvalidOptions,
+                    ctx_range(r, from, to),
+                ));
+            }
+        };
         self.scan_region(r, from, to, true, pace.as_ref(), |item, _drain| {
             if matches!(item, ScanItem::Unreadable { .. }) {
                 obs.add(Counter::MediaErrors, 1);
@@ -222,9 +273,10 @@ where
 
     /// Scans `r` from `from` to `to` (clamped to the data area). `calls_store`:
     /// the visitor may call the store (a caller's), so it never runs while a
-    /// shared lane is held (the module's docs). `pace`: a background scan's
-    /// call (the module's docs); `None` reads unpaced (a read's own search
-    /// for its bad sectors, class `Read`).
+    /// shared lane is held (the module's docs), and the scan's buffers are
+    /// under the pool's background cap. `pace`: a background scan's call
+    /// (the module's docs); `None` reads unpaced, class `Read` (a caller's
+    /// `Read` scan, or a read's own search for its bad sectors).
     pub(crate) fn scan_region<F>(
         &self,
         r: &LiveRegion,
@@ -258,17 +310,25 @@ where
         if from == to {
             return Ok(out.finish());
         }
-        // A background scan's reads are always split at its piece (R5.4),
-        // their buffers under the pool's background cap: with fewer than
-        // `DEPTH` it runs shallower, as with fewer buffers of any kind.
+        // A background scan's reads are always split at its piece (R5.4).
+        // A caller's scan (of either class) or a paced one holds its
+        // buffers under the pool's background cap, as a read stream does,
+        // so half of each class stays for commits however long its visitor
+        // runs: with fewer than `DEPTH` it runs shallower, as with fewer
+        // buffers of any kind. The store's own short reads take theirs
+        // uncapped.
         let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));
         // From the class that holds a piece: a piece is any multiple of
         // 4 KiB (`background_io`), a class a power of two.
         let class = self.inner.pool.class_len(chunk).unwrap_or(chunk);
+        let capped = calls_store || pace.is_some();
         let mut free: Vec<IoBuf> = (0..DEPTH)
-            .map_while(|_| match pace {
-                Some(_) => self.inner.pool.take_capped(chunk, class).ok(),
-                None => self.inner.pool.take_within(chunk, chunk).ok(),
+            .map_while(|_| {
+                if capped {
+                    self.inner.pool.take_capped(chunk, class).ok()
+                } else {
+                    self.inner.pool.take_within(chunk, chunk).ok()
+                }
             })
             .collect();
         if free.is_empty() {

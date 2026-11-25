@@ -1726,9 +1726,9 @@ M = [
  ('crates/store-io-engine/src/qos.rs', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y) && false,', QOS_T),
  ('crates/store-io-engine/src/qos.rs', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),\n            _ => false,', '            (Some(x), Some(y)) => Arc::ptr_eq(&x, &y),\n            _ => true,', QOS_T),
  ('crates/store-io-engine/src/domain/mod.rs', '            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))', '            .filter(|_| false)\n            .map(|a| crate::pace::Pace::new(&a.qos, Arc::clone(&a.clock)))', QOS_STORE_T),
- (SCAN_SRC, '        let pace = self.inner.domain.new_pace();', '        let pace = self.inner.domain.new_pace().filter(|_| false);', QOS_STORE_T),
+ (SCAN_SRC, '            IoClass::Background => self.inner.domain.new_pace(),', '            IoClass::Background => self.inner.domain.new_pace().filter(|_| false),', QOS_STORE_T),
  (SCAN_SRC, '        let chunk = pace.map_or(self.chunk(), |p| p.piece().min(self.chunk()));', '        let chunk = pace.map_or(self.chunk(), |p| p.piece().max(self.chunk()));', QOS_STORE_T),
- (SCAN_SRC, '                Some(_) => self.inner.pool.take_capped(chunk, class).ok(),', '                Some(_) => self.inner.pool.take_within(chunk, class).ok(),', PACE_T),
+ (SCAN_SRC, '                    self.inner.pool.take_capped(chunk, class).ok()', '                    self.inner.pool.take_within(chunk, class).ok()', PACE_T),
  (SCAN_SRC, '                let charge = match pace {', '                let charge = match pace.filter(|_| false) {', QOS_STORE_T),
  (SCAN_SRC, '                    Some(p) => match p.try_charge() {', '                    Some(p) => match p.try_charge().filter(|_| false) {', QOS_STORE_T),
  (SCAN_SRC, '                        None if in_flight > 0 => {', '                        None if in_flight > 0 && false => {', QOS_STORE_T),
@@ -2138,6 +2138,9 @@ M = [
  (FILE_SINK_SRC, '                let _waited = ws.wait_all();\n            }\n        }\n        let shown = shown(&e);', '                let _waited = ws.reap();\n            }\n        }\n        let shown = shown(&e);', FILE_SINK_LIB),
  (FILE_SINK_SRC, '    fn drop(&mut self) {\n        if let Some(w) = &self.writes {\n            if let Ok(mut ws) = w.try_borrow_mut() {\n                let _waited = ws.wait_all();', '    fn drop(&mut self) {\n        if let Some(w) = &self.writes {\n            if let Ok(mut ws) = w.try_borrow_mut() {\n                let _waited = ws.reap();', FILE_SINK_LIB),
  (FILE_SINK_SRC, '                let at = if self.writes_failed() {', '                let at = if self.writes_failed() || true {', FILE_SINK_T),
+ # After 0.6.0: a caller's scan of class Read (scan_with) reads unpaced.
+ (SCAN_SRC, '            IoClass::Read => None,', '            IoClass::Read => self.inner.domain.new_pace(),', QOS_STORE_T),
+ (SCAN_SRC, '        let capped = calls_store || pace.is_some();', '        let capped = pace.is_some();', SCAN_TEST),
 ]
 
 def kill_stuck_tests():

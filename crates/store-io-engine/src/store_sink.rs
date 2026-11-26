@@ -596,7 +596,14 @@ mod tests {
                 swallowed: Vec::new(),
                 finishes: true,
             };
-            let e = s.export(&mut w).unwrap_err();
+            // A `FileSink` writes whole chunks from their own buffers as
+            // they come (D-175): with a stream lending one chunk it stages
+            // everything, so its `end_region` still has a write to admit.
+            let o = crate::export::ExportOptions {
+                depth: file.then_some(1),
+                ..crate::export::ExportOptions::default()
+            };
+            let e = s.export_with(&mut w, o).unwrap_err();
             assert!(!w.swallowed.is_empty(), "file {file}: nothing refused");
             assert!(!e.report.complete);
             assert_eq!(

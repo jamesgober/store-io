@@ -27,6 +27,22 @@
 
 ### Changed
 
+- Engine: **`FileSink` writes whole chunks from their own buffers**, with
+  no staging copy (V6f2a, D-175: on CI's memory-backed device the copy was
+  about 15% of an export's time). A chunk is written as it is when nothing
+  is staged before it (or the stage ends on a block), its bytes start at
+  its buffer's start, its length is whole blocks and at most the call's
+  piece, its buffer is aligned for the target's direct I/O, and the stream
+  can spare it (counting every chunk it has lent, the sink's and its
+  caller's, it keeps one to deliver); anything else (a slot's object, or a
+  chunk the stream cannot spare) is staged as before, never waited for.
+  `FileSink` now implements `settle`: it waits until one of those writes
+  completes. A chunk whose write's queue is lost (a failed wait) leaves its
+  buffer with that queue, and when the sink drops its stream counts it no
+  longer lent: a failing target can lower the source store's background
+  buffer cap by the buffers its lost writes held. The report still counts
+  only bytes the sink wrote; a region's tail of whole blocks is now
+  written as it arrives, not at `end_region`.
 - Harness: **G7 gates a `Read`-class scan** (`scan_with`), with the
   default `Background` scan's figure published beside it, as G20 does for
   read streams. The `Background` scan (256 KiB pieces, 2 MiB in flight)

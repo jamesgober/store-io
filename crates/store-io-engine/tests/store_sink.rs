@@ -1280,8 +1280,10 @@ fn four_chunks(p: &SimPlatform) -> (Store<SimPlatform>, u64) {
 
 /// A media error mid-region stops the export with the sink holding
 /// accepted bytes it has not written: the report counts only its writes
-/// done (`StoreSink`: up to its second piece's start; `FileSink`, staging
-/// 128 KiB pieces, the group's: its first piece). The store sink restores
+/// done (`StoreSink`: up to its second piece's start; `FileSink`: its first
+/// chunk and the bisected second's 8 KiB before the bad block, each whole
+/// blocks written from its own buffer, D-175; staged, with a stream lending
+/// one chunk, only its first 128 KiB piece). The store sink restores
 /// nothing, and a later
 /// `end_region` or `finish` by hand is refused.
 #[test]
@@ -1330,8 +1332,27 @@ fn test_an_export_side_stop_counts_only_the_sink_s_writes() {
     let e = export_into(&s, &mut fs).unwrap_err();
     assert!(media(&e), "{:?}", e.error);
     assert_eq!(e.report.region.as_deref(), Some("pages"));
-    assert_eq!(e.report.offset, CHUNK as u64, "accepted {}", bad.start);
-    assert_eq!(e.report.bytes, CHUNK as u64);
+    assert_eq!(e.report.offset, bad.start, "accepted {}", bad.start);
+    assert_eq!(e.report.bytes, bad.start);
+    // Staged (a stream lending one chunk): the bytes accepted but not yet
+    // written (its second piece) count none.
+    let p2 = SimPlatform::new(SimConfig::volatile(5622));
+    let (s2, base2) = four_chunks(&p2);
+    arm(&p2, base2);
+    drop(p2.open_dir(Path::new("/backup"), true).unwrap());
+    let mut fs2 =
+        FileSink::create(p2.clone(), Path::new("/backup"), FileSinkOptions::default()).unwrap();
+    let mut o = ExportOptions::default();
+    o.depth = Some(1);
+    let e2 = s2.export_with(&mut fs2, o).unwrap_err();
+    assert!(media(&e2), "{:?}", e2.error);
+    assert_eq!(
+        e2.report.offset, CHUNK as u64,
+        "staged: accepted {}",
+        bad.start
+    );
+    assert_eq!(e2.report.bytes, CHUNK as u64);
+    drop(fs2);
     let info = p.with_world(|w| {
         w.media_of(&PathBuf::from("/backup"), REGIONS_INFO)
             .map(<[u8]>::to_vec)

@@ -506,8 +506,12 @@ fn test_a_stop_before_a_file_s_first_write_completes_counts_none_of_it() {
 }
 
 /// A region whose file cannot be made durable (its directory's sync
-/// failing at `end_region`): the export fails there, the report's offset
-/// where its writes done reached when it ended, never its whole length.
+/// failing at `end_region`): the export fails there, the region not
+/// counted, the report's offset where its writes done reached when it
+/// ended. Its chunks are whole blocks, each written from its own buffer as
+/// it came (D-175), so that is its whole length; with a stream lending one
+/// chunk everything is staged, and its last, partial piece (written at
+/// `end_region`) is not counted.
 #[test]
 fn test_a_region_whose_file_is_not_made_durable_counts_only_its_writes_done() {
     struct Arm {
@@ -535,31 +539,35 @@ fn test_a_region_whose_file_is_not_made_durable_counts_only_its_writes_done() {
             self.inner.finish()
         }
     }
-    let (p, s) = every_kind(3058);
-    let mut arm = Arm {
-        inner: sink(&p),
-        p: p.clone(),
-    };
-    let e = export(&s, &mut arm).unwrap_err();
-    assert!(
-        matches!(
-            e.error,
-            Error::Io {
-                op: Op::SyncDir,
-                ..
-            }
-        ),
-        "{:?}",
-        e.error
-    );
-    let r = &e.report;
-    assert_eq!(r.region.as_deref(), Some("pages"));
-    assert_eq!(r.regions, 0);
-    // Its whole pieces written; the last, partial one, and the file's
-    // durability, not counted.
-    assert_eq!(r.offset, 2 * SPAN, "{r:?}");
-    assert_eq!(r.bytes, r.offset);
-    assert!(media(&p, REGIONS_INFO).unwrap_or_default().is_empty());
+    for (seed, depth, offset) in [(3058, None, 2 * SPAN + 3 * B), (3059, Some(1), 2 * SPAN)] {
+        let (p, s) = every_kind(seed);
+        let mut arm = Arm {
+            inner: sink(&p),
+            p: p.clone(),
+        };
+        let mut o = ExportOptions::default();
+        o.depth = depth;
+        let e = s.export_with(&mut arm, o).unwrap_err();
+        assert!(
+            matches!(
+                e.error,
+                Error::Io {
+                    op: Op::SyncDir,
+                    ..
+                }
+            ),
+            "{:?}",
+            e.error
+        );
+        let r = &e.report;
+        assert_eq!(r.region.as_deref(), Some("pages"));
+        assert_eq!(r.regions, 0);
+        // Its writes done; the file's durability (and, staged, its last
+        // partial piece) not counted.
+        assert_eq!(r.offset, offset, "{depth:?}: {r:?}");
+        assert_eq!(r.bytes, r.offset);
+        assert!(media(&p, REGIONS_INFO).unwrap_or_default().is_empty());
+    }
 }
 
 /// A store with no region: `begin` then `finish`, and a `regions.info`
@@ -628,11 +636,12 @@ fn test_each_misuse_is_refused_and_the_export_is_not_complete() {
         assert!(!e.report.complete, "{m:?}");
         assert_eq!(e.report.regions, ended, "{m:?}");
         assert_eq!(e.report.region.as_deref(), inside, "{m:?}");
-        // Where it stands in that region: its writes done (the first
-        // region's whole 128 KiB pieces when its end never came), none
+        // Where it stands in that region: its writes done (the whole first
+        // region when its end never came: its chunks are whole blocks,
+        // each written from its own buffer as it came, D-175), none
         // otherwise.
         let offset = if m == Misuse::SkipFirstEnd {
-            (2 * SPAN + 3 * B) / CHUNK as u64 * CHUNK as u64
+            2 * SPAN + 3 * B
         } else {
             0
         };

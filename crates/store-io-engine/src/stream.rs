@@ -132,6 +132,7 @@ impl<B> FreeList<B> {
     /// A lent buffer back: kept while open; returned, to be dropped outside
     /// the lock, once closed.
     pub(crate) fn give_back(&mut self, b: B) -> Option<B> {
+        debug_assert!(self.lent > 0, "a buffer given back that was not lent");
         self.lent = self.lent.saturating_sub(1);
         if self.closed {
             Some(b)
@@ -139,6 +140,13 @@ impl<B> FreeList<B> {
             self.bufs.push(b);
             None
         }
+    }
+
+    /// A lent buffer that never comes back (a write from it whose queue was
+    /// lost, so the queue keeps it): one less lent, once.
+    pub(crate) fn lost(&mut self) {
+        debug_assert!(self.lent > 0, "a buffer lost that was not lent");
+        self.lent = self.lent.saturating_sub(1);
     }
 
     /// Closes the list: every buffer on it, to be dropped outside the lock.
@@ -157,6 +165,9 @@ fn lock<B>(m: &Mutex<FreeList<B>>) -> MutexGuard<'_, FreeList<B>> {
 /// else to the pool). `Send`: a worker thread may hold and drop it.
 pub struct Chunk {
     buf: Option<IoBuf>,
+    /// Its buffer is out in a write from it ([`Self::take_buf`]): dropped
+    /// without it back, the buffer counts as lost to its stream.
+    taken: bool,
     at: usize,
     len: usize,
     offset: u64,
@@ -190,6 +201,45 @@ impl Chunk {
             None => &[],
         }
     }
+
+    /// Whether its bytes start at its buffer's start (a bisected piece's
+    /// last run, which keeps the piece's buffer, and a range's first chunk
+    /// clamped to an unaligned start do not; the other runs are copied to
+    /// a buffer's start): only such a chunk's buffer can be written from.
+    pub(crate) fn starts_its_buffer(&self) -> bool {
+        self.at == 0 && self.buf.is_some()
+    }
+
+    /// Its buffer, cut to its bytes, for a write from it (a sink's write
+    /// with no copy): only for a chunk whose bytes start at its buffer's
+    /// start. The chunk stays lent: [`Self::restore`] puts the buffer back
+    /// once the write's completion returns it (and the chunk's drop then
+    /// gives it back as any chunk's); a chunk dropped without it counts
+    /// the buffer lost to its stream ([`FreeList::lost`]).
+    pub(crate) fn take_buf(&mut self) -> Option<IoBuf> {
+        if !self.starts_its_buffer() {
+            return None;
+        }
+        let mut b = self.buf.take()?;
+        if !b.set_len(self.len) {
+            self.buf = Some(b);
+            return None;
+        }
+        self.taken = true;
+        Some(b)
+    }
+
+    /// How many chunks its stream has lent now, this one included.
+    pub(crate) fn stream_lent(&self) -> usize {
+        lock(&self.home).lent
+    }
+
+    /// The buffer [`Self::take_buf`] gave, back from its write.
+    pub(crate) fn restore(&mut self, buf: IoBuf) {
+        debug_assert!(self.taken && self.buf.is_none(), "a buffer restored twice");
+        self.buf = Some(buf);
+        self.taken = false;
+    }
 }
 
 impl core::fmt::Debug for Chunk {
@@ -204,11 +254,17 @@ impl core::fmt::Debug for Chunk {
 
 impl Drop for Chunk {
     fn drop(&mut self) {
-        if let Some(b) = self.buf.take() {
-            // Dropped (to the pool, its background count released) outside
-            // the lock once the stream has ended.
-            let back = lock(&self.home).give_back(b);
-            drop(back);
+        match self.buf.take() {
+            Some(b) => {
+                // Dropped (to the pool, its background count released)
+                // outside the lock once the stream has ended.
+                let back = lock(&self.home).give_back(b);
+                drop(back);
+            }
+            // Out in a write that never returned it: it stays with that
+            // write's queue, and is no longer lent.
+            None if self.taken => lock(&self.home).lost(),
+            None => {}
         }
     }
 }
@@ -760,6 +816,7 @@ where
         drop(home);
         Ok(Chunk {
             buf: Some(buf),
+            taken: false,
             at: 0,
             len: bytes.len(),
             offset,
@@ -792,6 +849,12 @@ where
     /// The chunks its caller may hold at once.
     pub(crate) fn lend(&self) -> usize {
         self.core.borrow().lend
+    }
+
+    /// The chunks it has lent now.
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn lent(&self) -> usize {
+        lock(&self.core.borrow().home).lent
     }
 
     /// The stream's pacing (a `Background` stream's call).
@@ -1063,6 +1126,7 @@ where
         lock(&self.home).lent += 1;
         Chunk {
             buf: Some(buf),
+            taken: false,
             at,
             len,
             offset,
@@ -1734,6 +1798,37 @@ mod collect_tests {
         let _piece = pace.admit().unwrap();
         drop(stream);
         assert_eq!(p.with_world(|w| w.waits()), waits, "never waited on again");
+    }
+
+    /// A chunk whose buffer went out in a write from it (a sink's write
+    /// with no copy): put back, its drop gives the buffer back to the
+    /// stream; never back (the write's queue lost it), its drop counts it
+    /// no longer lent, once, and the stream has one buffer fewer.
+    #[test]
+    fn test_a_chunk_s_buffer_out_in_a_write_is_given_back_or_counted_lost() {
+        let (_p, _s, log, _data) = setup(76);
+        let mut stream = log.read_stream(0..LEN as u64).unwrap();
+        let home = Arc::clone(&stream.core.borrow().home);
+        let mut c = stream.next().unwrap().unwrap();
+        let len = c.bytes().len();
+        assert_eq!(lock(&home).lent, 1);
+        let b = c.take_buf().unwrap();
+        assert_eq!(b.len(), len, "cut to the chunk's bytes");
+        assert!(c.bytes().is_empty() && c.take_buf().is_none());
+        c.restore(b);
+        assert_eq!(c.bytes().len(), len);
+        let free = lock(&home).bufs.len();
+        drop(c);
+        assert_eq!(lock(&home).lent, 0);
+        assert_eq!(lock(&home).bufs.len(), free + 1, "given back");
+        let mut c = stream.next().unwrap().unwrap();
+        let free = lock(&home).bufs.len();
+        let b = c.take_buf().unwrap();
+        // The write's queue kept it (here: dropped to its pool).
+        drop(b);
+        drop(c);
+        assert_eq!(lock(&home).lent, 0, "counted lost");
+        assert_eq!(lock(&home).bufs.len(), free, "never back");
     }
 }
 

@@ -2020,7 +2020,7 @@ M = [
  (FILE_SINK_SRC, '            self.id = c.sink_bound();', '            if false {\n                self.id = c.sink_bound();\n            }', FILE_SINK_T),
  (EXPORT_SRC, '        let _bound = call::bind(&call);', '        let _bound = Some(call::bind(&call)).filter(|_| false);', FILE_SINK_T),
  (EXPORT_SRC, '                    report.regions = i;', '                    report.regions = i.max(report.regions);', FILE_SINK_T),
- (FILE_SINK_SRC, '        self.crc_bytes(bytes);', '        if false {\n            self.crc_bytes(bytes);\n        }', FILE_SINK_T),
+ (FILE_SINK_SRC, '        self.crc_bytes(chunk.bytes());', '        if false {\n            self.crc_bytes(chunk.bytes());\n        }', FILE_SINK_T),
  (CALL_SRC, '        if f.is_none() {', '        if f.is_none() || true {', FILE_SINK_T),
  (FILE_SINK_SRC, '        self.platform\n            .set_len(file, len)\n            .map_err(|raw| io(Op::Allocate, raw))?;\n        self.platform\n            .flush_all(file)\n            .map_err(|raw| io(Op::FlushAll, raw))\n    }', '        self.platform\n            .flush_all(file)\n            .map_err(|raw| io(Op::FlushAll, raw))?;\n        self.platform\n            .set_len(file, len)\n            .map_err(|raw| io(Op::Allocate, raw))\n    }', FILE_SINK_T),
  (FILE_SINK_SRC, '        self.sync_dir()?;\n        self.done.push(', '        if false {\n            self.sync_dir()?;\n        }\n        self.done.push(', FILE_SINK_T),
@@ -2132,8 +2132,8 @@ M = [
  (FILE_SINK_SRC, '        self.drain_stage(true)?;\n        self.settle_writes()?;\n', '        self.drain_stage(true)?;\n', FILE_SINK_T),
  # V6e review (D-171): the sink's own collection inside an admission, a
  # failed sink's writes collected, a region not made durable.
- (FILE_SINK_SRC, '                    self.failure_of(&w)?;\n                    self.admit_failed = true;', '                    let _f = self.failure_of(&w);\n                    self.admit_failed = true;', FILE_SINK_LIB),
- (FILE_SINK_SRC, '        // charge released).\n        self.failure_of(&w)?;', '        // charge released).\n        let _f = self.failure_of(&w);', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '                    self.failure_of(w)?;\n                    self.admit_failed = true;', '                    let _f = self.failure_of(w);\n                    self.admit_failed = true;', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '        // charge released).\n        self.failure_of(w)?;', '        // charge released).\n        let _f = self.failure_of(w);', FILE_SINK_LIB),
  (FILE_SINK_SRC, '                if self.failed.is_none() {\n                    self.failed = Some((io(Op::Write, raw), lost));', '                if false {\n                    self.failed = Some((io(Op::Write, raw), lost));', FILE_SINK_LIB),
  (FILE_SINK_SRC, '                let _waited = ws.wait_all();\n            }\n        }\n        let shown = shown(&e);', '                let _waited = ws.reap();\n            }\n        }\n        let shown = shown(&e);', FILE_SINK_LIB),
  (FILE_SINK_SRC, '    fn drop(&mut self) {\n        if let Some(w) = &self.writes {\n            if let Ok(mut ws) = w.try_borrow_mut() {\n                let _waited = ws.wait_all();', '    fn drop(&mut self) {\n        if let Some(w) = &self.writes {\n            if let Ok(mut ws) = w.try_borrow_mut() {\n                let _waited = ws.reap();', FILE_SINK_LIB),
@@ -2141,6 +2141,14 @@ M = [
  # After 0.6.0: a caller's scan of class Read (scan_with) reads unpaced.
  (SCAN_SRC, '            IoClass::Read => None,', '            IoClass::Read => self.inner.domain.new_pace(),', QOS_STORE_T),
  (SCAN_SRC, '        let capped = calls_store || pace.is_some();', '        let capped = pace.is_some();', SCAN_TEST),
+ # V6f2a (D-175): FileSink writes whole chunks from their own buffers.
+ (FILE_SINK_SRC, '        if !self.direct_ok(&chunk) {', '        if !self.direct_ok(&chunk) || true {', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '        if chunk.stream_lent() >= self.lend {', '        if chunk.stream_lent() > self.lend {', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '            && n % block == 0\n', '', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '            && self.fill % block == 0\n', '', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '            if ws.chunks() < before {', '            if true {', FILE_SINK_LIB),
+ (FILE_SINK_SRC, '                if buf.is_some() {', '                if false {', FILE_SINK_LIB),
+ (STREAM_SRC, '        debug_assert!(self.lent > 0, "a buffer lost that was not lent");\n        self.lent = self.lent.saturating_sub(1);', '        debug_assert!(self.lent > 0, "a buffer lost that was not lent");', STREAM_UNIT_T),
 ]
 
 def kill_stuck_tests():

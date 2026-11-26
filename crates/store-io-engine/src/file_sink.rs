@@ -23,9 +23,22 @@
 //! directory restorable.
 //!
 //! **Writes.** Direct, in whole blocks of the larger of the source's block
-//! and the target file system's, staged in pieces of the call's piece and
-//! kept in flight together, up to [`DEPTH`] (D-171: G21 measured one write
-//! at a time, D-168, far under the device's rate). Each write is admitted
+//! and the target file system's, kept in flight together, up to [`DEPTH`]
+//! (D-171: G21 measured one write at a time, D-168, far under the device's
+//! rate). A chunk is written from its own buffer, with no copy (D-175),
+//! when nothing is staged before it (or the stage ends on a block), its
+//! bytes start at its buffer's start, its length is whole blocks and at
+//! most the call's piece, its buffer is aligned for the target's direct
+//! I/O, and the stream can spare it (counting every chunk it has lent, the
+//! sink's and its caller's, it keeps one to deliver); anything else (a
+//! slot's object, say, or a chunk the stream cannot spare) is staged in
+//! pieces of the call's piece. A chunk written from goes back to its
+//! stream when its write completes; one whose write's queue is lost (a
+//! failed wait) stays with that queue, and the stream counts it no longer
+//! lent (it has one buffer fewer) when the sink drops its record (at the
+//! sink's drop). A sink the export stopped for its own reasons holds such
+//! writes in flight, at most `lend - 1` of the source store's buffers,
+//! until its next call or its drop. Each write is admitted
 //! by the call's record on the target's device group before it is
 //! submitted, and its charge held until it completes; the sink's writes in
 //! flight are a collector of the call on this thread (R5.4), so a wait for
@@ -65,6 +78,7 @@ use crate::io::not_written;
 use crate::pace::{Held, Pace, Registered};
 use crate::qos::Collect;
 use crate::store::StoreOptions;
+use crate::stream::Chunk;
 
 /// The record that makes a [`FileSink`]'s directory restorable.
 pub const REGIONS_INFO: &str = "regions.info";
@@ -86,6 +100,9 @@ struct Pending {
     result: Option<RawResult<usize>>,
     /// Its admission, released when its completion is collected.
     charge: Option<Held>,
+    /// A write from a chunk's own buffer: the chunk, lent until the write's
+    /// completion gives its buffer back (then the chunk drops at once).
+    chunk: Option<Chunk>,
 }
 
 /// The sink's writes in flight, oldest first, and how far its writes done
@@ -107,13 +124,15 @@ struct Writes<Q: Queue> {
 
 impl<Q: Queue> Writes<Q> {
     /// Submits `buf` at `offset` of `file`, its admission `charge` held
-    /// until it completes.
+    /// until it completes; `chunk`: the chunk `buf` is from (a write with
+    /// no copy), else `buf` is a staging buffer.
     fn submit(
         &mut self,
         file: &Q::File,
         offset: u64,
         buf: IoBuf,
         charge: Option<Held>,
+        mut chunk: Option<Chunk>,
     ) -> Result<(), Error> {
         let len = buf.len();
         let tag = self.next_tag;
@@ -132,12 +151,16 @@ impl<Q: Queue> Writes<Q> {
                     len,
                     result: None,
                     charge,
+                    chunk,
                 });
                 Ok(())
             }
             Err(rejected) => {
                 if let Some(b) = rejected.buf {
-                    self.free.push(b);
+                    match chunk.as_mut() {
+                        Some(c) => c.restore(b),
+                        None => self.free.push(b),
+                    }
                 }
                 Err(rejected.raw.map_or_else(
                     || not_written(NotWrittenCause::QueueFull, ErrorContext::default()),
@@ -153,11 +176,26 @@ impl<Q: Queue> Writes<Q> {
     /// it there, recorded as the failure.
     fn file(&mut self) {
         for comp in self.lane.done.drain() {
+            let mut buf = comp.buf;
             if let Some(w) = self.pending.iter_mut().find(|w| w.tag == comp.tag) {
                 w.result = Some(comp.result);
                 w.charge = None;
+                // A chunk's buffer goes back to its stream now (a chunk
+                // whose completion has none is dropped when it is popped,
+                // its buffer counted lost).
+                if buf.is_some() {
+                    if let Some(mut c) = w.chunk.take() {
+                        if let Some(b) = buf.take() {
+                            c.restore(b);
+                        }
+                    }
+                }
             }
-            if let Some(b) = comp.buf {
+            if let Some(b) = buf {
+                debug_assert!(
+                    self.pending.iter().any(|w| w.tag == comp.tag),
+                    "a completion of no write in flight"
+                );
                 self.free.push(b);
             }
         }
@@ -185,6 +223,12 @@ impl<Q: Queue> Writes<Q> {
     fn reap(&mut self) {
         let _arrived = self.lane.reap();
         self.file();
+    }
+
+    /// Writes in flight from chunks' own buffers (the stream's buffers the
+    /// sink holds).
+    fn chunks(&self) -> usize {
+        self.pending.iter().filter(|w| w.chunk.is_some()).count()
     }
 
     /// Waits for at least one write in flight: whether there was one. A
@@ -318,6 +362,12 @@ pub struct FileSink<P: Platform> {
     /// The write block and the staging buffer's size (a multiple of it).
     block: u64,
     piece: usize,
+    /// The target's direct-I/O memory alignment, and the chunks the
+    /// export's stream lends at once (its header's `lend`).
+    align: usize,
+    lend: usize,
+    /// Writes made from chunks' own buffers (no copy).
+    direct_writes: u64,
     stage: Option<IoBuf>,
     /// Bytes in the staging buffer, and the file offset it starts at.
     fill: usize,
@@ -382,6 +432,9 @@ impl<P: Platform> FileSink<P> {
             pool: None,
             block: 0,
             piece: 0,
+            align: 4096,
+            lend: 0,
+            direct_writes: 0,
             stage: None,
             fill: 0,
             at: 0,
@@ -461,27 +514,10 @@ impl<P: Platform> FileSink<P> {
             return Err(refusal());
         };
         self.failure_of(&w)?;
-        // Admitted first, with no borrow of the writes held: its wait
-        // collects the call's pieces on this thread, the sink's own writes
-        // among them (R5.4). A refusal keeps the staging buffer.
-        let charge = match &self.pace {
-            Some(p) => match p.admit() {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    // The admission's wait collected the sink's own writes
-                    // and that collection failed (a write, or the wait
-                    // itself): the sink's failure, recorded as its own.
-                    self.failure_of(&w)?;
-                    self.admit_failed = true;
-                    return Err(e);
-                }
-            },
-            None => None,
-        };
-        // A write the admission's wait collected may have failed: that is
-        // the failure, before anything more is submitted (the admission's
-        // charge released).
-        self.failure_of(&w)?;
+        // A row of the lane free (writes from chunks share them).
+        self.make_room(&w)?;
+        // Admitted first (a refusal keeps the staging buffer).
+        let charge = self.admit_write(&w)?;
         let Some(mut buf) = self.stage.take() else {
             return Err(refusal());
         };
@@ -494,7 +530,7 @@ impl<P: Platform> FileSink<P> {
             self.stage = Some(buf);
             return Err(refusal());
         };
-        w.borrow_mut().submit(file, self.at, buf, charge)?;
+        w.borrow_mut().submit(file, self.at, buf, charge, None)?;
         self.at += len as u64;
         // The next staging buffer: a completed write's, else one waited
         // for (the pool holds one per write in flight and one to fill).
@@ -509,6 +545,108 @@ impl<P: Platform> FileSink<P> {
             }
         };
         self.failure_of(&w)
+    }
+
+    /// Admits one write by the call's record (none when unpaced), with no
+    /// borrow of the writes held: its wait collects the call's pieces on
+    /// this thread, the sink's own writes among them (R5.4).
+    fn admit_write(&mut self, w: &Rc<RefCell<Writes<P::Queue>>>) -> Result<Option<Held>, Error> {
+        let charge = match &self.pace {
+            Some(p) => match p.admit() {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    // The admission's wait collected the sink's own writes
+                    // and that collection failed (a write, or the wait
+                    // itself): the sink's failure, recorded as its own.
+                    self.failure_of(w)?;
+                    self.admit_failed = true;
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        // A write the admission's wait collected may have failed: that is
+        // the failure, before anything more is submitted (the admission's
+        // charge released).
+        self.failure_of(w)?;
+        Ok(charge)
+    }
+
+    /// Waits, collecting the sink's own writes, until a row of the lane is
+    /// free.
+    fn make_room(&self, w: &Rc<RefCell<Writes<P::Queue>>>) -> Result<(), Error> {
+        loop {
+            let mut ws = w.borrow_mut();
+            ws.reap();
+            let full = ws.pending.len() >= DEPTH;
+            if !full {
+                break;
+            }
+            if !ws.wait_one().map_err(|raw| io(Op::Write, raw))? {
+                break;
+            }
+        }
+        self.failure_of(w)
+    }
+
+    /// Whether `c` may be written from its own buffer (see the module's
+    /// "Writes"): the stage empty or ending on a block, its bytes from its
+    /// buffer's start, whole blocks, at most the call's piece, and its
+    /// buffer aligned for the target. Whether the stream can spare it is
+    /// [`Self::accept`]'s to check, after collecting what has completed.
+    fn direct_ok(&self, c: &Chunk) -> bool {
+        let bytes = c.bytes();
+        let (n, block) = (bytes.len(), self.block as usize);
+        block > 0
+            && self.fill % block == 0
+            && c.starts_its_buffer()
+            && n > 0
+            && n % block == 0
+            && n <= self.piece
+            && (bytes.as_ptr() as usize) % self.align == 0
+    }
+
+    /// Writes `chunk` from its own buffer, or stages its bytes: staged too
+    /// when the stream cannot spare it (it lends `lend` chunks at once, this
+    /// one and any its caller still holds counted), never waited for, so
+    /// the sink's writes in flight are never fewer than staging allows.
+    fn accept(&mut self, mut chunk: Chunk) -> Result<(), Error> {
+        if !self.direct_ok(&chunk) {
+            return self.stage_bytes(chunk.bytes(), false);
+        }
+        let Some(w) = self.writes.clone() else {
+            return Err(refusal());
+        };
+        // The chunks of writes completed back to the stream first.
+        w.borrow_mut().reap();
+        if chunk.stream_lent() >= self.lend {
+            return self.stage_bytes(chunk.bytes(), false);
+        }
+        // What is staged first (whole blocks: no padding written).
+        self.drain_stage(false)?;
+        self.failure_of(&w)?;
+        self.make_room(&w)?;
+        let charge = self.admit_write(&w)?;
+        let len = chunk.bytes().len();
+        let Some(buf) = chunk.take_buf() else {
+            drop(charge);
+            return self.stage_bytes(chunk.bytes(), false);
+        };
+        let Some(file) = self.file.as_ref() else {
+            chunk.restore(buf);
+            return Err(refusal());
+        };
+        w.borrow_mut()
+            .submit(file, self.at, buf, charge, Some(chunk))?;
+        self.at += len as u64;
+        self.direct_writes += 1;
+        self.failure_of(&w)
+    }
+
+    /// Writes made from chunks' own buffers so far.
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn direct_writes(&self) -> u64 {
+        self.direct_writes
     }
 
     /// The writes' recorded failure, if any (sticky).
@@ -692,6 +830,8 @@ impl<P: Platform> FileSink<P> {
         .max()
         .unwrap_or(4096)
         .next_power_of_two();
+        self.align = align;
+        self.lend = header.lend;
         let pool = BufPool::new(&PoolConfig::uniform(
             align.min(self.piece),
             self.piece,
@@ -908,14 +1048,13 @@ impl<P: Platform> ExportSink for FileSink<P> {
         let State::InRegion { declared, written } = self.state else {
             return Err(self.refuse(0));
         };
-        let bytes = chunk.bytes();
-        let n = bytes.len() as u64;
+        let n = chunk.bytes().len() as u64;
         // At the region's next byte, within its declared length.
         if chunk.offset() != written || n > declared - written {
             return Err(self.refuse(written));
         }
-        self.crc_bytes(bytes);
-        let staged = self.stage_bytes(bytes, false);
+        self.crc_bytes(chunk.bytes());
+        let staged = self.accept(chunk);
         match staged {
             Ok(()) => {
                 // Its writes done without a gap (the bytes staged or in
@@ -930,6 +1069,45 @@ impl<P: Platform> ExportSink for FileSink<P> {
                 Ok(())
             }
             // The failed write's start: every write before it done.
+            Err(e) => {
+                let at = self.failed_at();
+                if let Some(c) = &self.call {
+                    c.wrote(self.id, at.min(declared));
+                }
+                Err(self.fail(e, at))
+            }
+        }
+    }
+
+    /// Waits until a write from a chunk's own buffer completes (one of the
+    /// stream's buffers back to it): the export calls this when its stream
+    /// needs a buffer and every one is lent.
+    fn settle(&mut self) -> Result<(), SinkError> {
+        let State::InRegion { declared, .. } = self.state else {
+            return Ok(());
+        };
+        let Some(w) = self.writes.clone() else {
+            return Ok(());
+        };
+        let before = w.borrow().chunks();
+        let mut waited = Ok(());
+        while before > 0 && waited.is_ok() {
+            let mut ws = w.borrow_mut();
+            ws.reap();
+            if ws.chunks() < before {
+                break;
+            }
+            match ws.wait_one() {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(raw) => {
+                    waited = Err(io(Op::Write, raw));
+                    break;
+                }
+            }
+        }
+        match waited.and_then(|()| self.failure_of(&w)) {
+            Ok(()) => Ok(()),
             Err(e) => {
                 let at = self.failed_at();
                 if let Some(c) = &self.call {
@@ -1006,6 +1184,358 @@ mod tests {
     use super::*;
     use crate::Store;
     use crate::export::VolumeFacts;
+
+    /// What a test region is: a page region of its bytes, an append
+    /// region's durable prefix of them (exported padded to whole blocks),
+    /// or a slot's committed object.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Page,
+        Append,
+        Slot,
+    }
+
+    /// A store of `regions` (each of `len` patterned bytes, of its kind) on
+    /// the simulator's chunk of 128 KiB.
+    fn zero_copy_store(
+        seed: u64,
+        regions: &[(u64, Kind)],
+    ) -> (SimPlatform, Store<SimPlatform>, Vec<Vec<u8>>) {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let o = StoreOptions {
+            queues: 2,
+            buffers_per_class: 64,
+            max_io: 1 << 17,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p.clone(), Path::new("/db"), o).unwrap();
+        let mut datas = Vec::new();
+        for (i, &(len, kind)) in regions.iter().enumerate() {
+            let data: Vec<u8> = (0..len)
+                .map(|j| (j as u8) ^ (j >> 9) as u8 ^ (i as u8).wrapping_mul(37))
+                .collect();
+            if kind == Kind::Slot {
+                let _d = s
+                    .provision_slot(&format!("s{i}"))
+                    .unwrap()
+                    .commit(&data)
+                    .unwrap();
+            } else if kind == Kind::Append {
+                let r = s
+                    .provision_append_region(
+                        &format!("a{i}"),
+                        len.next_multiple_of(4096) + (1 << 20),
+                    )
+                    .unwrap();
+                let t = r.append(&data).unwrap();
+                let _d = r.sync_through(&t).unwrap();
+            } else {
+                let r = s.provision_page_region(&format!("p{i}"), len).unwrap();
+                let _d = r.write_durable(r.pos(0).unwrap(), &data).unwrap();
+            }
+            datas.push(data);
+        }
+        drop(p.open_dir(Path::new("/out"), true).unwrap());
+        (p, s, datas)
+    }
+
+    /// Exports `s` into a new sink with the stream `depth` (`None`: the
+    /// default), and checks each region's data file holds its bytes (an
+    /// append region's then zeros to its last block): the report, and the
+    /// writes made from chunks' own buffers.
+    fn export_checked(
+        p: &SimPlatform,
+        s: &Store<SimPlatform>,
+        datas: &[Vec<u8>],
+        depth: Option<usize>,
+    ) -> (crate::export::ExportReport, u64) {
+        let mut sink =
+            FileSink::create(p.clone(), Path::new("/out"), FileSinkOptions::default()).unwrap();
+        let o = crate::export::ExportOptions {
+            depth,
+            ..crate::export::ExportOptions::default()
+        };
+        let report = s.export_with(&mut sink, o).unwrap();
+        let direct = sink.direct_writes();
+        drop(sink);
+        for (i, data) in datas.iter().enumerate() {
+            let got = p
+                .with_world(|w| {
+                    w.media_of(&std::path::PathBuf::from("/out"), &data_name(i as u32))
+                        .map(<[u8]>::to_vec)
+                })
+                .unwrap();
+            let whole = got.len() >= data.len()
+                && got[..data.len()] == data[..]
+                && got[data.len()..].iter().all(|&b| b == 0)
+                && (got.len() as u64).div_ceil(4096) == (data.len() as u64).div_ceil(4096);
+            assert!(
+                whole,
+                "region {i}'s file ({} of {} bytes)",
+                got.len(),
+                data.len()
+            );
+        }
+        (report, direct)
+    }
+
+    /// The stream's whole chunks are written from their own buffers (D-175:
+    /// no staging copy), every byte where it belongs.
+    #[test]
+    fn test_whole_chunks_are_written_from_their_own_buffers() {
+        let (p, s, datas) = zero_copy_store(900, &[(1 << 20, Kind::Page), (3 << 17, Kind::Page)]);
+        let (report, direct) = export_checked(&p, &s, &datas, None);
+        assert!(report.complete);
+        // 8 and 3 chunks of 128 KiB: every one from its own buffer.
+        assert_eq!(direct, 11);
+    }
+
+    /// Bytes that are not whole blocks (a slot's object) are staged
+    /// (padded, then the file cut to its length); a region after them is
+    /// written from its buffers again. An append region's durable prefix
+    /// is exported in whole blocks, so every one of its chunks is.
+    #[test]
+    fn test_a_slot_s_object_is_staged_and_the_next_region_goes_on_without_copies() {
+        let regions = [
+            ((1 << 20) + 1000, Kind::Append),
+            (1000, Kind::Slot),
+            (1 << 19, Kind::Page),
+        ];
+        let (p, s, datas) = zero_copy_store(901, &regions);
+        let (report, direct) = export_checked(&p, &s, &datas, None);
+        assert!(report.complete);
+        // The append region's 8 chunks of 128 KiB and its last block, the
+        // slot's object staged, the page region's 4 chunks.
+        assert_eq!(direct, 13);
+    }
+
+    /// A stream lending one chunk at a time is staged whole (no write may
+    /// hold the stream's only buffer); one lending two writes from chunks
+    /// (one out at a time, a chunk it cannot spare staged); both complete
+    /// and exact.
+    #[test]
+    fn test_lend_one_stages_everything_and_lend_two_writes_from_chunks() {
+        let (p, s, datas) = zero_copy_store(902, &[(1 << 20, Kind::Page)]);
+        let (report, direct) = export_checked(&p, &s, &datas, Some(1));
+        assert!(report.complete);
+        assert_eq!(direct, 0);
+        let (p, s, datas) = zero_copy_store(903, &[(1 << 20, Kind::Page)]);
+        let (report, direct) = export_checked(&p, &s, &datas, Some(2));
+        assert!(report.complete);
+        assert!((1..=8).contains(&direct), "{direct}");
+    }
+
+    /// A wait failing at any point of an export with writes held in
+    /// flight: whatever the export's end, once it and its sink are gone
+    /// every background buffer of the source store is back with its pool
+    /// (a chunk whose write's buffer stayed with a lost queue is counted
+    /// lost to its stream exactly once: a second count would trip the
+    /// stream's debug assertion).
+    #[test]
+    fn test_a_failed_wait_anywhere_leaves_no_background_buffer_held() {
+        let mut failed = 0;
+        for k in 1..=24 {
+            let (p, s, _datas) = zero_copy_store(
+                904,
+                &[
+                    (1 << 20, Kind::Page),
+                    (1 << 19, Kind::Append),
+                    (1000, Kind::Slot),
+                ],
+            );
+            let mut sink =
+                FileSink::create(p.clone(), Path::new("/out"), FileSinkOptions::default()).unwrap();
+            p.with_world(|w| {
+                w.hold_reaps(1 << 40);
+                let next = w.waits() + k;
+                w.faults_mut().fail_wait = Some((next, 5));
+            });
+            failed += u32::from(s.export(&mut sink).is_err());
+            drop(sink);
+            p.with_world(|w| {
+                w.hold_reaps(0);
+                w.faults_mut().fail_wait = None;
+            });
+            for (size, held, _cap) in s.inner.pool.background_holdings() {
+                assert_eq!(
+                    held, 0,
+                    "wait {k}: {held} background buffers of {size} B held"
+                );
+            }
+        }
+        assert!(failed > 0, "no wait failed");
+    }
+
+    /// A wait failing with writes from chunks in flight (commits quiet,
+    /// reaps held): the sink fails; once it drops, its records of those
+    /// writes go and the stream counts each chunk no longer lent, once.
+    #[test]
+    fn test_a_lost_write_s_chunk_is_counted_lost_once_the_sink_drops() {
+        let (p, _s, log, stream) = by_hand(908);
+        let data = vec![9u8; 3 * 4096];
+        let mut sink = begun_by_hand(&p, stream.lend(), data.len() as u64);
+        p.with_world(|w| {
+            w.advance_clock_ns(10_000_000_000);
+            w.hold_reaps(1 << 40);
+        });
+        for i in 0..3 {
+            let at = i * 4096;
+            let c = stream
+                .lend_bytes(log.state(), at as u64, &data[at..at + 4096])
+                .unwrap();
+            sink.data(c).unwrap();
+        }
+        let out = sink.writes.as_ref().unwrap().borrow().chunks();
+        assert_eq!(out, 3, "writes from chunks in flight");
+        assert_eq!(stream.lent(), 3);
+        p.with_world(|w| {
+            let next = w.waits() + 1;
+            w.faults_mut().fail_wait = Some((next, 5));
+        });
+        assert!(sink.settle().is_err());
+        drop(sink);
+        assert_eq!(stream.lent(), 0, "each chunk counted lost");
+    }
+
+    /// A store with an append region, an empty `/out`, and an export
+    /// stream to lend chunks from by hand (`lend_bytes`).
+    fn by_hand(
+        seed: u64,
+    ) -> (
+        SimPlatform,
+        Store<SimPlatform>,
+        crate::AppendRegion<SimPlatform>,
+        crate::stream::ReadStream<SimPlatform>,
+    ) {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let s = Store::create(p.clone(), Path::new("/db"), StoreOptions::default()).unwrap();
+        let log = s.provision_append_region("log", 1 << 20).unwrap();
+        drop(p.open_dir(Path::new("/out"), true).unwrap());
+        let stream = s.export_stream(None, None).unwrap();
+        (p, s, log, stream)
+    }
+
+    /// A sink begun by hand for one append region whose stream length is
+    /// `len` bytes.
+    fn begun_by_hand(p: &SimPlatform, lend: usize, len: u64) -> FileSink<SimPlatform> {
+        let mut sink =
+            FileSink::create(p.clone(), Path::new("/out"), FileSinkOptions::default()).unwrap();
+        let header = ExportHeader {
+            region_count: 1,
+            block_size: 4096,
+            facts: VolumeFacts::default(),
+            writable: true,
+            lend,
+            total: 1 << 30,
+        };
+        sink.begin(&header).unwrap();
+        let info = RegionInfo {
+            name: "log".to_owned(),
+            kind: RegionKind::Append,
+            generation: 1,
+            tag: 0,
+            cap: None,
+            fill: FillPattern::Zeros,
+            fill_key: [0; 16],
+            block_size: 4096,
+            data_size: len.next_multiple_of(4096),
+            durable_len: Some(len),
+            object_len: None,
+            full_copy: false,
+            superseded: false,
+        };
+        sink.region(&info).unwrap();
+        sink
+    }
+
+    fn out_file(p: &SimPlatform) -> Vec<u8> {
+        p.with_world(|w| {
+            w.media_of(&std::path::PathBuf::from("/out"), &data_name(0))
+                .map(<[u8]>::to_vec)
+        })
+        .unwrap()
+    }
+
+    /// Bytes that are not whole blocks, staged, then a chunk that could be
+    /// written from its own buffer: it is staged behind them (the stage
+    /// does not end on a block), so the file holds every byte in order.
+    #[test]
+    fn test_a_whole_chunk_after_a_partial_stage_is_staged_behind_it() {
+        let (p, _s, log, stream) = by_hand(905);
+        let data: Vec<u8> = (0..5096u32).map(|i| (i % 251) as u8).collect();
+        let mut sink = begun_by_hand(&p, stream.lend(), data.len() as u64);
+        let first = stream.lend_bytes(log.state(), 0, &data[..1000]).unwrap();
+        sink.data(first).unwrap();
+        let second = stream.lend_bytes(log.state(), 1000, &data[1000..]).unwrap();
+        sink.data(second).unwrap();
+        sink.end_region().unwrap();
+        sink.finish().unwrap();
+        assert_eq!(sink.direct_writes(), 0);
+        assert!(out_file(&p) == data);
+    }
+
+    /// `settle` waits until a write from a chunk's own buffer completes:
+    /// one of the stream's buffers is back when it returns.
+    #[test]
+    fn test_settle_waits_for_a_write_from_a_chunk() {
+        let (p, _s, log, stream) = by_hand(906);
+        let data: Vec<u8> = (0..3 * 4096u32).map(|i| (i % 241) as u8).collect();
+        let mut sink = begun_by_hand(&p, stream.lend(), data.len() as u64);
+        p.with_world(|w| w.hold_reaps(1 << 40));
+        for i in 0..3 {
+            let at = i * 4096;
+            let c = stream
+                .lend_bytes(log.state(), at as u64, &data[at..at + 4096])
+                .unwrap();
+            sink.data(c).unwrap();
+        }
+        let chunks = |sink: &FileSink<SimPlatform>| sink.writes.as_ref().unwrap().borrow().chunks();
+        let before = chunks(&sink);
+        assert!(before >= 1, "writes from chunks in flight");
+        sink.settle().unwrap();
+        assert!(chunks(&sink) < before, "one back");
+        p.with_world(|w| w.hold_reaps(0));
+        sink.end_region().unwrap();
+        sink.finish().unwrap();
+        assert_eq!(sink.direct_writes(), 3);
+        assert!(out_file(&p) == data);
+    }
+
+    /// With commits quiet and its writes held in flight, the sink never
+    /// holds more than `lend - 1` of the stream's buffers in writes from
+    /// chunks (one the stream cannot spare is staged): the stream always
+    /// has one to lend (a sink holding them all would leave it none, and
+    /// the next chunk would be refused), and every byte arrives.
+    #[test]
+    fn test_a_sink_holds_at_most_lend_minus_one_chunks() {
+        let (p, _s, log, stream) = by_hand(907);
+        let lend = stream.lend();
+        let n = lend + 2;
+        let data: Vec<u8> = (0..(n * 4096) as u32).map(|i| (i % 239) as u8).collect();
+        let mut sink = begun_by_hand(&p, lend, data.len() as u64);
+        // Commits quiet (the provisioning's long past), so the sink's
+        // writes are not paced to one piece in flight; reaps held back.
+        p.with_world(|w| {
+            w.advance_clock_ns(10_000_000_000);
+            w.hold_reaps(1 << 40);
+        });
+        let mut most = 0;
+        for i in 0..n {
+            let at = i * 4096;
+            let c = stream
+                .lend_bytes(log.state(), at as u64, &data[at..at + 4096])
+                .unwrap();
+            sink.data(c).unwrap();
+            most = most.max(sink.writes.as_ref().unwrap().borrow().chunks());
+        }
+        assert_eq!(most, lend - 1, "lend {lend}");
+        p.with_world(|w| w.hold_reaps(0));
+        sink.end_region().unwrap();
+        sink.finish().unwrap();
+        // The chunks it could not spare staged, the rest from their buffers.
+        assert!(sink.direct_writes() >= (lend - 1) as u64);
+        assert!(out_file(&p) == data);
+    }
 
     /// A sink bound to an export's call, begun, in a 1 MiB page region,
     /// with reaps held back so its writes stay in flight until a wait.
@@ -1182,7 +1712,7 @@ mod tests {
         for i in 0..3u64 {
             let mut b = pool.take(4096).unwrap();
             assert!(b.set_len(4096));
-            w.submit(&f, i * 4096, b, None).unwrap();
+            w.submit(&f, i * 4096, b, None, None).unwrap();
         }
         w.wait_all().unwrap();
         assert_eq!(w.done_to, 4096);

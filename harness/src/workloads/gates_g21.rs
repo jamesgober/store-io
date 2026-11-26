@@ -5,21 +5,23 @@
 //! and its directory synced for each) to a [`FileSink`] in a directory on
 //! the same device, repeated for the measured time, alternating with fio
 //! reading one file while it writes another on that device at the same
-//! time, [`REPS`] times each (medians of alternated runs). The
-//! gate is the export's rate against the lower of fio's two rates: a copy
-//! reads and writes every byte once, so it can go no faster than the
-//! slower side while both share the device.
+//! time, in [`paired::ROUNDS`] rounds, the side first alternating, judged
+//! on the rounds' ratios ([`paired`]). The baseline is each round's lower
+//! of fio's two rates: a copy reads and writes every byte once, so it can
+//! go no faster than the slower side while both share the device. fio's
+//! write rate counts its end fsync by fio's own clock (an export reads,
+//! writes and must flush; direct, the fsync costs fio little), so the
+//! lower side is also the writer with its fsync counted
+//! ([`fio::read_write_together`]).
 //!
-//! The same export into a [`StoreSink`] (a new store restored directly) is
-//! measured after and published beside it, never gated.
+//! Published beside it, never gated, measured after the rounds: the same
+//! export into a [`StoreSink`] (a new store restored directly), and fio
+//! writing a fresh file alone (its file's removal never just before a
+//! timed export).
 //!
-//! **Reported in 0.6.0, gated at 80% from V6f (D-172)**: the export ran at
-//! 71 to 81% of the row's baseline on CI's kind of device, its own rate
-//! steady while fio's moved between runs, so as a gate it would pass about
-//! one run in three. The row's primary figure is the export against fio's
-//! writer with its end fsync counted beside its reader (an export reads,
-//! writes and must flush), with min(fio read, fio write), as the row
-//! states, and fio writing a fresh file alone beside it.
+//! **Reported, gated at 80% from V6f (D-172)**: a store-io that has not
+//! met it is no failure yet; an integrity failure is (the point's check
+//! fails, and with it the run's integrity line, which CI requires).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -31,13 +33,16 @@ use store_io_engine::{
 };
 
 use super::gates::{Row, Verdict, f};
+use super::paired::{self, median};
 use super::stamp::{self, BLOCK};
 use super::{Ctx, remove, sioerr, with_store};
+#[cfg(doc)]
+use crate::fio;
 use crate::report::{Point, System, Verify};
 use crate::sio::{self, SioStore};
 
-/// Alternations of fio and the export.
-pub const REPS: usize = 3;
+/// Runs of each published figure: the `StoreSink` export, fio's fresh file.
+const QUIET: usize = 3;
 const MIB: u64 = 1 << 20;
 /// The large page region.
 const BIG: u64 = 160 << 20;
@@ -66,16 +71,22 @@ fn layout() -> Vec<(String, u64)> {
 /// from the sink's creation to the export's return, `finish` and its syncs
 /// included), alternating with `fio` (one baseline run: the read side's and
 /// the write side's MB/s, run together, the write side's with its end
-/// fsync counted, and a fresh file's write alone with its fsync counted):
-/// `mb_per_s` the export's median,
-/// `fio_read_mb_per_s` and `fio_write_mb_per_s` fio's medians and
-/// `fio_min_mb_per_s` the median of each run's lower side, `spread` the
-/// larger relative range of the export's and fio's lower side;
-/// `store_sink_mb_per_s` a `StoreSink` export's median, measured after.
-/// Every block holds its region's pattern ([`stamp`]); the last export is
-/// read back through a `FileSource` (every span's CRC checked) and every
-/// word checked.
-pub fn export(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64, f64, f64), String>) -> Point {
+/// fsync counted) in [`paired::ROUNDS`] rounds against each round's lower
+/// side: the rounds' ratios as [`paired::record`] names them, `mb_per_s`
+/// the export's median, `fio_read_mb_per_s` and `fio_write_mb_per_s`
+/// fio's medians and `fio_min_mb_per_s` the median of each round's lower
+/// side, `spread` the larger relative range of the export's and fio's
+/// lower side; after the rounds, `store_sink_mb_per_s` a `StoreSink`
+/// export's median and `fio_fresh_mb_per_s` the median of `fresh` (fio
+/// writing a fresh file alone, its fsync counted), [`QUIET`] runs each.
+/// Every block holds its region's pattern ([`stamp`]); the last `FileSink`
+/// export is read back through a `FileSource` (every span's CRC checked)
+/// and every word checked.
+pub fn export(
+    ctx: &Ctx,
+    fio: &mut dyn FnMut() -> Result<(f64, f64), String>,
+    fresh: &mut dyn FnMut() -> Result<f64, String>,
+) -> Point {
     let p = Point::new(System::StoreIo, "Store::export to FileSink");
     with_store(ctx, "g21", p, |store, p| {
         let names = fill(store)?;
@@ -91,23 +102,26 @@ pub fn export(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64, f64, f64), S
         }
         let (mut ours, mut reads, mut writes, mut lows, mut exports) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), 0u64);
-        let (mut synced, mut fresh) = (Vec::new(), Vec::new());
         let mut last = None;
-        for _ in 0..REPS {
-            let (r, w, ws, wf) = fio()?;
-            fresh.push(wf);
-            reads.push(r);
-            writes.push(w);
-            synced.push(ws);
-            lows.push(r.min(w));
-            let (mb, dir) = timed(ctx, &mut exports, |keep| {
-                let (secs, dir) = file_once(ctx, store)?;
-                Ok((secs, keep.then_some(dir)))
-            })?;
-            ours.push(mb);
-            if let Some(old) = dir.and_then(|d| last.replace(d)) {
-                if let Some(e) = remove(&old) {
-                    p.notes.push(e);
+        for i in 0..paired::ROUNDS {
+            let first = paired::ours_first(i);
+            for ours_turn in [first, !first] {
+                if ours_turn {
+                    let (mb, dir) = timed(ctx, &mut exports, |keep| {
+                        let (secs, dir) = file_once(ctx, store)?;
+                        Ok((secs, keep.then_some(dir)))
+                    })?;
+                    ours.push(mb);
+                    if let Some(old) = dir.and_then(|d| last.replace(d)) {
+                        if let Some(e) = remove(&old) {
+                            p.notes.push(e);
+                        }
+                    }
+                } else {
+                    let (r, w) = fio()?;
+                    reads.push(r);
+                    writes.push(w);
+                    lows.push(r.min(w));
                 }
             }
         }
@@ -116,14 +130,34 @@ pub fn export(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64, f64, f64), S
         p.metric("fio_read_mb_per_s", Some(median(&reads)));
         p.metric("fio_write_mb_per_s", Some(median(&writes)));
         p.metric("fio_min_mb_per_s", Some(low));
-        p.metric("fio_write_synced_mb_per_s", Some(median(&synced)));
-        p.metric("fio_fresh_mb_per_s", Some(median(&fresh)));
         p.metric("spread", Some(range(&ours, m).max(range(&lows, low))));
-        // Published, not gated: a refusal is noted and leaves the gate to
-        // `FileSink`; a `StoreSink` export that ends incomplete fails the
-        // point, as wrong bytes would.
+        paired::record(p, &ours, &lows);
+        p.notes.push(format!(
+            "alternated with fio reading and writing together (store-io first in the 2nd, 4th, ... rounds): export {ours:.0?} MB/s, fio read {reads:.0?}, write {writes:.0?} MB/s"
+        ));
+        // The last FileSink export checked now, before anything published:
+        // nothing after can leave the gated figure unchecked.
+        let Some(dir) = last else {
+            return Err("no export was kept to check".to_owned());
+        };
+        let checked = check(ctx, &dir, &names);
+        if let Some(e) = remove(&dir) {
+            p.notes.push(e);
+        }
+        p.verify = match checked {
+            Ok(()) => Verify::Passed(format!(
+                "every export complete with all {} regions and {} MiB; the last one read back through a FileSource (every span's CRC checked) and every word of every region checked",
+                names.len(),
+                TOTAL / MIB
+            )),
+            Err(why) => Verify::Failed(why),
+        };
+        // Published, not gated, after the rounds and the check: a
+        // `StoreSink` export (any failure, an incomplete store included, is
+        // noted and leaves the gate to `FileSink`), then fio writing a fresh
+        // file alone (its failure is noted).
         let mut direct = Vec::new();
-        for _ in 0..REPS {
+        for _ in 0..QUIET {
             match timed(ctx, &mut exports, |_| {
                 let secs = store_once(ctx, store)?;
                 Ok((secs, None))
@@ -140,33 +174,35 @@ pub fn export(ctx: &Ctx, fio: &mut dyn FnMut() -> Result<(f64, f64, f64, f64), S
             p.metric("store_sink_mb_per_s", Some(median(&direct)));
         }
         p.metric("exports", Some(exports as f64));
-        p.notes.push(format!(
-            "alternated with fio reading and writing together: export {ours:.0?} MB/s, fio read {reads:.0?}, write {writes:.0?} MB/s; StoreSink export {direct:.0?} MB/s"
-        ));
-        let Some(dir) = last else {
-            return Err("no export was kept to check".to_owned());
-        };
-        let checked = check(ctx, &dir, &names);
-        if let Some(e) = remove(&dir) {
-            p.notes.push(e);
+        let mut alone = Vec::new();
+        for _ in 0..QUIET {
+            match fresh() {
+                Ok(mb) => alone.push(mb),
+                Err(why) => {
+                    p.notes
+                        .push(format!("fio's fresh-file write not measured: {why}"));
+                    break;
+                }
+            }
         }
-        p.verify = match checked {
-            Ok(()) => Verify::Passed(format!(
-                "every export complete with all {} regions and {} MiB; the last one read back through a FileSource (every span's CRC checked) and every word of every region checked",
-                names.len(),
-                TOTAL / MIB
-            )),
-            Err(why) => Verify::Failed(why),
-        };
+        if !alone.is_empty() {
+            p.metric("fio_fresh_mb_per_s", Some(median(&alone)));
+        }
+        p.notes.push(format!(
+            "after the rounds: StoreSink export {direct:.0?} MB/s; fio writing a fresh file alone {alone:.0?} MB/s"
+        ));
         Ok(())
     })
 }
 
-/// G21's row (D-172): reported, never a failure, the 80% it is gated at
-/// from V6f in its text; the export against fio's writer with its end
-/// fsync counted, then against min(fio read, fio write) and fio writing a
-/// fresh file alone. A point that did not complete, or whose bytes did not
-/// check out, is reported as not measured, with why.
+/// G21's row (D-172): reported, the 80% it is gated at from V6f in its
+/// text (an integrity failure still fails the run: the point's check, and
+/// with it the report's integrity line, which CI requires); the export
+/// against each round's min(fio read, fio write), fio's write rate counting
+/// its end fsync, with the rounds' ratio, its interval and the pooled one,
+/// and fio writing a fresh file alone beside it. A point that did not
+/// complete, or whose bytes did not check out, is reported as not
+/// measured, with why.
 pub(super) fn row(g21: &Point) -> Row {
     let v = |k: &str| if g21.usable() { g21.get(k) } else { None };
     let export = v("mb_per_s");
@@ -174,23 +210,23 @@ pub(super) fn row(g21: &Point) -> Row {
         Some((e, b)) if b > 0.0 => format!("{:.0}%", 100.0 * e / b),
         _ => "n/a".to_owned(),
     };
-    let synced = v("fio_write_synced_mb_per_s");
-    let low = v("fio_min_mb_per_s");
+    let pct = |r: Option<f64>| r.map_or("n/a".to_owned(), |r| format!("{:.0}%", 100.0 * r));
     let fresh = v("fio_fresh_mb_per_s");
     let measured = if g21.usable() {
         format!(
-            "store-io export {} MB/s: {} of fio's writer with its end fsync counted ({} MB/s, a lower bound), beside its reader; {} of min(fio read {}, write {}) = {} MB/s; {} of fio writing a fresh 1 GiB file alone, its fsync counted ({} MB/s); medians of {} alternated runs, spread {:.0}%; {} MiB in {} regions; StoreSink export {} MB/s (published)",
+            "store-io export {} MB/s, against each round's min(fio read, fio write) (fio's write rate counts its end fsync): median {} (interval {} to {}), pooled {}; fio read {}, write {} MB/s, lower side {} MB/s (medians of {} rounds, spread {:.0}%); {} of fio writing a fresh 1 GiB file alone, its fsync counted ({} MB/s, published); {} MiB in {} regions; StoreSink export {} MB/s (published)",
             f(export, 0),
-            share(synced),
-            f(synced, 0),
-            share(low),
+            pct(v("ratio")),
+            pct(v("ratio_lo")),
+            pct(v("ratio_hi")),
+            pct(v("pooled_ratio")),
             f(v("fio_read_mb_per_s"), 0),
             f(v("fio_write_mb_per_s"), 0),
-            f(low, 0),
+            f(v("fio_min_mb_per_s"), 0),
+            paired::ROUNDS,
+            v("spread").unwrap_or(0.0) * 100.0,
             share(fresh),
             f(fresh, 0),
-            REPS,
-            v("spread").unwrap_or(0.0) * 100.0,
             TOTAL >> 20,
             REGIONS,
             f(v("store_sink_mb_per_s"), 0)
@@ -205,7 +241,7 @@ pub(super) fn row(g21: &Point) -> Row {
     };
     Row {
         id: "G21",
-        gate: "Export to FileSink against fio's writer with its end fsync counted, fio reading one file and writing another on the same device at once (QD8, 1 MiB): reported in 0.6.0, gated at 80% from V6f; also against min(fio read, fio write) and fio writing a fresh file alone",
+        gate: "Export to FileSink against min(fio read, fio write), fio reading one file and writing another on the same device at once (QD8, 1 MiB; its write rate counts its end fsync), 10 alternated rounds (G1's rule on their ratios): reported, gated at 80% from V6f; fio writing a fresh file alone published beside it",
         measured,
         verdict: Verdict::Reported,
     }
@@ -394,18 +430,6 @@ fn read_full(src: &mut FileSource<sio::Plat>, buf: &mut [u8]) -> Result<usize, S
     Ok(n)
 }
 
-/// The median of a non-empty set.
-fn median(v: &[f64]) -> f64 {
-    let mut v = v.to_vec();
-    v.sort_by(f64::total_cmp);
-    let n = v.len();
-    if n % 2 == 1 {
-        v[n / 2]
-    } else {
-        (v[n / 2 - 1] + v[n / 2]) / 2.0
-    }
-}
-
 /// A set's range relative to `m`.
 fn range(v: &[f64], m: f64) -> f64 {
     let (lo, hi) = v
@@ -421,19 +445,23 @@ mod tests {
     fn point(verify: Verify) -> Point {
         let mut p = Point::new(System::StoreIo, "Store::export to FileSink");
         p.metric("mb_per_s", Some(2300.0));
-        p.metric("fio_write_synced_mb_per_s", Some(2875.0));
         p.metric("fio_read_mb_per_s", Some(4800.0));
         p.metric("fio_write_mb_per_s", Some(3290.0));
         p.metric("fio_min_mb_per_s", Some(3290.0));
         p.metric("fio_fresh_mb_per_s", Some(6600.0));
         p.metric("spread", Some(0.04));
+        p.metric("ratio", Some(0.70));
+        p.metric("ratio_lo", Some(0.66));
+        p.metric("ratio_hi", Some(0.74));
+        p.metric("pooled_ratio", Some(0.699));
         p.metric("store_sink_mb_per_s", Some(1540.0));
         p.verify = verify;
         p
     }
 
     /// The row is computed from the point: reported, the export against
-    /// each baseline, and the 80% it is gated at from V6f in its text.
+    /// each round's lower fio side (the ratio, its interval, the pooled
+    /// one), and the 80% it is gated at from V6f in its text.
     #[test]
     fn test_g21_s_row_is_reported_with_each_baseline() {
         let r = row(&point(Verify::Passed("checked".to_owned())));
@@ -441,13 +469,20 @@ mod tests {
         assert!(r.verdict == Verdict::Reported);
         assert!(r.gate.contains("gated at 80% from V6f"), "{}", r.gate);
         assert!(
-            r.measured.contains("2300 MB/s: 80% of fio's writer"),
+            r.measured
+                .contains("2300 MB/s, against each round's min(fio read, fio write)"),
             "{}",
             r.measured
         );
         assert!(
             r.measured
-                .contains("70% of min(fio read 4800, write 3290) = 3290 MB/s"),
+                .contains("median 70% (interval 66% to 74%), pooled 70%"),
+            "{}",
+            r.measured
+        );
+        assert!(
+            r.measured
+                .contains("fio read 4800, write 3290 MB/s, lower side 3290 MB/s"),
             "{}",
             r.measured
         );
@@ -458,8 +493,9 @@ mod tests {
         );
     }
 
-    /// A point whose bytes did not check out is reported, never a failure,
-    /// as not measured, with why.
+    /// A point whose bytes did not check out is reported as not measured,
+    /// with why (its failed check fails the run's integrity line, which CI
+    /// requires, not this row).
     #[test]
     fn test_g21_s_row_without_a_measurement_is_reported_as_not_measured() {
         let r = row(&point(Verify::Failed("a region's words".to_owned())));

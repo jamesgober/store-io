@@ -50,6 +50,26 @@
   94 to 100% of fio in each. The rows publish the ratio, its interval and
   the pooled ratio beside both sides' medians, and the gates job prints
   G7's, G20's and G21's rounds.
+- Harness: **G21's baselines by fio's own clock, in paired rounds**
+  (V6f's first step). fio's write rate counts its end fsync: the write
+  side's run time runs to the fsync's end (G21's shape, direct, 2 s
+  measured: 2004 ms without `--end_fsync`, 2014 ms with it, fio 3.36; the
+  fsync costs little direct), so the "writer with its end fsync counted"
+  figure, taken from fio's wall time and differing from fio's own rate
+  mostly by fio's start and exit, is gone, and min(fio read, fio write) is
+  that baseline too. fio writing a
+  fresh file alone is fio's own rate for one run: the difference of a
+  whole run's and a 1 MiB run's wall times reached zero on a fast device
+  and published 1.07e12 MB/s on one CI run. The export alternates with
+  fio in 10 rounds, judged on each round's ratio to the lower side, as G7
+  and G20 are; the `StoreSink` export and the fresh-file write run after
+  the rounds and the last export's check, so the fresh file's removal
+  never comes just before a timed export and a published figure's failure
+  (noted) never leaves the gated one unchecked. G21 stays reported until
+  V6f gates it at 80%; an integrity failure in it fails the run as before.
+- CI: the Windows test jobs' limit is 60 minutes (the 1.85 job's three
+  test passes take 12 to 15 minutes each since V6; 45 cut one short at
+  the third, every test that ran passing); the other legs keep 45.
 
 ## [0.6.0] - 2026-11-20
 

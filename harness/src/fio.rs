@@ -144,15 +144,16 @@ pub fn jobs_together(
     parse(&text, side).ok_or_else(|| "fio output not understood".to_owned())
 }
 
-/// Runs two time-based jobs at once in one fio process: one reading
-/// `read_file` and one writing `write_file` (made by fio if missing), each
-/// with `args`, `warmup` seconds of ramp and `secs` measured, the writer
-/// ending with an fsync. Returns the read side, the write side
-/// (`--group_reporting`: each side is its one job's), and the writer's rate
-/// with that fsync counted: the bytes it wrote in the measured window over
-/// fio's whole run less the ramp (fio reports no time for an end fsync, so
-/// its process's start and exit count too: a lower bound), bytes per
-/// second.
+/// Runs fio reading `read_file` and writing `write_file` at once, one job
+/// each (`args` the jobs' own options), time-based with `warmup` seconds of
+/// ramp and `secs` measured, the writer ending with an fsync: each side's
+/// result. fio's write rate counts that fsync: the write side's run time
+/// (`write.runtime`, which `bw_bytes` divides by) runs to the fsync's end,
+/// by fio's own clock, so neither fio's start nor its exit is in either
+/// figure. Direct, the fsync costs little (this shape, 2 s measured: 2004
+/// ms without `--end_fsync`, 2014 ms with it, fio 3.36 in WSL; 2017 and
+/// 2024 ms, fio 3.43 on Windows). Under `--group_reporting` the job's
+/// `job_runtime`, and so [`Stats::runtime_s`] and `cpu_s`, sum both jobs'.
 ///
 /// # Errors
 ///
@@ -164,7 +165,7 @@ pub fn read_write_together(
     args: &[&str],
     secs: f64,
     warmup: f64,
-) -> Result<(Stats, Stats, f64), String> {
+) -> Result<(Stats, Stats), String> {
     let mut all = vec![
         format!("--size={bytes}"),
         "--direct=1".to_owned(),
@@ -186,57 +187,44 @@ pub fn read_write_together(
         "--rw=write".to_owned(),
         "--end_fsync=1".to_owned(),
     ]);
-    let t = std::time::Instant::now();
     let (text, _) = run_raw(&all)?;
-    let wall = t.elapsed().as_secs_f64();
     let side = |s: &str| parse(&text, s).ok_or_else(|| "fio output not understood".to_owned());
-    let (r, w) = (side("read")?, side("write")?);
-    let written =
-        side_bytes(&text, "write").ok_or_else(|| "fio output not understood".to_owned())?;
-    let synced = written / (wall - warmup).max(1e-9);
-    Ok((r, w, synced))
+    Ok((side("read")?, side("write")?))
 }
 
-/// The bytes the first job's `side` moved in its measured window
-/// (`io_bytes`; with `--group_reporting`, the group's).
-fn side_bytes(json: &str, side: &str) -> Option<f64> {
-    let jobs = &json[json.find("\"jobs\"")?..];
-    let job = object_after(jobs, "[")?;
-    let sect = object_after(job, &format!("\"{side}\" :"))?;
-    number_after(sect, "\"io_bytes\" :")
-}
-
-/// Writes `bytes` to a fresh `file` (removed first: fio creates it, with
-/// no layout, as an export creates its files), direct, with `args`, ending
-/// with an fsync, and returns the write rate with that fsync counted,
-/// bytes per second: the bytes over fio's whole run less a run writing
-/// 1 MiB to a fresh file the same way (fio's start, the file's creation
-/// and the fsync's fixed cost cancel).
+/// Writes `bytes` to a fresh `file` (removed first: fio creates it and, on
+/// Linux, allocates it before its clock starts, fio's default
+/// `fallocate=native`, as `FileSink` allocates each data file before its
+/// writes; on Windows fio does not), direct, with `args`, ending with an
+/// fsync, and returns fio's write rate, bytes per second: by fio's own
+/// clock, which runs to the fsync's end (see [`read_write_together`]).
+/// (It was the bytes over the difference of two runs' wall times, a 1 MiB
+/// one taken from the whole one: on a fast device the whole write takes
+/// about as long as fio's start varies, and the difference reached zero,
+/// 1.07e12 MB/s on one CI run.)
 ///
 /// # Errors
 ///
-/// fio's failure, as text.
+/// fio's failure or an output this reader does not understand, as text.
 pub fn write_fresh(file: &Path, bytes: u64, args: &[&str]) -> Result<f64, String> {
-    let run = |size: u64| -> Result<f64, String> {
-        let _gone = std::fs::remove_file(file);
-        let mut all = vec![
-            "--name=fresh".to_owned(),
-            format!("--filename={}", path_arg(file)),
-            format!("--size={size}"),
-            "--rw=write".to_owned(),
-            "--direct=1".to_owned(),
-            "--end_fsync=1".to_owned(),
-            "--output-format=json".to_owned(),
-        ];
-        all.extend(args.iter().map(|a| (*a).to_owned()));
-        let t = std::time::Instant::now();
-        let _out = run_raw(&all)?;
-        Ok(t.elapsed().as_secs_f64())
-    };
-    let small = run(1 << 20)?;
-    let big = run(bytes)?;
     let _gone = std::fs::remove_file(file);
-    Ok((bytes - (1 << 20)) as f64 / (big - small).max(1e-9))
+    let mut all = vec![
+        "--name=fresh".to_owned(),
+        format!("--filename={}", path_arg(file)),
+        format!("--size={bytes}"),
+        "--rw=write".to_owned(),
+        "--direct=1".to_owned(),
+        "--end_fsync=1".to_owned(),
+        "--output-format=json".to_owned(),
+    ];
+    all.extend(args.iter().map(|a| (*a).to_owned()));
+    let ran = run_raw(&all);
+    let _gone = std::fs::remove_file(file);
+    let (text, _) = ran?;
+    parse_with(&text, "write", false)
+        .map(|w| w.bytes_per_s)
+        .filter(|b| b.is_finite() && *b > 0.0)
+        .ok_or_else(|| "fio output not understood".to_owned())
 }
 
 /// Runs one time-based job of `secs` (no ramp) on `file` and returns its

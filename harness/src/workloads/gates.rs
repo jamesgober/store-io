@@ -330,20 +330,15 @@ pub fn run(ctx: &Ctx) -> Section {
             ctx.secs,
             ctx.warmup,
         )
-        .and_then(|(r, w, synced)| {
-            // fio writing a fresh file alone (as an export writes its
-            // files), published beside the gated baseline (D-171).
-            let fresh = fio::write_fresh(&fio_fresh, 4 * SPAN, &[aio, "--bs=1m", "--iodepth=8"])?;
-            Ok((
-                r.bytes_per_s / 1e6,
-                w.bytes_per_s / 1e6,
-                synced / 1e6,
-                fresh / 1e6,
-            ))
-        }),
+        .map(|(r, w)| (r.bytes_per_s / 1e6, w.bytes_per_s / 1e6)),
         Err(e) => Err(e.clone()),
     };
-    let g21 = gates_g21::export(ctx, &mut together);
+    // fio writing a fresh file alone (as an export writes its files),
+    // published beside the gated baseline (D-171), after G21's rounds.
+    let mut fresh = || {
+        fio::write_fresh(&fio_fresh, 4 * SPAN, &[aio, "--bs=1m", "--iodepth=8"]).map(|b| b / 1e6)
+    };
+    let g21 = gates_g21::export(ctx, &mut together, &mut fresh);
     if let Some(e) = remove(&fio_out) {
         sec.anomalies.push(format!("fio's G21 file: {e}"));
     }
@@ -721,10 +716,10 @@ pub fn run(ctx: &Ctx) -> Section {
         ),
         verdict: paired::judge(g20r, g20lo, g20hi, g20p, 0.9),
     });
-    // G21: an export to `FileSink`, reported in 0.6.0 and gated at 80%
-    // from V6f (D-172): against fio's writer with its end fsync counted
-    // beside its reader, the row's min(fio read, fio write) and fio writing
-    // a fresh file alone beside it.
+    // G21: an export to `FileSink`, reported, gated at 80% from V6f
+    // (D-172): against each round's min(fio read, fio write), fio's write
+    // rate counting its end fsync (D-174), with fio writing a fresh file
+    // alone beside it.
     rows.push(gates_g21::row(&g21));
     // G8: allocations on the hot paths after init.
     // The read loop's count: the largest of its three runs.

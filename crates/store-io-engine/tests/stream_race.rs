@@ -226,11 +226,15 @@ fn test_a_retire_inside_a_bisection_delivers_none_of_its_items() {
 fn test_a_retire_between_calls_submits_no_read() {
     let _h = Hooked::new(None);
     lock().streamer = Some(thread::current().id());
-    let (_p, s) = store(5);
+    let (p, s) = store(5);
     let len = 32 * CHUNK as u64;
     let r = page_region(&s, len);
     let read = StreamOptions::default().class(IoClass::Read).depth(2);
     let mut stream = r.read_stream_with(0..len, read).unwrap();
+    // Its first reads not completed by the reap after their submit (as a
+    // real device's), so it keeps its depth and its next call submits
+    // again: the retire must stop that read (D-177).
+    p.with_world(|w| w.hold_reaps(1));
     let first = stream.next().unwrap().unwrap();
     drop(first);
     let before = lock().submits;

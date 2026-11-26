@@ -525,8 +525,13 @@ fn test_a_media_error_fails_the_export() {
 /// them fails the export `TooManyInFlight`.
 #[test]
 fn test_settle_is_asked_when_every_chunk_is_lent() {
-    for drops in [true, false] {
-        let (_p, s) = store(2010, opts());
+    // Also with the stream's reads not completed inline (reaps held back,
+    // as a real device's: it keeps its depth, D-177).
+    for (drops, held) in [(true, false), (false, false), (true, true), (false, true)] {
+        let (p, s) = store(2010, opts());
+        if held {
+            p.with_world(|w| w.hold_reaps(1 << 40));
+        }
         page(&s, "pages", 8 * CHUNK as u64, 1);
         s.provision_slot("s").unwrap().commit(b"obj").unwrap();
         page(&s, "more", 20 * CHUNK as u64, 2);
@@ -536,6 +541,7 @@ fn test_settle_is_asked_when_every_chunk_is_lent() {
             ..VecSink::default()
         };
         let r = export(&s, &mut sink);
+        p.with_world(|w| w.hold_reaps(0));
         let lend = sink.header.as_ref().unwrap().lend;
         assert_eq!(lend, 8, "the default lend this pool gives");
         if drops {

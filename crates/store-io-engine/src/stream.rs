@@ -21,6 +21,17 @@
 //! buffer; its items are queued only after the gate holds once all its
 //! reads have completed.
 //!
+//! **Its window.** A stream keeps up to its depth of reads ahead (submitted
+//! and not yet delivered), but reads one at a time once each of its last
+//! `depth` reads completed by the first reap after its own submit (D-177):
+//! a read that completes inside its submit (a memory-backed device, an
+//! unwritten extent read as zeros, a non-blocking read refused and finished
+//! by a blocking one inside the reap) gains nothing from depth, and one
+//! read at a time reuses one buffer, hot in cache, where depth spreads the
+//! copies over every buffer. The first read that does not complete so (any
+//! real device's) gives the stream its whole depth again from its next
+//! call.
+//!
 //! **Buffers.** A stream takes `depth + lend + 1` buffers when it is made,
 //! under the pool's background cap (half of each class: a stream is a bulk
 //! reader, so the other half stays for commits): up to `depth` reads in
@@ -423,6 +434,11 @@ where
     scratch: Option<IoBuf>,
     home: Arc<Mutex<FreeList<IoBuf>>>,
     lend: usize,
+    /// Reads ahead (submitted, not yet delivered) at most now: 1 to the
+    /// depth, 0 on an empty stream (the module's "Its window"); and the
+    /// reads in a row that completed inline.
+    window: usize,
+    inline: usize,
     /// The current part's next read, and the block-aligned end of its span.
     next: u64,
     end: u64,
@@ -631,6 +647,8 @@ where
             scratch: None,
             home,
             lend: 0,
+            window: 0,
+            inline: 0,
             next,
             end,
             req: 0,
@@ -700,6 +718,7 @@ where
         lock(&s.home).bufs = bufs;
         s.ring = (0..depth).map(|_| None).collect();
         s.lend = lend;
+        s.window = depth;
         s.req = req;
         s.pace = pace;
         Ok(ReadStream::new(s))
@@ -857,6 +876,13 @@ where
         lock(&self.core.borrow().home).lent
     }
 
+    /// Its window and its depth (the module's "Its window").
+    #[cfg(all(test, not(loom)))]
+    pub(crate) fn window(&self) -> (usize, usize) {
+        let c = self.core.borrow();
+        (c.window, c.depth())
+    }
+
     /// The stream's pacing (a `Background` stream's call).
     #[cfg(all(test, not(loom)))]
     pub(crate) fn pace(&self) -> Option<Pace> {
@@ -996,11 +1022,12 @@ where
         self.ring.len()
     }
 
-    /// Submits reads while the ring has room, a buffer is free and data is
-    /// left, each read cut where its extent ends.
+    /// Submits reads while the window has room, a buffer is free and data
+    /// is left, each read cut where its extent ends.
     fn refill(&mut self) -> Result<(), Error> {
         let depth = self.depth() as u64;
-        while !self.copying() && self.submitted - self.delivered < depth && self.more() {
+        let window = self.window.clamp(1, self.depth()) as u64;
+        while !self.copying() && self.submitted - self.delivered < window && self.more() {
             let part = self.cur;
             self.live_of(part)?;
             test_hook::step(Step::StreamSubmit);
@@ -1102,6 +1129,29 @@ where
         self.file();
     }
 
+    /// Learns from the reads submitted since `before` (and reaped once)
+    /// whether this device completes reads inline: one that did counts
+    /// toward reading one at a time, one that did not gives the stream its
+    /// whole depth again (the module's "Its window").
+    fn learn(&mut self, before: u64) {
+        let depth = self.depth();
+        if depth == 0 {
+            return;
+        }
+        for tag in before..self.submitted {
+            let slot = (tag % depth as u64) as usize;
+            if self.ring[slot].as_ref().is_some_and(|r| r.done.is_some()) {
+                self.inline += 1;
+            } else {
+                self.inline = 0;
+                self.window = depth;
+            }
+        }
+        if self.inline >= depth {
+            self.window = 1;
+        }
+    }
+
     /// Waits for at least one read in flight.
     fn wait_one(&mut self) -> Result<(), OsError> {
         let waited = match self.lane.as_mut() {
@@ -1165,8 +1215,10 @@ where
     /// end; `Err`: an error that ends it.
     fn advance(&mut self) -> Result<Next, Error> {
         loop {
+            let before = self.submitted;
             self.refill()?;
             self.reap();
+            self.learn(before);
             // Decided before delivering anything (the refill above still
             // keeps reads in flight): a refused call delivers, counts and
             // classifies nothing.
@@ -1798,6 +1850,114 @@ mod collect_tests {
         let _piece = pace.admit().unwrap();
         drop(stream);
         assert_eq!(p.with_world(|w| w.waits()), waits, "never waited on again");
+    }
+
+    /// A store whose chunk is 128 KiB, an append region of `LEN` patterned
+    /// bytes made durable, commits quiet.
+    fn setup_small_chunks(
+        seed: u64,
+    ) -> (
+        SimPlatform,
+        Store<SimPlatform>,
+        AppendRegion<SimPlatform>,
+        Vec<u8>,
+    ) {
+        let p = SimPlatform::new(SimConfig::volatile(seed));
+        let opts = StoreOptions {
+            max_io: 128 << 10,
+            ..StoreOptions::default()
+        };
+        let s = Store::create(p.clone(), Path::new("/s"), opts).unwrap();
+        let log = s.provision_append_region("log", LEN as u64).unwrap();
+        let data: Vec<u8> = (0..LEN).map(|i| (i % 251) as u8).collect();
+        let t = log.append(&data).unwrap();
+        let _receipt = log.sync_through(&t).unwrap();
+        p.with_world(|w| w.advance_clock_ns(10_000_000_000));
+        (p, s, log, data)
+    }
+
+    /// Reads that complete by the first reap after their submit (the
+    /// simulator's, as a memory-backed device's): once its depth of them
+    /// did, the stream reads one at a time, every byte still in order.
+    #[test]
+    fn test_a_stream_whose_reads_complete_inline_reads_one_at_a_time() {
+        let (_p, _s, log, data) = setup_small_chunks(77);
+        let read = StreamOptions::default().class(IoClass::Read);
+        let mut stream = log.read_stream_with(0..LEN as u64, read).unwrap();
+        let (start, depth) = stream.window();
+        assert_eq!(start, depth, "it starts at its depth");
+        assert!(depth > 1);
+        let mut back = Vec::new();
+        let mut most_late = 0;
+        let mut items = 0;
+        while let Some(c) = stream.next() {
+            let c = c.unwrap();
+            back.extend_from_slice(c.bytes());
+            items += 1;
+            if items > 2 * depth {
+                // Reads submitted and not yet delivered: its window's.
+                let core = stream.core.borrow();
+                most_late = most_late.max(core.submitted - core.delivered);
+            }
+        }
+        assert!(back == data);
+        assert!(items > 2 * depth + 4, "{items} chunks");
+        assert_eq!(stream.window().0, 1);
+        assert_eq!(most_late, 0, "read ahead once it learned");
+    }
+
+    /// Reads that do not complete by the reap after their submit (that reap
+    /// held back each call, the older reads collected by later reaps, as a
+    /// real device's): the stream keeps its whole depth in flight.
+    #[test]
+    fn test_a_stream_whose_reads_do_not_complete_inline_keeps_its_depth() {
+        let (p, _s, log, data) = setup_small_chunks(78);
+        let read = StreamOptions::default().class(IoClass::Read);
+        let mut stream = log.read_stream_with(0..LEN as u64, read).unwrap();
+        let depth = stream.window().1;
+        let mut back = Vec::new();
+        let mut most = 0;
+        loop {
+            p.with_world(|w| w.hold_reaps(1));
+            let Some(c) = stream.next() else {
+                break;
+            };
+            back.extend_from_slice(c.unwrap().bytes());
+            most = most.max(stream.core.borrow().in_flight);
+            assert_eq!(stream.window().0, depth, "kept its depth");
+        }
+        p.with_world(|w| w.hold_reaps(0));
+        assert!(back == data);
+        assert!(most > 1, "{most} in flight");
+    }
+
+    /// One read that does not complete inline, after many that did: the
+    /// stream has its whole depth again at once.
+    #[test]
+    fn test_a_read_that_does_not_complete_inline_restores_the_depth() {
+        let (p, _s, log, _data) = setup_small_chunks(79);
+        let read = StreamOptions::default().class(IoClass::Read);
+        let mut stream = log.read_stream_with(0..LEN as u64, read).unwrap();
+        let depth = stream.window().1;
+        for _ in 0..2 * depth {
+            drop(stream.next().unwrap().unwrap());
+        }
+        assert_eq!(stream.window().0, 1);
+        p.with_world(|w| w.hold_reaps(1));
+        drop(stream.next().unwrap().unwrap());
+        assert_eq!(stream.window().0, depth);
+        // Its next call reads ahead its whole depth again.
+        p.with_world(|w| w.hold_reaps(1));
+        drop(stream.next().unwrap().unwrap());
+        let ahead = {
+            let core = stream.core.borrow();
+            core.submitted - core.delivered
+        };
+        assert!(
+            ahead as usize >= depth - 1,
+            "{ahead} ahead of depth {depth}"
+        );
+        p.with_world(|w| w.hold_reaps(0));
     }
 
     /// A chunk whose buffer went out in a write from it (a sink's write

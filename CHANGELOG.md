@@ -27,6 +27,16 @@
 
 ### Changed
 
+- Engine: **a read stream reads one at a time when its reads complete
+  inline** (D-177). It keeps up to its depth of reads in flight, but once
+  each of its last `depth` reads completed by the first reap after its own
+  submit (a memory-backed device, say) it reads one at a time, reusing one
+  buffer hot in cache; the first read that does not complete so (any real
+  device's) gives it its whole depth again from its next call.
+  On CI's memory-backed device the read stream (8 deep, 8 lent) ran at 84
+  to 96% of fio's synchronous read by CPU type (an EPYC 9V74 and a Xeon
+  6973P-C the lowest); a stream made 1 deep ran at 99 to 100%.
+- CI: the gates job prints the runner's CPU.
 - Engine: **`FileSink` writes whole chunks from their own buffers**, with
   no staging copy (V6f2a, D-175: on CI's memory-backed device the copy was
   about 15% of an export's time). A chunk is written as it is when nothing

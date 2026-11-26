@@ -1841,7 +1841,7 @@ M = [
  (STREAM_SRC, "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(part) {", "            // classified (an error's too): its own part's gate.\n            if let Err(e) = self.live_of(part).or(Ok(())) {", STREAM_RACE_T),
  (STREAM_SRC, '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live_of(part) {', '        let (reads, bytes) = std::mem::take(&mut self.bisected);\n        if let Err(e) = self.live_of(part).or(Ok(())) {', STREAM_RACE_T),
  (STREAM_SRC, '                let place = (at - base) as usize;', '                let place = (at - base).min(0) as usize;', STREAM_T),
- (STREAM_SRC, '        while !self.copying() && self.submitted - self.delivered < depth && self.more() {', '        while (!self.copying() || true) && self.submitted - self.delivered < depth && self.more() {', STREAM_T),
+ (STREAM_SRC, '        while !self.copying() && self.submitted - self.delivered < window && self.more() {', '        while (!self.copying() || true) && self.submitted - self.delivered < window && self.more() {', STREAM_T),
  (STREAM_SRC, '                .min(self.parts[part].run_left(next)) as usize;', '                .min(self.parts[part].run_left(next).max(u64::MAX)) as usize;', STREAM_T),
  ('crates/store-io-engine/src/region.rs', '        let end = range.end.min(self.durable_through());', '        let end = range.end.max(range.end.min(self.durable_through()));', STREAM_T),
  ('crates/store-io-engine/src/region.rs', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) {', '            .live()\n            .map_err(|why| retired_error(why, &self.state))?;\n        if !self.state.positioned.load(Ordering::Acquire) && false {', STREAM_T),
@@ -2149,6 +2149,10 @@ M = [
  (FILE_SINK_SRC, '            if ws.chunks() < before {', '            if true {', FILE_SINK_LIB),
  (FILE_SINK_SRC, '                if buf.is_some() {', '                if false {', FILE_SINK_LIB),
  (STREAM_SRC, '        debug_assert!(self.lent > 0, "a buffer lost that was not lent");\n        self.lent = self.lent.saturating_sub(1);', '        debug_assert!(self.lent > 0, "a buffer lost that was not lent");', STREAM_UNIT_T),
+ # D-177: a read stream reads one at a time when its reads complete inline.
+ (STREAM_SRC, '        if self.inline >= depth {', '        if false {', STREAM_UNIT_T),
+ (STREAM_SRC, '                self.inline = 0;\n                self.window = depth;', '                self.inline = 0;', STREAM_UNIT_T),
+ (STREAM_SRC, '        let window = self.window.clamp(1, self.depth()) as u64;', '        let window = self.depth() as u64;', STREAM_UNIT_T),
 ]
 
 def kill_stuck_tests():

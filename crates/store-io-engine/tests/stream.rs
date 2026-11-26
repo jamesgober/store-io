@@ -195,7 +195,15 @@ fn test_an_unpositioned_append_region_is_refused() {
 /// going on after them.
 #[test]
 fn test_media_errors_are_exact_items_and_the_stream_goes_on() {
-    for lend in [None, Some(1usize)] {
+    // Each also with its reads not completed by the reap after their submit
+    // (as a real device's: a stream keeps its depth, D-177), so reads go on
+    // being submitted while a bisected piece's runs wait to be copied.
+    for (lend, held) in [
+        (None, false),
+        (Some(1usize), false),
+        (None, true),
+        (Some(1), true),
+    ] {
         let (p, s) = store(6, opts());
         let len = 4 * CHUNK as u64;
         let r = page_region(&s, "pages", len);
@@ -225,12 +233,23 @@ fn test_media_errors_are_exact_items_and_the_stream_goes_on() {
             None => StreamOptions::default(),
             Some(l) => StreamOptions::default().depth(2).lend(l),
         };
+        // Held, of class `Read`: a paced stream refused a charge with a read
+        // in flight would read no further ahead whatever its window.
+        let o = if held { o.class(IoClass::Read) } else { o };
         let mut stream = r.read_stream_with(0..len, o).unwrap();
         // With `lend` 1, each chunk is dropped before the next call: a
         // buffer a run is still to be copied from is never reused.
         let mut data = Vec::new();
         let mut bad = Vec::new();
-        for item in stream.by_ref() {
+        loop {
+            if held {
+                // The reap right after each call's submits held back: its
+                // reads look not inline, the later reaps collect them.
+                p.with_world(|w| w.hold_reaps(1));
+            }
+            let Some(item) = stream.next() else {
+                break;
+            };
             match item {
                 Ok(c) => {
                     assert_eq!(c.offset(), data.len() as u64);
@@ -245,26 +264,38 @@ fn test_media_errors_are_exact_items_and_the_stream_goes_on() {
                 Err(e) => panic!("{e:?}"),
             }
         }
-        assert_eq!(bad, bads.to_vec(), "lend {lend:?}");
+        p.with_world(|w| w.hold_reaps(0));
+        assert_eq!(bad, bads.to_vec(), "lend {lend:?}, held {held}");
         let mut want = stamped(0, len as usize);
         for b in &bads {
             want[b.start as usize..b.end as usize].fill(0xEE);
         }
         assert!(
             data == want,
-            "lend {lend:?}: the good bytes at their places"
+            "lend {lend:?}, held {held}: the good bytes at their places"
         );
     }
 }
 
 #[test]
 fn test_a_next_with_every_lent_chunk_held_is_refused_and_the_stream_goes_on() {
-    let (_p, s) = store(7, opts());
+    // Also with its reads not completed inline (reaps held back, as a real
+    // device's), so the refused call has reads in flight (D-177).
+    for held in [false, true] {
+        each_lent_chunk_held(held);
+    }
+}
+
+fn each_lent_chunk_held(held: bool) {
+    let (p, s) = store(7, opts());
     let len = 6 * CHUNK as u64;
     let r = page_region(&s, "pages", len);
-    let mut stream = r
-        .read_stream_with(0..len, StreamOptions::default().depth(2).lend(2))
-        .unwrap();
+    let mut o = StreamOptions::default().depth(2).lend(2);
+    if held {
+        o = o.class(IoClass::Read);
+        p.with_world(|w| w.hold_reaps(1 << 40));
+    }
+    let mut stream = r.read_stream_with(0..len, o).unwrap();
     let a = stream.next().unwrap().unwrap();
     let b = stream.next().unwrap().unwrap();
     let e = stream.next().unwrap().unwrap_err();
@@ -274,6 +305,7 @@ fn test_a_next_with_every_lent_chunk_held_is_refused_and_the_stream_goes_on() {
     assert_eq!(c.offset(), b.offset() + b.bytes().len() as u64);
     drop((b, c));
     let (rest, bad) = drain(stream, 3 * CHUNK as u64);
+    p.with_world(|w| w.hold_reaps(0));
     assert!(bad.is_empty());
     assert!(rest == stamped(3 * CHUNK as u64, 3 * CHUNK));
 }
@@ -284,7 +316,7 @@ fn test_stream_options_are_validated_and_the_defaults_fit_the_pool() {
         buffers_per_class: 16,
         ..opts()
     };
-    let (_p, s) = store(8, small);
+    let (p, s) = store(8, small);
     let len = 8 * CHUNK as u64;
     let r = page_region(&s, "pages", len);
     for o in [
@@ -313,6 +345,18 @@ fn test_stream_options_are_validated_and_the_defaults_fit_the_pool() {
     assert_eq!(cause(&e), Some(NotWrittenCause::TooManyInFlight));
     drop(held);
     assert!(stream.next().unwrap().is_ok());
+    drop(stream);
+    // Again with its reads not completed inline (reaps held back, as a real
+    // device's: it keeps its depth, D-177), of class `Read`.
+    p.with_world(|w| w.hold_reaps(1 << 40));
+    let read = StreamOptions::default().class(IoClass::Read);
+    let mut stream = r.read_stream_with(0..len, read).unwrap();
+    let held: Vec<Chunk> = (0..3).map(|_| stream.next().unwrap().unwrap()).collect();
+    let e = stream.next().unwrap().unwrap_err();
+    assert_eq!(cause(&e), Some(NotWrittenCause::TooManyInFlight));
+    drop(held);
+    assert!(stream.next().unwrap().is_ok());
+    p.with_world(|w| w.hold_reaps(0));
 }
 
 #[test]
@@ -401,13 +445,15 @@ fn test_cancel_waits_and_a_failed_wait_is_its_error() {
     let _first = stream.next().unwrap().unwrap();
     stream.cancel().unwrap();
     // Unpaced (the writes above made commits active, and a paced stream
-    // keeps one read in flight, which `next()` itself waits for).
+    // keeps one read in flight, which `next()` itself waits for), its reads
+    // not completed inline (reaps held back from its first, as a real
+    // device's: a stream whose reads complete inline reads one at a time,
+    // D-177), so reads stay in flight.
     let read = StreamOptions::default().class(IoClass::Read);
     let mut stream = r.read_stream_with(0..len, read).unwrap();
+    p.with_world(|w| w.hold_reaps(1 << 40));
     let first = stream.next().unwrap().unwrap();
     drop(first);
-    // The next call's new read stays in flight (its reap held back).
-    p.with_world(|w| w.hold_reaps(1));
     let second = stream.next().unwrap().unwrap();
     drop(second);
     p.with_world(|w| {
@@ -483,13 +529,15 @@ fn test_a_stream_read_in_flight_is_outstanding() {
     let r = page_region(&s, "pages", len);
     let read = StreamOptions::default().class(IoClass::Read);
     let mut stream = r.read_stream_with(0..len, read).unwrap();
+    // Its reads not completed inline (as a real device's, D-177).
+    p.with_world(|w| w.hold_reaps(1 << 40));
     let first = stream.next().unwrap().unwrap();
     drop(first);
-    p.with_world(|w| w.hold_reaps(1));
     let second = stream.next().unwrap().unwrap();
     drop(second);
     assert!(s.oldest_outstanding().is_some(), "a stream read in flight");
     stream.cancel().unwrap();
+    p.with_world(|w| w.hold_reaps(0));
     assert!(s.oldest_outstanding().is_none());
 }
 
